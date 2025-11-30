@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "Atlassian": {
+      "type": "stdio",
+      "command": "mcp-atlassian"
+    },
+    "GitHub": {
+      "type": "stdio",
+      "command": "/home/apanoia/.npm-global/bin/mcp-server-github",
+      "args": ["stdio"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "context7": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp@latest"
+      ],
+      "env": {}
+    }
+  }
+}

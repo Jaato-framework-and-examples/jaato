@@ -1,0 +1,42 @@
+"""Base protocol for tool plugins."""
+
+from typing import Protocol, List, Dict, Any, Callable, Optional, runtime_checkable
+from google.genai import types
+
+
+@runtime_checkable
+class ToolPlugin(Protocol):
+    """Interface that all tool plugins must implement.
+
+    Plugins provide tool executors and their FunctionDeclaration
+    objects for the AI model to invoke.
+    """
+
+    @property
+    def name(self) -> str:
+        """Unique identifier for this plugin."""
+        ...
+
+    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
+        """Return Vertex AI FunctionDeclaration objects for this plugin's tools."""
+        ...
+
+    def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
+        """Return a mapping of tool names to their executor callables.
+
+        Each executor should accept a dict of arguments and return a
+        JSON-serializable result.
+        """
+        ...
+
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
+        """Called once when the plugin is enabled.
+
+        Args:
+            config: Optional configuration dict for plugin-specific settings.
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """Called when the plugin is disabled. Clean up resources here."""
+        ...
