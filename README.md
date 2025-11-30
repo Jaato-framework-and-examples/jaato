@@ -178,15 +178,59 @@ jaato/
 
 ## Environment Variables
 
+### Core Configuration
+
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PROJECT_ID` | GCP project ID | Required |
 | `LOCATION` | Vertex AI region | `us-central1` |
 | `MODEL_NAME` | Gemini model name | `gemini-2.5-flash` |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Path to SA key | Required |
-| `AI_USE_CHAT_FUNCTIONS` | Enable function calling | `0` |
-| `AI_RETRY_ATTEMPTS` | Max retry attempts | `5` |
-| `VERBOSE` | Enable verbose output | `1` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON key | Required |
+
+### Function Calling
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AI_USE_CHAT_FUNCTIONS` | Enable function calling mode | `0` (disabled) |
+| `AI_FC_MAX_TURNS` | Max iterations for function call loop | `2` |
+| `AI_EXECUTE_TOOLS` | Allow generic/dynamic tool execution | `0` (disabled) |
+
+### Retry & Rate Limiting
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AI_RETRY_ATTEMPTS` | Max retry attempts for transient errors | `5` |
+| `AI_RETRY_BASE_DELAY` | Base delay (seconds) for exponential backoff | `1.0` |
+| `AI_RETRY_MAX_DELAY` | Maximum delay (seconds) between retries | `30.0` |
+| `AI_RETRY_LOG_SILENT` | Suppress retry log messages | `0` (show logs) |
+
+### Logging & Output
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `VERBOSE` | Enable verbose console output | `1` (enabled) |
+| `LEDGER_PATH` | Output path for token accounting JSONL | `token_events_ledger.jsonl` |
+
+### SSL/TLS Certificates
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `REQUESTS_CA_BUNDLE` | Custom CA certificate bundle path | System default |
+| `SSL_CERT_FILE` | SSL certificate file path | System default |
+| `ENV_VALIDATE_CA` | Validate CA paths exist on startup | `0` (disabled) |
+
+### Debug
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AI_TOOL_RUNNER_DEBUG` | Debug logging for tool execution | `0` (disabled) |
+
+### Domain-Specific (CLI Harness)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GITHUB_CLI_PATH` | Extra path to GitHub CLI binary | None |
+| `CONFLUENCE_CLI_PATH` | Extra path to Confluence CLI binary | None |
 
 ## Documentation
 
