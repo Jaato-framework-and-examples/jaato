@@ -289,6 +289,7 @@ Domain parameters (passed via --domain-params JSON):
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--trace", action="store_true", help="Write per-run trace files")
     parser.add_argument("--trace-dir", default="cli_vs_mcp/traces", help="Directory for trace files")
+    parser.add_argument("--cli-path", default=None, help="Extra path to CLI binary (e.g., path to gh or confluence-cli)")
 
     # Domain-specific parameters as JSON
     parser.add_argument("--domain-params", default="{}", help="Domain-specific parameters as JSON string")
@@ -319,11 +320,8 @@ Domain parameters (passed via --domain-params JSON):
     domain = args.domain
     cli_templates, mcp_templates = get_templates_for_domain(domain)
 
-    # Domain-specific CLI path lookup (harness responsibility)
-    cli_path_env_var = f"{domain.upper()}_CLI_PATH"
-    cli_extra_paths = []
-    if os.environ.get(cli_path_env_var):
-        cli_extra_paths.append(os.environ.get(cli_path_env_var))
+    # CLI extra path from argument
+    cli_extra_paths = [args.cli_path] if args.cli_path else []
 
     # Create and discover plugins
     registry = PluginRegistry()
