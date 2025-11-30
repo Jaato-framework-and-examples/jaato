@@ -89,6 +89,55 @@ Compare token usage between CLI and MCP tool approaches:
   --verbose
 ```
 
+#### Domain Parameters
+
+The `--domain-params` argument accepts a JSON object with parameters specific to each domain and scenario. The harness substitutes these values into prompt templates.
+
+**GitHub Domain** (`--domain github`)
+
+| Scenario | Parameters | Description |
+|----------|------------|-------------|
+| `list_issues` | `owner`*, `repo`*, `limit` | List repository issues |
+| `get_issue` | `owner`*, `repo`*, `issue_number`* | Get a specific issue |
+| `search_issues` | `owner`*, `repo`*, `search_query`, `limit`, `top_n` | Search issues with query |
+
+*Required parameters
+
+Examples:
+```bash
+# List issues
+--domain-params '{"owner": "anthropics", "repo": "claude-code", "limit": 10}'
+
+# Get specific issue
+--domain-params '{"owner": "anthropics", "repo": "claude-code", "issue_number": 42}'
+
+# Search issues
+--domain-params '{"owner": "anthropics", "repo": "claude-code", "search_query": "bug label:urgent", "limit": 20}'
+```
+
+**Confluence Domain** (`--domain confluence`)
+
+| Scenario | Parameters | Description |
+|----------|------------|-------------|
+| `get_page` | `page_id`* | Retrieve a page by ID |
+| `search` | `cql_query`, `limit`, `top_n` | Search using CQL |
+| `list_children` | `parent_page_id`*, `limit` | List child pages |
+| `update_page` | `page_id`*, `current_title`, `current_body_file`, `change_request` | Update a page |
+
+*Required parameters
+
+Examples:
+```bash
+# Get page
+--domain-params '{"page_id": "123456789"}'
+
+# Search pages
+--domain-params '{"cql_query": "space=DEV and type=page", "limit": 10}'
+
+# List children
+--domain-params '{"parent_page_id": "123456789", "limit": 20}'
+```
+
 ### Simple Connectivity Test
 
 Verify your Vertex AI setup:
