@@ -89,6 +89,18 @@ Compare token usage between CLI and MCP tool approaches:
   --verbose
 ```
 
+#### CLI Path
+
+Use `--cli-path` to specify the location of a CLI binary if it's not in your PATH:
+
+```bash
+.venv/bin/python cli_vs_mcp/cli_mcp_harness.py \
+  --domain github \
+  --cli-path /usr/local/bin/gh \
+  --scenarios list_issues \
+  --domain-params '{"owner": "your-org", "repo": "your-repo"}'
+```
+
 #### Domain Parameters
 
 The `--domain-params` argument accepts a JSON object with parameters specific to each domain and scenario. The harness substitutes these values into prompt templates.
@@ -224,13 +236,6 @@ jaato/
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `AI_TOOL_RUNNER_DEBUG` | Debug logging for tool execution | `0` (disabled) |
-
-### Domain-Specific (CLI Harness)
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GITHUB_CLI_PATH` | Extra path to GitHub CLI binary | None |
-| `CONFLUENCE_CLI_PATH` | Extra path to Confluence CLI binary | None |
 
 ## Documentation
 
