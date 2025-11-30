@@ -1,0 +1,150 @@
+# jaato
+
+**j**ust **a**nother **a**gentic **t**ool **o**rchestrator
+
+An experimental project for exploring LLM function calling patterns with Google's Vertex AI and Gemini models.
+
+## Overview
+
+jaato is a sandbox for experimenting with:
+
+- **Vertex AI Integration** - Using the `google-genai` SDK with Gemini models
+- **Function Calling** - Multi-turn tool execution loops with automatic result feeding
+- **Tool Orchestration** - Unified interface for CLI tools and MCP (Model Context Protocol) servers
+- **Token Accounting** - Detailed tracking of prompt/output tokens with retry logic
+
+> **Note**: This is an experimental project, not intended for production use.
+
+## Features
+
+- **Plugin Architecture** - Extensible system for adding new tool types
+- **CLI Tool Execution** - Run local command-line tools via subprocess
+- **MCP Server Support** - Connect to multiple MCP servers and auto-discover their tools
+- **Token Ledger** - JSONL logging of all API calls with token counts
+- **Rate Limit Handling** - Exponential backoff retry for transient errors
+- **Prompt Templates** - Domain-specific templates for different use cases
+
+## Prerequisites
+
+- Python 3.10+
+- Google Cloud Platform account with Vertex AI enabled
+- Service account with Vertex AI permissions
+
+## Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/apanoia/jaato.git
+cd jaato
+
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+## Configuration
+
+1. Copy the example environment file:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Edit `.env` with your configuration:
+   ```bash
+   PROJECT_ID=your-gcp-project-id
+   LOCATION=us-central1
+   MODEL_NAME=gemini-2.5-flash
+   GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
+   ```
+
+3. (Optional) Configure MCP servers in `.mcp.json`:
+   ```json
+   {
+     "mcpServers": {
+       "GitHub": {
+         "type": "stdio",
+         "command": "mcp-server-github",
+         "env": {
+           "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+         }
+       }
+     }
+   }
+   ```
+
+## Usage
+
+### CLI vs MCP Harness
+
+Compare token usage between CLI and MCP tool approaches:
+
+```bash
+.venv/bin/python cli_vs_mcp/cli_mcp_harness.py \
+  --domain github \
+  --scenarios list_issues \
+  --domain-params '{"owner": "your-org", "repo": "your-repo"}' \
+  --verbose
+```
+
+### Simple Connectivity Test
+
+Verify your Vertex AI setup:
+
+```bash
+.venv/bin/python simple-connectivity-test/simple-connectivity-test.py
+```
+
+### COBOL ModLog Training Generator
+
+Generate training data from COBOL modification logs:
+
+```bash
+.venv/bin/python modlog-training-set-test/generate_training_set.py \
+  --source modlog-training-set-test/sample_cobol.cbl \
+  --out training_data.jsonl \
+  --mode full-stream
+```
+
+## Project Structure
+
+```
+jaato/
+├── shared/                     # Core library
+│   ├── ai_tool_runner.py       # Function calling loop orchestrator
+│   ├── token_accounting.py     # Token usage tracking
+│   ├── mcp_context_manager.py  # MCP server connection manager
+│   ├── plugins/                # Tool plugin system
+│   │   ├── cli.py              # CLI tool plugin
+│   │   ├── mcp.py              # MCP tool plugin
+│   │   └── registry.py         # Plugin discovery & lifecycle
+│   └── prompt_templates/       # Domain-specific prompts
+├── cli_vs_mcp/                 # CLI vs MCP comparison harness
+├── simple-connectivity-test/   # Basic Vertex AI test
+├── modlog-training-set-test/   # COBOL training data generator
+└── docs/                       # Additional documentation
+```
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PROJECT_ID` | GCP project ID | Required |
+| `LOCATION` | Vertex AI region | `us-central1` |
+| `MODEL_NAME` | Gemini model name | `gemini-2.5-flash` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to SA key | Required |
+| `AI_USE_CHAT_FUNCTIONS` | Enable function calling | `0` |
+| `AI_RETRY_ATTEMPTS` | Max retry attempts | `5` |
+| `VERBOSE` | Enable verbose output | `1` |
+
+## Documentation
+
+- [GCP Setup Guide](docs/gcp-setup.md) - Setting up your GCP project
+- [Plugin System](shared/plugins/README.md) - Creating custom tool plugins
+- [ModLog Training](modlog-training-set-test/README.md) - COBOL training data generation
+
+## License
+
+MIT License - See [LICENSE](LICENSE) for details.
