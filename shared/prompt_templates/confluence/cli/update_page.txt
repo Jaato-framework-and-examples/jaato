@@ -1,0 +1,18 @@
+Use the available confluence CLI tool to prepare an update to a page.
+Goal: generate a new body preserving existing intent but applying requested edits.
+Inputs:
+- PAGE_ID: {{PAGE_ID}}
+- CURRENT_TITLE: {{CURRENT_TITLE}}
+- CURRENT_BODY: (between <BODY> tags)
+- CHANGE_REQUEST: {{CHANGE_REQUEST}}
+Instructions:
+1. You will use the confluence-cli command to update a page.
+2. You can find out the exact command syntax by using the --help option of their available variants.
+3. Produce NEW_TITLE (may keep or refine current).
+4. Produce UPDATED_BODY markdown applying CHANGE_REQUEST.
+5. List up to 5 change justification bullets.
+Output JSON: {"new_title":..., "updated_body_md":..., "justifications":[...]}
+<BODY>
+{{CURRENT_BODY}}
+</BODY>
+Respect original sections unless change request demands removal.

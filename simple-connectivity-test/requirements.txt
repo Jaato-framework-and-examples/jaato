@@ -1,0 +1,6 @@
+google-genai
+google-auth
+python-dotenv
+
+# Model Context Protocol SDK (PyPI package)
+modelcontextprotocol

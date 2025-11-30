@@ -1,0 +1,8 @@
+click
+requests
+google-genai
+mcp[cli]
+google-api-core
+google-oauth2
+certifi
+python-dotenv

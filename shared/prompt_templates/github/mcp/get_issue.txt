@@ -1,0 +1,6 @@
+Use the MCP tool get_issue to retrieve issue #{{ISSUE_NUMBER}} from {{OWNER}}/{{REPO}}.
+
+After the tool returns, produce JSON output:
+{"number": ..., "title": "...", "summary": "3-sentence summary", "state": "...", "labels": [...], "author": "..."}
+
+Do not add information not present in the issue.

@@ -1,0 +1,8 @@
+Use the available confluence CLI tool to perform a content search.
+Instructions:
+1. You will use the confluence-cli command to search content.
+2. You can find out the exact command syntax by using the --help option of their available variants.
+3. For each returned result (assume fields: id, title, excerpt), provide a concise relevance reason (<=15 words).
+4. Return only top {{TOP_N}} results even if more retrieved.
+Output JSON: {"results":[{"id":..., "title":..., "reason":..., "excerpt":...}]}
+Avoid speculation beyond provided excerpts.

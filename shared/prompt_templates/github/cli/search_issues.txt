@@ -1,0 +1,6 @@
+Use the gh CLI tool to search issues in {{OWNER}}/{{REPO}} matching "{{SEARCH_QUERY}}".
+
+Command: gh issue list --repo {{OWNER}}/{{REPO}} --search "{{SEARCH_QUERY}}" --limit {{LIMIT}} --json number,title,state
+
+Return top {{TOP_N}} results as JSON:
+{"results": [{"number": ..., "title": "...", "state": "...", "relevance": "brief reason"}]}

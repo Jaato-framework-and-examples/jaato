@@ -1,0 +1,17 @@
+You are generating a high-quality training example for a COBOL-focused model.
+Modification entry:
+Date: {entry['date']}
+Programmer: {entry['programmer']}
+Type: {entry['change_type']}
+Description: {entry['description']}
+Delimiter: {entry['delimiter']}
+Relevant source excerpt:
+```
+{full_source_text}
+```
+Task: Provide a concise yet technically rich explanation of:
+1. What the change implies. If the programmer of the change has followed the advised coding pattern, you should be able to identify not only the new code introduced between the initial and ending delimiter of the change, but also whatever original code which has been substituted, as the code substituted will be commented out, but not removed, in favor of the new code introduced. From comparing commented out code to added or modified code, you can get further insights about the change being analysed
+2. Potential rationale (e.g., fixing an abend, performance, security).
+3. Any risk areas or edge cases to test.
+4. Short guidance for future related changes.
+Return ONLY the explanation text (no JSON, no prefixes).

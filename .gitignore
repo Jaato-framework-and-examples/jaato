@@ -1,0 +1,36 @@
+# Environment files (contain secrets)
+.env
+**/.env
+
+# GCP Service Account keys
+shared/sa_keyfile.json
+**/sa_keyfile.json
+*-keyfile.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Generated data files
+*.jsonl
+**/traces/
+cli_vs_mcp/harness_summary.json
+test_traces/
+
+# IDE/Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude local settings
+.claude/settings.local.json
+
+# OS files
+.DS_Store
+Thumbs.db

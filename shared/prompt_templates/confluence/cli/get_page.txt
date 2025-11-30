@@ -1,0 +1,13 @@
+Use the available confluence CLI tool to retrieve the contents of a page whose ID is provided.
+Instructions:
+1. The exact command call that you should issue is "confluence-cli content get {{PAGE_ID}}", 
+2. If for some unexpected reason the command fails for you, you can maybe identify an alternative by using the --help option of the command
+3. You can find out the exact command syntax by using the --help option of their available variants
+4. Mind that this tool is deterministic, if you call it with the same exact parameters as before then you will always get the exact same result. So if you already tried one set of input parameters and it did not work for you, do not repeat, use the --help and find a different set of parameters 
+5. Assume the tool returns raw page content (title, body).
+6. After obtaining content, produce:
+   - Title
+   - 3-sentence summary of the content
+   - Up to 6 key points
+Output format (JSON): {"title":..., "summary":..., "key_points":[...]}
+Do not include anything not present in the page content.

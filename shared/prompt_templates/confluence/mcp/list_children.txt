@@ -1,0 +1,5 @@
+Use MCP tool confluence.list_children with parent id {{PARENT_PAGE_ID}} limit {{LIMIT}}.
+Tool output includes: id, title, last_modified_iso.
+Return JSON: {"children":[{"id":..., "title":..., "age_days":...}]}
+Compute age_days from provided NOW_UTC = {{NOW_UTC}}.
+No added commentary.

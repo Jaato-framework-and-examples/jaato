@@ -1,0 +1,8 @@
+Use the gh CLI tool to retrieve issue #{{ISSUE_NUMBER}} from {{OWNER}}/{{REPO}}.
+
+Command: gh issue view {{ISSUE_NUMBER}} --repo {{OWNER}}/{{REPO}} --json number,title,body,state,labels,author
+
+After obtaining the issue, produce JSON output:
+{"number": ..., "title": "...", "summary": "3-sentence summary", "state": "...", "labels": [...], "author": "..."}
+
+Do not add information not present in the issue.

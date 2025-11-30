@@ -1,0 +1,4 @@
+Use the MCP tool search_issues for {{OWNER}}/{{REPO}} with query "{{SEARCH_QUERY}}" limit {{LIMIT}}.
+
+Return top {{TOP_N}} results as JSON:
+{"results": [{"number": ..., "title": "...", "state": "...", "relevance": "brief reason"}]}

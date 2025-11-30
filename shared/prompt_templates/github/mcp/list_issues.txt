@@ -1,0 +1,4 @@
+Use the MCP tool list_issues for {{OWNER}}/{{REPO}} limit {{LIMIT}}.
+
+Compute age_days from NOW_UTC={{NOW_UTC}} and return JSON:
+{"issues": [{"number": ..., "title": "...", "state": "...", "age_days": ...}]}

@@ -1,0 +1,4 @@
+Use the MCP Confluence tool function confluence.get_page to retrieve a page by id {{PAGE_ID}}.
+After the tool output (fields: title, body), return JSON: {"title":..., "summary":..., "key_points":[...]}
+Summary: 3 sentences. Key points: <=6.
+Avoid adding content not present.

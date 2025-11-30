@@ -1,0 +1,365 @@
+# Plugin Framework
+
+This document explains how to use the jaato plugin framework from a client perspective and how to implement new plugins.
+
+## Overview
+
+The plugin framework provides a way to dynamically discover, load, and manage tool implementations that can be used by the AI model. Plugins are auto-discovered from the `shared/plugins/` directory and can be enabled/disabled at runtime.
+
+## Client Usage
+
+### Basic Usage
+
+```python
+from shared.plugins import PluginRegistry
+
+# Create a registry and discover all available plugins
+registry = PluginRegistry()
+registry.discover()
+
+# List available plugins
+print(registry.list_available())  # ['cli', 'mcp', ...]
+```
+
+### Enabling and Disabling Plugins
+
+Plugins must be explicitly enabled before they can be used. This allows fine-grained control over which tools are available to the AI model.
+
+```python
+# Enable a plugin
+registry.enable('cli')
+
+# Enable with configuration
+registry.enable('cli', config={'extra_paths': ['/usr/local/bin']})
+
+# Check what's enabled
+print(registry.list_enabled())  # ['cli']
+
+# Disable a plugin
+registry.disable('cli')
+
+# Enable all discovered plugins
+registry.enable_all()
+
+# Disable all plugins (cleanup)
+registry.disable_all()
+```
+
+### Getting Tool Declarations and Executors
+
+Once plugins are enabled, you can retrieve their tool declarations (for the AI model) and executors (for running the tools).
+
+```python
+# Get FunctionDeclarations for Vertex AI
+declarations = registry.get_enabled_declarations()
+
+# Get executor callables
+executors = registry.get_enabled_executors()
+# Returns: {'tool_name': callable, ...}
+```
+
+### Integration with ai_tool_runner
+
+The `run_single_prompt` function accepts a `registry` parameter:
+
+```python
+from shared.ai_tool_runner import run_single_prompt
+from shared.plugins import PluginRegistry
+
+# Setup
+registry = PluginRegistry()
+registry.discover()
+registry.enable('cli')
+
+# Run prompt with enabled tools
+result = run_single_prompt(
+    model_name='gemini-2.5-flash',
+    project_id='my-project',
+    location='us-central1',
+    prompt='List files in current directory',
+    ledger_path=Path('ledger.jsonl'),
+    registry=registry
+)
+
+# Cleanup
+registry.disable_all()
+```
+
+### Dynamic Plugin Switching
+
+You can enable/disable plugins between prompts to change what tools are available:
+
+```python
+registry = PluginRegistry()
+registry.discover()
+
+# First prompt: CLI tools only
+registry.enable('cli')
+result1 = run_single_prompt(..., registry=registry)
+registry.disable('cli')
+
+# Second prompt: MCP tools only
+registry.enable('mcp')
+result2 = run_single_prompt(..., registry=registry)
+registry.disable('mcp')
+
+# Third prompt: Both tools
+registry.enable('cli')
+registry.enable('mcp')
+result3 = run_single_prompt(..., registry=registry)
+registry.disable_all()
+```
+
+---
+
+## Implementing a New Plugin
+
+To create a new plugin, add a Python file to `shared/plugins/` that implements the `ToolPlugin` protocol.
+
+### Plugin Protocol
+
+Every plugin must implement these methods:
+
+```python
+from typing import Protocol, List, Dict, Any, Callable, Optional
+from google.genai import types
+
+class ToolPlugin(Protocol):
+    @property
+    def name(self) -> str:
+        """Unique identifier for this plugin."""
+        ...
+
+    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
+        """Return google-genai FunctionDeclaration objects for this plugin's tools."""
+        ...
+
+    def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
+        """Return a mapping of tool names to their executor callables."""
+        ...
+
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
+        """Called when the plugin is enabled. Setup resources here."""
+        ...
+
+    def shutdown(self) -> None:
+        """Called when the plugin is disabled. Cleanup resources here."""
+        ...
+```
+
+### Minimal Plugin Example
+
+Here's a minimal plugin that provides a single tool:
+
+```python
+# shared/plugins/example.py
+
+from typing import Dict, List, Any, Callable, Optional
+from google.genai import types
+
+
+class ExamplePlugin:
+    """A simple example plugin."""
+
+    def __init__(self):
+        self._initialized = False
+
+    @property
+    def name(self) -> str:
+        return "example"
+
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
+        # Perform any setup here
+        self._initialized = True
+
+    def shutdown(self) -> None:
+        # Cleanup resources here
+        self._initialized = False
+
+    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
+        return [types.FunctionDeclaration(
+            name='example_tool',
+            description='An example tool that echoes input',
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Message to echo"
+                    }
+                },
+                "required": ["message"]
+            }
+        )]
+
+    def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
+        return {'example_tool': self._execute}
+
+    def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        message = args.get('message', '')
+        return {'echo': message, 'length': len(message)}
+
+
+def create_plugin() -> ExamplePlugin:
+    """Factory function required for plugin discovery."""
+    return ExamplePlugin()
+```
+
+### Key Requirements
+
+1. **Factory Function**: Your plugin module must export a `create_plugin()` function that returns an instance of your plugin class.
+
+2. **Unique Name**: The `name` property must return a unique identifier for your plugin.
+
+3. **FunctionDeclaration Format**: Tool declarations must follow the google-genai schema format:
+   ```python
+   types.FunctionDeclaration(
+       name='tool_name',
+       description='What the tool does',
+       parameters_json_schema={
+           "type": "object",
+           "properties": {
+               "param_name": {
+                   "type": "string",  # or "number", "boolean", "array", "object"
+                   "description": "What this parameter is for"
+               }
+           },
+           "required": ["param_name"]  # List of required parameters
+       }
+   )
+   ```
+
+4. **Executor Signature**: Each executor must accept a `Dict[str, Any]` and return a JSON-serializable result:
+   ```python
+   def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
+       # args contains the parameters from the AI model
+       return {'result': 'some value'}
+   ```
+
+### Plugin with Configuration
+
+If your plugin needs configuration, handle it in `initialize()`:
+
+```python
+class ConfigurablePlugin:
+    def __init__(self):
+        self._api_key: Optional[str] = None
+        self._timeout: int = 30
+
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
+        if config:
+            self._api_key = config.get('api_key')
+            self._timeout = config.get('timeout', 30)
+
+    # ... rest of implementation
+```
+
+Client usage:
+```python
+registry.enable('configurable', config={
+    'api_key': 'secret123',
+    'timeout': 60
+})
+```
+
+### Plugin with Multiple Tools
+
+A single plugin can provide multiple tools:
+
+```python
+class MultiToolPlugin:
+    @property
+    def name(self) -> str:
+        return "multi"
+
+    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
+        return [
+            types.FunctionDeclaration(name='tool_a', description='...', parameters_json_schema={...}),
+            types.FunctionDeclaration(name='tool_b', description='...', parameters_json_schema={...}),
+            types.FunctionDeclaration(name='tool_c', description='...', parameters_json_schema={...}),
+        ]
+
+    def get_executors(self) -> Dict[str, Callable]:
+        return {
+            'tool_a': self._execute_a,
+            'tool_b': self._execute_b,
+            'tool_c': self._execute_c,
+        }
+```
+
+### Plugin with Background Resources
+
+For plugins that need persistent connections or background threads (like the MCP plugin):
+
+```python
+import threading
+
+class BackgroundPlugin:
+    def __init__(self):
+        self._thread: Optional[threading.Thread] = None
+        self._running = False
+
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
+        self._running = True
+        self._thread = threading.Thread(target=self._background_work, daemon=True)
+        self._thread.start()
+
+    def shutdown(self) -> None:
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=5)
+        self._thread = None
+
+    def _background_work(self):
+        while self._running:
+            # Do background work
+            pass
+```
+
+---
+
+## Built-in Plugins
+
+### CLI Plugin (`cli`)
+
+Executes local shell commands.
+
+**Configuration:**
+- `extra_paths`: List of additional directories to add to PATH
+
+**Tools:**
+- `cli_based_tool`: Execute a shell command
+
+**Example:**
+```python
+registry.enable('cli', config={'extra_paths': ['/opt/custom/bin']})
+```
+
+### MCP Plugin (`mcp`)
+
+Connects to MCP (Model Context Protocol) servers defined in `.mcp.json` and exposes their tools.
+
+**Configuration:** None (reads from `.mcp.json`)
+
+**Tools:** Dynamic - depends on connected MCP servers
+
+**Example:**
+```python
+registry.enable('mcp')
+# Tools from GitHub MCP server, Atlassian MCP server, etc.
+```
+
+---
+
+## File Structure
+
+```
+shared/plugins/
+├── __init__.py      # Exports PluginRegistry, ToolPlugin
+├── base.py          # ToolPlugin Protocol definition
+├── registry.py      # PluginRegistry class
+├── cli.py           # CLI tool plugin
+├── mcp.py           # MCP tool plugin
+├── README.md        # This documentation
+└── your_plugin.py   # Your custom plugin
+```

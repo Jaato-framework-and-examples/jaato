@@ -1,0 +1,4 @@
+Use MCP tool confluence.search with CQL query {{CQL_QUERY}} limit {{LIMIT}}.
+Extract results (id, title, excerpt). Provide JSON: {"results":[{"id":..., "title":..., "reason":..., "excerpt":...}]}
+Reason: brief relevance statement derived only from excerpt.
+Return only top {{TOP_N}}.

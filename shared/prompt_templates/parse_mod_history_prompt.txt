@@ -1,0 +1,16 @@
+You are an expert COBOL maintenance analyst. Extract the modification history
+comment entries from the following COBOL source. The layout may vary (different
+columns, separators, markers like *, \"* HISTORY\", dashed lines, etc.).
+
+Return ONLY JSON (no prose) as an array of objects. Each object MUST have exactly these keys:
+{"date": "YYYY-MM-DD or best-effort", "programmer": "string or null", "description": "trimmed change description", "delimiter": "string or null"}
+Omit speculative entries with confidence < 0.6.
+"delimiter" is the literal separator / marker associated with the change (e.g. "-I", "-I/E", "-E", "-F", "-I/F" or a meaningful prefix used in the log). If no clear delimiter is present, set it to null.
+The log entry itself may contain hints (including Spanish words) that point to the delimiter token; capture only the clean delimiter string (no surrounding asterisks or spaces).
+Typical entry elements: user name, user code (pattern Uxxxxxx), date, description, delimiter token.
+
+Example:
+[{"date":"2024-03-11","programmer":"U123456","description":"Adjusted multi-currency rounding logic","delimiter":"MC-RND-I"}]
+
+History Region (above WORKING STORAGE SECTION):
+{history_region_text}

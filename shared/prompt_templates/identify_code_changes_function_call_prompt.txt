@@ -1,0 +1,16 @@
+You are analyzing a single COBOL modification log entry.
+Your goal: explain the concrete code changed and provide a concise rationale.
+If you need candidate changed lines, call the function changed_lines_tool with:
+  description: the modification description text
+  delimiter: the delimiter token (if any) that may appear near changed code
+Do NOT invent code lines without calling the tool first if you need them.
+You may call changed_lines_tool multiple times if necessary.
+After obtaining any needed lines, produce a final explanation.
+Return only natural language explanation (no JSON) and append a section:
+"Likely affected lines:" followed by numbered lines IF you obtained tool results.
+Modification metadata:
+Date: {entry['date']}
+Programmer: {entry['programmer']}
+Change type: {entry['change_type']}
+Description: {entry['description']}
+Begin analysis below.

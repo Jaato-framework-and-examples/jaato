@@ -1,0 +1,5 @@
+Use MCP tool confluence.get_page to obtain current page {{PAGE_ID}}, then plan update per CHANGE_REQUEST: {{CHANGE_REQUEST}}
+Then call confluence.update_page with new title/body.
+Return JSON: {"new_title":..., "updated_body_md":..., "justifications":[...]}
+Justifications: <=5 bullets referencing changes.
+Preserve intent; modify only as requested.
