@@ -179,6 +179,37 @@ permission_config = {
 | `policy` | `dict` | `None` | Inline policy dict (overrides file) |
 | `actor_type` | `str` | `"console"` | Actor type for interactive approval |
 | `actor_config` | `dict` | `{}` | Actor-specific settings |
+| `expose_tool` | `bool` | `True` | Whether to expose `askPermission` tool to model |
+
+### Dual Nature: Enforcement vs Tool
+
+The permission plugin has two distinct roles that can be enabled independently:
+
+| Role | Description | Control |
+|------|-------------|---------|
+| **Permission enforcement** | Wraps `ToolExecutor.execute()` to check permissions before any tool runs | Always active when plugin is used |
+| **askPermission tool** | Exposes a tool for the model to proactively query permissions | `expose_tool` config option |
+
+**Enforcement only (no tool exposed to model):**
+```python
+permission_config = {
+    "config_path": "permissions.json",
+    "expose_tool": False  # Model cannot query permissions proactively
+}
+```
+
+**Both enforcement and proactive tool:**
+```python
+permission_config = {
+    "config_path": "permissions.json",
+    "expose_tool": True  # Default - model can use askPermission
+}
+```
+
+Use `expose_tool: False` when you want:
+- Transparent permission enforcement without model awareness
+- Simpler tool surface for the model
+- Permission denials to appear as direct errors
 
 ### Example Configurations
 
