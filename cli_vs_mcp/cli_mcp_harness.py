@@ -165,7 +165,7 @@ def print_config(args, domain_params: Dict[str, Any], project_id: str, location:
     print("  Trace organization:")
     print(f"    Timestamp:  {submission_timestamp}")
     print(f"    Output dir: {args.trace_dir}/{submission_timestamp}/{args.domain}/")
-    print(f"    Structure:  <output_dir>/<scenario>/<plugin>/run<N>.{trace.json,jsonl}")
+    print(f"    Structure:  <output_dir>/<scenario>/<plugin>/run<N>.{{trace.json,jsonl}}")
     print()
     print("=" * 70)
     print()
