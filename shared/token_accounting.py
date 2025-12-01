@@ -118,7 +118,8 @@ class TokenLedger:
                     except Exception:
                         err_cls = "Exception"
                     tag = "rate-limit" if classification["rate_limit"] else "transient"
-                    print(f"[AI Retry {attempt}/{max_attempts}] {tag}: {err_cls}: {str(exc)[:140].replace('\n',' ')} | sleep {sleep_sec:.2f}s")
+                    exc_msg = str(exc)[:140].replace('\n', ' ')
+                    print(f"[AI Retry {attempt}/{max_attempts}] {tag}: {err_cls}: {exc_msg} | sleep {sleep_sec:.2f}s")
                 time.sleep(sleep_sec)
         usage = getattr(response, "usage_metadata", None)
         if usage:
