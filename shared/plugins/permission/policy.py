@@ -2,6 +2,11 @@
 
 This module provides the core logic for evaluating tool execution permissions
 based on blacklist/whitelist rules. The blacklist always takes priority.
+
+Optionally includes sanitization checks for:
+- Shell injection prevention
+- Path scope validation
+- Dangerous command blocking
 """
 
 import fnmatch
@@ -9,6 +14,13 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
+
+from .sanitization import (
+    SanitizationConfig,
+    SanitizationResult,
+    sanitize_command,
+    create_strict_config,
+)
 
 
 class PermissionDecision(Enum):
@@ -24,7 +36,8 @@ class PolicyMatch:
     decision: PermissionDecision
     reason: str
     matched_rule: Optional[str] = None
-    rule_type: Optional[str] = None  # "blacklist", "whitelist", "default"
+    rule_type: Optional[str] = None  # "blacklist", "whitelist", "default", "sanitization"
+    violations: Optional[List[str]] = None  # For sanitization failures
 
 
 @dataclass
@@ -32,9 +45,10 @@ class PermissionPolicy:
     """Policy engine for evaluating tool execution permissions.
 
     Evaluation order:
-    1. Check blacklist (tools, patterns, arguments) -> DENY if matched
-    2. Check whitelist (tools, patterns, arguments) -> ALLOW if matched
-    3. Apply default_policy
+    1. Sanitization checks (if enabled) -> DENY if violations found
+    2. Check blacklist (tools, patterns, arguments) -> DENY if matched
+    3. Check whitelist (tools, patterns, arguments) -> ALLOW if matched
+    4. Apply default_policy
 
     Blacklist ALWAYS takes priority over whitelist.
     """
@@ -55,6 +69,10 @@ class PermissionPolicy:
     session_blacklist: Set[str] = field(default_factory=set)
     session_whitelist: Set[str] = field(default_factory=set)
 
+    # Sanitization configuration (None = disabled)
+    sanitization_config: Optional[SanitizationConfig] = None
+    cwd: Optional[str] = None  # Working directory for path checks
+
     def check(self, tool_name: str, args: Dict[str, Any]) -> PolicyMatch:
         """Evaluate permission for a tool call.
 
@@ -67,6 +85,12 @@ class PermissionPolicy:
         """
         # Build a signature for pattern matching
         signature = self._build_signature(tool_name, args)
+
+        # 0. Run sanitization checks FIRST (highest priority for security)
+        if self.sanitization_config is not None:
+            sanitization_match = self._check_sanitization(tool_name, args, signature)
+            if sanitization_match:
+                return sanitization_match
 
         # 1. Check session blacklist first (highest priority)
         if self._matches_session_blacklist(tool_name, signature):
@@ -114,6 +138,40 @@ class PermissionPolicy:
                 reason="No matching rule, requires actor approval",
                 rule_type="default"
             )
+
+    def _check_sanitization(
+        self, tool_name: str, args: Dict[str, Any], signature: str
+    ) -> Optional[PolicyMatch]:
+        """Run sanitization checks. Returns PolicyMatch if blocked, None otherwise.
+
+        Sanitization checks run BEFORE blacklist/whitelist evaluation and include:
+        - Shell injection detection (metacharacters, command substitution)
+        - Dangerous command blocking (sudo, rm, etc.)
+        - Path scope validation (restrict to allowed directories)
+        """
+        if self.sanitization_config is None:
+            return None
+
+        # Only sanitize CLI commands
+        if tool_name != "cli_based_tool":
+            return None
+
+        command = args.get("command", "")
+        if not command:
+            return None
+
+        result = sanitize_command(command, self.sanitization_config, self.cwd)
+
+        if not result.is_safe:
+            return PolicyMatch(
+                decision=PermissionDecision.DENY,
+                reason=f"Sanitization failed: {result.reason}",
+                matched_rule="sanitization",
+                rule_type="sanitization",
+                violations=result.violations
+            )
+
+        return None
 
     def _build_signature(self, tool_name: str, args: Dict[str, Any]) -> str:
         """Build a command signature for pattern matching.
@@ -244,6 +302,31 @@ class PermissionPolicy:
         self.session_blacklist.clear()
         self.session_whitelist.clear()
 
+    def set_sanitization(
+        self,
+        config: Optional[SanitizationConfig] = None,
+        cwd: Optional[str] = None
+    ) -> None:
+        """Enable or update sanitization configuration.
+
+        Args:
+            config: SanitizationConfig instance, or None to disable
+            cwd: Working directory for path scope checks
+        """
+        self.sanitization_config = config
+        self.cwd = cwd
+
+    def enable_strict_sandbox(self, cwd: Optional[str] = None) -> None:
+        """Enable strict sandboxing with all protections.
+
+        This enables:
+        - Shell injection blocking
+        - Dangerous command blocking
+        - Path scope restricted to cwd only
+        """
+        self.sanitization_config = create_strict_config(cwd)
+        self.cwd = cwd
+
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'PermissionPolicy':
         """Create a PermissionPolicy from a configuration dict.
@@ -264,11 +347,49 @@ class PermissionPolicy:
                 "arguments": {
                     "cli_based_tool": {"command": ["git", "npm"]}
                 }
+            },
+            "sanitization": {
+                "enabled": true,
+                "block_shell_metacharacters": true,
+                "block_dangerous_commands": true,
+                "allowed_dangerous_commands": ["rm"],
+                "path_scope": {
+                    "enabled": true,
+                    "allowed_roots": ["."],
+                    "block_absolute": true,
+                    "block_parent_traversal": true,
+                    "allow_home": false
+                }
             }
         }
         """
+        from .sanitization import SanitizationConfig, PathScopeConfig
+
         blacklist = config.get("blacklist", {})
         whitelist = config.get("whitelist", {})
+
+        # Parse sanitization config
+        sanitization_config = None
+        san_cfg = config.get("sanitization", {})
+        if san_cfg.get("enabled", False):
+            path_scope = None
+            ps_cfg = san_cfg.get("path_scope", {})
+            if ps_cfg.get("enabled", False):
+                path_scope = PathScopeConfig(
+                    allowed_roots=ps_cfg.get("allowed_roots", ["."]),
+                    block_absolute=ps_cfg.get("block_absolute", True),
+                    block_parent_traversal=ps_cfg.get("block_parent_traversal", True),
+                    resolve_symlinks=ps_cfg.get("resolve_symlinks", True),
+                    allow_home=ps_cfg.get("allow_home", False),
+                )
+
+            sanitization_config = SanitizationConfig(
+                block_shell_metacharacters=san_cfg.get("block_shell_metacharacters", True),
+                block_dangerous_commands=san_cfg.get("block_dangerous_commands", True),
+                allowed_dangerous_commands=set(san_cfg.get("allowed_dangerous_commands", [])),
+                custom_blocked_commands=set(san_cfg.get("custom_blocked_commands", [])),
+                path_scope=path_scope,
+            )
 
         return cls(
             default_policy=config.get("defaultPolicy", "deny"),
@@ -278,4 +399,6 @@ class PermissionPolicy:
             whitelist_tools=set(whitelist.get("tools", [])),
             whitelist_patterns=whitelist.get("patterns", []),
             whitelist_arguments=whitelist.get("arguments", {}),
+            sanitization_config=sanitization_config,
+            cwd=config.get("cwd"),
         )
