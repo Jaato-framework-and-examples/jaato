@@ -135,9 +135,9 @@ class TokenLedger:
         return response
 
     def summarize(self) -> Dict[str, Any]:
-        total_prompt = sum(e.get("prompt_tokens") or 0 for e in self._events)
-        total_output = sum(e.get("output_tokens") or 0 for e in self._events)
-        total = sum(e.get("total_tokens") or 0 for e in self._events)
+        total_prompt = sum(e.get("prompt_tokens") or 0 for e in self._events if e.get("stage") == "response")
+        total_output = sum(e.get("output_tokens") or 0 for e in self._events if e.get("stage") == "response")
+        total = sum(e.get("total_tokens") or 0 for e in self._events if e.get("stage") == "response")
         api_errors = [e for e in self._events if e.get("stage") == "api-error"]
         rate_errors = [e for e in api_errors if e.get("rate_limit")]
         retry_attempts = len(api_errors)
