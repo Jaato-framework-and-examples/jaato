@@ -29,8 +29,11 @@ class PermissionPlugin:
     - Allow tools via whitelist rules
     - Prompt an actor for approval when policy is ambiguous
 
-    The plugin itself does not expose tools to the AI model. Instead, it
-    wraps other plugins' executors to add permission checking.
+    The plugin has two distinct roles:
+    1. Permission enforcement: Wraps ToolExecutor.execute() to check permissions
+    2. Proactive check tool: Optional 'askPermission' tool for the model
+
+    These can be enabled/disabled independently via configuration.
     """
 
     def __init__(self):
@@ -41,6 +44,8 @@ class PermissionPlugin:
         self._wrapped_executors: Dict[str, Callable] = {}
         self._original_executors: Dict[str, Callable] = {}
         self._execution_log: List[Dict[str, Any]] = []
+        # Whether to expose askPermission tool to the model
+        self._expose_tool: bool = True
 
     @property
     def name(self) -> str:
@@ -58,9 +63,13 @@ class PermissionPlugin:
                    - actor_type: Type of actor ("console", "webhook", "file")
                    - actor_config: Configuration for the actor
                    - policy: Inline policy dict (overrides file)
+                   - expose_tool: Whether to expose askPermission to model (default: True)
         """
         # Load configuration
         config = config or {}
+
+        # Whether to expose the askPermission tool to the model
+        self._expose_tool = config.get("expose_tool", True)
 
         # Try to load from file first
         config_path = config.get("config_path")
@@ -112,9 +121,16 @@ class PermissionPlugin:
     def get_function_declarations(self) -> List[types.FunctionDeclaration]:
         """Return function declarations.
 
-        The permission plugin itself provides an 'askPermission' tool that
-        can be called to check if a tool is allowed before execution.
+        The permission plugin can optionally provide an 'askPermission' tool that
+        the model can call to check if a tool is allowed before execution.
+
+        This is controlled by the 'expose_tool' config option (default: True).
+        When False, the permission enforcement still works but the model cannot
+        proactively query permissions.
         """
+        if not self._expose_tool:
+            return []
+
         return [
             types.FunctionDeclaration(
                 name="askPermission",
@@ -137,7 +153,13 @@ class PermissionPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor for askPermission tool."""
+        """Return the executor for askPermission tool.
+
+        Only returns the executor if expose_tool is True.
+        """
+        if not self._expose_tool:
+            return {}
+
         return {
             "askPermission": self._execute_ask_permission
         }
