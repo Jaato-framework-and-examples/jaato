@@ -163,8 +163,9 @@ def print_config(args, domain_params: Dict[str, Any], project_id: str, location:
     print(f"    Selected:  {scenarios}")
     print()
     print("  Trace organization:")
-    print(f"    Timestamp: {submission_timestamp}")
-    print(f"    Structure: {args.trace_dir}/{submission_timestamp}/{args.domain}/<scenario>/")
+    print(f"    Timestamp:  {submission_timestamp}")
+    print(f"    Output dir: {args.trace_dir}/{submission_timestamp}/{args.domain}/")
+    print(f"    Structure:  <output_dir>/<scenario>/<plugin>/run<N>.{trace.json,jsonl}")
     print()
     print("=" * 70)
     print()
@@ -301,7 +302,7 @@ Domain parameters (passed via --domain-params JSON):
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--trace", action="store_true", help="Write per-run trace files")
     parser.add_argument("--trace-dir", default="cli_vs_mcp/traces",
-                        help="Base directory for traces (organized as: {trace-dir}/{timestamp}/{domain}/{scenario}/)")
+                        help="Base directory for traces (organized as: {trace-dir}/{timestamp}/{domain}/{scenario}/{plugin}/)")
     parser.add_argument("--cli-path", default=None, help="Extra path to CLI binary (e.g., path to gh or confluence-cli)")
 
     # Domain-specific parameters as JSON
@@ -379,12 +380,16 @@ Domain parameters (passed via --domain-params JSON):
         if args.verbose:
             print(f"[Scenario] {scenario}")
 
-        # Create hierarchical trace directory: {base}/{timestamp}/{domain}/{scenario}/
-        scenario_trace_dir = trace_base_dir / submission_timestamp / domain / scenario
-        scenario_trace_dir.mkdir(parents=True, exist_ok=True)
+        # Create hierarchical trace directories: {base}/{timestamp}/{domain}/{scenario}/{plugin}/
+        scenario_base_dir = trace_base_dir / submission_timestamp / domain / scenario
+        cli_trace_dir = scenario_base_dir / "cli"
+        mcp_trace_dir = scenario_base_dir / "mcp"
+        cli_trace_dir.mkdir(parents=True, exist_ok=True)
+        mcp_trace_dir.mkdir(parents=True, exist_ok=True)
 
         if args.verbose:
-            print(f"  Trace directory: {scenario_trace_dir}")
+            print(f"  CLI trace directory: {cli_trace_dir}")
+            print(f"  MCP trace directory: {mcp_trace_dir}")
 
         cli_runs: List[Dict[str, Any]] = []
         mcp_runs: List[Dict[str, Any]] = []
@@ -394,10 +399,10 @@ Domain parameters (passed via --domain-params JSON):
                 print(f"  CLI run {run_index}/{args.runs}")
             registry.enable('cli', config={'extra_paths': cli_extra_paths} if cli_extra_paths else None)
             cli_prompt = build_prompt(scenario, "cli", domain_params, domain, cli_templates, mcp_templates)
-            cli_ledger = scenario_trace_dir / f"cli_run{run_index}.jsonl"
+            cli_ledger = cli_trace_dir / f"run{run_index}.jsonl"
             cli_res = run_single_prompt(
                 client, model_name, cli_prompt, cli_ledger,
-                trace=args.trace, trace_dir=scenario_trace_dir,
+                trace=args.trace, trace_dir=cli_trace_dir,
                 registry=registry
             )
             cli_runs.append(cli_res)
@@ -410,10 +415,10 @@ Domain parameters (passed via --domain-params JSON):
                 print(f"  MCP run {run_index}/{args.runs}")
             registry.enable('mcp')
             mcp_prompt = build_prompt(scenario, "mcp", domain_params, domain, cli_templates, mcp_templates)
-            mcp_ledger = scenario_trace_dir / f"mcp_run{run_index}.jsonl"
+            mcp_ledger = mcp_trace_dir / f"run{run_index}.jsonl"
             mcp_res = run_single_prompt(
                 client, model_name, mcp_prompt, mcp_ledger,
-                trace=args.trace, trace_dir=scenario_trace_dir,
+                trace=args.trace, trace_dir=mcp_trace_dir,
                 registry=registry
             )
             mcp_runs.append(mcp_res)
