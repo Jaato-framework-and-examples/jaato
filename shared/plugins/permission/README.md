@@ -141,6 +141,134 @@ export PERMISSION_WEBHOOK_TOKEN=secret-token  # For webhook actor
 python cli_vs_mcp/cli_mcp_harness.py --scenarios get_page
 ```
 
+## Permission Config Parameter
+
+The `permission_config` parameter passed to `run_single_prompt()` (or directly to `PermissionPlugin.initialize()`) controls how the plugin is configured.
+
+### Config Structure
+
+```python
+permission_config = {
+    # Path to permissions.json file (optional)
+    "config_path": "permissions.json",
+
+    # Inline policy - overrides file if provided (optional)
+    "policy": {
+        "defaultPolicy": "ask",
+        "blacklist": {...},
+        "whitelist": {...}
+    },
+
+    # Actor type: "console", "webhook", or "file"
+    "actor_type": "console",
+
+    # Actor-specific configuration (optional)
+    "actor_config": {
+        "timeout": 30,
+        "endpoint": "https://...",  # for webhook
+        "base_path": "/tmp/approvals"  # for file
+    }
+}
+```
+
+### Config Options Reference
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `config_path` | `str` | `None` | Path to `permissions.json` file |
+| `policy` | `dict` | `None` | Inline policy dict (overrides file) |
+| `actor_type` | `str` | `"console"` | Actor type for interactive approval |
+| `actor_config` | `dict` | `{}` | Actor-specific settings |
+
+### Example Configurations
+
+**Minimal (uses defaults + environment):**
+```python
+result = run_single_prompt(
+    ...,
+    permission_plugin=PermissionPlugin(),
+    permission_config=None  # Uses PERMISSION_CONFIG_PATH env or defaults
+)
+```
+
+**File-based configuration:**
+```python
+result = run_single_prompt(
+    ...,
+    permission_plugin=PermissionPlugin(),
+    permission_config={
+        "config_path": "permissions.json",
+        "actor_type": "console"
+    }
+)
+```
+
+**Inline policy (no file needed):**
+```python
+result = run_single_prompt(
+    ...,
+    permission_plugin=PermissionPlugin(),
+    permission_config={
+        "policy": {
+            "defaultPolicy": "deny",
+            "blacklist": {
+                "patterns": ["rm -rf *", "sudo *"]
+            },
+            "whitelist": {
+                "patterns": ["git *", "npm *", "python *"]
+            }
+        },
+        "actor_type": "console"
+    }
+)
+```
+
+**Webhook actor for external approval:**
+```python
+result = run_single_prompt(
+    ...,
+    permission_plugin=PermissionPlugin(),
+    permission_config={
+        "config_path": "permissions.json",
+        "actor_type": "webhook",
+        "actor_config": {
+            "endpoint": "https://approvals.example.com/api/permission",
+            "timeout": 60,
+            "headers": {"X-Service": "jaato"}
+        }
+    }
+)
+```
+
+**Harness integration pattern:**
+```python
+# In your harness config (e.g., scenarios.yaml or config dict)
+harness_config = {
+    "model": "gemini-2.5-flash",
+    "enable_permissions": True,
+    "permission_config": {
+        "config_path": "permissions.json",
+        "actor_type": "console"
+    }
+}
+
+# In harness code
+def run_scenario(scenario_name: str, config: Dict) -> Dict:
+    permission_plugin = None
+    if config.get("enable_permissions"):
+        permission_plugin = PermissionPlugin()
+
+    return run_single_prompt(
+        client=client,
+        model_name=config["model"],
+        prompt=scenario_prompt,
+        ledger_path=ledger_path,
+        registry=registry,
+        permission_plugin=permission_plugin,
+        permission_config=config.get("permission_config")  # None if not set
+    )
+```
+
 ## Configuration
 
 ### permissions.json Structure
