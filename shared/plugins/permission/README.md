@@ -45,23 +45,39 @@ The permission plugin (`askPermission`) provides access control for tool executi
 4. **If allowed**: Original plugin executor runs
 5. **If denied**: Error returned to model
 
-### Relationship with Other Plugins
+### Dual Nature: Middleware vs Plugin
 
-The permission plugin wraps the execution layer, not individual plugins:
+The permission plugin is unique - it has two distinct roles controlled separately:
+
+| Role | Purpose | Control |
+|------|---------|---------|
+| **Middleware** | Enforces permissions on ALL tool executions | `executor.set_permission_plugin()` |
+| **Plugin** | Exposes `askPermission` tool for model to query | `registry.expose_tool("permission")` |
 
 ```python
-# Other plugins expose their tools normally
+# 1. Other plugins expose their tools via registry
 registry.expose_tool("cli", {"extra_paths": ["/usr/local/bin"]})
 registry.expose_tool("mcp", {"config_path": ".mcp.json"})
 
-# Permission plugin wraps ALL tool executions
+# 2. Permission plugin as MIDDLEWARE (enforcement layer)
+permission_plugin = PermissionPlugin()
+permission_plugin.initialize(config)
 executor.set_permission_plugin(permission_plugin)
+
+# 3. Permission plugin as PLUGIN (optional - exposes askPermission tool)
+registry.expose_tool("permission")  # Only if you want model to query permissions
 ```
 
-This means:
-- **CLI plugin tools** (`cli_based_tool`) → checked by permission plugin
-- **MCP plugin tools** (any MCP server tool) → checked by permission plugin
-- **askPermission tool** → always allowed (to prevent deadlock)
+**As middleware** (via `set_permission_plugin`):
+- Wraps `ToolExecutor.execute()` to check permissions before ANY tool runs
+- CLI plugin tools (`cli_based_tool`) → checked
+- MCP plugin tools (any MCP server tool) → checked
+- `askPermission` tool → always allowed (to prevent deadlock)
+
+**As plugin** (via `registry.expose_tool("permission")`):
+- Exposes `askPermission` tool so the model can proactively query permissions
+- Optional - enforcement works without exposing this tool
+- Useful when you want the model to check before attempting blocked actions
 
 ## Client Integration
 
