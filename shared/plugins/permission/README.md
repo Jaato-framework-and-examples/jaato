@@ -326,6 +326,110 @@ Model: I cannot execute that command as it's blocked by the permission policy.
        Would you like me to use a safer alternative?
 ```
 
+## Context Parameter
+
+The permission system supports an optional `context` parameter that provides additional information to actors when making approval decisions. This context flows through the entire permission check pipeline.
+
+### Setting Context
+
+Context is set when attaching the permission plugin to the executor:
+
+```python
+executor.set_permission_plugin(
+    permission_plugin,
+    context={
+        "session_id": "abc-123",
+        "user_id": "user@example.com",
+        "turn_number": 5,
+        "previous_tools": ["search_issues", "get_page"],
+        "project": "my-project",
+    }
+)
+```
+
+### Context Flow
+
+```
+ToolExecutor.set_permission_plugin(plugin, context)
+        │
+        ▼
+ToolExecutor.execute(name, args)
+        │
+        ▼
+PermissionPlugin.check_permission(name, args, context)
+        │
+        ▼ (if ASK_ACTOR)
+PermissionRequest.create(..., context=context)
+        │
+        ▼
+Actor.request_permission(request)
+        │
+        ▼
+Actor displays/uses context for decision
+```
+
+### Context in Actor Requests
+
+When an actor is invoked, the context is included in the permission request:
+
+**Console Actor Display:**
+```
+============================================================
+[askPermission] Tool execution request:
+  Tool: cli_based_tool
+  Arguments: {"command": "git push origin main"}
+  Context: {"session_id": "abc-123", "turn_number": 5, "user_id": "admin"}
+============================================================
+```
+
+**Webhook Request Payload:**
+```json
+{
+  "request_id": "uuid",
+  "timestamp": "2024-01-15T10:30:00Z",
+  "tool_name": "cli_based_tool",
+  "arguments": {"command": "git push"},
+  "timeout_seconds": 30,
+  "default_on_timeout": "deny",
+  "context": {
+    "session_id": "abc-123",
+    "user_id": "admin",
+    "turn_number": 5,
+    "previous_tools": ["search_issues"]
+  }
+}
+```
+
+### Common Context Fields
+
+| Field | Description |
+|-------|-------------|
+| `session_id` | Unique identifier for the current session |
+| `user_id` | Identifier for the user or service account |
+| `turn_number` | Current turn in the conversation loop |
+| `previous_tools` | List of tools already executed in this session |
+| `project` | Project or workspace identifier |
+| `environment` | Environment name (dev, staging, prod) |
+| `request_source` | Origin of the request (cli, api, scheduled) |
+
+### Dynamic Context Updates
+
+For scenarios where context changes during execution (e.g., tracking turn numbers), you can update context by re-setting the permission plugin:
+
+```python
+# Update context with new turn number
+executor.set_permission_plugin(
+    permission_plugin,
+    context={**base_context, "turn_number": current_turn}
+)
+```
+
+Or access the executor's context directly:
+
+```python
+executor._permission_context["turn_number"] = current_turn
+```
+
 ## Security Considerations
 
 1. **Fail-safe defaults**: Permission check failures result in DENY
