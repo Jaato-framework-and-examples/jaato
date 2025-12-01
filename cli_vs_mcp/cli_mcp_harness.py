@@ -167,17 +167,19 @@ def print_config(args, domain_params: Dict[str, Any], project_id: str, location:
 
 def aggregate_runs(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not runs:
-        return {"runs": 0, "avg_prompt_tokens": 0, "avg_output_tokens": 0, "avg_total_tokens": 0, "errors": 0}
+        return {"runs": 0, "avg_prompt_tokens": 0, "avg_output_tokens": 0, "avg_total_tokens": 0, "avg_turns": 0, "errors": 0}
     # Handle missing summary keys gracefully (can happen on generation errors)
     total_prompt = sum(r.get("summary", {}).get("total_prompt_tokens", 0) or 0 for r in runs)
     total_output = sum(r.get("summary", {}).get("total_output_tokens", 0) or 0 for r in runs)
     total = sum(r.get("summary", {}).get("total_tokens", 0) or 0 for r in runs)
+    total_turns = sum(r.get("turns", 0) or 0 for r in runs)
     errors = sum(1 for r in runs if r.get("error"))
     return {
         "runs": len(runs),
         "avg_prompt_tokens": total_prompt / len(runs),
         "avg_output_tokens": total_output / len(runs),
         "avg_total_tokens": total / len(runs),
+        "avg_turns": total_turns / len(runs),
         "errors": errors,
     }
 
@@ -211,6 +213,7 @@ def print_comparison_table(summary: Dict[str, Any]) -> None:
             ("Prompt Tokens", "avg_prompt_tokens"),
             ("Output Tokens", "avg_output_tokens"),
             ("Total Tokens", "avg_total_tokens"),
+            ("Avg Turns", "avg_turns"),
         ]
 
         for label, key in metrics:
@@ -219,18 +222,22 @@ def print_comparison_table(summary: Dict[str, Any]) -> None:
             diff = mcp_val - cli_val
             diff_pct = (diff / cli_val * 100) if cli_val > 0 else 0
 
-            # Determine winner (lower is better for tokens)
+            # Determine winner (lower is better for tokens and turns)
             if cli_val < mcp_val:
                 winner = "CLI"
-                diff_str = f"+{diff:.0f}"
+                diff_str = f"+{diff:.1f}" if key == "avg_turns" else f"+{diff:.0f}"
             elif mcp_val < cli_val:
                 winner = "MCP"
-                diff_str = f"{diff:.0f}"
+                diff_str = f"{diff:.1f}" if key == "avg_turns" else f"{diff:.0f}"
             else:
                 winner = "TIE"
                 diff_str = "0"
 
-            print(f"  {label:<20} {cli_val:>12.0f} {mcp_val:>12.0f} {diff_str:>12} {winner:>10}")
+            # Use 1 decimal place for turns, 0 for tokens
+            if key == "avg_turns":
+                print(f"  {label:<20} {cli_val:>12.1f} {mcp_val:>12.1f} {diff_str:>12} {winner:>10}")
+            else:
+                print(f"  {label:<20} {cli_val:>12.0f} {mcp_val:>12.0f} {diff_str:>12} {winner:>10}")
 
     # Summary footer
     print("\n" + "=" * 70)
@@ -387,8 +394,8 @@ Domain parameters (passed via --domain-params JSON):
         summary["scenarios"][scenario] = {
             "cli": aggregate_runs(cli_runs),
             "mcp": aggregate_runs(mcp_runs),
-            "cli_details": [{"ledger": r["ledger"], "summary": r["summary"]} for r in cli_runs],
-            "mcp_details": [{"ledger": r["ledger"], "summary": r["summary"]} for r in mcp_runs],
+            "cli_details": [{"ledger": r["ledger"], "summary": r["summary"], "turns": r.get("turns", 0)} for r in cli_runs],
+            "mcp_details": [{"ledger": r["ledger"], "summary": r["summary"], "turns": r.get("turns", 0)} for r in mcp_runs],
         }
 
     pathlib.Path(args.output).write_text(json.dumps(summary, indent=2), encoding="utf-8")

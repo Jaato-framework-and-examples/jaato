@@ -244,7 +244,7 @@ def run_function_call_loop(
             final_text = text_out if text_out else ''
             if trace:
                 trace_list.append({'turn': turn, 'text': final_text, 'function_calls': []})
-            return {'text': final_text, 'function_results': function_results, 'diagnostics': diagnostics, 'trace': trace_list}
+            return {'text': final_text, 'function_results': function_results, 'diagnostics': diagnostics, 'trace': trace_list, 'turns': turn + 1}
 
         # Execute calls
         for fc in func_calls:
@@ -292,9 +292,9 @@ def run_function_call_loop(
             # Use extract_text_from_parts to avoid SDK warning
             final_text = extract_text_from_parts(response)
             diagnostics['note'] = 'max_turns_reached'
-            return {'text': final_text, 'function_results': function_results, 'diagnostics': diagnostics, 'trace': trace_list}
+            return {'text': final_text, 'function_results': function_results, 'diagnostics': diagnostics, 'trace': trace_list, 'turns': turn}
 
-    return {'text': '', 'function_results': function_results, 'diagnostics': diagnostics, 'trace': trace_list}
+    return {'text': '', 'function_results': function_results, 'diagnostics': diagnostics, 'trace': trace_list, 'turns': turn}
 
 
 def run_single_prompt(
@@ -366,6 +366,7 @@ def run_single_prompt(
             "error": f"Generation failed: {exc}",
             "summary": summary,
             "ledger": str(ledger_path),
+            "turns": 0,
         }
 
     text_val = None
@@ -409,6 +410,11 @@ def run_single_prompt(
         "summary": summary,
         "ledger": str(ledger_path),
     }
+    # Include turns count from function call loop
+    if 'diagnostics_from_runner' in locals() and isinstance(diagnostics_from_runner, dict):
+        result['turns'] = diagnostics_from_runner.get('turns', 1)
+    else:
+        result['turns'] = 1  # Single turn for non-function-call mode
     if diagnostics:
         result['response_diagnostic'] = diagnostics
 
