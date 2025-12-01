@@ -396,9 +396,9 @@ def run_single_prompt(
 
             # Load tools from the plugin registry
             if registry:
-                for name, fn in registry.get_enabled_executors().items():
+                for name, fn in registry.get_exposed_executors().items():
                     executor.register(name, fn)
-                all_tool_decls = registry.get_enabled_declarations()
+                all_tool_decls = registry.get_exposed_declarations()
 
             # Initialize permission plugin if provided
             perm_plugin = permission_plugin
