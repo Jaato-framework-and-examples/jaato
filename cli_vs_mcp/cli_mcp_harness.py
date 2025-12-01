@@ -3,6 +3,7 @@ import argparse
 import json
 import pathlib
 import time
+from datetime import datetime
 from typing import Dict, Any, List, Tuple
 import sys
 
@@ -126,7 +127,7 @@ from shared.ai_tool_runner import run_single_prompt
 
 def print_config(args, domain_params: Dict[str, Any], project_id: str, location: str,
                  model_name: str, scenarios: List[str], all_scenarios: List[str],
-                 cli_extra_paths: List[str]) -> None:
+                 cli_extra_paths: List[str], submission_timestamp: str) -> None:
     """Print all configuration parameters at startup."""
     print("=" * 70)
     print("  CLI vs MCP Harness Configuration")
@@ -160,6 +161,10 @@ def print_config(args, domain_params: Dict[str, Any], project_id: str, location:
     print("  Scenarios:")
     print(f"    Available: {all_scenarios}")
     print(f"    Selected:  {scenarios}")
+    print()
+    print("  Trace organization:")
+    print(f"    Timestamp: {submission_timestamp}")
+    print(f"    Structure: {args.trace_dir}/{submission_timestamp}/{args.domain}/<scenario>/")
     print()
     print("=" * 70)
     print()
@@ -295,7 +300,8 @@ Domain parameters (passed via --domain-params JSON):
     parser.add_argument("--output", default="cli_vs_mcp/harness_summary.json")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--trace", action="store_true", help="Write per-run trace files")
-    parser.add_argument("--trace-dir", default="cli_vs_mcp/traces", help="Directory for trace files")
+    parser.add_argument("--trace-dir", default="cli_vs_mcp/traces",
+                        help="Base directory for traces (organized as: {trace-dir}/{timestamp}/{domain}/{scenario}/)")
     parser.add_argument("--cli-path", default=None, help="Extra path to CLI binary (e.g., path to gh or confluence-cli)")
 
     # Domain-specific parameters as JSON
@@ -347,18 +353,39 @@ Domain parameters (passed via --domain-params JSON):
             if s not in all_scenarios:
                 raise SystemExit(f"Unknown scenario for domain '{domain}': {s}. Available: {all_scenarios}")
 
+    # Generate timestamp for hierarchical trace organization
+    submission_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
     # Print configuration summary
     print_config(args, domain_params, project_id, location, model_name,
-                 scenarios, all_scenarios, cli_extra_paths)
+                 scenarios, all_scenarios, cli_extra_paths, submission_timestamp)
 
+    # Base directories for traces and output
+    trace_base_dir = pathlib.Path(args.trace_dir)
     out_dir = pathlib.Path(args.output).parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    summary: Dict[str, Any] = {"scenarios": {}, "meta": {"runs": args.runs, "model": model_name, "domain": domain}}
+    summary: Dict[str, Any] = {
+        "scenarios": {},
+        "meta": {
+            "runs": args.runs,
+            "model": model_name,
+            "domain": domain,
+            "submission_timestamp": submission_timestamp
+        }
+    }
 
     for scenario in scenarios:
         if args.verbose:
             print(f"[Scenario] {scenario}")
+
+        # Create hierarchical trace directory: {base}/{timestamp}/{domain}/{scenario}/
+        scenario_trace_dir = trace_base_dir / submission_timestamp / domain / scenario
+        scenario_trace_dir.mkdir(parents=True, exist_ok=True)
+
+        if args.verbose:
+            print(f"  Trace directory: {scenario_trace_dir}")
+
         cli_runs: List[Dict[str, Any]] = []
         mcp_runs: List[Dict[str, Any]] = []
         for run_index in range(1, args.runs + 1):
@@ -367,10 +394,10 @@ Domain parameters (passed via --domain-params JSON):
                 print(f"  CLI run {run_index}/{args.runs}")
             registry.enable('cli', config={'extra_paths': cli_extra_paths} if cli_extra_paths else None)
             cli_prompt = build_prompt(scenario, "cli", domain_params, domain, cli_templates, mcp_templates)
-            cli_ledger = out_dir / f"cli_{scenario}_run{run_index}.jsonl"
+            cli_ledger = scenario_trace_dir / f"cli_run{run_index}.jsonl"
             cli_res = run_single_prompt(
                 client, model_name, cli_prompt, cli_ledger,
-                trace=args.trace, trace_dir=pathlib.Path(args.trace_dir),
+                trace=args.trace, trace_dir=scenario_trace_dir,
                 registry=registry
             )
             cli_runs.append(cli_res)
@@ -383,10 +410,10 @@ Domain parameters (passed via --domain-params JSON):
                 print(f"  MCP run {run_index}/{args.runs}")
             registry.enable('mcp')
             mcp_prompt = build_prompt(scenario, "mcp", domain_params, domain, cli_templates, mcp_templates)
-            mcp_ledger = out_dir / f"mcp_{scenario}_run{run_index}.jsonl"
+            mcp_ledger = scenario_trace_dir / f"mcp_run{run_index}.jsonl"
             mcp_res = run_single_prompt(
                 client, model_name, mcp_prompt, mcp_ledger,
-                trace=args.trace, trace_dir=pathlib.Path(args.trace_dir),
+                trace=args.trace, trace_dir=scenario_trace_dir,
                 registry=registry
             )
             mcp_runs.append(mcp_res)
@@ -398,9 +425,22 @@ Domain parameters (passed via --domain-params JSON):
             "mcp_details": [{"ledger": r["ledger"], "summary": r["summary"], "turns": r.get("turns", 0)} for r in mcp_runs],
         }
 
-    pathlib.Path(args.output).write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    # Write summary to hierarchical location: {trace_dir}/{timestamp}/{domain}/harness_summary.json
+    summary_dir = trace_base_dir / submission_timestamp / domain
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = summary_dir / "harness_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    # Also write to the legacy output path if different
+    legacy_output = pathlib.Path(args.output)
+    if legacy_output.resolve() != summary_path.resolve():
+        legacy_output.parent.mkdir(parents=True, exist_ok=True)
+        legacy_output.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
     if args.verbose:
-        print(f"\nSummary written to {args.output}")
+        print(f"\nSummary written to {summary_path}")
+        if legacy_output.resolve() != summary_path.resolve():
+            print(f"Also written to {legacy_output}")
         print_comparison_table(summary)
 
 
