@@ -23,6 +23,7 @@ jaato is a sandbox for experimenting with:
 - **Token Ledger** - JSONL logging of all API calls with token counts
 - **Rate Limit Handling** - Exponential backoff retry for transient errors
 - **Prompt Templates** - Domain-specific templates for different use cases
+- **Trace Visualization** - Generate sequence diagrams from execution traces
 
 ## Prerequisites
 
@@ -169,6 +170,36 @@ Generate training data from COBOL modification logs:
   --mode full-stream
 ```
 
+### Sequence Diagram Generator
+
+Generate PDF sequence diagrams from trace files to visualize interactions between the client, orchestrator, LLM, and tools:
+
+```bash
+# First, run the harness with tracing enabled
+.venv/bin/python cli_vs_mcp/cli_mcp_harness.py \
+  --domain github \
+  --scenarios list_issues \
+  --domain-params '{"owner": "your-org", "repo": "your-repo"}' \
+  --trace --trace-dir cli_vs_mcp/traces
+
+# Generate sequence diagram from trace
+.venv/bin/python sequence-diagram-generator/trace_to_sequence.py \
+  --trace cli_vs_mcp/traces/cli_list_issues_run1.trace.json \
+  -o sequence_diagram.pdf
+```
+
+You can also export to PlantUML or Mermaid formats:
+
+```bash
+# Export PlantUML source
+.venv/bin/python sequence-diagram-generator/trace_to_sequence.py \
+  --trace traces/trace.json --export-plantuml diagram.puml
+
+# Export Mermaid source
+.venv/bin/python sequence-diagram-generator/trace_to_sequence.py \
+  --trace traces/trace.json --export-mermaid diagram.mmd
+```
+
 ## Project Structure
 
 ```
@@ -183,6 +214,7 @@ jaato/
 │   │   └── registry.py         # Plugin discovery & lifecycle
 │   └── prompt_templates/       # Domain-specific prompts
 ├── cli_vs_mcp/                 # CLI vs MCP comparison harness
+├── sequence-diagram-generator/ # Trace visualization tool
 ├── simple-connectivity-test/   # Basic Vertex AI test
 ├── modlog-training-set-test/   # COBOL training data generator
 └── docs/                       # Additional documentation
@@ -242,6 +274,7 @@ jaato/
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up your GCP project
 - [Plugin System](shared/plugins/README.md) - Creating custom tool plugins
 - [ModLog Training](modlog-training-set-test/README.md) - COBOL training data generation
+- [Sequence Diagrams](sequence-diagram-generator/README.md) - Trace visualization
 
 ## License
 
