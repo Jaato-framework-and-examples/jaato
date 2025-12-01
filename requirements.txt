@@ -3,7 +3,7 @@ requests
 google-genai
 mcp[cli]
 google-api-core
-google-oauth2
+google-auth
 certifi
 python-dotenv
 reportlab
