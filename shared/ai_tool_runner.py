@@ -437,8 +437,9 @@ def run_single_prompt(
                     trace_payload['fc_result'] = fc_result
             with open(trace_path, 'w', encoding='utf-8') as tf:
                 json.dump(trace_payload, tf, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            import sys
+            print(f"[Warning] Failed to write trace file: {e}", file=sys.stderr)
     return result
 
 
