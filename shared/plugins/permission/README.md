@@ -306,6 +306,152 @@ def run_scenario(scenario_name: str, config: Dict) -> Dict:
 }
 ```
 
+### Rule Types: tools vs patterns vs arguments
+
+The blacklist and whitelist each support three types of rules. They serve different purposes and match differently.
+
+#### `tools` - Match by Tool Name
+
+Matches the exact tool name. Use this for blanket allow/deny of entire tools.
+
+```json
+{
+  "blacklist": {
+    "tools": ["dangerous_tool", "admin_tool"]
+  },
+  "whitelist": {
+    "tools": ["search_issues", "get_page"]
+  }
+}
+```
+
+| Tool Call | Blacklist Match | Whitelist Match |
+|-----------|-----------------|-----------------|
+| `dangerous_tool({...})` | YES | - |
+| `search_issues({...})` | - | YES |
+| `cli_based_tool({...})` | - | - |
+
+**Use case**: When you want to completely block or allow a specific tool regardless of its arguments.
+
+#### `patterns` - Match Command Signatures (Glob-Style)
+
+Matches against a "signature" string built from the tool call. Uses glob-style wildcards (`*`).
+
+**For `cli_based_tool`**: The signature is the full command string.
+```
+cli_based_tool({"command": "git push origin main"})
+  → signature: "git push origin main"
+```
+
+**For other tools**: The signature is `tool_name(arg1=val1, arg2=val2, ...)`.
+```
+search_issues({"query": "bug", "limit": 10})
+  → signature: "search_issues(limit=10, query=bug)"
+```
+
+```json
+{
+  "blacklist": {
+    "patterns": ["rm -rf *", "sudo *", "chmod 777 *"]
+  },
+  "whitelist": {
+    "patterns": ["git *", "npm test", "python *.py"]
+  }
+}
+```
+
+| Command | Pattern | Match? |
+|---------|---------|--------|
+| `git status` | `git *` | YES |
+| `git push origin main` | `git *` | YES |
+| `rm -rf /tmp/cache` | `rm -rf *` | YES |
+| `rm file.txt` | `rm -rf *` | NO (missing `-rf`) |
+| `sudo apt update` | `sudo *` | YES |
+| `python script.py` | `python *.py` | YES |
+| `python -m pytest` | `python *.py` | NO |
+
+**Use case**: When you want to allow/deny commands based on their structure, especially for CLI tools where the command prefix determines safety.
+
+#### `arguments` - Match Specific Argument Values
+
+Matches specific values within specific arguments of specific tools. Provides fine-grained control.
+
+```json
+{
+  "blacklist": {
+    "arguments": {
+      "cli_based_tool": {
+        "command": ["rm -rf", "sudo", "shutdown", "reboot", "mkfs"]
+      }
+    }
+  },
+  "whitelist": {
+    "arguments": {
+      "cli_based_tool": {
+        "command": ["git", "npm", "pip", "python"]
+      }
+    }
+  }
+}
+```
+
+**Matching logic**:
+- For blacklist: Blocks if the argument value **starts with** or **contains** any blocked value
+- For whitelist: Allows if the argument value **starts with** any allowed value
+
+| Command | Blacklist `["rm -rf", "sudo"]` | Whitelist `["git", "npm"]` |
+|---------|-------------------------------|---------------------------|
+| `rm -rf /tmp` | BLOCKED (starts with `rm -rf`) | - |
+| `rm file.txt` | allowed | - |
+| `sudo apt update` | BLOCKED (starts with `sudo`) | - |
+| `git status` | - | ALLOWED (starts with `git`) |
+| `git push` | - | ALLOWED (starts with `git`) |
+| `npm install` | - | ALLOWED (starts with `npm`) |
+| `python test.py` | - | not matched |
+
+**Use case**: When you need to control based on the actual command being run, not just the pattern. More precise than patterns for argument-level filtering.
+
+### Comparison: When to Use Each
+
+| Rule Type | Granularity | Best For |
+|-----------|-------------|----------|
+| `tools` | Tool-level | Blocking/allowing entire tools (e.g., block all MCP tools) |
+| `patterns` | Signature-level | Command structure matching with wildcards (e.g., `git *`) |
+| `arguments` | Argument-level | Precise control over specific argument values |
+
+### Combined Example
+
+```json
+{
+  "blacklist": {
+    "tools": ["admin_dangerous_tool"],
+    "patterns": ["* --force", "* -rf *"],
+    "arguments": {
+      "cli_based_tool": {
+        "command": ["sudo", "shutdown", "reboot"]
+      }
+    }
+  },
+  "whitelist": {
+    "tools": ["search_issues"],
+    "patterns": ["git status", "git diff *", "npm test"],
+    "arguments": {
+      "cli_based_tool": {
+        "command": ["git", "npm", "pip"]
+      }
+    }
+  }
+}
+```
+
+This configuration:
+1. **Blocks** `admin_dangerous_tool` entirely (tools)
+2. **Blocks** any command with `--force` flag (patterns)
+3. **Blocks** any command starting with `sudo`, `shutdown`, `reboot` (arguments)
+4. **Allows** `search_issues` tool entirely (tools)
+5. **Allows** `git status`, `git diff` commands (patterns)
+6. **Allows** commands starting with `git`, `npm`, `pip` (arguments)
+
 ### Policy Evaluation Rules
 
 | Priority | Rule Type | Effect |
@@ -318,14 +464,14 @@ def run_scenario(scenario_name: str, config: Dict) -> Dict:
 
 **Key principle**: Blacklist ALWAYS takes priority over whitelist.
 
-### Pattern Matching
+### Evaluation Order Within Each List
 
-Patterns use glob-style matching:
-- `*` matches any characters
-- `git *` matches `git status`, `git push origin main`, etc.
-- `rm -rf *` matches any rm -rf command
+Within blacklist (or whitelist), rules are checked in this order:
+1. `tools` - exact tool name match
+2. `patterns` - glob pattern match against signature
+3. `arguments` - argument value match
 
-For CLI tools, patterns match the full command string.
+First match wins within each priority level.
 
 ## Actor Types
 
