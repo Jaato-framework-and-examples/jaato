@@ -50,9 +50,9 @@ The permission plugin (`askPermission`) provides access control for tool executi
 The permission plugin wraps the execution layer, not individual plugins:
 
 ```python
-# Other plugins register their executors normally
-registry.enable("cli", {"extra_paths": ["/usr/local/bin"]})
-registry.enable("mcp", {"config_path": ".mcp.json"})
+# Other plugins expose their tools normally
+registry.expose_tool("cli", {"extra_paths": ["/usr/local/bin"]})
+registry.expose_tool("mcp", {"config_path": ".mcp.json"})
 
 # Permission plugin wraps ALL tool executions
 executor.set_permission_plugin(permission_plugin)
@@ -79,8 +79,8 @@ client = genai.Client(vertexai=True, project="my-project", location="us-central1
 # Set up plugin registry
 registry = PluginRegistry()
 registry.discover()
-registry.enable("cli")
-registry.enable("mcp", {"config_path": ".mcp.json"})
+registry.expose_tool("cli")
+registry.expose_tool("mcp", {"config_path": ".mcp.json"})
 
 # Create permission plugin
 permission_plugin = PermissionPlugin()
@@ -110,7 +110,7 @@ from shared.plugins.permission import PermissionPlugin
 executor = ToolExecutor(ledger=ledger)
 
 # Register plugin executors
-for name, fn in registry.get_enabled_executors().items():
+for name, fn in registry.get_exposed_executors().items():
     executor.register(name, fn)
 
 # Initialize and attach permission plugin
@@ -179,34 +179,39 @@ permission_config = {
 | `policy` | `dict` | `None` | Inline policy dict (overrides file) |
 | `actor_type` | `str` | `"console"` | Actor type for interactive approval |
 | `actor_config` | `dict` | `{}` | Actor-specific settings |
-| `expose_tool` | `bool` | `True` | Whether to expose `askPermission` tool to model |
 
 ### Dual Nature: Enforcement vs Tool
 
-The permission plugin has two distinct roles that can be enabled independently:
+The permission plugin has two distinct roles that are controlled independently:
 
 | Role | Description | Control |
 |------|-------------|---------|
-| **Permission enforcement** | Wraps `ToolExecutor.execute()` to check permissions before any tool runs | Always active when plugin is used |
-| **askPermission tool** | Exposes a tool for the model to proactively query permissions | `expose_tool` config option |
+| **Permission enforcement** | Wraps `ToolExecutor.execute()` to check permissions before any tool runs | `executor.set_permission_plugin(plugin)` |
+| **askPermission tool** | Exposes a tool for the model to proactively query permissions | `registry.expose_tool("permission")` |
 
 **Enforcement only (no tool exposed to model):**
 ```python
-permission_config = {
-    "config_path": "permissions.json",
-    "expose_tool": False  # Model cannot query permissions proactively
-}
+# Initialize and set permission plugin for enforcement
+permission_plugin = PermissionPlugin()
+permission_plugin.initialize({"config_path": "permissions.json"})
+executor.set_permission_plugin(permission_plugin)
+
+# Don't expose the permission plugin's askPermission tool
+# registry.expose_tool("permission")  # <-- NOT called
 ```
 
 **Both enforcement and proactive tool:**
 ```python
-permission_config = {
-    "config_path": "permissions.json",
-    "expose_tool": True  # Default - model can use askPermission
-}
+# Initialize and set permission plugin for enforcement
+permission_plugin = PermissionPlugin()
+permission_plugin.initialize({"config_path": "permissions.json"})
+executor.set_permission_plugin(permission_plugin)
+
+# Also expose askPermission tool to the model
+registry.expose_tool("permission")
 ```
 
-Use `expose_tool: False` when you want:
+Use enforcement-only when you want:
 - Transparent permission enforcement without model awareness
 - Simpler tool surface for the model
 - Permission denials to appear as direct errors

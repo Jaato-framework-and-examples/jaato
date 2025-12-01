@@ -4,7 +4,7 @@ This document explains how to use the jaato plugin framework from a client persp
 
 ## Overview
 
-The plugin framework provides a way to dynamically discover, load, and manage tool implementations that can be used by the AI model. Plugins are auto-discovered from the `shared/plugins/` directory and can be enabled/disabled at runtime.
+The plugin framework provides a way to dynamically discover, load, and manage tool implementations that can be used by the AI model. Plugins are auto-discovered from the `shared/plugins/` directory and can be exposed/unexposed at runtime.
 
 ## Client Usage
 
@@ -21,40 +21,40 @@ registry.discover()
 print(registry.list_available())  # ['cli', 'mcp', ...]
 ```
 
-### Enabling and Disabling Plugins
+### Exposing and Unexposing Plugin Tools
 
-Plugins must be explicitly enabled before they can be used. This allows fine-grained control over which tools are available to the AI model.
+Plugins must be explicitly exposed before their tools can be used by the AI model. This allows fine-grained control over which tools are available.
 
 ```python
-# Enable a plugin
-registry.enable('cli')
+# Expose a plugin's tools to the model
+registry.expose_tool('cli')
 
-# Enable with configuration
-registry.enable('cli', config={'extra_paths': ['/usr/local/bin']})
+# Expose with configuration
+registry.expose_tool('cli', config={'extra_paths': ['/usr/local/bin']})
 
-# Check what's enabled
-print(registry.list_enabled())  # ['cli']
+# Check what's exposed
+print(registry.list_exposed())  # ['cli']
 
-# Disable a plugin
-registry.disable('cli')
+# Unexpose a plugin's tools
+registry.unexpose_tool('cli')
 
-# Enable all discovered plugins
-registry.enable_all()
+# Expose all discovered plugins' tools
+registry.expose_all()
 
-# Disable all plugins (cleanup)
-registry.disable_all()
+# Unexpose all plugins' tools (cleanup)
+registry.unexpose_all()
 ```
 
 ### Getting Tool Declarations and Executors
 
-Once plugins are enabled, you can retrieve their tool declarations (for the AI model) and executors (for running the tools).
+Once plugins are exposed, you can retrieve their tool declarations (for the AI model) and executors (for running the tools).
 
 ```python
 # Get FunctionDeclarations for Vertex AI
-declarations = registry.get_enabled_declarations()
+declarations = registry.get_exposed_declarations()
 
 # Get executor callables
-executors = registry.get_enabled_executors()
+executors = registry.get_exposed_executors()
 # Returns: {'tool_name': callable, ...}
 ```
 
@@ -69,9 +69,9 @@ from shared.plugins import PluginRegistry
 # Setup
 registry = PluginRegistry()
 registry.discover()
-registry.enable('cli')
+registry.expose_tool('cli')
 
-# Run prompt with enabled tools
+# Run prompt with exposed tools
 result = run_single_prompt(
     model_name='gemini-2.5-flash',
     project_id='my-project',
@@ -82,32 +82,32 @@ result = run_single_prompt(
 )
 
 # Cleanup
-registry.disable_all()
+registry.unexpose_all()
 ```
 
 ### Dynamic Plugin Switching
 
-You can enable/disable plugins between prompts to change what tools are available:
+You can expose/unexpose plugins between prompts to change what tools are available:
 
 ```python
 registry = PluginRegistry()
 registry.discover()
 
 # First prompt: CLI tools only
-registry.enable('cli')
+registry.expose_tool('cli')
 result1 = run_single_prompt(..., registry=registry)
-registry.disable('cli')
+registry.unexpose_tool('cli')
 
 # Second prompt: MCP tools only
-registry.enable('mcp')
+registry.expose_tool('mcp')
 result2 = run_single_prompt(..., registry=registry)
-registry.disable('mcp')
+registry.unexpose_tool('mcp')
 
 # Third prompt: Both tools
-registry.enable('cli')
-registry.enable('mcp')
+registry.expose_tool('cli')
+registry.expose_tool('mcp')
 result3 = run_single_prompt(..., registry=registry)
-registry.disable_all()
+registry.unexpose_all()
 ```
 
 ---
@@ -139,11 +139,11 @@ class ToolPlugin(Protocol):
         ...
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """Called when the plugin is enabled. Setup resources here."""
+        """Called when the plugin is exposed. Setup resources here."""
         ...
 
     def shutdown(self) -> None:
-        """Called when the plugin is disabled. Cleanup resources here."""
+        """Called when the plugin is unexposed. Cleanup resources here."""
         ...
 ```
 
@@ -256,7 +256,7 @@ class ConfigurablePlugin:
 
 Client usage:
 ```python
-registry.enable('configurable', config={
+registry.expose_tool('configurable', config={
     'api_key': 'secret123',
     'timeout': 60
 })
@@ -332,7 +332,7 @@ Executes local shell commands.
 
 **Example:**
 ```python
-registry.enable('cli', config={'extra_paths': ['/opt/custom/bin']})
+registry.expose_tool('cli', config={'extra_paths': ['/opt/custom/bin']})
 ```
 
 ### MCP Plugin (`mcp`)
@@ -345,7 +345,7 @@ Connects to MCP (Model Context Protocol) servers defined in `.mcp.json` and expo
 
 **Example:**
 ```python
-registry.enable('mcp')
+registry.expose_tool('mcp')
 # Tools from GitHub MCP server, Atlassian MCP server, etc.
 ```
 

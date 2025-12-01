@@ -29,11 +29,19 @@ class PermissionPlugin:
     - Allow tools via whitelist rules
     - Prompt an actor for approval when policy is ambiguous
 
-    The plugin has two distinct roles:
-    1. Permission enforcement: Wraps ToolExecutor.execute() to check permissions
-    2. Proactive check tool: Optional 'askPermission' tool for the model
+    The plugin has two distinct roles that are controlled independently:
 
-    These can be enabled/disabled independently via configuration.
+    1. Permission enforcement (middleware):
+       - Enabled via: executor.set_permission_plugin(plugin)
+       - Wraps ToolExecutor.execute() to check permissions before any tool runs
+
+    2. Proactive check tool (askPermission):
+       - Enabled via: registry.expose_tool("permission")
+       - Exposes askPermission tool for model to query permissions proactively
+
+    Usage patterns:
+    - Enforcement only: set_permission_plugin() without expose_tool()
+    - Enforcement + proactive: set_permission_plugin() AND expose_tool()
     """
 
     def __init__(self):
@@ -44,8 +52,6 @@ class PermissionPlugin:
         self._wrapped_executors: Dict[str, Callable] = {}
         self._original_executors: Dict[str, Callable] = {}
         self._execution_log: List[Dict[str, Any]] = []
-        # Whether to expose askPermission tool to the model
-        self._expose_tool: bool = True
 
     @property
     def name(self) -> str:
@@ -63,13 +69,9 @@ class PermissionPlugin:
                    - actor_type: Type of actor ("console", "webhook", "file")
                    - actor_config: Configuration for the actor
                    - policy: Inline policy dict (overrides file)
-                   - expose_tool: Whether to expose askPermission to model (default: True)
         """
         # Load configuration
         config = config or {}
-
-        # Whether to expose the askPermission tool to the model
-        self._expose_tool = config.get("expose_tool", True)
 
         # Try to load from file first
         config_path = config.get("config_path")
@@ -119,18 +121,18 @@ class PermissionPlugin:
         self._original_executors.clear()
 
     def get_function_declarations(self) -> List[types.FunctionDeclaration]:
-        """Return function declarations.
+        """Return function declarations for the askPermission tool.
 
-        The permission plugin can optionally provide an 'askPermission' tool that
-        the model can call to check if a tool is allowed before execution.
+        The askPermission tool allows the model to proactively check if a tool
+        is allowed before execution. Exposure is controlled via the registry:
 
-        This is controlled by the 'expose_tool' config option (default: True).
-        When False, the permission enforcement still works but the model cannot
-        proactively query permissions.
+        - registry.expose_tool("permission") -> askPermission available to model
+        - Permission enforcement via executor.set_permission_plugin() is separate
+
+        This separation allows:
+        - Enforcement only: set_permission_plugin() without expose_tool()
+        - Enforcement + proactive checks: both set_permission_plugin() and expose_tool()
         """
-        if not self._expose_tool:
-            return []
-
         return [
             types.FunctionDeclaration(
                 name="askPermission",
@@ -155,11 +157,8 @@ class PermissionPlugin:
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Return the executor for askPermission tool.
 
-        Only returns the executor if expose_tool is True.
+        Exposure is controlled via the registry (expose_tool/unexpose_tool).
         """
-        if not self._expose_tool:
-            return {}
-
         return {
             "askPermission": self._execute_ask_permission
         }
