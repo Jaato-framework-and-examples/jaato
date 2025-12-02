@@ -1,0 +1,482 @@
+"""TODO plugin for plan registration and progress reporting.
+
+This plugin enables LLMs to:
+1. Register execution plans with ordered steps
+2. Report progress on individual steps
+3. Query plan status
+4. Complete/fail/cancel plans
+
+Progress is reported through configurable transport protocols
+(console, webhook, file) matching the permissions plugin pattern.
+"""
+
+from typing import Any, Callable, Dict, List, Optional
+from google.genai import types
+
+from .models import PlanStatus, StepStatus, TodoPlan, TodoStep
+from .storage import TodoStorage, create_storage, InMemoryStorage
+from .actors import TodoReporter, ConsoleReporter, create_reporter
+from .config_loader import load_config, TodoConfig
+
+
+class TodoPlugin:
+    """Plugin that provides plan registration and progress tracking.
+
+    This plugin exposes tools for the LLM to:
+    - createPlan: Register a new execution plan with steps
+    - updateStep: Report progress on a specific step
+    - getPlanStatus: Query current plan state
+    - completePlan: Mark a plan as finished
+
+    Progress is reported through configurable reporters (console, webhook, file)
+    using the same transport protocol patterns as the permissions plugin.
+    """
+
+    def __init__(self):
+        self._config: Optional[TodoConfig] = None
+        self._storage: Optional[TodoStorage] = None
+        self._reporter: Optional[TodoReporter] = None
+        self._initialized = False
+        self._current_plan_id: Optional[str] = None
+
+    @property
+    def name(self) -> str:
+        return "todo"
+
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
+        """Initialize the TODO plugin.
+
+        Args:
+            config: Optional configuration dict. If not provided, loads from
+                   file specified by TODO_CONFIG_PATH or default locations.
+
+                   Config options:
+                   - config_path: Path to todo.json file
+                   - reporter_type: Type of reporter ("console", "webhook", "file")
+                   - reporter_config: Configuration for the reporter
+                   - storage_type: Type of storage ("memory", "file", "hybrid")
+                   - storage_path: Path for file-based storage
+        """
+        config = config or {}
+
+        # Try to load from file first
+        config_path = config.get("config_path")
+        try:
+            self._config = load_config(config_path)
+        except FileNotFoundError:
+            # Use defaults
+            self._config = TodoConfig()
+
+        # Initialize storage
+        storage_type = config.get("storage_type") or self._config.storage_type
+        storage_path = config.get("storage_path") or self._config.storage_path
+        use_directory = config.get("storage_use_directory", self._config.storage_use_directory)
+
+        try:
+            self._storage = create_storage(
+                storage_type=storage_type,
+                path=storage_path,
+                use_directory=use_directory,
+            )
+        except (ValueError, OSError) as e:
+            print(f"Warning: Failed to initialize storage: {e}")
+            print("Falling back to in-memory storage")
+            self._storage = InMemoryStorage()
+
+        # Initialize reporter
+        reporter_type = config.get("reporter_type") or self._config.reporter_type
+        reporter_config = config.get("reporter_config") or self._config.to_reporter_config()
+
+        try:
+            self._reporter = create_reporter(reporter_type, reporter_config)
+        except (ValueError, RuntimeError) as e:
+            print(f"Warning: Failed to initialize {reporter_type} reporter: {e}")
+            print("Falling back to console reporter")
+            self._reporter = ConsoleReporter()
+
+        self._initialized = True
+
+    def shutdown(self) -> None:
+        """Shutdown the TODO plugin."""
+        if self._reporter:
+            self._reporter.shutdown()
+        self._storage = None
+        self._reporter = None
+        self._initialized = False
+        self._current_plan_id = None
+
+    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
+        """Return function declarations for TODO tools."""
+        return [
+            types.FunctionDeclaration(
+                name="createPlan",
+                description="Register a new execution plan with ordered steps. "
+                           "Use this before starting a multi-step task to track progress.",
+                parameters_json_schema={
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Brief summary of the plan (e.g., 'Refactor auth module')"
+                        },
+                        "steps": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Ordered list of step descriptions"
+                        }
+                    },
+                    "required": ["title", "steps"]
+                }
+            ),
+            types.FunctionDeclaration(
+                name="updateStep",
+                description="Update the status of a specific step in the current plan. "
+                           "Use this to report progress as you complete steps.",
+                parameters_json_schema={
+                    "type": "object",
+                    "properties": {
+                        "step_id": {
+                            "type": "string",
+                            "description": "ID of the step to update (from createPlan response)"
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["in_progress", "completed", "failed", "skipped"],
+                            "description": "New status for the step"
+                        },
+                        "result": {
+                            "type": "string",
+                            "description": "Optional outcome or notes for the step"
+                        },
+                        "error": {
+                            "type": "string",
+                            "description": "Error message if step failed"
+                        }
+                    },
+                    "required": ["step_id", "status"]
+                }
+            ),
+            types.FunctionDeclaration(
+                name="getPlanStatus",
+                description="Get the current status of a plan and all its steps.",
+                parameters_json_schema={
+                    "type": "object",
+                    "properties": {
+                        "plan_id": {
+                            "type": "string",
+                            "description": "ID of the plan (optional, defaults to current plan)"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.FunctionDeclaration(
+                name="completePlan",
+                description="Mark the current plan as completed, failed, or cancelled.",
+                parameters_json_schema={
+                    "type": "object",
+                    "properties": {
+                        "status": {
+                            "type": "string",
+                            "enum": ["completed", "failed", "cancelled"],
+                            "description": "Final status of the plan"
+                        },
+                        "summary": {
+                            "type": "string",
+                            "description": "Optional summary of the outcome"
+                        }
+                    },
+                    "required": ["status"]
+                }
+            ),
+        ]
+
+    def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
+        """Return the executors for TODO tools."""
+        return {
+            "createPlan": self._execute_create_plan,
+            "updateStep": self._execute_update_step,
+            "getPlanStatus": self._execute_get_plan_status,
+            "completePlan": self._execute_complete_plan,
+        }
+
+    def _execute_create_plan(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the createPlan tool."""
+        title = args.get("title", "")
+        steps = args.get("steps", [])
+
+        if not title:
+            return {"error": "title is required"}
+
+        if not steps or not isinstance(steps, list):
+            return {"error": "steps must be a non-empty array"}
+
+        if not all(isinstance(s, str) for s in steps):
+            return {"error": "all steps must be strings"}
+
+        # Create plan
+        plan = TodoPlan.create(title=title, step_descriptions=steps)
+
+        # Save to storage
+        if self._storage:
+            self._storage.save_plan(plan)
+
+        # Set as current plan
+        self._current_plan_id = plan.plan_id
+
+        # Report creation
+        if self._reporter:
+            self._reporter.report_plan_created(plan)
+
+        return {
+            "plan_id": plan.plan_id,
+            "title": plan.title,
+            "status": plan.status.value,
+            "steps": [
+                {
+                    "step_id": s.step_id,
+                    "sequence": s.sequence,
+                    "description": s.description,
+                    "status": s.status.value,
+                }
+                for s in plan.steps
+            ],
+            "progress": plan.get_progress(),
+        }
+
+    def _execute_update_step(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the updateStep tool."""
+        step_id = args.get("step_id", "")
+        status_str = args.get("status", "")
+        result = args.get("result")
+        error = args.get("error")
+
+        if not step_id:
+            return {"error": "step_id is required"}
+
+        if not status_str:
+            return {"error": "status is required"}
+
+        # Validate status
+        try:
+            new_status = StepStatus(status_str)
+        except ValueError:
+            return {"error": f"Invalid status: {status_str}. "
+                           f"Must be one of: in_progress, completed, failed, skipped"}
+
+        # Get current plan
+        plan = self._get_current_plan()
+        if not plan:
+            return {"error": "No active plan. Create a plan first with createPlan."}
+
+        # Find step
+        step = plan.get_step_by_id(step_id)
+        if not step:
+            return {"error": f"Step not found: {step_id}"}
+
+        # Update step status
+        if new_status == StepStatus.IN_PROGRESS:
+            step.start()
+            plan.current_step = step.sequence
+        elif new_status == StepStatus.COMPLETED:
+            step.complete(result)
+        elif new_status == StepStatus.FAILED:
+            step.fail(error)
+        elif new_status == StepStatus.SKIPPED:
+            step.skip(result)
+
+        # Save to storage
+        if self._storage:
+            self._storage.save_plan(plan)
+
+        # Report update
+        if self._reporter:
+            self._reporter.report_step_update(plan, step)
+
+        return {
+            "step_id": step.step_id,
+            "sequence": step.sequence,
+            "description": step.description,
+            "status": step.status.value,
+            "result": step.result,
+            "error": step.error,
+            "progress": plan.get_progress(),
+        }
+
+    def _execute_get_plan_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the getPlanStatus tool."""
+        plan_id = args.get("plan_id")
+
+        # Get plan (specified or current)
+        if plan_id and self._storage:
+            plan = self._storage.get_plan(plan_id)
+        else:
+            plan = self._get_current_plan()
+
+        if not plan:
+            return {"error": "No plan found. Create a plan first with createPlan."}
+
+        return {
+            "plan_id": plan.plan_id,
+            "title": plan.title,
+            "status": plan.status.value,
+            "created_at": plan.created_at,
+            "completed_at": plan.completed_at,
+            "summary": plan.summary,
+            "current_step": plan.current_step,
+            "steps": [
+                {
+                    "step_id": s.step_id,
+                    "sequence": s.sequence,
+                    "description": s.description,
+                    "status": s.status.value,
+                    "started_at": s.started_at,
+                    "completed_at": s.completed_at,
+                    "result": s.result,
+                    "error": s.error,
+                }
+                for s in plan.steps
+            ],
+            "progress": plan.get_progress(),
+        }
+
+    def _execute_complete_plan(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the completePlan tool."""
+        status_str = args.get("status", "")
+        summary = args.get("summary")
+
+        if not status_str:
+            return {"error": "status is required"}
+
+        # Validate status
+        if status_str not in ("completed", "failed", "cancelled"):
+            return {"error": f"Invalid status: {status_str}. "
+                           f"Must be one of: completed, failed, cancelled"}
+
+        # Get current plan
+        plan = self._get_current_plan()
+        if not plan:
+            return {"error": "No active plan. Create a plan first with createPlan."}
+
+        # Update plan status
+        if status_str == "completed":
+            plan.complete_plan(summary)
+        elif status_str == "failed":
+            plan.fail_plan(summary)
+        else:
+            plan.cancel_plan(summary)
+
+        # Save to storage
+        if self._storage:
+            self._storage.save_plan(plan)
+
+        # Report completion
+        if self._reporter:
+            self._reporter.report_plan_completed(plan)
+
+        # Clear current plan
+        self._current_plan_id = None
+
+        return {
+            "plan_id": plan.plan_id,
+            "title": plan.title,
+            "status": plan.status.value,
+            "completed_at": plan.completed_at,
+            "summary": plan.summary,
+            "progress": plan.get_progress(),
+        }
+
+    def _get_current_plan(self) -> Optional[TodoPlan]:
+        """Get the current active plan."""
+        if not self._current_plan_id or not self._storage:
+            return None
+        return self._storage.get_plan(self._current_plan_id)
+
+    # Convenience methods for programmatic access
+
+    def create_plan(
+        self,
+        title: str,
+        steps: List[str],
+        context: Optional[Dict[str, Any]] = None
+    ) -> TodoPlan:
+        """Create a new plan programmatically.
+
+        Args:
+            title: Plan title
+            steps: List of step descriptions
+            context: Optional context data
+
+        Returns:
+            Created TodoPlan instance
+        """
+        plan = TodoPlan.create(title=title, step_descriptions=steps, context=context)
+
+        if self._storage:
+            self._storage.save_plan(plan)
+
+        self._current_plan_id = plan.plan_id
+
+        if self._reporter:
+            self._reporter.report_plan_created(plan)
+
+        return plan
+
+    def update_step(
+        self,
+        step_id: str,
+        status: StepStatus,
+        result: Optional[str] = None,
+        error: Optional[str] = None
+    ) -> Optional[TodoStep]:
+        """Update a step programmatically.
+
+        Args:
+            step_id: ID of the step
+            status: New status
+            result: Optional result/notes
+            error: Optional error message
+
+        Returns:
+            Updated TodoStep or None if not found
+        """
+        plan = self._get_current_plan()
+        if not plan:
+            return None
+
+        step = plan.get_step_by_id(step_id)
+        if not step:
+            return None
+
+        if status == StepStatus.IN_PROGRESS:
+            step.start()
+            plan.current_step = step.sequence
+        elif status == StepStatus.COMPLETED:
+            step.complete(result)
+        elif status == StepStatus.FAILED:
+            step.fail(error)
+        elif status == StepStatus.SKIPPED:
+            step.skip(result)
+
+        if self._storage:
+            self._storage.save_plan(plan)
+
+        if self._reporter:
+            self._reporter.report_step_update(plan, step)
+
+        return step
+
+    def get_current_plan(self) -> Optional[TodoPlan]:
+        """Get the current active plan."""
+        return self._get_current_plan()
+
+    def get_all_plans(self) -> List[TodoPlan]:
+        """Get all stored plans."""
+        if not self._storage:
+            return []
+        return self._storage.get_all_plans()
+
+
+def create_plugin() -> TodoPlugin:
+    """Factory function to create the TODO plugin instance."""
+    return TodoPlugin()
