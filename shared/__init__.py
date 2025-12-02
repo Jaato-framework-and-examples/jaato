@@ -30,7 +30,7 @@ from .plugins.registry import PluginRegistry
 from .plugins.permission import PermissionPlugin
 
 # Utilities
-from .ssl_helper import active_cert_bundle
+from .ssl_helper import active_cert_bundle, normalize_ca_env_vars
 
 __all__ = [
     # Google GenAI SDK
@@ -50,4 +50,5 @@ __all__ = [
     "PermissionPlugin",
     # Utilities
     "active_cert_bundle",
+    "normalize_ca_env_vars",
 ]
