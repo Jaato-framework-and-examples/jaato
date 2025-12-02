@@ -25,6 +25,9 @@ from .ai_tool_runner import (
     extract_text_from_parts,
 )
 
+# Core client
+from .jaato_client import JaatoClient
+
 # Plugin system
 from .plugins.registry import PluginRegistry
 from .plugins.permission import PermissionPlugin
@@ -45,6 +48,8 @@ __all__ = [
     "run_single_prompt",
     "extract_function_calls",
     "extract_text_from_parts",
+    # Core client
+    "JaatoClient",
     # Plugin system
     "PluginRegistry",
     "PermissionPlugin",

@@ -163,6 +163,18 @@ class PermissionPlugin:
             "askPermission": self._execute_ask_permission
         }
 
+    def get_system_instructions(self) -> Optional[str]:
+        """Return system instructions for the permission system."""
+        return """Tool execution is controlled by a permission system. Before executing tools,
+you may use `askPermission` to check if a tool is allowed.
+
+The askPermission tool takes:
+- tool_name: Name of the tool to check
+- arguments: (optional) Arguments that would be passed to the tool
+
+It returns whether the tool is allowed and the reason for the decision.
+If a tool is denied, do not attempt to execute it."""
+
     def _execute_ask_permission(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the askPermission tool.
 
@@ -175,11 +187,12 @@ class PermissionPlugin:
         if not tool_name:
             return {"error": "tool_name is required"}
 
-        allowed, reason = self.check_permission(tool_name, tool_args)
+        allowed, perm_info = self.check_permission(tool_name, tool_args)
 
         return {
             "allowed": allowed,
-            "reason": reason,
+            "reason": perm_info.get('reason', ''),
+            "method": perm_info.get('method', 'unknown'),
             "tool_name": tool_name,
         }
 
@@ -188,7 +201,7 @@ class PermissionPlugin:
         tool_name: str,
         args: Dict[str, Any],
         context: Optional[Dict[str, Any]] = None
-    ) -> Tuple[bool, str]:
+    ) -> Tuple[bool, Dict[str, Any]]:
         """Check if a tool execution is permitted.
 
         Args:
@@ -197,27 +210,31 @@ class PermissionPlugin:
             context: Optional context for actor (session_id, turn_number, etc.)
 
         Returns:
-            Tuple of (is_allowed, reason_string)
+            Tuple of (is_allowed, metadata_dict) where metadata_dict contains:
+            - 'reason': Human-readable reason string
+            - 'method': Decision method ('whitelist', 'blacklist', 'default',
+                       'sanitization', 'session_whitelist', 'session_blacklist',
+                       'user_approved', 'user_denied', 'timeout')
         """
         if not self._policy:
-            return True, "Permission plugin not initialized"
+            return True, {'reason': 'Permission plugin not initialized', 'method': 'not_initialized'}
 
         # Evaluate against policy
         match = self._policy.check(tool_name, args)
 
         if match.decision == PermissionDecision.ALLOW:
             self._log_decision(tool_name, args, "allow", match.reason)
-            return True, match.reason
+            return True, {'reason': match.reason, 'method': match.rule_type or 'policy'}
 
         elif match.decision == PermissionDecision.DENY:
             self._log_decision(tool_name, args, "deny", match.reason)
-            return False, match.reason
+            return False, {'reason': match.reason, 'method': match.rule_type or 'policy'}
 
         elif match.decision == PermissionDecision.ASK_ACTOR:
             # Need to ask the actor
             if not self._actor:
                 self._log_decision(tool_name, args, "deny", "No actor configured")
-                return False, "No actor configured for approval"
+                return False, {'reason': 'No actor configured for approval', 'method': 'no_actor'}
 
             request = PermissionRequest.create(
                 tool_name=tool_name,
@@ -230,23 +247,26 @@ class PermissionPlugin:
             return self._handle_actor_response(tool_name, args, response)
 
         # Unknown decision type, deny by default
-        return False, "Unknown policy decision"
+        return False, {'reason': 'Unknown policy decision', 'method': 'unknown'}
 
     def _handle_actor_response(
         self,
         tool_name: str,
         args: Dict[str, Any],
         response: ActorResponse
-    ) -> Tuple[bool, str]:
+    ) -> Tuple[bool, Dict[str, Any]]:
         """Handle response from an actor.
 
         Updates session rules if actor requests it.
+
+        Returns:
+            Tuple of (is_allowed, metadata_dict) with 'reason' and 'method'.
         """
         decision = response.decision
 
         if decision in (ActorDecision.ALLOW, ActorDecision.ALLOW_ONCE):
             self._log_decision(tool_name, args, "allow", response.reason)
-            return True, response.reason
+            return True, {'reason': response.reason, 'method': 'user_approved'}
 
         elif decision == ActorDecision.ALLOW_SESSION:
             # Add to session whitelist
@@ -254,11 +274,11 @@ class PermissionPlugin:
             if self._policy:
                 self._policy.add_session_whitelist(pattern)
             self._log_decision(tool_name, args, "allow", f"Session whitelist: {pattern}")
-            return True, response.reason
+            return True, {'reason': response.reason, 'method': 'session_whitelist'}
 
         elif decision == ActorDecision.DENY:
             self._log_decision(tool_name, args, "deny", response.reason)
-            return False, response.reason
+            return False, {'reason': response.reason, 'method': 'user_denied'}
 
         elif decision == ActorDecision.DENY_SESSION:
             # Add to session blacklist
@@ -266,15 +286,15 @@ class PermissionPlugin:
             if self._policy:
                 self._policy.add_session_blacklist(pattern)
             self._log_decision(tool_name, args, "deny", f"Session blacklist: {pattern}")
-            return False, response.reason
+            return False, {'reason': response.reason, 'method': 'session_blacklist'}
 
         elif decision == ActorDecision.TIMEOUT:
             self._log_decision(tool_name, args, "deny", "Actor timeout")
-            return False, response.reason
+            return False, {'reason': response.reason, 'method': 'timeout'}
 
         # Unknown decision, deny
         self._log_decision(tool_name, args, "deny", "Unknown actor decision")
-        return False, "Unknown actor decision"
+        return False, {'reason': 'Unknown actor decision', 'method': 'unknown'}
 
     def _log_decision(
         self,
@@ -316,12 +336,16 @@ class PermissionPlugin:
         self._original_executors[name] = executor
 
         def wrapped(args: Dict[str, Any]) -> Any:
-            allowed, reason = self.check_permission(name, args)
+            allowed, perm_info = self.check_permission(name, args)
 
             if not allowed:
-                return {"error": f"Permission denied: {reason}"}
+                return {"error": f"Permission denied: {perm_info.get('reason', '')}", "_permission": perm_info}
 
-            return executor(args)
+            result = executor(args)
+            # Inject permission metadata if result is a dict
+            if isinstance(result, dict):
+                result['_permission'] = perm_info
+            return result
 
         self._wrapped_executors[name] = wrapped
         return wrapped

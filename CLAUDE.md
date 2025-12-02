@@ -45,15 +45,21 @@ python3 -m venv .venv
 
 ### Core Components (`shared/`)
 
+- **jaato_client.py**: Core client for the framework
+  - `JaatoClient`: Unified client using SDK chat API for multi-turn conversations
+  - `connect()`, `configure_tools()`, `send_message()` - core methods
+  - `get_history()`, `reset_session()` - history access and control
+  - SDK manages conversation history internally
+
 - **ai_tool_runner.py**: Central orchestrator for function-calling loops with Vertex AI
   - `ToolExecutor`: Registry mapping tool names to callables
-  - `run_function_call_loop()`: Iterative loop that handles model responses, extracts function calls, executes them, and feeds results back
-  - `run_single_prompt()`: High-level entry point combining model init, tool setup, and execution
+  - `run_function_call_loop()`: Legacy function for direct API usage (JaatoClient handles this internally now)
 
-- **tool_executors.py**: Concrete tool implementations
-  - `cli_based_tool()`: Execute local CLI commands via subprocess
-  - `mcp_based_tool()`: Invoke MCP server tools via the global manager
-  - `get_mcp_tools_dynamic()`: Discover tools from connected MCP servers at runtime
+- **plugins/**: Tool plugin system
+  - `PluginRegistry`: Discovers and manages tool plugins
+  - `cli.py`: CLI tool plugin for shell commands
+  - `mcp.py`: MCP tool plugin for Model Context Protocol servers
+  - `permission/`: Permission control for tool execution
 
 - **mcp_context_manager.py**: Multi-server MCP client manager
   - `MCPClientManager`: Manages persistent connections to multiple MCP servers
@@ -66,12 +72,14 @@ python3 -m venv .venv
 
 ### Tool Execution Flow
 
-1. Caller creates a `genai.Client(vertexai=True, project=..., location=...)`
-2. `run_single_prompt()` receives the client and model name
-3. Tools are registered via `ToolExecutor` (CLI and/or MCP)
-4. `run_function_call_loop()` sends prompt to model
-5. Model returns function calls → executor runs them → results fed back to model
-6. Loop continues until model returns text without function calls
+1. Create `JaatoClient` and connect: `jaato.connect(project, location, model)`
+2. Configure tools from plugin registry: `jaato.configure_tools(registry, permission_plugin)`
+3. Send message: `response = jaato.send_message(prompt)`
+4. Internally, SDK chat API handles function calling loop:
+   - Model returns function calls → executor runs them → results fed back
+   - Loop continues until model returns text without function calls
+5. Access history when needed: `history = jaato.get_history()`
+6. Reset session: `jaato.reset_session()` or `jaato.reset_session(modified_history)`
 
 ### MCP Server Configuration
 

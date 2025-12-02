@@ -205,14 +205,17 @@ You can also export to PlantUML or Mermaid formats:
 ```
 jaato/
 ├── shared/                     # Core library
+│   ├── jaato_client.py         # Core client (JaatoClient)
 │   ├── ai_tool_runner.py       # Function calling loop orchestrator
 │   ├── token_accounting.py     # Token usage tracking
 │   ├── mcp_context_manager.py  # MCP server connection manager
 │   ├── plugins/                # Tool plugin system
 │   │   ├── cli.py              # CLI tool plugin
 │   │   ├── mcp.py              # MCP tool plugin
-│   │   └── registry.py         # Plugin discovery & lifecycle
+│   │   ├── registry.py         # Plugin discovery & lifecycle
+│   │   └── permission/         # Permission control plugin
 │   └── prompt_templates/       # Domain-specific prompts
+├── simple-client/              # Interactive console client
 ├── cli_vs_mcp/                 # CLI vs MCP comparison harness
 ├── sequence-diagram-generator/ # Trace visualization tool
 ├── simple-connectivity-test/   # Basic Vertex AI test

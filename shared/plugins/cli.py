@@ -66,6 +66,20 @@ class CLIToolPlugin:
         """Return the executor mapping."""
         return {'cli_based_tool': self._execute}
 
+    def get_system_instructions(self) -> Optional[str]:
+        """Return system instructions for the CLI tool."""
+        return """You have access to `cli_based_tool` which executes local shell commands on the user's machine.
+
+Use it to run commands like `ls`, `cat`, `grep`, `find`, `git`, `gh`, etc.
+
+Example usage:
+- List files: cli_based_tool(command="ls -la")
+- Read a file: cli_based_tool(command="cat /path/to/file")
+- Check git status: cli_based_tool(command="git status")
+- Search for text: cli_based_tool(command="grep -r 'pattern' /path")
+
+The tool returns stdout, stderr, and returncode from the executed command."""
+
     def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a CLI command.
 
