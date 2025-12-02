@@ -16,10 +16,10 @@ if str(ROOT) not in sys.path:
 
 from typing import Optional
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 
 from shared import (
+    genai,
+    types,
     ToolExecutor,
     run_function_call_loop,
     TokenLedger,

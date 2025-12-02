@@ -4,9 +4,14 @@
 # Clients can import everything they need from a single location:
 #
 #   from shared import (
+#       genai, types,  # Google GenAI SDK
 #       ToolExecutor, run_function_call_loop, TokenLedger,
 #       PluginRegistry, PermissionPlugin, active_cert_bundle,
 #   )
+
+# Google GenAI SDK - re-exported for convenience
+from google import genai
+from google.genai import types
 
 # Token accounting
 from .token_accounting import TokenLedger, generate_with_ledger
@@ -28,6 +33,9 @@ from .plugins.permission import PermissionPlugin
 from .ssl_helper import active_cert_bundle
 
 __all__ = [
+    # Google GenAI SDK
+    "genai",
+    "types",
     # Token accounting
     "TokenLedger",
     "generate_with_ledger",
