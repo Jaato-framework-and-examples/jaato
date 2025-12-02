@@ -19,11 +19,14 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from shared.ai_tool_runner import ToolExecutor, run_function_call_loop
-from shared.token_accounting import TokenLedger
-from shared.plugins.registry import PluginRegistry
-from shared.plugins.permission import PermissionPlugin
-from shared.ssl_helper import active_cert_bundle
+from shared import (
+    ToolExecutor,
+    run_function_call_loop,
+    TokenLedger,
+    PluginRegistry,
+    PermissionPlugin,
+    active_cert_bundle,
+)
 
 
 class InteractiveClient:

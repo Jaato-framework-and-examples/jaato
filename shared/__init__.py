@@ -1,2 +1,45 @@
 # Shared modules package
+#
+# This module provides a unified import surface for the jaato orchestrator framework.
+# Clients can import everything they need from a single location:
+#
+#   from shared import (
+#       ToolExecutor, run_function_call_loop, TokenLedger,
+#       PluginRegistry, PermissionPlugin, active_cert_bundle,
+#   )
+
+# Token accounting
 from .token_accounting import TokenLedger, generate_with_ledger
+
+# Tool execution
+from .ai_tool_runner import (
+    ToolExecutor,
+    run_function_call_loop,
+    run_single_prompt,
+    extract_function_calls,
+    extract_text_from_parts,
+)
+
+# Plugin system
+from .plugins.registry import PluginRegistry
+from .plugins.permission import PermissionPlugin
+
+# Utilities
+from .ssl_helper import active_cert_bundle
+
+__all__ = [
+    # Token accounting
+    "TokenLedger",
+    "generate_with_ledger",
+    # Tool execution
+    "ToolExecutor",
+    "run_function_call_loop",
+    "run_single_prompt",
+    "extract_function_calls",
+    "extract_text_from_parts",
+    # Plugin system
+    "PluginRegistry",
+    "PermissionPlugin",
+    # Utilities
+    "active_cert_bundle",
+]
