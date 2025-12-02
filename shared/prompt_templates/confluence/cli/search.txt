@@ -1,8 +1,11 @@
-Use the available confluence CLI tool to perform a content search.
-Instructions:
-1. You will use the confluence-cli command to search content.
-2. You can find out the exact command syntax by using the --help option of their available variants.
-3. For each returned result (assume fields: id, title, excerpt), provide a concise relevance reason (<=15 words).
-4. Return only top {{TOP_N}} results even if more retrieved.
-Output JSON: {"results":[{"id":..., "title":..., "reason":..., "excerpt":...}]}
-Avoid speculation beyond provided excerpts.
+Use the confluence-cli tool to locate in space SpainCrossDomainAS and provide a short 50-lines overview of the contents of one page whose title is "JSON processing at CICS". 
+
+The command below should work fine and return you the page id:
+
+confluence-cli search 'space.key=SpainCrossDomainAS AND title="JSON processing at CICS"'
+
+Once you have a page id, this other command below should provide you the whole contents of the page:
+
+confluence-cli content get 921354028
+
+Otherwise, you can always attach the --help argument to the command to get understanding of how it works and how to use it.

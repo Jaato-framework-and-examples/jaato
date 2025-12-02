@@ -1,8 +1,4 @@
-Use the available confluence CLI tool to list the child pages of {{PARENT_PAGE_ID}} limited to {{LIMIT}} results.
-Instructions:
-1. You will use the confluence-cli command to list child pages.
-2. You can find out the exact command syntax by using the --help option of their available variants.
-3. Assume tool returns: id, title, last_modified_iso.
-4. Provide JSON: {"children":[{"id":..., "title":..., "age_days":...}]}
-5. Compute age_days = (NOW_UTC - last_modified_iso) in whole days (assume NOW_UTC provided as {{NOW_UTC}}).
-No commentary; just data.
+Use cli command "confluence-cli search parent={{PARENT_PAGE_ID}} --limit {{LIMIT}}" to find the list of children.
+Tool output includes: id, title.
+Return JSON: {"children":[{"id":..., "title":...}]}
+No added commentary.
