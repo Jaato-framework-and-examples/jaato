@@ -595,3 +595,284 @@ class TestPermissionPluginEdgeCases:
         }
         allowed, reason = plugin.check_permission("tool", complex_args)
         assert allowed is True
+
+
+class TestActorCommunication:
+    """Comprehensive tests for actor communication."""
+
+    def test_request_contains_tool_name(self):
+        """Verify actor receives correct tool_name."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        mock_actor = Mock()
+        mock_actor.request_permission.return_value = ActorResponse(
+            request_id="test",
+            decision=ActorDecision.ALLOW,
+            reason="OK"
+        )
+        plugin._actor = mock_actor
+
+        plugin.check_permission("my_specific_tool", {"arg": "val"})
+
+        request = mock_actor.request_permission.call_args[0][0]
+        assert request.tool_name == "my_specific_tool"
+
+    def test_request_contains_arguments(self):
+        """Verify actor receives correct arguments."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        mock_actor = Mock()
+        mock_actor.request_permission.return_value = ActorResponse(
+            request_id="test",
+            decision=ActorDecision.ALLOW,
+            reason="OK"
+        )
+        plugin._actor = mock_actor
+
+        test_args = {"command": "git status", "cwd": "/home/user"}
+        plugin.check_permission("cli_based_tool", test_args)
+
+        request = mock_actor.request_permission.call_args[0][0]
+        assert request.arguments == test_args
+
+    def test_request_contains_timeout(self):
+        """Verify actor receives configured timeout."""
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {"defaultPolicy": "ask"},
+            "actor_config": {"timeout": 45}
+        })
+
+        mock_actor = Mock()
+        mock_actor.request_permission.return_value = ActorResponse(
+            request_id="test",
+            decision=ActorDecision.ALLOW,
+            reason="OK"
+        )
+        plugin._actor = mock_actor
+
+        plugin.check_permission("test_tool", {})
+
+        request = mock_actor.request_permission.call_args[0][0]
+        # Timeout should come from config
+        assert request.timeout_seconds == plugin._config.actor_timeout
+
+    def test_allow_once_does_not_remember(self):
+        """ALLOW_ONCE should execute but still ask next time."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        mock_actor = Mock()
+        mock_actor.request_permission.return_value = ActorResponse(
+            request_id="test",
+            decision=ActorDecision.ALLOW_ONCE,
+            reason="Allowed once"
+        )
+        plugin._actor = mock_actor
+
+        # First call - should be allowed
+        allowed1, _ = plugin.check_permission("test_tool", {})
+        assert allowed1 is True
+        assert mock_actor.request_permission.call_count == 1
+
+        # Second call - should ask actor again (not remembered)
+        allowed2, _ = plugin.check_permission("test_tool", {})
+        assert allowed2 is True
+        assert mock_actor.request_permission.call_count == 2
+
+    def test_allow_session_remembers_exact_tool(self):
+        """ALLOW_SESSION with tool name should remember for that tool."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        mock_actor = Mock()
+        mock_actor.request_permission.return_value = ActorResponse(
+            request_id="test",
+            decision=ActorDecision.ALLOW_SESSION,
+            reason="Approved for session",
+            remember_pattern="specific_tool"
+        )
+        plugin._actor = mock_actor
+
+        # First call - asks actor
+        allowed1, _ = plugin.check_permission("specific_tool", {})
+        assert allowed1 is True
+        assert mock_actor.request_permission.call_count == 1
+
+        # Second call - should NOT ask actor (remembered)
+        allowed2, _ = plugin.check_permission("specific_tool", {})
+        assert allowed2 is True
+        assert mock_actor.request_permission.call_count == 1  # Still 1, not called again
+
+    def test_allow_session_pattern_matching(self):
+        """ALLOW_SESSION with pattern 'git *' should match git commands."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        mock_actor = Mock()
+        mock_actor.request_permission.return_value = ActorResponse(
+            request_id="test",
+            decision=ActorDecision.ALLOW_SESSION,
+            reason="Git commands approved",
+            remember_pattern="git *"
+        )
+        plugin._actor = mock_actor
+
+        # First call with "git status" - asks actor
+        allowed1, _ = plugin.check_permission(
+            "cli_based_tool",
+            {"command": "git status"}
+        )
+        assert allowed1 is True
+        assert mock_actor.request_permission.call_count == 1
+
+        # Second call with "git push" - should NOT ask actor (pattern match)
+        allowed2, _ = plugin.check_permission(
+            "cli_based_tool",
+            {"command": "git push origin main"}
+        )
+        assert allowed2 is True
+        # Pattern should match, so actor not called again
+        assert mock_actor.request_permission.call_count == 1
+
+    def test_deny_session_remembers(self):
+        """DENY_SESSION should block subsequent calls without asking."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        mock_actor = Mock()
+        mock_actor.request_permission.return_value = ActorResponse(
+            request_id="test",
+            decision=ActorDecision.DENY_SESSION,
+            reason="Blocked for session",
+            remember_pattern="dangerous_tool"
+        )
+        plugin._actor = mock_actor
+
+        # First call - asks actor, gets denied
+        allowed1, _ = plugin.check_permission("dangerous_tool", {})
+        assert allowed1 is False
+        assert mock_actor.request_permission.call_count == 1
+
+        # Second call - should NOT ask actor (remembered denial)
+        allowed2, _ = plugin.check_permission("dangerous_tool", {})
+        assert allowed2 is False
+        assert mock_actor.request_permission.call_count == 1  # Not called again
+
+    def test_deny_session_pattern_blocking(self):
+        """DENY_SESSION with pattern should block matching commands."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        mock_actor = Mock()
+        mock_actor.request_permission.return_value = ActorResponse(
+            request_id="test",
+            decision=ActorDecision.DENY_SESSION,
+            reason="rm commands blocked",
+            remember_pattern="rm *"
+        )
+        plugin._actor = mock_actor
+
+        # First call with "rm -rf" - asks actor
+        allowed1, _ = plugin.check_permission(
+            "cli_based_tool",
+            {"command": "rm -rf /tmp/test"}
+        )
+        assert allowed1 is False
+        assert mock_actor.request_permission.call_count == 1
+
+        # Second call with "rm file.txt" - should NOT ask (pattern blocks)
+        allowed2, _ = plugin.check_permission(
+            "cli_based_tool",
+            {"command": "rm file.txt"}
+        )
+        assert allowed2 is False
+        assert mock_actor.request_permission.call_count == 1
+
+    def test_different_tool_still_asks(self):
+        """Session rule for one tool should not affect different tools."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        # Set up actor to return ALLOW_SESSION for first tool
+        call_count = [0]
+
+        def mock_request_permission(request):
+            call_count[0] += 1
+            return ActorResponse(
+                request_id="test",
+                decision=ActorDecision.ALLOW_SESSION,
+                reason="Approved",
+                remember_pattern="tool_a"
+            )
+
+        mock_actor = Mock()
+        mock_actor.request_permission = mock_request_permission
+        plugin._actor = mock_actor
+
+        # Call tool_a - gets remembered
+        plugin.check_permission("tool_a", {})
+        assert call_count[0] == 1
+
+        # Call tool_a again - not asked (remembered)
+        plugin.check_permission("tool_a", {})
+        assert call_count[0] == 1
+
+        # Call tool_b - should ask actor (different tool)
+        plugin.check_permission("tool_b", {})
+        assert call_count[0] == 2
+
+    def test_request_has_unique_id(self):
+        """Each request should have a unique ID."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        request_ids = []
+
+        def capture_request(request):
+            request_ids.append(request.request_id)
+            return ActorResponse(
+                request_id=request.request_id,
+                decision=ActorDecision.ALLOW,
+                reason="OK"
+            )
+
+        mock_actor = Mock()
+        mock_actor.request_permission = capture_request
+        plugin._actor = mock_actor
+
+        # Make multiple requests
+        plugin.check_permission("tool1", {})
+        plugin.check_permission("tool2", {})
+        plugin.check_permission("tool3", {})
+
+        # All IDs should be unique
+        assert len(request_ids) == 3
+        assert len(set(request_ids)) == 3  # All unique
+
+    def test_request_has_timestamp(self):
+        """Request should have a timestamp."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        captured_request = [None]
+
+        def capture_request(request):
+            captured_request[0] = request
+            return ActorResponse(
+                request_id=request.request_id,
+                decision=ActorDecision.ALLOW,
+                reason="OK"
+            )
+
+        mock_actor = Mock()
+        mock_actor.request_permission = capture_request
+        plugin._actor = mock_actor
+
+        plugin.check_permission("test_tool", {})
+
+        assert captured_request[0] is not None
+        assert captured_request[0].timestamp is not None
+        assert len(captured_request[0].timestamp) > 0
