@@ -119,16 +119,9 @@ class TestValidateConfig:
 
     def test_blacklist_not_object(self):
         config = {"blacklist": "invalid"}
-        # The validator should catch this, but due to a bug in _check_conflicts,
-        # it may crash when blacklist is not a dict. Test that it either fails
-        # validation or raises an error.
-        try:
-            is_valid, errors = validate_config(config)
-            assert not is_valid
-            assert any("blacklist" in e for e in errors)
-        except (AttributeError, TypeError):
-            # Known issue: _check_conflicts assumes blacklist is a dict
-            pass
+        is_valid, errors = validate_config(config)
+        assert not is_valid
+        assert any("blacklist" in e for e in errors)
 
     def test_blacklist_tools_not_array(self):
         config = {"blacklist": {"tools": "not-array"}}
@@ -166,16 +159,9 @@ class TestValidateConfig:
 
     def test_whitelist_validation(self):
         config = {"whitelist": {"tools": 123}}
-        # The validator should catch this, but may crash in _check_conflicts
-        # due to improper type handling. Test that it either fails validation or raises.
-        try:
-            is_valid, errors = validate_config(config)
-            # The validation should catch that tools is not an array
-            actual_errors = [e for e in errors if not e.startswith("Warning:")]
-            assert len(actual_errors) > 0 or not is_valid
-        except (TypeError, AttributeError):
-            # Known issue: _check_conflicts may fail on invalid types
-            pass
+        is_valid, errors = validate_config(config)
+        assert not is_valid
+        assert any("whitelist" in e for e in errors)
 
     def test_invalid_actor_type(self):
         config = {"actor": {"type": "invalid"}}

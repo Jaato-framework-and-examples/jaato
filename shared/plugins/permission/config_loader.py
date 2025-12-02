@@ -160,9 +160,20 @@ def _check_conflicts(config: Dict[str, Any], errors: List[str]) -> None:
     blacklist = config.get("blacklist", {})
     whitelist = config.get("whitelist", {})
 
+    # Guard against non-dict types (already reported as errors in validation)
+    if not isinstance(blacklist, dict) or not isinstance(whitelist, dict):
+        return
+
+    # Get tools lists, guarding against non-list types
+    bl_tools_raw = blacklist.get("tools", [])
+    wl_tools_raw = whitelist.get("tools", [])
+
+    if not isinstance(bl_tools_raw, list) or not isinstance(wl_tools_raw, list):
+        return
+
     # Check tool conflicts
-    bl_tools = set(blacklist.get("tools", []))
-    wl_tools = set(whitelist.get("tools", []))
+    bl_tools = set(bl_tools_raw)
+    wl_tools = set(wl_tools_raw)
     conflicts = bl_tools & wl_tools
     if conflicts:
         errors.append(
