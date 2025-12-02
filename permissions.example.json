@@ -1,0 +1,41 @@
+{
+  "version": "1.0",
+  "defaultPolicy": "ask",
+  "blacklist": {
+    "tools": [],
+    "patterns": [
+      "rm -rf *",
+      "sudo *",
+      "chmod 777 *",
+      "shutdown *",
+      "reboot *"
+    ],
+    "arguments": {
+      "cli_based_tool": {
+        "command": ["rm -rf", "sudo", "shutdown", "reboot", "mkfs", "dd if="]
+      }
+    }
+  },
+  "whitelist": {
+    "tools": [
+      "search_issues",
+      "get_page",
+      "askPermission"
+    ],
+    "patterns": [
+      "git *",
+      "npm *",
+      "python *",
+      "pytest *",
+      "pip *",
+      "ls *",
+      "cat *",
+      "grep *"
+    ],
+    "arguments": {}
+  },
+  "actor": {
+    "type": "console",
+    "timeout": 30
+  }
+}

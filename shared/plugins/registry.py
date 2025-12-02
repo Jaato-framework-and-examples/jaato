@@ -10,7 +10,7 @@ from .base import ToolPlugin
 
 
 class PluginRegistry:
-    """Manages plugin discovery, lifecycle, and enable/disable state.
+    """Manages plugin discovery, lifecycle, and tool exposure state.
 
     Usage:
         registry = PluginRegistry()
@@ -18,21 +18,21 @@ class PluginRegistry:
 
         print(registry.list_available())  # ['cli', 'mcp', ...]
 
-        registry.enable('cli', config={'extra_paths': ['/usr/local/bin']})
-        registry.enable('mcp')
+        registry.expose_tool('cli', config={'extra_paths': ['/usr/local/bin']})
+        registry.expose_tool('mcp')
 
-        # Get tools for enabled plugins
-        declarations = registry.get_enabled_declarations()
-        executors = registry.get_enabled_executors()
+        # Get tools for exposed plugins
+        declarations = registry.get_exposed_declarations()
+        executors = registry.get_exposed_executors()
 
-        # Later, disable plugins
-        registry.disable('mcp')
-        registry.disable_all()
+        # Later, unexpose plugins
+        registry.unexpose_tool('mcp')
+        registry.unexpose_all()
     """
 
     def __init__(self):
         self._plugins: Dict[str, ToolPlugin] = {}
-        self._enabled: Set[str] = set()
+        self._exposed: Set[str] = set()
         self._configs: Dict[str, Dict[str, Any]] = {}
 
     def discover(self, plugin_dir: Optional[Path] = None) -> List[str]:
@@ -81,26 +81,26 @@ class PluginRegistry:
         """List all discovered plugin names."""
         return list(self._plugins.keys())
 
-    def list_enabled(self) -> List[str]:
-        """List currently enabled plugin names."""
-        return list(self._enabled)
+    def list_exposed(self) -> List[str]:
+        """List currently exposed plugin names."""
+        return list(self._exposed)
 
-    def is_enabled(self, name: str) -> bool:
-        """Check if a plugin is currently enabled."""
-        return name in self._enabled
+    def is_exposed(self, name: str) -> bool:
+        """Check if a plugin's tools are currently exposed to the model."""
+        return name in self._exposed
 
     def get_plugin(self, name: str) -> Optional[ToolPlugin]:
         """Get a plugin by name, or None if not found."""
         return self._plugins.get(name)
 
-    def enable(self, name: str, config: Optional[Dict[str, Any]] = None) -> None:
-        """Enable a plugin.
+    def expose_tool(self, name: str, config: Optional[Dict[str, Any]] = None) -> None:
+        """Expose a plugin's tools to the model.
 
         Calls the plugin's initialize() method if this is the first time
-        enabling it, or if a new config is provided.
+        exposing it, or if a new config is provided.
 
         Args:
-            name: Plugin name to enable.
+            name: Plugin name to expose.
             config: Optional configuration dict for the plugin.
 
         Raises:
@@ -111,60 +111,60 @@ class PluginRegistry:
 
         plugin = self._plugins[name]
 
-        # Initialize if not already enabled, or if new config provided
-        if name not in self._enabled:
+        # Initialize if not already exposed, or if new config provided
+        if name not in self._exposed:
             plugin.initialize(config)
             if config:
                 self._configs[name] = config
-            self._enabled.add(name)
+            self._exposed.add(name)
         elif config and config != self._configs.get(name):
             # Re-initialize with new config
             plugin.shutdown()
             plugin.initialize(config)
             self._configs[name] = config
 
-    def disable(self, name: str) -> None:
-        """Disable a plugin.
+    def unexpose_tool(self, name: str) -> None:
+        """Stop exposing a plugin's tools to the model.
 
         Calls the plugin's shutdown() method to clean up resources.
 
         Args:
-            name: Plugin name to disable.
+            name: Plugin name to unexpose.
         """
-        if name in self._enabled:
+        if name in self._exposed:
             self._plugins[name].shutdown()
-            self._enabled.discard(name)
+            self._exposed.discard(name)
             self._configs.pop(name, None)
 
-    def enable_all(self, config: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
-        """Enable all discovered plugins.
+    def expose_all(self, config: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
+        """Expose all discovered plugins' tools.
 
         Args:
             config: Optional dict mapping plugin names to their configs.
         """
         config = config or {}
         for name in self._plugins:
-            self.enable(name, config.get(name))
+            self.expose_tool(name, config.get(name))
 
-    def disable_all(self) -> None:
-        """Disable all enabled plugins."""
-        for name in list(self._enabled):
-            self.disable(name)
+    def unexpose_all(self) -> None:
+        """Stop exposing all plugins' tools."""
+        for name in list(self._exposed):
+            self.unexpose_tool(name)
 
-    def get_enabled_declarations(self) -> List[types.FunctionDeclaration]:
-        """Get FunctionDeclarations from all enabled plugins."""
+    def get_exposed_declarations(self) -> List[types.FunctionDeclaration]:
+        """Get FunctionDeclarations from all exposed plugins."""
         decls = []
-        for name in self._enabled:
+        for name in self._exposed:
             try:
                 decls.extend(self._plugins[name].get_function_declarations())
             except Exception as exc:
                 print(f"[PluginRegistry] Error getting declarations from '{name}': {exc}")
         return decls
 
-    def get_enabled_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Get executor callables from all enabled plugins."""
+    def get_exposed_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
+        """Get executor callables from all exposed plugins."""
         executors = {}
-        for name in self._enabled:
+        for name in self._exposed:
             try:
                 executors.update(self._plugins[name].get_executors())
             except Exception as exc:

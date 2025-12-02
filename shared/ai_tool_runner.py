@@ -10,27 +10,88 @@ from shared.token_accounting import TokenLedger
 
 if TYPE_CHECKING:
     from shared.plugins.registry import PluginRegistry
+    from shared.plugins.permission import PermissionPlugin
 
 
 class ToolExecutor:
     """Registry mapping tool names to callables.
 
     Executors should accept a single dict-like argument and return a JSON-serializable result.
+
+    Supports optional permission checking via a PermissionPlugin. When a permission
+    plugin is set, all tool executions are checked against the permission policy
+    before execution.
     """
-    def __init__(self):
+    def __init__(self, ledger: Optional[TokenLedger] = None):
         self._map: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
+        self._permission_plugin: Optional['PermissionPlugin'] = None
+        self._permission_context: Dict[str, Any] = {}
+        self._ledger: Optional[TokenLedger] = ledger
 
     def register(self, name: str, fn: Callable[[Dict[str, Any]], Any]) -> None:
         self._map[name] = fn
 
+    def set_ledger(self, ledger: Optional[TokenLedger]) -> None:
+        """Set the ledger for recording events."""
+        self._ledger = ledger
+
+    def set_permission_plugin(
+        self,
+        plugin: Optional['PermissionPlugin'],
+        context: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Set the permission plugin for access control.
+
+        Args:
+            plugin: PermissionPlugin instance, or None to disable permission checking.
+            context: Optional context dict passed to permission checks (e.g., session_id).
+        """
+        self._permission_plugin = plugin
+        self._permission_context = context or {}
+
     def execute(self, name: str, args: Dict[str, Any]) -> Tuple[bool, Any]:
-        fn = self._map.get(name)
         debug = False
         try:
             import os
             debug = os.environ.get('AI_TOOL_RUNNER_DEBUG', '').lower() in ('1', 'true', 'yes')
         except Exception:
             debug = False
+
+        # Check permissions if a permission plugin is set
+        # Note: askPermission tool itself is always allowed
+        if self._permission_plugin is not None and name != 'askPermission':
+            try:
+                allowed, reason = self._permission_plugin.check_permission(
+                    name, args, self._permission_context
+                )
+                # Record permission check to ledger
+                if self._ledger is not None:
+                    self._ledger._record('permission-check', {
+                        'tool': name,
+                        'args': args,
+                        'allowed': allowed,
+                        'reason': reason,
+                    })
+                if not allowed:
+                    if debug:
+                        print(f"[ai_tool_runner] permission denied for {name}: {reason}")
+                    return False, {'error': f'Permission denied: {reason}'}
+                if debug:
+                    print(f"[ai_tool_runner] permission granted for {name}: {reason}")
+            except Exception as perm_exc:
+                if debug:
+                    print(f"[ai_tool_runner] permission check failed for {name}: {perm_exc}")
+                # Record permission error to ledger
+                if self._ledger is not None:
+                    self._ledger._record('permission-error', {
+                        'tool': name,
+                        'args': args,
+                        'error': str(perm_exc),
+                    })
+                # On permission check failure, deny by default for safety
+                return False, {'error': f'Permission check failed: {perm_exc}'}
+
+        fn = self._map.get(name)
         if not fn:
             if debug:
                 print(f"[ai_tool_runner] execute: no executor registered for {name}, attempting generic execution")
@@ -304,7 +365,9 @@ def run_single_prompt(
     ledger_path: pathlib.Path,
     trace: bool = False,
     trace_dir: pathlib.Path | None = None,
-    registry: Optional['PluginRegistry'] = None
+    registry: Optional['PluginRegistry'] = None,
+    permission_plugin: Optional['PermissionPlugin'] = None,
+    permission_config: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Run a single prompt with tools from the provided plugin registry.
 
@@ -316,6 +379,8 @@ def run_single_prompt(
         trace: If True, include trace data in the result.
         trace_dir: Directory for trace files.
         registry: PluginRegistry with already-enabled plugins. If None, no tools available.
+        permission_plugin: Optional PermissionPlugin for access control.
+        permission_config: Optional config for initializing permission plugin.
 
     Returns:
         Dict with 'text', 'summary', 'ledger' keys, and optionally error/diagnostic info.
@@ -326,14 +391,29 @@ def run_single_prompt(
 
     try:
         if use_fc:
-            executor = ToolExecutor()
+            executor = ToolExecutor(ledger=ledger)
             all_tool_decls = []
 
             # Load tools from the plugin registry
             if registry:
-                for name, fn in registry.get_enabled_executors().items():
+                for name, fn in registry.get_exposed_executors().items():
                     executor.register(name, fn)
-                all_tool_decls = registry.get_enabled_declarations()
+                all_tool_decls = registry.get_exposed_declarations()
+
+            # Initialize permission plugin if provided
+            perm_plugin = permission_plugin
+            if perm_plugin is not None:
+                try:
+                    perm_plugin.initialize(permission_config)
+                    executor.set_permission_plugin(perm_plugin)
+                    # Register askPermission tool from permission plugin
+                    for name, fn in perm_plugin.get_executors().items():
+                        executor.register(name, fn)
+                    all_tool_decls.extend(perm_plugin.get_function_declarations())
+                except Exception as perm_err:
+                    # Log warning but continue without permission plugin
+                    if ledger:
+                        ledger._record('permission-init-error', {'error': str(perm_err)})
 
             tool_decl = types.Tool(function_declarations=all_tool_decls) if all_tool_decls else None
             fc_result = run_function_call_loop(
