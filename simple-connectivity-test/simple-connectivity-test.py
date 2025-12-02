@@ -7,10 +7,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
 	sys.path.insert(0, str(ROOT))
 
-from google import genai
-from shared.token_accounting import TokenLedger
 from dotenv import load_dotenv
-from shared.ssl_helper import active_cert_bundle
+
+from shared import genai, TokenLedger, active_cert_bundle
 
 # === Prompt (can be overridden with --prompt) ===
 DEFAULT_PROMPT = (

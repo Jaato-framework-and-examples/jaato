@@ -58,28 +58,34 @@ executors = registry.get_exposed_executors()
 # Returns: {'tool_name': callable, ...}
 ```
 
-### Integration with ai_tool_runner
+### Integration with JaatoClient
 
-The `run_single_prompt` function accepts a `registry` parameter:
+The recommended way to use plugins is with `JaatoClient`:
 
 ```python
-from shared.ai_tool_runner import run_single_prompt
-from shared.plugins import PluginRegistry
+from shared import JaatoClient, PluginRegistry, TokenLedger
 
 # Setup
 registry = PluginRegistry()
 registry.discover()
 registry.expose_tool('cli')
 
-# Run prompt with exposed tools
-result = run_single_prompt(
-    model_name='gemini-2.5-flash',
-    project_id='my-project',
-    location='us-central1',
-    prompt='List files in current directory',
-    ledger_path=Path('ledger.jsonl'),
-    registry=registry
-)
+# Create and configure client
+jaato = JaatoClient()
+jaato.connect('my-project', 'us-central1', 'gemini-2.5-flash')
+jaato.configure_tools(registry, ledger=TokenLedger())
+
+# Run prompts (SDK manages history internally)
+response = jaato.send_message('List files in current directory')
+
+# Multi-turn conversations work automatically
+response2 = jaato.send_message('Now show hidden files too')
+
+# Access history when needed
+history = jaato.get_history()
+
+# Reset session to start fresh
+jaato.reset_session()
 
 # Cleanup
 registry.unexpose_all()
@@ -87,26 +93,35 @@ registry.unexpose_all()
 
 ### Dynamic Plugin Switching
 
-You can expose/unexpose plugins between prompts to change what tools are available:
+You can expose/unexpose plugins between prompts to change what tools are available.
+Note: Calling `configure_tools()` creates a new chat session, so conversation history is reset.
 
 ```python
+from shared import JaatoClient, PluginRegistry
+
 registry = PluginRegistry()
 registry.discover()
 
-# First prompt: CLI tools only
+jaato = JaatoClient()
+jaato.connect('my-project', 'us-central1', 'gemini-2.5-flash')
+
+# First session: CLI tools only
 registry.expose_tool('cli')
-result1 = run_single_prompt(..., registry=registry)
+jaato.configure_tools(registry)
+response1 = jaato.send_message('List files')
 registry.unexpose_tool('cli')
 
-# Second prompt: MCP tools only
+# Second session: MCP tools only (new chat session)
 registry.expose_tool('mcp')
-result2 = run_single_prompt(..., registry=registry)
+jaato.configure_tools(registry)
+response2 = jaato.send_message('Search GitHub issues')
 registry.unexpose_tool('mcp')
 
-# Third prompt: Both tools
+# Third session: Both tools (new chat session)
 registry.expose_tool('cli')
 registry.expose_tool('mcp')
-result3 = run_single_prompt(..., registry=registry)
+jaato.configure_tools(registry)
+response3 = jaato.send_message('List files and search GitHub')
 registry.unexpose_all()
 ```
 

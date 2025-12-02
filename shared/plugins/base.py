@@ -40,3 +40,14 @@ class ToolPlugin(Protocol):
     def shutdown(self) -> None:
         """Called when the plugin is disabled. Clean up resources here."""
         ...
+
+    def get_system_instructions(self) -> Optional[str]:
+        """Return system instructions describing this plugin's capabilities.
+
+        These instructions are prepended to the user's prompt to help the model
+        understand what tools are available and how to use them.
+
+        Returns:
+            A string with instructions, or None if no instructions are needed.
+        """
+        ...

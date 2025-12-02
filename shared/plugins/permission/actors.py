@@ -7,6 +7,7 @@ approval for tool execution.
 
 import json
 import os
+import readline
 import sys
 import time
 import uuid
@@ -164,6 +165,26 @@ class ConsoleActor(Actor):
     def __init__(self):
         self._input_func: Callable[[], str] = input
         self._output_func: Callable[[str], None] = print
+        self._skip_readline_history: bool = True
+
+    def _read_input(self) -> str:
+        """Read input, optionally avoiding readline history pollution.
+
+        Permission responses (y/n/a/never/once) have no utility in history,
+        so by default we remove them after reading.
+        """
+        if not self._skip_readline_history:
+            return self._input_func()
+
+        history_len_before = readline.get_current_history_length()
+        result = self._input_func()
+        history_len_after = readline.get_current_history_length()
+
+        # Remove the entry if history grew
+        if history_len_after > history_len_before:
+            readline.remove_history_item(history_len_after - 1)
+
+        return result
 
     @property
     def name(self) -> str:
@@ -175,12 +196,15 @@ class ConsoleActor(Actor):
         Config options:
             input_func: Custom input function (for testing)
             output_func: Custom output function (for testing)
+            skip_readline_history: Whether to remove responses from readline history (default: True)
         """
         if config:
             if "input_func" in config:
                 self._input_func = config["input_func"]
             if "output_func" in config:
                 self._output_func = config["output_func"]
+            if "skip_readline_history" in config:
+                self._skip_readline_history = config["skip_readline_history"]
 
     def request_permission(self, request: PermissionRequest) -> ActorResponse:
         """Prompt user in console for permission.
@@ -206,7 +230,7 @@ class ConsoleActor(Actor):
         self._output_func("Options: [y]es, [n]o, [a]lways, [never], [once]")
 
         try:
-            response = self._input_func().strip().lower()
+            response = self._read_input().strip().lower()
         except (EOFError, KeyboardInterrupt):
             return ActorResponse(
                 request_id=request.request_id,

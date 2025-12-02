@@ -170,3 +170,24 @@ class PluginRegistry:
             except Exception as exc:
                 print(f"[PluginRegistry] Error getting executors from '{name}': {exc}")
         return executors
+
+    def get_system_instructions(self) -> Optional[str]:
+        """Combine system instructions from all exposed plugins.
+
+        Returns:
+            Combined system instructions string, or None if no plugins
+            have instructions.
+        """
+        instructions = []
+        for name in self._exposed:
+            try:
+                plugin_instructions = self._plugins[name].get_system_instructions()
+                if plugin_instructions:
+                    instructions.append(plugin_instructions)
+            except Exception as exc:
+                print(f"[PluginRegistry] Error getting system instructions from '{name}': {exc}")
+
+        if not instructions:
+            return None
+
+        return "\n\n".join(instructions)

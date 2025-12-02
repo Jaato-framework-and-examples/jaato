@@ -57,27 +57,37 @@ class ToolExecutor:
         except Exception:
             debug = False
 
+        # Track permission metadata for injection into result
+        permission_meta = None
+
         # Check permissions if a permission plugin is set
         # Note: askPermission tool itself is always allowed
         if self._permission_plugin is not None and name != 'askPermission':
             try:
-                allowed, reason = self._permission_plugin.check_permission(
+                allowed, perm_info = self._permission_plugin.check_permission(
                     name, args, self._permission_context
                 )
+                # Build permission metadata for result injection
+                permission_meta = {
+                    'decision': 'allowed' if allowed else 'denied',
+                    'reason': perm_info.get('reason', ''),
+                    'method': perm_info.get('method', 'unknown'),
+                }
                 # Record permission check to ledger
                 if self._ledger is not None:
                     self._ledger._record('permission-check', {
                         'tool': name,
                         'args': args,
                         'allowed': allowed,
-                        'reason': reason,
+                        'reason': perm_info.get('reason', ''),
+                        'method': perm_info.get('method', 'unknown'),
                     })
                 if not allowed:
                     if debug:
-                        print(f"[ai_tool_runner] permission denied for {name}: {reason}")
-                    return False, {'error': f'Permission denied: {reason}'}
+                        print(f"[ai_tool_runner] permission denied for {name}: {perm_info.get('reason', '')}")
+                    return False, {'error': f"Permission denied: {perm_info.get('reason', '')}", '_permission': permission_meta}
                 if debug:
-                    print(f"[ai_tool_runner] permission granted for {name}: {reason}")
+                    print(f"[ai_tool_runner] permission granted for {name}: {perm_info.get('reason', '')}")
             except Exception as perm_exc:
                 if debug:
                     print(f"[ai_tool_runner] permission check failed for {name}: {perm_exc}")
@@ -99,6 +109,9 @@ class ToolExecutor:
             if os.environ.get('AI_EXECUTE_TOOLS', '').lower() in ('1', 'true', 'yes'):
                 try:
                     ok, res = _generic_executor(name, args, debug=debug)
+                    # Inject permission metadata if available
+                    if permission_meta and isinstance(res, dict):
+                        res['_permission'] = permission_meta
                     return ok, res
                 except Exception as exc:
                     if debug:
@@ -109,19 +122,14 @@ class ToolExecutor:
         try:
             if debug:
                 print(f"[ai_tool_runner] execute: invoking {name} with args={args}")
-            # sig = inspect.signature(fn)
-            # # If function expects exactly one parameter, pass the dict directly (legacy style)
-            # if len(sig.parameters) == 1:
-            #     return True, fn(args)
-            # # Special case: MCP tools should always receive a single dict argument
-            # if name == 'mcp_based_tool':
-            #     return True, fn(args)
-            # # Otherwise attempt to expand dict into keyword arguments
-            # return True, fn(**args)
             if fn.__name__ == 'mcp_based_tool':
-                return True, fn(name, args)
+                result = fn(name, args)
             else:
-                return True, fn(args)
+                result = fn(args)
+            # Inject permission metadata if available and result is a dict
+            if permission_meta and isinstance(result, dict):
+                result['_permission'] = permission_meta
+            return True, result
         except Exception as exc:
             if debug:
                 print(f"[ai_tool_runner] execute: {name} raised {exc}")
@@ -218,7 +226,9 @@ def run_function_call_loop(
     executor: Optional[ToolExecutor] = None,
     ledger: Optional[TokenLedger] = None,
     max_turns: Optional[int] = None,
-    trace: bool = False
+    trace: bool = False,
+    system_instruction: Optional[str] = None,
+    history: Optional[List[types.Content]] = None
 ) -> Dict[str, Any]:
     """Run iterative function-call loop with the model.
 
@@ -231,20 +241,33 @@ def run_function_call_loop(
         ledger: optional TokenLedger for recording events.
         max_turns: maximum iterations to allow.
         trace: if True, return 'trace' key containing per-turn data.
+        system_instruction: optional system instruction to guide model behavior.
+        history: optional existing conversation history (list of Content objects).
+            If provided, the new user message is appended to this history.
 
-    Returns a dict: {'text': final_text, 'function_results': [...], 'diagnostics': {...}, 'trace': [...]}.
+    Returns a dict: {'text': final_text, 'function_results': [...], 'diagnostics': {...},
+                     'trace': [...], 'history': updated_history}.
     """
     # Normalize initial_parts: accept either Part or Content objects
-    parts_accum: List[types.Part] = []
+    user_parts: List[types.Part] = []
     for item in initial_parts:
         try:
             item_parts = getattr(item, 'parts', None)
             if item_parts:
-                parts_accum.extend(item_parts)
+                user_parts.extend(item_parts)
                 continue
         except Exception:
             pass
-        parts_accum.append(item)
+        user_parts.append(item)
+
+    # Initialize conversation history
+    conversation: List[types.Content] = list(history) if history else []
+    # Add the new user message to conversation
+    user_content = types.Content(parts=user_parts, role='user')
+    conversation.append(user_content)
+
+    # Parts accumulator for function call responses within this turn
+    current_turn_parts: List[types.Part] = list(user_parts)
 
     function_results: List[Dict[str, Any]] = []
     diagnostics: Dict[str, Any] = {}
@@ -252,15 +275,15 @@ def run_function_call_loop(
 
     turn = 0
     while True:
-        # Build contents for the request
-        contents = [types.Content(parts=parts_accum, role='user')]
+        # Build contents for the request from full conversation history
+        contents = conversation
 
-        # Flatten prompt for token counting
+        # Flatten prompt for token counting (use last user message)
         prompt_text = ''
         try:
-            prompt_text = '\n'.join([getattr(p, 'text', str(p)) for p in parts_accum if hasattr(p, 'text')])
+            prompt_text = '\n'.join([getattr(p, 'text', str(p)) for p in current_turn_parts if hasattr(p, 'text')])
         except Exception:
-            prompt_text = str(parts_accum)
+            prompt_text = str(current_turn_parts)
 
         # Count tokens
         try:
@@ -273,8 +296,9 @@ def run_function_call_loop(
             if ledger is not None:
                 ledger._record('prompt-count-error', {'error': 'count_tokens failed'})
 
-        # Build config with tools
+        # Build config with tools and system instruction
         config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
             tools=[declared_tools] if declared_tools is not None else None
         )
 
@@ -300,12 +324,21 @@ def run_function_call_loop(
         if trace:
             trace_list.append({'turn': turn, 'text': text_out, 'function_calls': func_calls})
 
+        # Add model response to conversation history
+        try:
+            model_content = response.candidates[0].content
+            conversation.append(model_content)
+        except (IndexError, AttributeError):
+            # Fallback: create Content from extracted text
+            if text_out:
+                conversation.append(types.Content(parts=[types.Part.from_text(text=text_out)], role='model'))
+
         # If no function calls, finish
         if not func_calls:
             final_text = text_out if text_out else ''
             if trace:
                 trace_list.append({'turn': turn, 'text': final_text, 'function_calls': []})
-            return {'text': final_text, 'function_results': function_results, 'diagnostics': diagnostics, 'trace': trace_list, 'turns': turn + 1}
+            return {'text': final_text, 'function_results': function_results, 'diagnostics': diagnostics, 'trace': trace_list, 'turns': turn + 1, 'history': conversation}
 
         # Execute calls
         for fc in func_calls:
@@ -344,18 +377,27 @@ def run_function_call_loop(
             # Append function response part for next iteration
             try:
                 func_part = make_function_response_part(name, res)
-                parts_accum.append(func_part)
+                current_turn_parts.append(func_part)
             except Exception:
                 pass
+
+        # Add function responses to conversation as user content
+        if current_turn_parts:
+            # Filter to only function response parts (not the original user text)
+            func_response_parts = [p for p in current_turn_parts if hasattr(p, 'function_response')]
+            if func_response_parts:
+                conversation.append(types.Content(parts=func_response_parts, role='user'))
+            # Reset for next turn
+            current_turn_parts = []
 
         turn += 1
         if max_turns is not None and turn >= max_turns:
             # Use extract_text_from_parts to avoid SDK warning
             final_text = extract_text_from_parts(response)
             diagnostics['note'] = 'max_turns_reached'
-            return {'text': final_text, 'function_results': function_results, 'diagnostics': diagnostics, 'trace': trace_list, 'turns': turn}
+            return {'text': final_text, 'function_results': function_results, 'diagnostics': diagnostics, 'trace': trace_list, 'turns': turn, 'history': conversation}
 
-    return {'text': '', 'function_results': function_results, 'diagnostics': diagnostics, 'trace': trace_list, 'turns': turn}
+    return {'text': '', 'function_results': function_results, 'diagnostics': diagnostics, 'trace': trace_list, 'turns': turn, 'history': conversation}
 
 
 def run_single_prompt(
@@ -416,6 +458,19 @@ def run_single_prompt(
                         ledger._record('permission-init-error', {'error': str(perm_err)})
 
             tool_decl = types.Tool(function_declarations=all_tool_decls) if all_tool_decls else None
+
+            # Collect system instructions from plugins
+            system_instructions_parts = []
+            if registry:
+                registry_instructions = registry.get_system_instructions()
+                if registry_instructions:
+                    system_instructions_parts.append(registry_instructions)
+            if perm_plugin:
+                perm_instructions = perm_plugin.get_system_instructions()
+                if perm_instructions:
+                    system_instructions_parts.append(perm_instructions)
+            system_instruction = "\n\n".join(system_instructions_parts) if system_instructions_parts else None
+
             fc_result = run_function_call_loop(
                 client,
                 model_name,
@@ -424,7 +479,8 @@ def run_single_prompt(
                 executor=executor,
                 ledger=ledger,
                 max_turns=None,
-                trace=trace
+                trace=trace,
+                system_instruction=system_instruction
             )
             response = type('R', (), {})()
             response.text = fc_result.get('text')

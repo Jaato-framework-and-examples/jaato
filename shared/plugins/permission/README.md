@@ -551,6 +551,14 @@ Responses:
 | `never` | Deny and add to session blacklist |
 | `once` | Allow but don't remember |
 
+**Readline History**: By default, permission responses are automatically excluded from readline history since they have no utility for recall. This can be disabled via config:
+
+```python
+actor_config = {
+    "skip_readline_history": False  # Include responses in readline history
+}
+```
+
 ### Webhook Actor (External Approval)
 
 Sends HTTP POST to configured endpoint:
@@ -622,7 +630,7 @@ The permission plugin records events to the TokenLedger:
 
 | Event Stage | Description |
 |-------------|-------------|
-| `permission-check` | Every permission evaluation (tool, args, allowed, reason) |
+| `permission-check` | Every permission evaluation (tool, args, allowed, reason, method) |
 | `permission-error` | Permission check failures |
 | `permission-init-error` | Plugin initialization failures |
 
@@ -634,9 +642,36 @@ Example ledger entry:
   "tool": "cli_based_tool",
   "args": {"command": "git status"},
   "allowed": true,
-  "reason": "Command matches whitelist pattern: git *"
+  "reason": "Command matches whitelist pattern: git *",
+  "method": "whitelist"
 }
 ```
+
+The `method` field indicates how the decision was made:
+- `whitelist` / `blacklist`: Matched static policy rule
+- `session_whitelist` / `session_blacklist`: Matched session rule
+- `user_approved` / `user_denied`: Actor approval
+- `timeout`: Actor timed out
+- `default`: Default policy applied
+
+### Permission Metadata in Function Responses
+
+When the permission plugin is active, permission metadata is automatically injected into function responses under the `_permission` key:
+
+```json
+{
+  "stdout": "hello\n",
+  "stderr": "",
+  "returncode": 0,
+  "_permission": {
+    "decision": "allowed",
+    "reason": "User approved execution",
+    "method": "user_approved"
+  }
+}
+```
+
+This allows clients to display permission decisions alongside tool results in conversation history. The `_permission` key uses an underscore prefix to indicate it's metadata rather than part of the actual tool output.
 
 ### Proactive Permission Checks
 
@@ -646,7 +681,7 @@ The model can use the `askPermission` tool to check before executing:
 Model: Before running this command, let me check if it's allowed.
        [calls askPermission(tool_name="cli_based_tool", arguments={"command": "rm -rf temp/"})]
 
-Response: {"allowed": false, "reason": "Command matches blacklist pattern: rm -rf *"}
+Response: {"allowed": false, "reason": "Command matches blacklist pattern: rm -rf *", "method": "blacklist", "tool_name": "cli_based_tool"}
 
 Model: I cannot execute that command as it's blocked by the permission policy.
        Would you like me to use a safer alternative?

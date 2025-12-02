@@ -93,6 +93,24 @@ class MCPToolPlugin:
 
         return executors
 
+    def get_system_instructions(self) -> Optional[str]:
+        """Return system instructions describing available MCP tools."""
+        if not self._initialized:
+            self.initialize()
+
+        if not self._tool_cache:
+            return None
+
+        lines = ["You have access to the following MCP (Model Context Protocol) tools:"]
+
+        for server_name, tools in self._tool_cache.items():
+            lines.append(f"\nFrom '{server_name}' server:")
+            for tool in tools:
+                desc = tool.description or "No description"
+                lines.append(f"  - {tool.name}: {desc}")
+
+        return "\n".join(lines)
+
     def _ensure_mcp_patch(self):
         """Lazily import mcp and apply the JSON-RPC validation patch."""
         if self._mcp_patch_applied:

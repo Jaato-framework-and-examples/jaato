@@ -1,12 +1,14 @@
 import os
 import json
 from typing import List, Dict, Any, TYPE_CHECKING
-from google import genai
 from google.genai import types
 from google.oauth2 import service_account
 
+from .jaato_client import JaatoClient
+from .token_accounting import TokenLedger
+
 if TYPE_CHECKING:
-    pass
+    from google import genai
 
 # Prompt template loader
 PROMPT_TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), 'prompt_templates')
@@ -25,11 +27,11 @@ def load_prompt_template(name: str) -> str:
 # processes.
 #
 # Public entry points:
-#   init_vertex(project: str|None=None, location: str='global', model_name: str='gemini-2.5-flash') -> tuple[Client, str]
+#   create_jaato_client(project, location, model_name) -> JaatoClient
 #   load_cobol_source(path: str) -> List[str]
-#   ai_parse_mod_history(history_region_text: str, client: Client, model_name: str, verbose: bool, ledger) -> List[Dict]
-#   identify_code_changes(entry: Dict, full_source_text: str, client, model_name, ledger, verbose: bool) -> Dict
-#   build_training_pairs(client, model_name, entries, source_lines, full_source_text, ledger, verbose) -> List[Dict]
+#   ai_parse_mod_history(history_region_text: str, jaato: JaatoClient, verbose: bool, ledger) -> List[Dict]
+#   identify_code_changes(entry: Dict, full_source_text: str, jaato: JaatoClient, ledger, verbose: bool) -> Dict
+#   build_training_pairs(jaato: JaatoClient, entries, source_lines, full_source_text, ledger, verbose) -> List[Dict]
 #   write_jsonl(path: str, records: List[Dict]) -> None
 # (Orchestrator scripts should call individual functions; consolidated process_source removed.)
 #
@@ -59,8 +61,21 @@ def classify_description(desc: str) -> str:
     return 'other'
 
 
-def init_vertex(project: str | None = None, location: str = 'global', model_name: str = 'gemini-2.5-flash') -> tuple['genai.Client', str]:
-    """Initialize Vertex AI and return (client, model_name) tuple."""
+def create_jaato_client(
+    project: str | None = None,
+    location: str = 'global',
+    model_name: str = 'gemini-2.5-flash'
+) -> JaatoClient:
+    """Create and connect a JaatoClient for Vertex AI.
+
+    Args:
+        project: GCP project ID (defaults to PROJECT_ID env var).
+        location: Vertex AI region (defaults to LOCATION env var or 'global').
+        model_name: Model name (defaults to MODEL_NAME env var or 'gemini-2.5-flash').
+
+    Returns:
+        Connected JaatoClient instance.
+    """
     project_id = project or os.environ.get('PROJECT_ID')
     loc = location or os.environ.get('LOCATION', 'global')
     model = os.environ.get('MODEL_NAME', model_name)
@@ -71,11 +86,22 @@ def init_vertex(project: str | None = None, location: str = 'global', model_name
         raise RuntimeError('GOOGLE_APPLICATION_CREDENTIALS required (env var)')
     if not os.path.isfile(creds_path):
         raise FileNotFoundError(f'Service account key file not found: {creds_path}')
-    creds = service_account.Credentials.from_service_account_file(creds_path)
+
     if os.environ.get('VERBOSE', '1') not in ('0', 'false', 'False'):
+        creds = service_account.Credentials.from_service_account_file(creds_path)
         print(f"[auth] SA: {creds.service_account_email}")
-    client = genai.Client(vertexai=True, project=project_id, location=loc, credentials=creds)
-    return client, model
+
+    jaato = JaatoClient()
+    jaato.connect(project_id, loc, model)
+    return jaato
+
+
+# Backwards compatibility alias
+def init_vertex(project: str | None = None, location: str = 'global', model_name: str = 'gemini-2.5-flash'):
+    """Deprecated: Use create_jaato_client() instead."""
+    jaato = create_jaato_client(project, location, model_name)
+    # Return tuple for backwards compatibility with existing callers
+    return jaato, jaato.model_name
 
 
 def load_cobol_source(path: str) -> List[str]:
@@ -83,11 +109,21 @@ def load_cobol_source(path: str) -> List[str]:
         return f.read().splitlines()
 
 
-def ai_parse_mod_history(history_region_text: str, client: 'genai.Client', model_name: str, verbose: bool, ledger) -> List[Dict]:
+def ai_parse_mod_history(history_region_text: str, jaato: JaatoClient, verbose: bool, ledger: TokenLedger) -> List[Dict]:
+    """Parse modification history from COBOL source using AI.
+
+    Args:
+        history_region_text: The history region text from the COBOL source.
+        jaato: Connected JaatoClient instance.
+        verbose: Whether to print debug information.
+        ledger: TokenLedger for accounting.
+
+    Returns:
+        List of parsed modification entries.
+    """
     template = load_prompt_template("parse_mod_history_prompt")
     prompt = template.replace("{history_region_text}", history_region_text)
-    response = ledger.generate_with_accounting(client, model_name, prompt)
-    raw = response.text.strip()
+    raw = jaato.generate(prompt, ledger).strip()
     data: List[Dict] = []
     try:
         data = json.loads(raw)
@@ -125,20 +161,26 @@ def ai_parse_mod_history(history_region_text: str, client: 'genai.Client', model
     return normalized
 
 
-def identify_code_changes(entry: Dict, full_source_text: str, client: 'genai.Client', model_name: str, ledger, verbose: bool) -> Dict[str, Any]:
+def identify_code_changes(entry: Dict, full_source_text: str, jaato: JaatoClient, ledger: TokenLedger, verbose: bool) -> Dict[str, Any]:
     """Identify concrete COBOL code changes for one history entry.
+
     If AI_USE_CHAT_FUNCTIONS is truthy, use function calling with the heuristic tool.
     Supports iterative multi-turn tool calls up to AI_FC_MAX_TURNS (default 2).
-    Returns dict with 'explanation' and optional 'lines'.
+
+    Args:
+        entry: The modification history entry.
+        full_source_text: The full COBOL source code.
+        jaato: Connected JaatoClient instance.
+        ledger: TokenLedger for accounting.
+        verbose: Whether to print debug information.
+
+    Returns:
+        Dict with 'explanation' and optional 'lines'.
     """
     use_fc = os.environ.get('AI_USE_CHAT_FUNCTIONS') not in (None, '', '0', 'false', 'False')
-    max_turns_env = os.environ.get('AI_FC_MAX_TURNS', '2')
-    try:
-        max_turns = max(1, int(max_turns_env))
-    except ValueError:
-        max_turns = 2
+
     if not use_fc:
-        # Legacy single prompt path
+        # Simple prompt path (no function calling)
         template = load_prompt_template("identify_code_changes_prompt")
         prompt = template
         placeholder_map = {
@@ -150,11 +192,10 @@ def identify_code_changes(entry: Dict, full_source_text: str, client: 'genai.Cli
         }
         for ph, val in placeholder_map.items():
             prompt = prompt.replace(ph, str(val))
-        response = ledger.generate_with_accounting(client, model_name, prompt)
-        raw = (response.text or '').strip()
+        raw = jaato.generate(prompt, ledger).strip()
         return {"explanation": raw}
 
-    # Function-calling iterative path using shared ai_tool_runner
+    # Function-calling path using JaatoClient with custom tools
     try:
         from .change_tools import changed_lines_tool, set_current_source
     except Exception as exc:
@@ -164,18 +205,23 @@ def identify_code_changes(entry: Dict, full_source_text: str, client: 'genai.Cli
 
     # Make full source available to tool without sending to model
     set_current_source(full_source_text)
-    # Prepare tool declaration and executor
+
+    # Prepare tool declaration
     changed_decl = types.FunctionDeclaration.from_func(changed_lines_tool)
-    tool = types.Tool(function_declarations=[changed_decl])
-    try:
-        from .ai_tool_runner import ToolExecutor, run_function_call_loop
-    except Exception:
-        # Local import fallback
-        from shared.ai_tool_runner import ToolExecutor, run_function_call_loop
 
-    executor = ToolExecutor()
-    executor.register('changed_lines_tool', lambda args: changed_lines_tool(description=entry.get('description', ''), delimiter=entry.get('delimiter')))
+    # Configure JaatoClient with custom tool
+    jaato.configure_custom_tools(
+        declarations=[changed_decl],
+        executors={
+            'changed_lines_tool': lambda args: changed_lines_tool(
+                description=entry.get('description', ''),
+                delimiter=entry.get('delimiter')
+            )
+        },
+        ledger=ledger
+    )
 
+    # Build prompt
     template = load_prompt_template("identify_code_changes_function_call_prompt")
     prompt = template
     placeholder_map = {
@@ -187,34 +233,30 @@ def identify_code_changes(entry: Dict, full_source_text: str, client: 'genai.Cli
     for ph, val in placeholder_map.items():
         prompt = prompt.replace(ph, str(val))
 
-    user_part = types.Part.from_text(prompt)
-    # Run the shared loop
-    fc_result = run_function_call_loop(client, model_name, [user_part], declared_tools=tool, executor=executor, ledger=ledger, max_turns=max_turns, trace=False)
+    # Send message with function calling
+    response_text = jaato.send_message(prompt)
 
-    final_text = (fc_result.get('text') or '').strip()
-    lines_result: List[Dict[str, Any]] = []
-    # Collect changed_lines_tool results
-    for fr in fc_result.get('function_results', []):
-        if fr.get('name') == 'changed_lines_tool' and fr.get('ok'):
-            res = fr.get('result') or {}
-            lines_result = res.get('lines', []) or lines_result
-            try:
-                ledger._record('tool-result', {'function': 'changed_lines_tool', 'line_count': len(lines_result)})
-            except Exception:
-                pass
-
-    if lines_result:
-        excerpt = '\n'.join(f"{li['line_number']:>5}: {li['code_line']}" for li in lines_result)
-        if not final_text:
-            final_text = "Identified likely affected lines via heuristic tool."
-        final_text = final_text + "\n\nLikely affected lines (tool heuristic):\n" + excerpt
-    return {"explanation": final_text.strip() if final_text else "No explanation text returned.", "lines": lines_result}
+    final_text = (response_text or '').strip()
+    return {"explanation": final_text if final_text else "No explanation text returned."}
 
 
-def build_training_pairs(client: 'genai.Client', model_name: str, entries: List[Dict], source_lines: List[str], full_source_text: str, ledger, verbose: bool) -> List[Dict]:
+def build_training_pairs(jaato: JaatoClient, entries: List[Dict], source_lines: List[str], full_source_text: str, ledger: TokenLedger, verbose: bool) -> List[Dict]:
+    """Build training pairs from modification entries.
+
+    Args:
+        jaato: Connected JaatoClient instance.
+        entries: List of modification history entries.
+        source_lines: Source code as list of lines.
+        full_source_text: Source code as full text.
+        ledger: TokenLedger for accounting.
+        verbose: Whether to print debug information.
+
+    Returns:
+        List of training pair dicts.
+    """
     pairs = []
     for e in entries:
-        change_analysis = identify_code_changes(e, full_source_text, client, model_name, ledger, verbose)
+        change_analysis = identify_code_changes(e, full_source_text, jaato, ledger, verbose)
         explanation = change_analysis.get('explanation') or "No explanation returned."
         changed_items = heuristic_changed_lines(e, source_lines)
         # Append code excerpt section to assistant message if any lines found
@@ -360,7 +402,8 @@ def make_training_pair(entry: Dict[str, Any], explanation: str, changed_items: L
 
 
 __all__ = [
-    'init_vertex',
+    'create_jaato_client',
+    'init_vertex',  # Deprecated, use create_jaato_client
     'load_cobol_source',
     'ai_parse_mod_history',
     'identify_code_changes',
