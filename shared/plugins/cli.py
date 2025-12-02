@@ -1,6 +1,7 @@
 """CLI tool plugin for executing local shell commands."""
 
 import os
+import shutil
 import shlex
 import subprocess
 from typing import Dict, List, Any, Callable, Optional
@@ -103,9 +104,22 @@ class CLIToolPlugin:
                 path_sep = os.pathsep
                 env['PATH'] = env.get('PATH', '') + path_sep + path_sep.join(extra_paths)
 
-            # Use shell=True for shell resolution (PATHEXT, etc.)
-            cmd_str = ' '.join(argv)
-            proc = subprocess.run(cmd_str, capture_output=True, text=True, check=False, env=env, shell=True)
+            # Resolve executable via PATH (including PATHEXT) for Windows
+            # This avoids relying on shell resolution while still finding .exe/.bat
+            exe = argv[0]
+            resolved = shutil.which(exe, path=env.get('PATH'))
+            if resolved:
+                argv[0] = resolved
+            else:
+                # If not found, return a clear error with hint about extra_paths
+                return {
+                    'error': f"cli_based_tool: executable '{exe}' not found in PATH",
+                    'hint': 'Configure extra_paths or provide full path to the executable.'
+                }
+
+            # Execute without shell so arguments with spaces/quotes are preserved
+            # Passing a list to subprocess.run ensures proper quoting on Windows
+            proc = subprocess.run(argv, capture_output=True, text=True, check=False, env=env, shell=False)
             return {'stdout': proc.stdout, 'stderr': proc.stderr, 'returncode': proc.returncode}
 
         except Exception as exc:
