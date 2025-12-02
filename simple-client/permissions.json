@@ -1,0 +1,14 @@
+{
+  "default_policy": "ask",
+  "whitelist": [],
+  "blacklist": [
+    {
+      "pattern": "rm *",
+      "reason": "Destructive file operations blocked"
+    }
+  ],
+  "actor": {
+    "type": "console",
+    "timeout": 60
+  }
+}
