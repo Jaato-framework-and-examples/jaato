@@ -207,7 +207,8 @@ If a tool is denied, do not attempt to execute it."""
         """Execute the askPermission tool.
 
         This allows the model to proactively check if a tool is allowed
-        before attempting to execute it.
+        before attempting to execute it. If approved, the tool is added to
+        the session whitelist so the actual execution won't prompt again.
         """
         tool_name = args.get("tool_name", "")
         tool_args = args.get("arguments", {})
@@ -222,6 +223,10 @@ If a tool is denied, do not attempt to execute it."""
         # Pass intent in context for actor to display
         context = {"intent": intent}
         allowed, perm_info = self.check_permission(tool_name, tool_args, context)
+
+        # If approved, add to session whitelist so actual execution won't prompt again
+        if allowed and self._policy:
+            self._policy.add_session_whitelist(tool_name)
 
         return {
             "allowed": allowed,
