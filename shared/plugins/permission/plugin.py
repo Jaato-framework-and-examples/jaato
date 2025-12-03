@@ -52,6 +52,7 @@ class PermissionPlugin:
         self._wrapped_executors: Dict[str, Callable] = {}
         self._original_executors: Dict[str, Callable] = {}
         self._execution_log: List[Dict[str, Any]] = []
+        self._allow_all: bool = False  # When True, auto-approve all requests
 
     @property
     def name(self) -> str:
@@ -119,6 +120,7 @@ class PermissionPlugin:
         self._initialized = False
         self._wrapped_executors.clear()
         self._original_executors.clear()
+        self._allow_all = False
 
     def add_whitelist_tools(self, tools: List[str]) -> None:
         """Add tools to the permission whitelist.
@@ -149,7 +151,8 @@ class PermissionPlugin:
         return [
             types.FunctionDeclaration(
                 name="askPermission",
-                description="Check if a tool is allowed to be executed. Returns permission status.",
+                description="Request permission to execute a tool. You MUST explain your intent - "
+                           "what you are trying to achieve or discover with this tool execution.",
                 parameters_json_schema={
                     "type": "object",
                     "properties": {
@@ -160,9 +163,13 @@ class PermissionPlugin:
                         "arguments": {
                             "type": "object",
                             "description": "Arguments that would be passed to the tool"
+                        },
+                        "intent": {
+                            "type": "string",
+                            "description": "Why you need to execute this tool - what you intend to achieve or discover"
                         }
                     },
-                    "required": ["tool_name"]
+                    "required": ["tool_name", "intent"]
                 }
             )
         ]
@@ -183,7 +190,11 @@ you may use `askPermission` to check if a tool is allowed.
 
 The askPermission tool takes:
 - tool_name: Name of the tool to check
+- intent: (REQUIRED) A clear explanation of what you intend to achieve or discover with this tool
 - arguments: (optional) Arguments that would be passed to the tool
+
+You MUST always provide an intent explaining WHY you need to execute the tool.
+The intent should describe what you are trying to accomplish, not just repeat the command.
 
 It returns whether the tool is allowed and the reason for the decision.
 If a tool is denied, do not attempt to execute it."""
@@ -200,11 +211,17 @@ If a tool is denied, do not attempt to execute it."""
         """
         tool_name = args.get("tool_name", "")
         tool_args = args.get("arguments", {})
+        intent = args.get("intent", "")
 
         if not tool_name:
             return {"error": "tool_name is required"}
 
-        allowed, perm_info = self.check_permission(tool_name, tool_args)
+        if not intent:
+            return {"error": "intent is required - explain what you intend to achieve with this tool"}
+
+        # Pass intent in context for actor to display
+        context = {"intent": intent}
+        allowed, perm_info = self.check_permission(tool_name, tool_args, context)
 
         return {
             "allowed": allowed,
@@ -231,8 +248,13 @@ If a tool is denied, do not attempt to execute it."""
             - 'reason': Human-readable reason string
             - 'method': Decision method ('whitelist', 'blacklist', 'default',
                        'sanitization', 'session_whitelist', 'session_blacklist',
-                       'user_approved', 'user_denied', 'timeout')
+                       'user_approved', 'user_denied', 'allow_all', 'timeout')
         """
+        # Check if user pre-approved all requests
+        if self._allow_all:
+            self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
+            return True, {'reason': 'Pre-approved all requests', 'method': 'allow_all'}
+
         if not self._policy:
             return True, {'reason': 'Permission plugin not initialized', 'method': 'not_initialized'}
 
@@ -292,6 +314,12 @@ If a tool is denied, do not attempt to execute it."""
                 self._policy.add_session_whitelist(pattern)
             self._log_decision(tool_name, args, "allow", f"Session whitelist: {pattern}")
             return True, {'reason': response.reason, 'method': 'session_whitelist'}
+
+        elif decision == ActorDecision.ALLOW_ALL:
+            # Pre-approve all future requests in this session
+            self._allow_all = True
+            self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
+            return True, {'reason': response.reason, 'method': 'allow_all'}
 
         elif decision == ActorDecision.DENY:
             self._log_decision(tool_name, args, "deny", response.reason)

@@ -32,6 +32,7 @@ class ActorDecision(Enum):
     ALLOW_ONCE = "allow_once"      # Execute but don't remember
     ALLOW_SESSION = "allow_session"  # Add to session whitelist
     DENY_SESSION = "deny_session"    # Add to session blacklist
+    ALLOW_ALL = "allow_all"          # Pre-approve all future requests in session
     TIMEOUT = "timeout"              # Actor didn't respond in time
 
 
@@ -209,25 +210,28 @@ class ConsoleActor(Actor):
     def request_permission(self, request: PermissionRequest) -> ActorResponse:
         """Prompt user in console for permission.
 
-        Displays tool name and arguments, then asks for approval.
+        Displays tool name, intent, and arguments, then asks for approval.
         Supported responses:
             y/yes     -> ALLOW
             n/no      -> DENY
-            a/always  -> ALLOW_SESSION (remember for session)
-            never     -> DENY_SESSION (block for session)
+            a/always  -> ALLOW_SESSION (remember this tool for session)
+            never     -> DENY_SESSION (block this tool for session)
             once      -> ALLOW_ONCE (don't remember)
+            all       -> ALLOW_ALL (pre-approve all future requests in session)
         """
         # Format the request for display
         self._output_func("")
         self._output_func("=" * 60)
         self._output_func("[askPermission] Tool execution request:")
+        # Display intent prominently if provided
+        intent = request.context.get("intent") if request.context else None
+        if intent:
+            self._output_func(f"  Intent: {intent}")
         self._output_func(f"  Tool: {request.tool_name}")
         self._output_func(f"  Arguments: {json.dumps(request.arguments, indent=4)}")
-        if request.context:
-            self._output_func(f"  Context: {request.context}")
         self._output_func("=" * 60)
         self._output_func("")
-        self._output_func("Options: [y]es, [n]o, [a]lways, [never], [once]")
+        self._output_func("Options: [y]es, [n]o, [a]lways, [never], [once], [all]")
 
         try:
             response = self._read_input().strip().lower()
@@ -275,6 +279,12 @@ class ConsoleActor(Actor):
                 request_id=request.request_id,
                 decision=ActorDecision.ALLOW_ONCE,
                 reason="User approved once",
+            )
+        elif response == "all":
+            return ActorResponse(
+                request_id=request.request_id,
+                decision=ActorDecision.ALLOW_ALL,
+                reason="User pre-approved all future requests",
             )
         else:
             # Unknown response, default to deny
