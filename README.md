@@ -37,8 +37,8 @@ jaato is a sandbox for experimenting with:
 
 | Plugin | Description |
 |--------|-------------|
-| [**cli**](shared/plugins/cli.py) | Execute local command-line tools via subprocess |
-| [**mcp**](shared/plugins/mcp.py) | Connect to MCP (Model Context Protocol) servers and auto-discover their tools |
+| [**cli**](shared/plugins/cli/README.md) | Execute local command-line tools via subprocess |
+| [**mcp**](shared/plugins/mcp/README.md) | Connect to MCP (Model Context Protocol) servers and auto-discover their tools |
 | [**permission**](shared/plugins/permission/README.md) | Control tool execution with blacklist/whitelist policies and interactive approval |
 | [**todo**](shared/plugins/todo/README.md) | Plan tracking with workflow enforcement for complex multi-step tasks |
 
