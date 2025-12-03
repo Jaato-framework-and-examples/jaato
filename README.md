@@ -1,8 +1,18 @@
 # jaato
 
+<p align="center">
+  <img src="docs/jaato_(traditional grinder)_logo.jpg" alt="jaato logo" width="200"/>
+</p>
+
 **j**ust **a**nother **a**gentic **t**ool **o**rchestrator
 
 An experimental project for exploring LLM function calling patterns with Google's Vertex AI and Gemini models.
+
+### Etymology
+
+While "jaato" serves as an acronym, the name also carries deeper meaning. In the Himalayan region (Nepal, Sikkim, Darjeeling, and Bhutan), a **jaato** (जाँतो) is a traditional rotary hand-quern or grinder used to mill grains. This ancient tool consists of two round stones with a wooden handle (*hāto*) used to turn the top stone in a circular motion.
+
+The metaphor is intentional: just as a traditional jaato grinds raw grains into refined flour, this orchestrator processes raw inputs through LLM tools to produce refined outputs.
 
 ## Overview
 
