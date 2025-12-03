@@ -4,7 +4,12 @@ This document explains how to use the jaato plugin framework from a client persp
 
 ## Overview
 
-The plugin framework provides a way to dynamically discover, load, and manage tool implementations that can be used by the AI model. Plugins are auto-discovered from the `shared/plugins/` directory and can be exposed/unexposed at runtime.
+The plugin framework provides a way to dynamically discover, load, and manage tool implementations that can be used by the AI model. Plugins are discovered via two mechanisms:
+
+1. **Entry Points** (recommended): Plugins register via Python entry points in `pyproject.toml`. This allows external packages to provide plugins.
+2. **Directory Scanning** (fallback): Plugins in `shared/plugins/` are auto-discovered for development.
+
+Discovered plugins can be exposed/unexposed at runtime.
 
 ## Client Usage
 
@@ -129,7 +134,21 @@ registry.unexpose_all()
 
 ## Implementing a New Plugin
 
-To create a new plugin, add a Python file to `shared/plugins/` that implements the `ToolPlugin` protocol.
+### Option 1: Entry Points (Recommended)
+
+Register your plugin via entry points in `pyproject.toml`. This works for both built-in and external plugins.
+
+```toml
+# In pyproject.toml
+[project.entry-points."jaato.plugins"]
+my_plugin = "my_package.plugins:create_plugin"
+```
+
+The entry point must reference a `create_plugin()` factory function that returns a `ToolPlugin` instance.
+
+### Option 2: Directory Placement (Development)
+
+For quick development, add a Python file to `shared/plugins/` that implements the `ToolPlugin` protocol.
 
 ### Plugin Protocol
 
@@ -392,8 +411,87 @@ shared/plugins/
 ├── __init__.py      # Exports PluginRegistry, ToolPlugin
 ├── base.py          # ToolPlugin Protocol definition
 ├── registry.py      # PluginRegistry class
-├── cli.py           # CLI tool plugin
-├── mcp.py           # MCP tool plugin
 ├── README.md        # This documentation
-└── your_plugin.py   # Your custom plugin
+├── cli/             # CLI tool plugin
+│   ├── __init__.py
+│   ├── plugin.py
+│   ├── README.md
+│   └── tests/
+├── mcp/             # MCP tool plugin
+│   ├── __init__.py
+│   ├── plugin.py
+│   ├── README.md
+│   └── tests/
+├── permission/      # Permission control plugin
+│   ├── __init__.py
+│   ├── plugin.py
+│   ├── README.md
+│   └── tests/
+├── todo/            # Plan tracking plugin
+│   ├── __init__.py
+│   ├── plugin.py
+│   ├── README.md
+│   └── tests/
+└── references/      # Documentation injection plugin
+    ├── __init__.py
+    ├── plugin.py
+    ├── README.md
+    └── tests/
+```
+
+---
+
+## External Plugin Packages
+
+External packages can provide jaato plugins by registering entry points.
+
+### Creating an External Plugin Package
+
+1. Create your plugin module with a `create_plugin()` factory:
+
+```python
+# my_jaato_plugin/plugin.py
+from shared.plugins.base import ToolPlugin
+
+class MyPlugin:
+    # ... implement ToolPlugin protocol ...
+
+def create_plugin():
+    return MyPlugin()
+```
+
+2. Register the entry point in `pyproject.toml`:
+
+```toml
+[project]
+name = "my-jaato-plugin"
+version = "0.1.0"
+dependencies = ["jaato"]
+
+[project.entry-points."jaato.plugins"]
+my_plugin = "my_jaato_plugin.plugin:create_plugin"
+```
+
+3. Install your package:
+
+```bash
+pip install -e .  # or pip install my-jaato-plugin
+```
+
+4. Your plugin will be automatically discovered:
+
+```python
+registry = PluginRegistry()
+discovered = registry.discover()
+# ['cli', 'mcp', 'permission', 'todo', 'references', 'my_plugin']
+```
+
+### Discovery Modes
+
+```python
+# Discover via both entry points and directory scanning (default)
+registry.discover()
+
+# Discover via entry points only (installed packages)
+registry.discover(include_directory=False)
 ```
