@@ -220,41 +220,45 @@ class JaatoClient:
         """
         # Track tokens for this turn
         turn_tokens = {'prompt': 0, 'output': 0, 'total': 0}
+        response = None
 
-        response = self._chat.send_message(message)
-        self._record_token_usage(response)
-        self._accumulate_turn_tokens(response, turn_tokens)
-
-        # Handle function calling loop
-        while response.function_calls:
-            func_responses = []
-
-            for fc in response.function_calls:
-                # Execute the function
-                name = fc.name
-                args = dict(fc.args) if fc.args else {}
-
-                if self._executor:
-                    result = self._executor.execute(name, args)
-                else:
-                    result = {"error": f"No executor registered for {name}"}
-
-                # Build function response part
-                func_responses.append(types.Part.from_function_response(
-                    name=name,
-                    response=result if isinstance(result, dict) else {"result": result}
-                ))
-
-            # Send function responses back to model
-            # Chat API accepts Parts directly (not Content objects)
-            response = self._chat.send_message(func_responses)
+        try:
+            response = self._chat.send_message(message)
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_tokens)
 
-        # Store turn accounting
-        self._turn_accounting.append(turn_tokens)
+            # Handle function calling loop
+            while response.function_calls:
+                func_responses = []
 
-        return response.text if response.text else ''
+                for fc in response.function_calls:
+                    # Execute the function
+                    name = fc.name
+                    args = dict(fc.args) if fc.args else {}
+
+                    if self._executor:
+                        result = self._executor.execute(name, args)
+                    else:
+                        result = {"error": f"No executor registered for {name}"}
+
+                    # Build function response part
+                    func_responses.append(types.Part.from_function_response(
+                        name=name,
+                        response=result if isinstance(result, dict) else {"result": result}
+                    ))
+
+                # Send function responses back to model
+                # Chat API accepts Parts directly (not Content objects)
+                response = self._chat.send_message(func_responses)
+                self._record_token_usage(response)
+                self._accumulate_turn_tokens(response, turn_tokens)
+
+            return response.text if response.text else ''
+
+        finally:
+            # Always store turn accounting, even on errors
+            if turn_tokens['total'] > 0:
+                self._turn_accounting.append(turn_tokens)
 
     def _accumulate_turn_tokens(self, response, turn_tokens: Dict[str, int]) -> None:
         """Accumulate token counts from response into turn totals."""
