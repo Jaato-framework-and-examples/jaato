@@ -8,15 +8,20 @@ from typing import Dict, List, Any, Callable, Optional
 from google.genai import types
 
 
+DEFAULT_MAX_OUTPUT_CHARS = 50000  # ~12k tokens at 4 chars/token
+
+
 class CLIToolPlugin:
     """Plugin that provides CLI command execution capability.
 
     Configuration:
         extra_paths: List of additional paths to add to PATH when executing commands.
+        max_output_chars: Maximum characters to return from stdout/stderr (default: 50000).
     """
 
     def __init__(self):
         self._extra_paths: List[str] = []
+        self._max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS
         self._initialized = False
 
     @property
@@ -27,12 +32,17 @@ class CLIToolPlugin:
         """Initialize the CLI plugin.
 
         Args:
-            config: Optional dict with 'extra_paths' key for additional PATH entries.
+            config: Optional dict with:
+                - extra_paths: Additional PATH entries
+                - max_output_chars: Max characters to return (default: 50000)
         """
-        if config and 'extra_paths' in config:
-            paths = config['extra_paths']
-            if paths:
-                self._extra_paths = paths if isinstance(paths, list) else [paths]
+        if config:
+            if 'extra_paths' in config:
+                paths = config['extra_paths']
+                if paths:
+                    self._extra_paths = paths if isinstance(paths, list) else [paths]
+            if 'max_output_chars' in config:
+                self._max_output_chars = config['max_output_chars']
         self._initialized = True
 
     def shutdown(self) -> None:
@@ -78,7 +88,13 @@ Example usage:
 - Check git status: cli_based_tool(command="git status")
 - Search for text: cli_based_tool(command="grep -r 'pattern' /path")
 
-The tool returns stdout, stderr, and returncode from the executed command."""
+The tool returns stdout, stderr, and returncode from the executed command.
+
+IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid truncation:
+- Use filters (grep, awk) to narrow results
+- Use head/tail to limit output lines
+- Use -maxdepth with find to limit recursion
+- Avoid commands that list entire directory trees without limits"""
 
     def get_auto_approved_tools(self) -> List[str]:
         """CLI tools require permission - return empty list."""
@@ -138,7 +154,30 @@ The tool returns stdout, stderr, and returncode from the executed command."""
             # Execute without shell so arguments with spaces/quotes are preserved
             # Passing a list to subprocess.run ensures proper quoting on Windows
             proc = subprocess.run(argv, capture_output=True, text=True, check=False, env=env, shell=False)
-            return {'stdout': proc.stdout, 'stderr': proc.stderr, 'returncode': proc.returncode}
+
+            # Truncate large outputs to prevent context window overflow
+            stdout = proc.stdout
+            stderr = proc.stderr
+            truncated = False
+
+            if len(stdout) > self._max_output_chars:
+                stdout = stdout[:self._max_output_chars]
+                truncated = True
+
+            if len(stderr) > self._max_output_chars:
+                stderr = stderr[:self._max_output_chars]
+                truncated = True
+
+            result = {'stdout': stdout, 'stderr': stderr, 'returncode': proc.returncode}
+
+            if truncated:
+                result['truncated'] = True
+                result['truncation_message'] = (
+                    f"Output truncated to {self._max_output_chars} chars. "
+                    "Consider using more specific commands (e.g., add filters, limits, or pipe to head/tail)."
+                )
+
+            return result
 
         except Exception as exc:
             return {'error': str(exc)}
