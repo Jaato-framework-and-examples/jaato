@@ -118,10 +118,8 @@ class ReferencesPlugin:
                 name="selectReferences",
                 description=(
                     "Trigger user selection of additional reference sources to incorporate. "
-                    "Each reference has tags describing its topic (e.g., 'api', 'auth', 'config'). "
-                    "When you encounter these tags or related topics during conversation, "
-                    "consider using this tool to access the corresponding reference for "
-                    "better understanding before proceeding with the task."
+                    "Call this tool directly - it will inform you if no sources are available. "
+                    "All parameters are optional."
                 ),
                 parameters_json_schema={
                     "type": "object",
@@ -129,8 +127,7 @@ class ReferencesPlugin:
                         "context": {
                             "type": "string",
                             "description": (
-                                "Explain why you need additional references. "
-                                "This helps the user make appropriate selections."
+                                "Optional: explain why you need references to help user select."
                             )
                         },
                         "filter_tags": {
@@ -184,6 +181,13 @@ class ReferencesPlugin:
         Presents available selectable sources to user via the configured actor,
         then returns instructions for the model to fetch selected references.
         """
+        # Early check: no sources configured at all
+        if not self._sources:
+            return {
+                "status": "no_sources",
+                "message": "No reference sources available."
+            }
+
         context = args.get("context")
         filter_tags = args.get("filter_tags", [])
 
