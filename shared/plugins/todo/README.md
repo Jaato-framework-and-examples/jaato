@@ -170,7 +170,12 @@ Model: Ready to begin the refactoring.
 
 Model: Understood, cancelling the plan.
        [calls completePlan with status: cancelled, summary: "User declined execution"]
+
+Model: How would you like me to proceed? I can work on this without plan tracking,
+       or you can tell me what you'd prefer instead.
 ```
+
+**Important:** When `startPlan` is denied, the model must NOT create a new plan and retry. A denial means the user doesn't want plan tracking for this task. The model should cancel the plan and either ask the user how to proceed or continue without plan tracking.
 
 ## Configuration
 

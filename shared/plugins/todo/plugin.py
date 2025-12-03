@@ -134,7 +134,8 @@ class TodoPlugin:
                 name="startPlan",
                 description="Step 2: Request user approval to begin executing the plan. "
                            "This MUST be called after createPlan and BEFORE any updateStep calls. "
-                           "If the user denies, use completePlan with status='cancelled'.",
+                           "If the user denies: call completePlan with status='cancelled', "
+                           "do NOT create another plan and retry.",
                 parameters_json_schema={
                     "type": "object",
                     "properties": {
@@ -254,9 +255,13 @@ class TodoPlugin:
             "RULES:\n"
             "- You MUST call startPlan after createPlan and wait for approval\n"
             "- You CANNOT call updateStep or addStep until startPlan is approved\n"
-            "- If user denies startPlan, call completePlan with status='cancelled'\n"
             "- Only use status='completed' or 'failed' for plans that were started\n"
-            "- Use status='cancelled' for plans the user rejected"
+            "- Use status='cancelled' for plans the user rejected\n\n"
+            "WHEN startPlan IS DENIED:\n"
+            "- Immediately call completePlan with status='cancelled' on the current plan\n"
+            "- Do NOT create a new plan and retry - the user does not want plan tracking\n"
+            "- Ask the user how they would like to proceed instead\n"
+            "- You may proceed with the task without plan tracking if appropriate"
         )
 
     def get_auto_approved_tools(self) -> List[str]:
