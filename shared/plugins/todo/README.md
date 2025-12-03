@@ -75,6 +75,16 @@ The TODO plugin enforces a strict workflow to ensure proper plan management:
                                           └─────────┘
 ```
 
+### Planning Quality
+
+Before creating a plan, the model is instructed to:
+
+- Think carefully about what steps are actually needed to achieve the goal
+- Break down the task into minimal, concrete steps it can realistically complete
+- Consider what tools and information are available
+- NOT propose plans it cannot achieve - be trustworthy
+- Make each step specific and actionable, not vague
+
 ### Workflow Rules
 
 1. **createPlan** - Register the execution plan with ordered steps

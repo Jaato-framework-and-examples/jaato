@@ -112,8 +112,9 @@ class TodoPlugin:
             types.FunctionDeclaration(
                 name="createPlan",
                 description="Step 1: Register a new execution plan with ordered steps. "
-                           "After calling this, you MUST call startPlan to get user approval "
-                           "before executing any steps.",
+                           "Think carefully before calling - only propose plans you can actually "
+                           "achieve with available tools. Each step must be specific and actionable. "
+                           "After calling this, you MUST call startPlan to get user approval.",
                 parameters_json_schema={
                     "type": "object",
                     "properties": {
@@ -124,7 +125,7 @@ class TodoPlugin:
                         "steps": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Ordered list of step descriptions"
+                            "description": "Ordered list of specific, actionable step descriptions"
                         }
                     },
                     "required": ["title", "steps"]
@@ -246,6 +247,12 @@ class TodoPlugin:
         """Return system instructions for the TODO plugin."""
         return (
             "You have access to plan tracking tools. Follow this STRICT workflow:\n\n"
+            "BEFORE CREATING A PLAN:\n"
+            "- Think carefully about what steps are actually needed to achieve the goal\n"
+            "- Break down the task into minimal, concrete steps you can realistically complete\n"
+            "- Consider what tools and information you have available\n"
+            "- Do NOT propose a plan you cannot achieve - be trustworthy\n"
+            "- Each step should be specific and actionable, not vague\n\n"
             "WORKFLOW:\n"
             "1. createPlan - Register your execution plan with ordered steps\n"
             "2. startPlan - Request user approval (REQUIRED before any execution)\n"
