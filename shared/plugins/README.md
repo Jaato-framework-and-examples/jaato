@@ -26,28 +26,36 @@ registry.discover()
 print(registry.list_available())  # ['cli', 'mcp', ...]
 ```
 
-### Exposing and Unexposing Plugin Tools
+### Exposing Plugin Tools
 
-Plugins must be explicitly exposed before their tools can be used by the AI model. This allows fine-grained control over which tools are available.
+By default, all discovered plugins should be exposed using `expose_all()`. This makes all tools available to the AI model.
 
 ```python
-# Expose a plugin's tools to the model
-registry.expose_tool('cli')
+# Expose all discovered plugins (recommended)
+registry.expose_all()
 
-# Expose with configuration
-registry.expose_tool('cli', config={'extra_paths': ['/usr/local/bin']})
+# Expose all with configuration for specific plugins
+registry.expose_all({
+    'cli': {'extra_paths': ['/usr/local/bin']},
+    'todo': {'reporter_type': 'console'},
+})
 
 # Check what's exposed
-print(registry.list_exposed())  # ['cli']
-
-# Unexpose a plugin's tools
-registry.unexpose_tool('cli')
-
-# Expose all discovered plugins' tools
-registry.expose_all()
+print(registry.list_exposed())  # ['cli', 'mcp', 'todo', ...]
 
 # Unexpose all plugins' tools (cleanup)
 registry.unexpose_all()
+```
+
+For selective exposure (opt-in instead of opt-out), use `expose_tool()`:
+
+```python
+# Expose only specific plugins
+registry.expose_tool('cli')
+registry.expose_tool('cli', config={'extra_paths': ['/usr/local/bin']})
+
+# Unexpose a specific plugin
+registry.unexpose_tool('cli')
 ```
 
 ### Getting Tool Declarations and Executors
@@ -73,7 +81,7 @@ from shared import JaatoClient, PluginRegistry, TokenLedger
 # Setup
 registry = PluginRegistry()
 registry.discover()
-registry.expose_tool('cli')
+registry.expose_all()  # Expose all plugins by default
 
 # Create and configure client
 jaato = JaatoClient()
@@ -110,23 +118,18 @@ registry.discover()
 jaato = JaatoClient()
 jaato.connect('my-project', 'us-central1', 'gemini-2.5-flash')
 
-# First session: CLI tools only
-registry.expose_tool('cli')
+# First session: All plugins
+registry.expose_all()
 jaato.configure_tools(registry)
 response1 = jaato.send_message('List files')
-registry.unexpose_tool('cli')
 
-# Second session: MCP tools only (new chat session)
+# Second session: Only specific plugins (new chat session)
+registry.unexpose_all()
 registry.expose_tool('mcp')
 jaato.configure_tools(registry)
 response2 = jaato.send_message('Search GitHub issues')
-registry.unexpose_tool('mcp')
 
-# Third session: Both tools (new chat session)
-registry.expose_tool('cli')
-registry.expose_tool('mcp')
-jaato.configure_tools(registry)
-response3 = jaato.send_message('List files and search GitHub')
+# Cleanup
 registry.unexpose_all()
 ```
 
@@ -309,6 +312,12 @@ class ConfigurablePlugin:
 
 Client usage:
 ```python
+# Via expose_all with config
+registry.expose_all({
+    'configurable': {'api_key': 'secret123', 'timeout': 60}
+})
+
+# Or via expose_tool for selective exposure
 registry.expose_tool('configurable', config={
     'api_key': 'secret123',
     'timeout': 60
@@ -383,9 +392,9 @@ Executes local shell commands.
 **Tools:**
 - `cli_based_tool`: Execute a shell command
 
-**Example:**
+**Example with configuration:**
 ```python
-registry.expose_tool('cli', config={'extra_paths': ['/opt/custom/bin']})
+registry.expose_all({'cli': {'extra_paths': ['/opt/custom/bin']}})
 ```
 
 ### MCP Plugin (`mcp`)
@@ -398,8 +407,7 @@ Connects to MCP (Model Context Protocol) servers defined in `.mcp.json` and expo
 
 **Example:**
 ```python
-registry.expose_tool('mcp')
-# Tools from GitHub MCP server, Atlassian MCP server, etc.
+registry.expose_all()  # MCP tools are available automatically
 ```
 
 ---
