@@ -248,6 +248,15 @@ class ReferencesPlugin:
 
     def _execute_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List all available reference sources."""
+        # Early check: no sources configured at all
+        if not self._sources:
+            return {
+                "sources": [],
+                "total": 0,
+                "selected_count": 0,
+                "message": "No reference sources available."
+            }
+
         filter_tags = args.get("filter_tags", [])
         mode_filter = args.get("mode", "all")
 
