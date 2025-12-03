@@ -31,6 +31,7 @@ from .jaato_client import JaatoClient
 # Plugin system
 from .plugins.registry import PluginRegistry
 from .plugins.permission import PermissionPlugin
+from .plugins.todo import TodoPlugin
 
 # Utilities
 from .ssl_helper import active_cert_bundle, normalize_ca_env_vars
@@ -53,6 +54,7 @@ __all__ = [
     # Plugin system
     "PluginRegistry",
     "PermissionPlugin",
+    "TodoPlugin",
     # Utilities
     "active_cert_bundle",
     "normalize_ca_env_vars",

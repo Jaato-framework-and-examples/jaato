@@ -160,6 +160,18 @@ class ToolPlugin(Protocol):
     def shutdown(self) -> None:
         """Called when the plugin is unexposed. Cleanup resources here."""
         ...
+
+    def get_system_instructions(self) -> Optional[str]:
+        """Return system instructions for the model about this plugin's tools."""
+        ...
+
+    def get_auto_approved_tools(self) -> List[str]:
+        """Return tool names that should be auto-approved without permission prompts.
+
+        Tools listed here will be automatically whitelisted when used with
+        the permission plugin. Return empty list if all tools require permission.
+        """
+        ...
 ```
 
 ### Minimal Plugin Example
@@ -209,6 +221,13 @@ class ExamplePlugin:
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         return {'example_tool': self._execute}
+
+    def get_system_instructions(self) -> Optional[str]:
+        return "You have access to example_tool which echoes messages."
+
+    def get_auto_approved_tools(self) -> List[str]:
+        # Return empty list - this tool requires permission
+        return []
 
     def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
         message = args.get('message', '')
