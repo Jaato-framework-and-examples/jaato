@@ -97,7 +97,7 @@ Before creating a plan, the model is instructed to:
 
 When a plan is created, the model is instructed to:
 
-- NOT execute ANY other tools until `startPlan` is approved by the user
+- NOT execute ANY other tools until `startPlan` is approved, unless necessary to compose the plan
 - Wait for the user to see and approve the plan before taking action
 
 ### Workflow Rules

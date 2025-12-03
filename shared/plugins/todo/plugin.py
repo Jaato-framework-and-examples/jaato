@@ -265,7 +265,7 @@ class TodoPlugin:
             "5. completePlan - Mark plan as finished\n\n"
             "RULES:\n"
             "- You MUST call startPlan after createPlan and wait for approval\n"
-            "- You CANNOT execute ANY other tools until startPlan is approved by the user\n"
+            "- You CANNOT execute ANY other tools until startPlan is approved, unless necessary to compose the plan\n"
             "- You CANNOT call updateStep or addStep until startPlan is approved\n"
             "- Only use status='completed' or 'failed' for plans that were started\n"
             "- Use status='cancelled' for plans the user rejected\n\n"
