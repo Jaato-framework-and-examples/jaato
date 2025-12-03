@@ -551,22 +551,26 @@ Prompts the user in the terminal:
 ```
 ============================================================
 [askPermission] Tool execution request:
+  Intent: Check if there are uncommitted changes before deployment
   Tool: cli_based_tool
-  Arguments: {"command": "git push origin main"}
+  Arguments: {"command": "git status"}
 ============================================================
 
-Options: [y]es, [n]o, [a]lways, [never], [once]
+Options: [y]es, [n]o, [a]lways, [never], [once], [all]
 >
 ```
+
+The **Intent** field shows what the model is trying to achieve with the tool execution, helping users make informed decisions.
 
 Responses:
 | Input | Effect |
 |-------|--------|
 | `y` / `yes` | Allow this execution |
 | `n` / `no` | Deny this execution |
-| `a` / `always` | Allow and add to session whitelist |
-| `never` | Deny and add to session blacklist |
+| `a` / `always` | Allow and add this tool to session whitelist |
+| `never` | Deny and add this tool to session blacklist |
 | `once` | Allow but don't remember |
+| `all` | Pre-approve ALL future requests in this session |
 
 **Readline History**: By default, permission responses are automatically excluded from readline history since they have no utility for recall. This can be disabled via config:
 
@@ -668,6 +672,7 @@ The `method` field indicates how the decision was made:
 - `whitelist` / `blacklist`: Matched static policy rule
 - `session_whitelist` / `session_blacklist`: Matched session rule
 - `user_approved` / `user_denied`: Actor approval
+- `allow_all`: User pre-approved all requests for this session
 - `timeout`: Actor timed out
 - `default`: Default policy applied
 
@@ -692,17 +697,23 @@ This allows clients to display permission decisions alongside tool results in co
 
 ### Proactive Permission Checks
 
-The model can use the `askPermission` tool to check before executing:
+The model can use the `askPermission` tool to check before executing. The `intent` field is **required** - the model must explain what it's trying to achieve:
 
 ```
 Model: Before running this command, let me check if it's allowed.
-       [calls askPermission(tool_name="cli_based_tool", arguments={"command": "rm -rf temp/"})]
+       [calls askPermission(
+           tool_name="cli_based_tool",
+           intent="Clean up temporary build artifacts from the temp directory",
+           arguments={"command": "rm -rf temp/"}
+       )]
 
 Response: {"allowed": false, "reason": "Command matches blacklist pattern: rm -rf *", "method": "blacklist", "tool_name": "cli_based_tool"}
 
 Model: I cannot execute that command as it's blocked by the permission policy.
        Would you like me to use a safer alternative?
 ```
+
+The intent helps users understand WHY the model wants to run a command, making approval decisions easier.
 
 ## Context Parameter
 

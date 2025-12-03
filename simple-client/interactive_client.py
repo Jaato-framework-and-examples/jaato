@@ -319,8 +319,8 @@ Keyboard shortcuts:
         turn_index = 0
 
         for i, content in enumerate(history):
-            role = getattr(content, 'role', 'unknown')
-            parts = getattr(content, 'parts', [])
+            role = getattr(content, 'role', None) or 'unknown'
+            parts = getattr(content, 'parts', None) or []
 
             # Check if this is a new user turn (user message with text, not function response)
             is_user_text = (role == 'user' and parts and
@@ -338,8 +338,8 @@ Keyboard shortcuts:
             next_is_user_text = False
             if not is_last:
                 next_content = history[i + 1]
-                next_role = getattr(next_content, 'role', 'unknown')
-                next_parts = getattr(next_content, 'parts', [])
+                next_role = getattr(next_content, 'role', None) or 'unknown'
+                next_parts = getattr(next_content, 'parts', None) or []
                 next_is_user_text = (next_role == 'user' and next_parts and
                                     hasattr(next_parts[0], 'text') and next_parts[0].text)
 
