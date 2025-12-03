@@ -80,6 +80,10 @@ Example usage:
 
 The tool returns stdout, stderr, and returncode from the executed command."""
 
+    def get_auto_approved_tools(self) -> List[str]:
+        """CLI tools require permission - return empty list."""
+        return []
+
     def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a CLI command.
 

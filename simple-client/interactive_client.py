@@ -24,6 +24,7 @@ from shared import (
     TokenLedger,
     PluginRegistry,
     PermissionPlugin,
+    TodoPlugin,
     active_cert_bundle,
 )
 
@@ -40,6 +41,7 @@ class InteractiveClient:
         self._jaato: Optional[JaatoClient] = None
         self.registry: Optional[PluginRegistry] = None
         self.permission_plugin: Optional[PermissionPlugin] = None
+        self.todo_plugin: Optional[TodoPlugin] = None
         self.ledger = TokenLedger()
 
     def log(self, msg: str) -> None:
@@ -102,6 +104,15 @@ class InteractiveClient:
             except Exception as e:
                 self.log(f"[client] MCP plugin skipped: {e}")
 
+        # Expose TODO plugin with console reporter for plan tracking
+        if "todo" in discovered:
+            self.registry.expose_tool("todo", {
+                "reporter_type": "console",
+                "storage_type": "memory",
+            })
+            self.todo_plugin = self.registry.get_plugin("todo")
+            self.log("[client] TODO plugin enabled - plan tracking available")
+
         # Initialize permission plugin with console actor
         self.log("[client] Initializing permission plugin with console actor...")
         self.permission_plugin = PermissionPlugin()
@@ -113,7 +124,7 @@ class InteractiveClient:
                 "blacklist": {"tools": [], "patterns": []},
             }
         })
-        self.log("[client] Permission plugin ready - all tool calls will require approval")
+        self.log("[client] Permission plugin ready")
 
         # Configure tools on JaatoClient
         self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
@@ -200,6 +211,10 @@ class InteractiveClient:
                 self._print_history()
                 continue
 
+            if user_input.lower() == 'plan':
+                self._print_plan()
+                continue
+
             # Execute the prompt
             response = self.run_prompt(user_input)
             print(f"\nModel> {response}")
@@ -212,6 +227,7 @@ Commands:
   tools   - List available tools
   reset   - Clear conversation history
   history - Show full conversation history
+  plan    - Show current plan status
   quit    - Exit the client
 
 When the model tries to use a tool, you'll see a permission prompt:
@@ -241,6 +257,41 @@ Keyboard shortcuts:
         print("\nAvailable tools:")
         for decl in self.registry.get_exposed_declarations():
             print(f"  - {decl.name}: {decl.description}")
+        print()
+
+    def _print_plan(self) -> None:
+        """Print current plan status."""
+        if not self.todo_plugin:
+            print("\n[Plan tracking not available]")
+            return
+
+        plan = self.todo_plugin.get_current_plan()
+        if not plan:
+            print("\n[No active plan]")
+            return
+
+        progress = plan.get_progress()
+        print(f"\n{'=' * 50}")
+        print(f"  Plan: {plan.title}")
+        print(f"  Status: {plan.status.value}")
+        print(f"  Progress: {progress['completed']}/{progress['total']} ({progress['percent']:.0f}%)")
+        print(f"{'=' * 50}")
+
+        for step in sorted(plan.steps, key=lambda s: s.sequence):
+            status_icons = {
+                'pending': '○',
+                'in_progress': '●',
+                'completed': '✓',
+                'failed': '✗',
+                'skipped': '⊘',
+            }
+            icon = status_icons.get(step.status.value, '?')
+            print(f"  {icon} {step.sequence}. {step.description} [{step.status.value}]")
+            if step.result:
+                print(f"      → {step.result}")
+            if step.error:
+                print(f"      ✗ {step.error}")
+
         print()
 
     def _print_history(self) -> None:
@@ -363,6 +414,7 @@ Keyboard shortcuts:
             self.registry.unexpose_all()
         if self.permission_plugin:
             self.permission_plugin.shutdown()
+        # Note: todo_plugin is managed via registry.unexpose_all()
 
 
 def main():

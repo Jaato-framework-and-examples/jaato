@@ -10,6 +10,7 @@ Progress is reported through configurable transport protocols
 (console, webhook, file) matching the permissions plugin pattern.
 """
 
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 from google.genai import types
 
@@ -110,8 +111,9 @@ class TodoPlugin:
         return [
             types.FunctionDeclaration(
                 name="createPlan",
-                description="Register a new execution plan with ordered steps. "
-                           "Use this before starting a multi-step task to track progress.",
+                description="Step 1: Register a new execution plan with ordered steps. "
+                           "After calling this, you MUST call startPlan to get user approval "
+                           "before executing any steps.",
                 parameters_json_schema={
                     "type": "object",
                     "properties": {
@@ -129,9 +131,25 @@ class TodoPlugin:
                 }
             ),
             types.FunctionDeclaration(
+                name="startPlan",
+                description="Step 2: Request user approval to begin executing the plan. "
+                           "This MUST be called after createPlan and BEFORE any updateStep calls. "
+                           "If the user denies, use completePlan with status='cancelled'.",
+                parameters_json_schema={
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "description": "Optional message explaining why this plan is proposed"
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.FunctionDeclaration(
                 name="updateStep",
-                description="Update the status of a specific step in the current plan. "
-                           "Use this to report progress as you complete steps.",
+                description="Step 3: Update the status of a step. Can only be called AFTER "
+                           "startPlan has been approved. Use this to report progress as you work.",
                 parameters_json_schema={
                     "type": "object",
                     "properties": {
@@ -158,7 +176,7 @@ class TodoPlugin:
             ),
             types.FunctionDeclaration(
                 name="getPlanStatus",
-                description="Get the current status of a plan and all its steps.",
+                description="Query current plan state and progress. Can be called at any time.",
                 parameters_json_schema={
                     "type": "object",
                     "properties": {
@@ -172,14 +190,16 @@ class TodoPlugin:
             ),
             types.FunctionDeclaration(
                 name="completePlan",
-                description="Mark the current plan as completed, failed, or cancelled.",
+                description="Step 4: Mark the plan as finished. Use 'completed' or 'failed' only "
+                           "if the plan was started. Use 'cancelled' if the user rejected startPlan.",
                 parameters_json_schema={
                     "type": "object",
                     "properties": {
                         "status": {
                             "type": "string",
                             "enum": ["completed", "failed", "cancelled"],
-                            "description": "Final status of the plan"
+                            "description": "Final status: 'completed'/'failed' require started plan, "
+                                         "'cancelled' for rejected plans"
                         },
                         "summary": {
                             "type": "string",
@@ -189,16 +209,63 @@ class TodoPlugin:
                     "required": ["status"]
                 }
             ),
+            types.FunctionDeclaration(
+                name="addStep",
+                description="Add a new step to the plan during execution. Can only be called "
+                           "AFTER startPlan has been approved.",
+                parameters_json_schema={
+                    "type": "object",
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": "Description of the new step"
+                        },
+                        "after_step_id": {
+                            "type": "string",
+                            "description": "Insert after this step ID. If omitted, appends to end."
+                        }
+                    },
+                    "required": ["description"]
+                }
+            ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Return the executors for TODO tools."""
         return {
             "createPlan": self._execute_create_plan,
+            "startPlan": self._execute_start_plan,
             "updateStep": self._execute_update_step,
             "getPlanStatus": self._execute_get_plan_status,
             "completePlan": self._execute_complete_plan,
+            "addStep": self._execute_add_step,
         }
+
+    def get_system_instructions(self) -> Optional[str]:
+        """Return system instructions for the TODO plugin."""
+        return (
+            "You have access to plan tracking tools. Follow this STRICT workflow:\n\n"
+            "WORKFLOW:\n"
+            "1. createPlan - Register your execution plan with ordered steps\n"
+            "2. startPlan - Request user approval (REQUIRED before any execution)\n"
+            "3. updateStep - Report progress on each step (only after startPlan approved)\n"
+            "4. addStep - Add new steps if needed during execution\n"
+            "5. completePlan - Mark plan as finished\n\n"
+            "RULES:\n"
+            "- You MUST call startPlan after createPlan and wait for approval\n"
+            "- You CANNOT call updateStep or addStep until startPlan is approved\n"
+            "- If user denies startPlan, call completePlan with status='cancelled'\n"
+            "- Only use status='completed' or 'failed' for plans that were started\n"
+            "- Use status='cancelled' for plans the user rejected"
+        )
+
+    def get_auto_approved_tools(self) -> List[str]:
+        """Return TODO tools as auto-approved (no security implications).
+
+        Note: startPlan is intentionally excluded - it requires user permission
+        to confirm they want the model to proceed with the proposed plan.
+        """
+        return ["createPlan", "updateStep", "getPlanStatus", "completePlan", "addStep"]
 
     def _execute_create_plan(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the createPlan tool."""
@@ -244,6 +311,44 @@ class TodoPlugin:
             "progress": plan.get_progress(),
         }
 
+    def _execute_start_plan(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the startPlan tool.
+
+        This tool requires permission - when the user approves, it signals
+        that they agree with the proposed plan and the model can proceed.
+        """
+        message = args.get("message", "")
+
+        # Get current plan
+        plan = self._get_current_plan()
+        if not plan:
+            return {"error": "No active plan. Create a plan first with createPlan."}
+
+        if plan.started:
+            return {"error": "Plan already started. Proceed with updateStep."}
+
+        # Mark plan as started (user approved)
+        plan.started = True
+        plan.started_at = datetime.utcnow().isoformat() + "Z"
+
+        # Save to storage
+        if self._storage:
+            self._storage.save_plan(plan)
+
+        return {
+            "approved": True,
+            "plan_id": plan.plan_id,
+            "title": plan.title,
+            "message": message or "Plan approved by user. You may proceed with execution.",
+            "steps": [
+                {
+                    "sequence": s.sequence,
+                    "description": s.description,
+                }
+                for s in sorted(plan.steps, key=lambda x: x.sequence)
+            ],
+        }
+
     def _execute_update_step(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the updateStep tool."""
         step_id = args.get("step_id", "")
@@ -268,6 +373,9 @@ class TodoPlugin:
         plan = self._get_current_plan()
         if not plan:
             return {"error": "No active plan. Create a plan first with createPlan."}
+
+        if not plan.started:
+            return {"error": "Plan not started. Call startPlan first to get user approval."}
 
         # Find step
         step = plan.get_step_by_id(step_id)
@@ -358,6 +466,12 @@ class TodoPlugin:
         if not plan:
             return {"error": "No active plan. Create a plan first with createPlan."}
 
+        # Guard: can only complete/fail a plan that was started
+        # Cancelling is allowed even if not started (user rejected the plan)
+        if not plan.started and status_str in ("completed", "failed"):
+            return {"error": f"Cannot mark plan as '{status_str}' - plan was never started. "
+                           f"Use 'cancelled' if the plan was rejected."}
+
         # Update plan status
         if status_str == "completed":
             plan.complete_plan(summary)
@@ -383,6 +497,42 @@ class TodoPlugin:
             "status": plan.status.value,
             "completed_at": plan.completed_at,
             "summary": plan.summary,
+            "progress": plan.get_progress(),
+        }
+
+    def _execute_add_step(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the addStep tool."""
+        description = args.get("description", "")
+        after_step_id = args.get("after_step_id")
+
+        if not description:
+            return {"error": "description is required"}
+
+        # Get current plan
+        plan = self._get_current_plan()
+        if not plan:
+            return {"error": "No active plan. Create a plan first with createPlan."}
+
+        if not plan.started:
+            return {"error": "Plan not started. Call startPlan first to get user approval."}
+
+        # Add the step
+        new_step = plan.add_step(description, after_step_id)
+
+        # Save to storage
+        if self._storage:
+            self._storage.save_plan(plan)
+
+        # Report the addition
+        if self._reporter:
+            self._reporter.report_step_update(plan, new_step)
+
+        return {
+            "step_id": new_step.step_id,
+            "sequence": new_step.sequence,
+            "description": new_step.description,
+            "status": new_step.status.value,
+            "total_steps": len(plan.steps),
             "progress": plan.get_progress(),
         }
 

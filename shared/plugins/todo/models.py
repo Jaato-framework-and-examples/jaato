@@ -119,6 +119,8 @@ class TodoPlan:
     steps: List[TodoStep] = field(default_factory=list)
     current_step: Optional[int] = None  # Current sequence number
     status: PlanStatus = PlanStatus.ACTIVE
+    started: bool = False  # True after user approves via startPlan
+    started_at: Optional[str] = None  # ISO8601 - when startPlan was approved
     completed_at: Optional[str] = None  # ISO8601
     summary: Optional[str] = None  # Final outcome summary
     context: Dict[str, Any] = field(default_factory=dict)
@@ -169,6 +171,38 @@ class TodoPlan:
             if step.status == StepStatus.PENDING:
                 return step
         return None
+
+    def add_step(self, description: str, after_step_id: Optional[str] = None) -> TodoStep:
+        """Add a new step to the plan.
+
+        Args:
+            description: Description of the new step.
+            after_step_id: If provided, insert after this step. Otherwise append to end.
+
+        Returns:
+            The newly created TodoStep.
+        """
+        if after_step_id:
+            # Find the step to insert after
+            after_step = self.get_step_by_id(after_step_id)
+            if after_step:
+                insert_sequence = after_step.sequence + 1
+                # Re-sequence all steps at or after the insert position
+                for step in self.steps:
+                    if step.sequence >= insert_sequence:
+                        step.sequence += 1
+            else:
+                # Step not found, append to end
+                insert_sequence = len(self.steps) + 1
+        else:
+            # Append to end
+            insert_sequence = len(self.steps) + 1
+
+        new_step = TodoStep.create(sequence=insert_sequence, description=description)
+        self.steps.append(new_step)
+        # Sort steps by sequence for consistent ordering
+        self.steps.sort(key=lambda s: s.sequence)
+        return new_step
 
     def get_progress(self) -> Dict[str, Any]:
         """Get progress statistics for the plan."""
@@ -221,6 +255,8 @@ class TodoPlan:
             "steps": [s.to_dict() for s in self.steps],
             "current_step": self.current_step,
             "status": self.status.value,
+            "started": self.started,
+            "started_at": self.started_at,
             "completed_at": self.completed_at,
             "summary": self.summary,
             "context": self.context,
@@ -247,6 +283,8 @@ class TodoPlan:
             steps=steps,
             current_step=data.get("current_step"),
             status=status,
+            started=data.get("started", False),
+            started_at=data.get("started_at"),
             completed_at=data.get("completed_at"),
             summary=data.get("summary"),
             context=data.get("context", {}),

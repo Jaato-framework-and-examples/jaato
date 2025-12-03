@@ -191,3 +191,20 @@ class PluginRegistry:
             return None
 
         return "\n\n".join(instructions)
+
+    def get_auto_approved_tools(self) -> List[str]:
+        """Collect auto-approved tool names from all exposed plugins.
+
+        Returns:
+            List of tool names that should be whitelisted for permission checks.
+        """
+        tools = []
+        for name in self._exposed:
+            try:
+                if hasattr(self._plugins[name], 'get_auto_approved_tools'):
+                    auto_approved = self._plugins[name].get_auto_approved_tools()
+                    if auto_approved:
+                        tools.extend(auto_approved)
+            except Exception as exc:
+                print(f"[PluginRegistry] Error getting auto-approved tools from '{name}': {exc}")
+        return tools

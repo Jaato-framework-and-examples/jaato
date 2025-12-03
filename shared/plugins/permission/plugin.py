@@ -120,6 +120,19 @@ class PermissionPlugin:
         self._wrapped_executors.clear()
         self._original_executors.clear()
 
+    def add_whitelist_tools(self, tools: List[str]) -> None:
+        """Add tools to the permission whitelist.
+
+        Use this to programmatically whitelist tools that should be auto-approved,
+        such as those returned by plugins' get_auto_approved_tools().
+
+        Args:
+            tools: List of tool names to whitelist.
+        """
+        if self._policy and tools:
+            for tool in tools:
+                self._policy.whitelist_tools.add(tool)
+
     def get_function_declarations(self) -> List[types.FunctionDeclaration]:
         """Return function declarations for the askPermission tool.
 
@@ -174,6 +187,10 @@ The askPermission tool takes:
 
 It returns whether the tool is allowed and the reason for the decision.
 If a tool is denied, do not attempt to execute it."""
+
+    def get_auto_approved_tools(self) -> List[str]:
+        """Permission tools require permission - return empty list."""
+        return []
 
     def _execute_ask_permission(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the askPermission tool.

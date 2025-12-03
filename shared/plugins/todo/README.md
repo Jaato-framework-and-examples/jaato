@@ -43,15 +43,62 @@ The TODO plugin (`createPlan`, `updateStep`, `getPlanStatus`, `completePlan`) pr
   - **File**: Write progress to filesystem for external monitoring
 - **Persistent Storage**: In-memory, file-based, or hybrid storage options
 - **LLM Integration**: Exposed as tools the model can call during execution
+- **Auto-Approved**: Most TODO tools are auto-whitelisted (except `startPlan` which requires user approval)
 
 ## Tools Exposed
 
-| Tool | Description |
-|------|-------------|
-| `createPlan` | Register a new execution plan with ordered steps |
-| `updateStep` | Update status of a specific step (in_progress, completed, failed, skipped) |
-| `getPlanStatus` | Query current plan state and progress |
-| `completePlan` | Mark plan as completed, failed, or cancelled |
+| Tool | Description | Auto-Approved |
+|------|-------------|---------------|
+| `createPlan` | Register a new execution plan with ordered steps | ✓ |
+| `startPlan` | Request user approval before beginning execution | ✗ (requires permission) |
+| `updateStep` | Update status of a specific step (in_progress, completed, failed, skipped) | ✓ |
+| `addStep` | Add a new step to an existing plan (insert at position or append) | ✓ |
+| `getPlanStatus` | Query current plan state and progress | ✓ |
+| `completePlan` | Mark plan as completed, failed, or cancelled | ✓ |
+
+**Note:** `startPlan` intentionally requires user permission. This ensures the user can review and approve the proposed plan before the model begins execution.
+
+## Required Workflow
+
+The TODO plugin enforces a strict workflow to ensure proper plan management:
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  createPlan │────▶│  startPlan  │────▶│  updateStep │────▶│ completePlan│
+│  (Step 1)   │     │  (Step 2)   │     │  (Step 3)   │     │  (Step 4)   │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+                          │                    ▲
+                          │                    │
+                    User Approval         ┌────┴────┐
+                    Required              │ addStep │
+                                          │(optional)│
+                                          └─────────┘
+```
+
+### Workflow Rules
+
+1. **createPlan** - Register the execution plan with ordered steps
+2. **startPlan** - Request user approval (REQUIRED before any execution)
+3. **updateStep** - Report progress on each step (only after startPlan is approved)
+4. **addStep** - Add new steps if needed during execution
+5. **completePlan** - Mark plan as finished
+
+### Enforcement
+
+The plugin enforces these rules with guards:
+
+- `updateStep` and `addStep` will **reject** calls if `startPlan` was not approved
+- `completePlan` with status `completed` or `failed` will **reject** if plan was not started
+- Use status `cancelled` to end plans that the user rejected at `startPlan`
+
+### Error Messages
+
+| Condition | Error |
+|-----------|-------|
+| updateStep before startPlan | "Plan not started. Call startPlan first to get user approval." |
+| addStep before startPlan | "Plan not started. Call startPlan first to get user approval." |
+| completePlan(completed) before startPlan | "Cannot mark plan as 'completed' - plan was never started. Use 'cancelled' if the plan was rejected." |
+| startPlan on already started plan | "Plan already started. Proceed with updateStep." |
 
 ## Quick Start
 
@@ -91,6 +138,13 @@ When the model uses the TODO tools, the flow looks like:
 Model: I'll create a plan to refactor the auth module.
        [calls createPlan with title and steps]
 
+       [User sees plan displayed]
+
+Model: Ready to begin the refactoring.
+       [calls startPlan with message explaining the plan]
+
+       [User approves or denies - permission prompt shown]
+
 Model: Starting with step 1: analyzing current code.
        [calls updateStep with status: in_progress]
 
@@ -104,6 +158,18 @@ Model: Moving to step 2: designing new interface.
 
 Model: Refactoring complete!
        [calls completePlan with status: completed, summary: "Successfully refactored auth module"]
+```
+
+**If user denies at startPlan:**
+
+```
+Model: Ready to begin the refactoring.
+       [calls startPlan]
+
+       [User denies permission]
+
+Model: Understood, cancelling the plan.
+       [calls completePlan with status: cancelled, summary: "User declined execution"]
 ```
 
 ## Configuration
@@ -357,6 +423,8 @@ class TodoPlan:
     steps: List[TodoStep]     # Ordered steps
     current_step: Optional[int]  # Current sequence number
     status: PlanStatus        # active|completed|failed|cancelled
+    started: bool             # True after startPlan approved
+    started_at: Optional[str] # ISO8601 - when startPlan was approved
     completed_at: Optional[str]
     summary: Optional[str]    # Final outcome summary
     context: Dict[str, Any]   # Session context

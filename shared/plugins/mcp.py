@@ -111,6 +111,10 @@ class MCPToolPlugin:
 
         return "\n".join(lines)
 
+    def get_auto_approved_tools(self) -> List[str]:
+        """MCP tools require permission - return empty list."""
+        return []
+
     def _ensure_mcp_patch(self):
         """Lazily import mcp and apply the JSON-RPC validation patch."""
         if self._mcp_patch_applied:

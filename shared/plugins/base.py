@@ -51,3 +51,14 @@ class ToolPlugin(Protocol):
             A string with instructions, or None if no instructions are needed.
         """
         ...
+
+    def get_auto_approved_tools(self) -> List[str]:
+        """Return list of tool names that should be auto-approved without permission prompts.
+
+        Tools returned here will be added to the permission whitelist automatically.
+        Use this for tools that have no security implications (e.g., progress tracking).
+
+        Returns:
+            List of tool names, or empty list if all tools require permission.
+        """
+        ...
