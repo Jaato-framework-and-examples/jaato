@@ -262,6 +262,15 @@ class ReferencesPlugin:
                 if any(tag in s.tags for tag in filter_tags)
             ]
 
+        # Handle empty case with clear message
+        if not sources:
+            return {
+                "sources": [],
+                "total": 0,
+                "selected_count": 0,
+                "message": "No reference sources available."
+            }
+
         return {
             "sources": [
                 {
