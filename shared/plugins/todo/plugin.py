@@ -246,7 +246,11 @@ class TodoPlugin:
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the TODO plugin."""
         return (
-            "You have access to plan tracking tools. Follow this STRICT workflow:\n\n"
+            "You have access to plan tracking tools.\n\n"
+            "WHEN TO USE:\n"
+            "- Only use these tools if the user explicitly requests a plan\n"
+            "- Do NOT automatically create plans for every task\n"
+            "- If the user does not ask for a plan, just do the task directly\n\n"
             "BEFORE CREATING A PLAN:\n"
             "- Think carefully about what steps are actually needed to achieve the goal\n"
             "- Break down the task into minimal, concrete steps you can realistically complete\n"
@@ -261,6 +265,7 @@ class TodoPlugin:
             "5. completePlan - Mark plan as finished\n\n"
             "RULES:\n"
             "- You MUST call startPlan after createPlan and wait for approval\n"
+            "- You CANNOT execute ANY other tools until startPlan is approved by the user\n"
             "- You CANNOT call updateStep or addStep until startPlan is approved\n"
             "- Only use status='completed' or 'failed' for plans that were started\n"
             "- Use status='cancelled' for plans the user rejected\n\n"

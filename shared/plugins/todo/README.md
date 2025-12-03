@@ -75,6 +75,14 @@ The TODO plugin enforces a strict workflow to ensure proper plan management:
                                           └─────────┘
 ```
 
+### When to Use
+
+The model is instructed to:
+
+- Only use TODO tools if the user **explicitly requests a plan**
+- NOT automatically create plans for every task
+- Just do the task directly if no plan is requested
+
 ### Planning Quality
 
 Before creating a plan, the model is instructed to:
@@ -84,6 +92,13 @@ Before creating a plan, the model is instructed to:
 - Consider what tools and information are available
 - NOT propose plans it cannot achieve - be trustworthy
 - Make each step specific and actionable, not vague
+
+### Execution Blocking
+
+When a plan is created, the model is instructed to:
+
+- NOT execute ANY other tools until `startPlan` is approved by the user
+- Wait for the user to see and approve the plan before taking action
 
 ### Workflow Rules
 
