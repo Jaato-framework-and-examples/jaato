@@ -55,14 +55,14 @@ from shared.plugins.registry import PluginRegistry
 
 registry = PluginRegistry()
 registry.discover()
-registry.expose_tool("cli")
+registry.expose_all()  # CLI plugin is exposed by default
 ```
 
 ### With Extra Paths
 
 ```python
-registry.expose_tool("cli", {
-    "extra_paths": ["/usr/local/bin", "/opt/custom/bin"]
+registry.expose_all({
+    "cli": {"extra_paths": ["/usr/local/bin", "/opt/custom/bin"]}
 })
 ```
 
@@ -78,7 +78,7 @@ client.connect(project_id, location, model_name)
 
 registry = PluginRegistry()
 registry.discover()
-registry.expose_tool("cli")
+registry.expose_all()
 
 client.configure_tools(registry)
 response = client.send_message("List files in the current directory")

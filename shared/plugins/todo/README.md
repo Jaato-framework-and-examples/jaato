@@ -140,10 +140,11 @@ client = genai.Client(vertexai=True, project="my-project", location="us-central1
 # Set up plugin registry
 registry = PluginRegistry()
 registry.discover()
-registry.expose_tool("cli")
-registry.expose_tool("todo", {
-    "reporter_type": "console",
-    "storage_type": "memory"
+registry.expose_all({
+    "todo": {
+        "reporter_type": "console",
+        "storage_type": "memory"
+    }
 })
 
 # Run with TODO tracking
@@ -495,8 +496,9 @@ The TODO plugin works alongside the permission plugin:
 ```python
 registry = PluginRegistry()
 registry.discover()
-registry.expose_tool("cli")
-registry.expose_tool("todo", {"reporter_type": "console"})
+registry.expose_all({
+    "todo": {"reporter_type": "console"}
+})
 
 # Permission plugin can control access to TODO tools if needed
 permission_plugin = PermissionPlugin()

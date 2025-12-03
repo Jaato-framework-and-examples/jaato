@@ -79,7 +79,7 @@ from shared.plugins.registry import PluginRegistry
 
 registry = PluginRegistry()
 registry.discover()
-registry.expose_tool("mcp")
+registry.expose_all()  # MCP plugin is exposed by default
 ```
 
 ### With JaatoClient
@@ -92,7 +92,7 @@ client.connect(project_id, location, model_name)
 
 registry = PluginRegistry()
 registry.discover()
-registry.expose_tool("mcp")
+registry.expose_all()
 
 client.configure_tools(registry)
 response = client.send_message("Search for issues in the repository")

@@ -209,7 +209,7 @@ from shared.plugins import PluginRegistry
 
 registry = PluginRegistry()
 registry.discover()
-registry.expose_tool("references")
+registry.expose_all()  # References plugin is exposed by default
 
 # Get declarations and executors
 declarations = registry.get_exposed_declarations()
