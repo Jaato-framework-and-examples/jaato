@@ -1,12 +1,20 @@
 """Plugin registry for discovering, loading, and managing tool plugins."""
 
 import importlib
+import importlib.metadata
 import pkgutil
+import sys
 from pathlib import Path
 from typing import Dict, List, Set, Callable, Any, Optional
 from google.genai import types
 
 from .base import ToolPlugin
+
+# Entry point group name for jaato plugins
+# External packages can register plugins by adding to this group in their pyproject.toml:
+#   [project.entry-points."jaato.plugins"]
+#   my_plugin = "my_package.plugins:create_plugin"
+PLUGIN_ENTRY_POINT_GROUP = "jaato.plugins"
 
 
 class PluginRegistry:
@@ -35,11 +43,86 @@ class PluginRegistry:
         self._exposed: Set[str] = set()
         self._configs: Dict[str, Dict[str, Any]] = {}
 
-    def discover(self, plugin_dir: Optional[Path] = None) -> List[str]:
-        """Discover all plugins from the plugins directory.
+    def discover(self, include_directory: bool = True) -> List[str]:
+        """Discover plugins via entry points and optionally directory scanning.
 
-        Scans the plugin directory for Python modules that export a
-        `create_plugin()` factory function, and instantiates each plugin.
+        Discovery order:
+        1. Entry points (jaato.plugins group) - for installed packages
+        2. Directory scanning (optional) - for development/local plugins
+
+        Entry points allow external packages to register plugins:
+            [project.entry-points."jaato.plugins"]
+            my_plugin = "my_package.plugins:create_plugin"
+
+        Args:
+            include_directory: Also scan the plugins directory for local plugins.
+                             Useful during development when package isn't installed.
+                             Default: True
+
+        Returns:
+            List of discovered plugin names.
+        """
+        discovered = []
+
+        # First, discover via entry points (installed packages)
+        discovered.extend(self._discover_via_entry_points())
+
+        # Then, optionally scan the plugins directory (development mode)
+        if include_directory:
+            discovered.extend(self._discover_via_directory())
+
+        return discovered
+
+    def _discover_via_entry_points(self) -> List[str]:
+        """Discover plugins registered via entry points.
+
+        External packages can register plugins by adding to the jaato.plugins
+        entry point group in their pyproject.toml.
+
+        Returns:
+            List of discovered plugin names.
+        """
+        discovered = []
+
+        try:
+            # Python 3.10+ API
+            if sys.version_info >= (3, 10):
+                eps = importlib.metadata.entry_points(group=PLUGIN_ENTRY_POINT_GROUP)
+            else:
+                # Python 3.9 compatibility
+                all_eps = importlib.metadata.entry_points()
+                eps = all_eps.get(PLUGIN_ENTRY_POINT_GROUP, [])
+
+            for ep in eps:
+                # Skip if already loaded (avoid duplicates with directory scan)
+                if ep.name in self._plugins:
+                    continue
+
+                try:
+                    create_plugin = ep.load()
+                    plugin = create_plugin()
+
+                    if isinstance(plugin, ToolPlugin):
+                        self._plugins[plugin.name] = plugin
+                        discovered.append(plugin.name)
+                    else:
+                        print(f"[PluginRegistry] Entry point '{ep.name}': "
+                              f"plugin does not implement ToolPlugin protocol")
+
+                except Exception as exc:
+                    print(f"[PluginRegistry] Error loading entry point '{ep.name}': {exc}")
+
+        except Exception as exc:
+            # Entry points not available (package not installed)
+            pass
+
+        return discovered
+
+    def _discover_via_directory(self, plugin_dir: Optional[Path] = None) -> List[str]:
+        """Discover plugins by scanning the plugins directory.
+
+        This is the fallback/development mode discovery that scans for Python
+        modules with a create_plugin() factory function.
 
         Args:
             plugin_dir: Directory to scan. Defaults to this package's directory.
@@ -55,6 +138,10 @@ class PluginRegistry:
         for finder, name, ispkg in pkgutil.iter_modules([str(plugin_dir)]):
             # Skip internal modules
             if name.startswith('_') or name in ('base', 'registry'):
+                continue
+
+            # Skip if already loaded via entry points
+            if name in self._plugins:
                 continue
 
             try:
