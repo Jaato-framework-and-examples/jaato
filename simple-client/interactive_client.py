@@ -214,6 +214,10 @@ class InteractiveClient:
                 self._print_plan()
                 continue
 
+            if user_input.lower() == 'context':
+                self._print_context()
+                continue
+
             # Execute the prompt
             response = self.run_prompt(user_input)
             print(f"\nModel> {response}")
@@ -226,6 +230,7 @@ Commands:
   tools   - List available tools
   reset   - Clear conversation history
   history - Show full conversation history
+  context - Show context window usage
   plan    - Show current plan status
   quit    - Exit the client
 
@@ -291,6 +296,37 @@ Keyboard shortcuts:
             if step.error:
                 print(f"      ✗ {step.error}")
 
+        print()
+
+    def _print_context(self) -> None:
+        """Print context window usage statistics."""
+        if not self._jaato:
+            print("\n[Context tracking not available - client not initialized]")
+            return
+
+        usage = self._jaato.get_context_usage()
+
+        print(f"\n{'=' * 50}")
+        print(f"  Context Window Usage")
+        print(f"{'=' * 50}")
+        print(f"  Model: {usage['model']}")
+        print(f"  Context limit: {usage['context_limit']:,} tokens")
+        print()
+
+        # Visual progress bar
+        bar_width = 40
+        filled = int(bar_width * usage['percent_used'] / 100)
+        bar = '█' * filled + '░' * (bar_width - filled)
+        print(f"  [{bar}] {usage['percent_used']:.2f}%")
+        print()
+
+        # Token breakdown
+        print(f"  Tokens used:     {usage['total_tokens']:,}")
+        print(f"    - Prompt:      {usage['prompt_tokens']:,}")
+        print(f"    - Output:      {usage['output_tokens']:,}")
+        print(f"  Tokens remaining: {usage['tokens_remaining']:,}")
+        print(f"  Turns: {usage['turns']}")
+        print(f"{'=' * 50}")
         print()
 
     def _print_history(self) -> None:
