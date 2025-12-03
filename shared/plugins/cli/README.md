@@ -4,7 +4,7 @@ The CLI plugin provides the `cli_based_tool` function for executing local shell 
 
 ## Overview
 
-This plugin allows models to run shell commands on the local machine via subprocess. Commands are executed without a shell (using `subprocess.run` with a list), which ensures proper argument handling and avoids shell injection vulnerabilities.
+This plugin allows models to run shell commands on the local machine via subprocess. Simple commands are executed without a shell for safety, while commands requiring shell features (pipes, redirections, command chaining) are automatically detected and executed through the shell.
 
 ## Tool Declaration
 
@@ -115,11 +115,41 @@ If an executable is not found:
 }
 ```
 
+### Shell Commands
+
+The plugin automatically detects when a command requires shell interpretation and switches to shell mode. This happens when the command contains:
+
+| Shell Feature | Example | Description |
+|---------------|---------|-------------|
+| Pipes | `ls \| grep foo` | Pass output between commands |
+| Redirections | `echo hello > file.txt` | Redirect input/output |
+| Command chaining | `cd /tmp && ls` | Run commands in sequence |
+| OR chaining | `cmd1 \|\| cmd2` | Run cmd2 if cmd1 fails |
+| Semicolon | `echo a; echo b` | Run commands sequentially |
+| Command substitution | `echo $(date)` | Embed command output |
+| Background | `sleep 10 &` | Run in background |
+
+**Examples:**
+```python
+# Find oldest file (uses pipe)
+cli_based_tool(command="ls -t | tail -1")
+
+# Filter output (uses pipe)
+cli_based_tool(command="ls -la | grep '.py'")
+
+# Chain commands (uses &&)
+cli_based_tool(command="cd /tmp && ls -la")
+
+# Redirect to file (uses >)
+cli_based_tool(command="echo 'hello' > /tmp/test.txt")
+```
+
 ## Security Considerations
 
-1. **No shell execution**: Commands run via subprocess list, not shell string
+1. **Shell auto-detection**: Simple commands run without shell (safer), shell is only used when required for pipes/redirections
 2. **No automatic approval**: Plugin returns empty `get_auto_approved_tools()` - all executions require permission
 3. **PATH isolation**: Only configured paths are searched for executables
+4. **Permission plugin integration**: Use the permission plugin to whitelist/blacklist specific commands
 
 ### Recommended: Use with Permission Plugin
 
@@ -152,6 +182,12 @@ Example usage:
 - Read a file: cli_based_tool(command="cat /path/to/file")
 - Check git status: cli_based_tool(command="git status")
 - Search for text: cli_based_tool(command="grep -r 'pattern' /path")
+
+Shell features like pipes and redirections are supported:
+- Filter output: cli_based_tool(command="ls -la | grep '.py'")
+- Chain commands: cli_based_tool(command="cd /tmp && ls -la")
+- Redirect output: cli_based_tool(command="echo 'hello' > /tmp/test.txt")
+- Find oldest file: cli_based_tool(command="ls -t | tail -1")
 
 The tool returns stdout, stderr, and returncode from the executed command.
 ```

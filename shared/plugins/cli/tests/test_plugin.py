@@ -162,3 +162,100 @@ class TestCLIPluginExecution:
 
         assert "error" not in result
         assert result["returncode"] == 0
+
+
+class TestCLIPluginShellDetection:
+    """Tests for shell metacharacter detection."""
+
+    def test_requires_shell_simple_command(self):
+        """Simple commands should not require shell."""
+        plugin = CLIToolPlugin()
+        assert plugin._requires_shell("echo hello") is False
+        assert plugin._requires_shell("ls -la") is False
+        assert plugin._requires_shell("git status") is False
+
+    def test_requires_shell_pipe(self):
+        """Commands with pipes require shell."""
+        plugin = CLIToolPlugin()
+        assert plugin._requires_shell("ls | grep foo") is True
+        assert plugin._requires_shell("cat file.txt | head -5") is True
+
+    def test_requires_shell_redirection(self):
+        """Commands with redirections require shell."""
+        plugin = CLIToolPlugin()
+        assert plugin._requires_shell("echo hello > file.txt") is True
+        assert plugin._requires_shell("echo hello >> file.txt") is True
+        assert plugin._requires_shell("cat < input.txt") is True
+
+    def test_requires_shell_command_chaining(self):
+        """Commands with chaining require shell."""
+        plugin = CLIToolPlugin()
+        assert plugin._requires_shell("cd /tmp && ls") is True
+        assert plugin._requires_shell("ls || echo 'failed'") is True
+        assert plugin._requires_shell("echo a; echo b") is True
+
+    def test_requires_shell_command_substitution(self):
+        """Commands with substitution require shell."""
+        plugin = CLIToolPlugin()
+        assert plugin._requires_shell("echo $(date)") is True
+        assert plugin._requires_shell("echo `date`") is True
+
+    def test_requires_shell_background(self):
+        """Commands with background execution require shell."""
+        plugin = CLIToolPlugin()
+        assert plugin._requires_shell("sleep 10 &") is True
+
+
+class TestCLIPluginShellExecution:
+    """Tests for shell command execution."""
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
+    def test_execute_pipe_command(self):
+        """Test executing a command with pipe."""
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+
+        result = plugin._execute({"command": "echo 'hello world' | grep hello"})
+
+        assert "error" not in result
+        assert result["returncode"] == 0
+        assert "hello" in result["stdout"]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
+    def test_execute_command_chaining(self):
+        """Test executing chained commands with &&."""
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+
+        result = plugin._execute({"command": "echo 'first' && echo 'second'"})
+
+        assert "error" not in result
+        assert result["returncode"] == 0
+        assert "first" in result["stdout"]
+        assert "second" in result["stdout"]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
+    def test_execute_pipe_with_head(self):
+        """Test executing pipe with head to limit output."""
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+
+        result = plugin._execute({"command": "echo -e 'a\\nb\\nc\\nd\\ne' | head -2"})
+
+        assert "error" not in result
+        assert result["returncode"] == 0
+        # Should only have first two lines
+        lines = result["stdout"].strip().split('\n')
+        assert len(lines) == 2
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
+    def test_execute_command_substitution(self):
+        """Test executing command with substitution."""
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+
+        result = plugin._execute({"command": "echo $(echo nested)"})
+
+        assert "error" not in result
+        assert result["returncode"] == 0
+        assert "nested" in result["stdout"]
