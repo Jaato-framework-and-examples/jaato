@@ -88,6 +88,31 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Interactive Client
+
+The interactive client provides a conversational interface with multi-turn support and permission prompts:
+
+```bash
+# Start interactive session
+.venv/bin/python simple-client/interactive_client.py
+
+# Start with an initial prompt, then continue interactively
+.venv/bin/python simple-client/interactive_client.py -i "List files in current directory"
+
+# Run a single prompt and exit (non-interactive)
+.venv/bin/python simple-client/interactive_client.py -p "What time is it?"
+```
+
+Features:
+- **Multi-turn conversations** with context preservation
+- **Permission prompts** for tool execution approval
+- **Plan tracking** with the TODO plugin for complex tasks
+- **Readline history** with ↑/↓ navigation
+
+Commands in interactive mode: `help`, `tools`, `reset`, `history`, `plan`, `quit`
+
+See [simple-client/README.md](simple-client/README.md) for full documentation.
+
 ### CLI vs MCP Harness
 
 Compare token usage between CLI and MCP tool approaches:
