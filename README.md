@@ -28,12 +28,21 @@ jaato is a sandbox for experimenting with:
 ## Features
 
 - **Plugin Architecture** - Extensible system for adding new tool types
-- **CLI Tool Execution** - Run local command-line tools via subprocess
-- **MCP Server Support** - Connect to multiple MCP servers and auto-discover their tools
 - **Token Ledger** - JSONL logging of all API calls with token counts
 - **Rate Limit Handling** - Exponential backoff retry for transient errors
 - **Prompt Templates** - Domain-specific templates for different use cases
 - **Trace Visualization** - Generate sequence diagrams from execution traces
+
+### Available Plugins
+
+| Plugin | Description |
+|--------|-------------|
+| **cli** | Execute local command-line tools via subprocess |
+| **mcp** | Connect to MCP (Model Context Protocol) servers and auto-discover their tools |
+| **permission** | Control tool execution with blacklist/whitelist policies and interactive approval |
+| **todo** | Plan tracking with workflow enforcement for complex multi-step tasks |
+
+See [shared/plugins/README.md](shared/plugins/README.md) for plugin development documentation.
 
 ## Prerequisites
 
