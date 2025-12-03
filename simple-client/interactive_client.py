@@ -167,8 +167,13 @@ class InteractiveClient:
             self._jaato.reset_session()
         self.log("[client] Conversation history cleared")
 
-    def run_interactive(self) -> None:
-        """Run the interactive prompt loop with multi-turn conversation."""
+    def run_interactive(self, clear_history: bool = True) -> None:
+        """Run the interactive prompt loop with multi-turn conversation.
+
+        Args:
+            clear_history: If True (default), clears conversation history at start.
+                          Set to False when continuing from an initial prompt.
+        """
         print("\n" + "=" * 60)
         print("  Simple Interactive Client with Permission Prompts")
         print("=" * 60)
@@ -177,8 +182,9 @@ class InteractiveClient:
         print("Use ↑/↓ arrows to navigate prompt history.")
         print("Type 'quit' or 'exit' to stop, 'help' for guidance.\n")
 
-        # Clear history at start of interactive session
-        self.clear_history()
+        # Clear history at start of interactive session (unless continuing from initial prompt)
+        if clear_history:
+            self.clear_history()
 
         while True:
             try:
@@ -438,6 +444,11 @@ def main():
         type=str,
         help="Run a single prompt and exit (non-interactive mode)"
     )
+    parser.add_argument(
+        "--initial-prompt", "-i",
+        type=str,
+        help="Start with this prompt, then continue interactively"
+    )
     args = parser.parse_args()
 
     client = InteractiveClient(
@@ -450,9 +461,14 @@ def main():
 
     try:
         if args.prompt:
-            # Single prompt mode
+            # Single prompt mode - run and exit
             response = client.run_prompt(args.prompt)
             print(f"\n{response}")
+        elif args.initial_prompt:
+            # Initial prompt mode - run prompt then continue interactively
+            response = client.run_prompt(args.initial_prompt)
+            print(f"\nModel> {response}")
+            client.run_interactive(clear_history=False)
         else:
             # Interactive mode
             client.run_interactive()
