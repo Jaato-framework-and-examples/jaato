@@ -92,26 +92,19 @@ class InteractiveClient:
         discovered = self.registry.discover()
         self.log(f"[client] Found plugins: {discovered}")
 
-        # Expose CLI plugin (MCP is optional based on .mcp.json)
-        if "cli" in discovered:
-            self.registry.expose_tool("cli")
-            self.log("[client] CLI plugin enabled")
-
-        if "mcp" in discovered:
-            try:
-                self.registry.expose_tool("mcp")
-                self.log("[client] MCP plugin enabled")
-            except Exception as e:
-                self.log(f"[client] MCP plugin skipped: {e}")
-
-        # Expose TODO plugin with console reporter for plan tracking
-        if "todo" in discovered:
-            self.registry.expose_tool("todo", {
+        # Expose all discovered plugins with specific configs where needed
+        plugin_configs = {
+            "todo": {
                 "reporter_type": "console",
                 "storage_type": "memory",
-            })
-            self.todo_plugin = self.registry.get_plugin("todo")
-            self.log("[client] TODO plugin enabled - plan tracking available")
+            },
+            "references": {
+                "actor_type": "console",
+            },
+        }
+        self.registry.expose_all(plugin_configs)
+        self.todo_plugin = self.registry.get_plugin("todo")
+        self.log(f"[client] Enabled plugins: {self.registry.list_exposed()}")
 
         # Initialize permission plugin with console actor
         self.log("[client] Initializing permission plugin with console actor...")
