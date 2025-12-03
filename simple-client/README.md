@@ -37,9 +37,21 @@ This client allows you to:
 
 ### Single Prompt Mode
 
+Run a single prompt and exit (useful for scripting):
+
 ```bash
-.venv/bin/python simple-client/interactive_client.py --env-file .env --prompt "List files in current directory"
+.venv/bin/python simple-client/interactive_client.py -p "List files in current directory"
 ```
+
+### Initial Prompt Mode
+
+Start with a prompt, then continue interactively. This preserves conversation history so you can respond to follow-up questions from the model:
+
+```bash
+.venv/bin/python simple-client/interactive_client.py -i "Refactor the auth module"
+```
+
+This is useful when the model might ask "How would you like to proceed?" or needs clarification.
 
 ## Commands
 
@@ -51,6 +63,7 @@ In interactive mode, the following commands are available:
 | `tools` | List available tools |
 | `reset` | Clear conversation history (start fresh) |
 | `history` | Show full conversation history |
+| `plan` | Show current plan status (if using TODO plugin) |
 | `quit` / `exit` / `q` | Exit the client |
 
 ### Keyboard Shortcuts

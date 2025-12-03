@@ -43,15 +43,87 @@ The TODO plugin (`createPlan`, `updateStep`, `getPlanStatus`, `completePlan`) pr
   - **File**: Write progress to filesystem for external monitoring
 - **Persistent Storage**: In-memory, file-based, or hybrid storage options
 - **LLM Integration**: Exposed as tools the model can call during execution
+- **Auto-Approved**: Most TODO tools are auto-whitelisted (except `startPlan` which requires user approval)
 
 ## Tools Exposed
 
-| Tool | Description |
-|------|-------------|
-| `createPlan` | Register a new execution plan with ordered steps |
-| `updateStep` | Update status of a specific step (in_progress, completed, failed, skipped) |
-| `getPlanStatus` | Query current plan state and progress |
-| `completePlan` | Mark plan as completed, failed, or cancelled |
+| Tool | Description | Auto-Approved |
+|------|-------------|---------------|
+| `createPlan` | Register a new execution plan with ordered steps | ✓ |
+| `startPlan` | Request user approval before beginning execution | ✗ (requires permission) |
+| `updateStep` | Update status of a specific step (in_progress, completed, failed, skipped) | ✓ |
+| `addStep` | Add a new step to an existing plan (insert at position or append) | ✓ |
+| `getPlanStatus` | Query current plan state and progress | ✓ |
+| `completePlan` | Mark plan as completed, failed, or cancelled | ✓ |
+
+**Note:** `startPlan` intentionally requires user permission. This ensures the user can review and approve the proposed plan before the model begins execution.
+
+## Required Workflow
+
+The TODO plugin enforces a strict workflow to ensure proper plan management:
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  createPlan │────▶│  startPlan  │────▶│  updateStep │────▶│ completePlan│
+│  (Step 1)   │     │  (Step 2)   │     │  (Step 3)   │     │  (Step 4)   │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+                          │                    ▲
+                          │                    │
+                    User Approval         ┌────┴────┐
+                    Required              │ addStep │
+                                          │(optional)│
+                                          └─────────┘
+```
+
+### When to Use
+
+The model is instructed to:
+
+- Only use TODO tools if the user **explicitly requests a plan**
+- NOT automatically create plans for every task
+- Just do the task directly if no plan is requested
+
+### Planning Quality
+
+Before creating a plan, the model is instructed to:
+
+- Think carefully about what steps are actually needed to achieve the goal
+- Break down the task into minimal, concrete steps it can realistically complete
+- Consider what tools and information are available
+- NOT propose plans it cannot achieve - be trustworthy
+- Make each step specific and actionable, not vague
+
+### Execution Blocking
+
+When a plan is created, the model is instructed to:
+
+- NOT execute ANY other tools until `startPlan` is approved, unless necessary to compose the plan
+- Wait for the user to see and approve the plan before taking action
+
+### Workflow Rules
+
+1. **createPlan** - Register the execution plan with ordered steps
+2. **startPlan** - Request user approval (REQUIRED before any execution)
+3. **updateStep** - Report progress on each step (only after startPlan is approved)
+4. **addStep** - Add new steps if needed during execution
+5. **completePlan** - Mark plan as finished
+
+### Enforcement
+
+The plugin enforces these rules with guards:
+
+- `updateStep` and `addStep` will **reject** calls if `startPlan` was not approved
+- `completePlan` with status `completed` or `failed` will **reject** if plan was not started
+- Use status `cancelled` to end plans that the user rejected at `startPlan`
+
+### Error Messages
+
+| Condition | Error |
+|-----------|-------|
+| updateStep before startPlan | "Plan not started. Call startPlan first to get user approval." |
+| addStep before startPlan | "Plan not started. Call startPlan first to get user approval." |
+| completePlan(completed) before startPlan | "Cannot mark plan as 'completed' - plan was never started. Use 'cancelled' if the plan was rejected." |
+| startPlan on already started plan | "Plan already started. Proceed with updateStep." |
 
 ## Quick Start
 
@@ -91,6 +163,13 @@ When the model uses the TODO tools, the flow looks like:
 Model: I'll create a plan to refactor the auth module.
        [calls createPlan with title and steps]
 
+       [User sees plan displayed]
+
+Model: Ready to begin the refactoring.
+       [calls startPlan with message explaining the plan]
+
+       [User approves or denies - permission prompt shown]
+
 Model: Starting with step 1: analyzing current code.
        [calls updateStep with status: in_progress]
 
@@ -105,6 +184,23 @@ Model: Moving to step 2: designing new interface.
 Model: Refactoring complete!
        [calls completePlan with status: completed, summary: "Successfully refactored auth module"]
 ```
+
+**If user denies at startPlan:**
+
+```
+Model: Ready to begin the refactoring.
+       [calls startPlan]
+
+       [User denies permission]
+
+Model: Understood, cancelling the plan.
+       [calls completePlan with status: cancelled, summary: "User declined execution"]
+
+Model: How would you like me to proceed? I can work on this without plan tracking,
+       or you can tell me what you'd prefer instead.
+```
+
+**Important:** When `startPlan` is denied, the model must NOT create a new plan and retry. A denial means the user doesn't want plan tracking for this task. The model should cancel the plan and either ask the user how to proceed or continue without plan tracking.
 
 ## Configuration
 
@@ -357,6 +453,8 @@ class TodoPlan:
     steps: List[TodoStep]     # Ordered steps
     current_step: Optional[int]  # Current sequence number
     status: PlanStatus        # active|completed|failed|cancelled
+    started: bool             # True after startPlan approved
+    started_at: Optional[str] # ISO8601 - when startPlan was approved
     completed_at: Optional[str]
     summary: Optional[str]    # Final outcome summary
     context: Dict[str, Any]   # Session context

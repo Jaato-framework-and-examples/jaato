@@ -111,6 +111,10 @@ class JaatoClient:
             # Also register askPermission tool
             for name, fn in permission_plugin.get_executors().items():
                 self._executor.register(name, fn)
+            # Whitelist auto-approved tools from plugins
+            auto_approved = registry.get_auto_approved_tools()
+            if auto_approved:
+                permission_plugin.add_whitelist_tools(auto_approved)
 
         # Build tool declarations
         all_decls = registry.get_exposed_declarations()

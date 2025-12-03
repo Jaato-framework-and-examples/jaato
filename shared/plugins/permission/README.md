@@ -157,6 +157,23 @@ export PERMISSION_WEBHOOK_TOKEN=secret-token  # For webhook actor
 python cli_vs_mcp/cli_mcp_harness.py --scenarios get_page
 ```
 
+### Programmatic Whitelist Management
+
+Plugins can declare tools that should be auto-approved via `get_auto_approved_tools()`. When using `JaatoClient.configure_tools()`, these are automatically added to the permission whitelist:
+
+```python
+# This happens automatically in configure_tools():
+auto_approved = registry.get_auto_approved_tools()
+permission_plugin.add_whitelist_tools(auto_approved)
+```
+
+You can also manually add tools to the whitelist:
+
+```python
+# Add specific tools to whitelist
+permission_plugin.add_whitelist_tools(['tool1', 'tool2'])
+```
+
 ## Permission Config Parameter
 
 The `permission_config` parameter passed to `run_single_prompt()` (or directly to `PermissionPlugin.initialize()`) controls how the plugin is configured.
