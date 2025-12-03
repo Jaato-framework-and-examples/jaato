@@ -466,6 +466,7 @@ def main():
             print(f"\n{response}")
         elif args.initial_prompt:
             # Initial prompt mode - run prompt then continue interactively
+            readline.add_history(args.initial_prompt)  # Add to history for ↑ recall
             response = client.run_prompt(args.initial_prompt)
             print(f"\nModel> {response}")
             client.run_interactive(clear_history=False)
