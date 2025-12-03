@@ -67,12 +67,14 @@ Create a `references.json` file in your project root or home directory:
 
 ### Source Types
 
+The `type` field is **required** for each source. It determines which additional fields are needed:
+
 | Type | Description | Required Fields |
 |------|-------------|-----------------|
-| `local` | Local file on filesystem | `path` |
-| `url` | HTTP/HTTPS URL | `url` |
-| `mcp` | MCP server tool call | `server`, `tool`, optionally `args` |
-| `inline` | Content embedded in config | `content` |
+| `local` | Local file on filesystem | `type`, `path` |
+| `url` | HTTP/HTTPS URL | `type`, `url` |
+| `mcp` | MCP server tool call | `type`, `server`, `tool`, optionally `args` |
+| `inline` | Content embedded in config | `type`, `content` |
 
 ### Injection Modes
 
