@@ -346,6 +346,10 @@ class ReferencesPlugin:
                 "Use `selectReferences` when you encounter topics matching these tags",
                 "to request user selection of relevant documentation.",
                 "",
+                "When reporting sources from listReferences, always indicate selection status:",
+                "- 'available but unselected' for sources not yet selected by the user",
+                "- 'selected' for sources the user has chosen to include",
+                "",
                 "Available tags: " + ", ".join(
                     sorted(set(tag for s in selectable for tag in s.tags))
                 ),
