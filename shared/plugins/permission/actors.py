@@ -177,15 +177,28 @@ class ConsoleActor(Actor):
         if not self._skip_readline_history:
             return self._input_func()
 
-        history_len_before = readline.get_current_history_length()
-        result = self._input_func()
-        history_len_after = readline.get_current_history_length()
+        # Check if readline supports history manipulation (not available on all platforms)
+        has_history_support = (
+            hasattr(readline, 'get_current_history_length') and
+            hasattr(readline, 'remove_history_item')
+        )
 
-        # Remove the entry if history grew
-        if history_len_after > history_len_before:
-            readline.remove_history_item(history_len_after - 1)
+        if not has_history_support:
+            return self._input_func()
 
-        return result
+        try:
+            history_len_before = readline.get_current_history_length()
+            result = self._input_func()
+            history_len_after = readline.get_current_history_length()
+
+            # Remove the entry if history grew
+            if history_len_after > history_len_before:
+                readline.remove_history_item(history_len_after - 1)
+
+            return result
+        except (AttributeError, OSError):
+            # Fallback if readline operations fail
+            return self._input_func()
 
     @property
     def name(self) -> str:
