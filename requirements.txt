@@ -6,4 +6,5 @@ google-api-core
 google-auth
 certifi
 python-dotenv
+pyreadline3
 reportlab
