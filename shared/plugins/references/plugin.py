@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from google.genai import types
 
 from .models import ReferenceSource, InjectionMode
-from .actors import SelectionActor, ConsoleActor, create_actor
+from .actors import SelectionActor, ConsoleSelectionActor, create_actor
 from .config_loader import load_config, ReferencesConfig
 
 
@@ -96,7 +96,7 @@ class ReferencesPlugin:
             # Fall back to console actor if configured actor fails
             print(f"Warning: Failed to initialize {actor_type} actor: {e}")
             print("Falling back to console actor")
-            self._actor = ConsoleActor()
+            self._actor = ConsoleSelectionActor()
             self._actor.initialize({})
 
         self._selected_source_ids = []
