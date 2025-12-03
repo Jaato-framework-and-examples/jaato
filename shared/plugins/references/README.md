@@ -13,7 +13,20 @@ The model is responsible for fetching content using existing tools (CLI for loca
 
 ## Configuration
 
-Create a `references.json` file in your project root or home directory:
+### Config File Location
+
+The plugin searches for the config file in the following order:
+
+1. Path specified via `REFERENCES_CONFIG_PATH` environment variable
+2. `./references.json` (current working directory)
+3. `./.references.json` (hidden file in current working directory)
+4. `~/.config/jaato/references.json` (user config directory)
+
+The first file found is used. If no file is found, the plugin initializes with an empty source list.
+
+### Config File Format
+
+Create a `references.json` file:
 
 ```json
 {
