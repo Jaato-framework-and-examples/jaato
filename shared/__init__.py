@@ -26,7 +26,7 @@ from .ai_tool_runner import (
 )
 
 # Core client
-from .jaato_client import JaatoClient
+from .jaato_client import JaatoClient, MODEL_CONTEXT_LIMITS, DEFAULT_CONTEXT_LIMIT
 
 # Plugin system
 from .plugins.registry import PluginRegistry
@@ -51,6 +51,8 @@ __all__ = [
     "extract_text_from_parts",
     # Core client
     "JaatoClient",
+    "MODEL_CONTEXT_LIMITS",
+    "DEFAULT_CONTEXT_LIMIT",
     # Plugin system
     "PluginRegistry",
     "PermissionPlugin",

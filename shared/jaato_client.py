@@ -13,6 +13,31 @@ from google.genai import types
 from .ai_tool_runner import ToolExecutor
 from .token_accounting import TokenLedger
 
+# Context window limits for known Gemini models (total tokens)
+# These are approximate limits; actual limits may vary by API version
+MODEL_CONTEXT_LIMITS: Dict[str, int] = {
+    # Gemini 2.5 models
+    "gemini-2.5-pro": 1_048_576,
+    "gemini-2.5-pro-preview-05-06": 1_048_576,
+    "gemini-2.5-flash": 1_048_576,
+    "gemini-2.5-flash-preview-04-17": 1_048_576,
+    # Gemini 2.0 models
+    "gemini-2.0-flash": 1_048_576,
+    "gemini-2.0-flash-exp": 1_048_576,
+    "gemini-2.0-flash-lite": 1_048_576,
+    # Gemini 1.5 models
+    "gemini-1.5-pro": 2_097_152,
+    "gemini-1.5-pro-latest": 2_097_152,
+    "gemini-1.5-flash": 1_048_576,
+    "gemini-1.5-flash-latest": 1_048_576,
+    # Gemini 1.0 models (legacy)
+    "gemini-1.0-pro": 32_760,
+    "gemini-pro": 32_760,
+}
+
+# Default context limit for unknown models
+DEFAULT_CONTEXT_LIMIT = 1_048_576
+
 if TYPE_CHECKING:
     from .plugins.registry import PluginRegistry
     from .plugins.permission import PermissionPlugin
@@ -303,6 +328,61 @@ class JaatoClient:
         """
         return list(self._turn_accounting)
 
+    def get_context_limit(self) -> int:
+        """Get the context window limit for the current model.
+
+        Returns:
+            The context window size in tokens.
+        """
+        if not self._model_name:
+            return DEFAULT_CONTEXT_LIMIT
+
+        # Try exact match first
+        if self._model_name in MODEL_CONTEXT_LIMITS:
+            return MODEL_CONTEXT_LIMITS[self._model_name]
+
+        # Try prefix matching for versioned model names
+        for model_prefix, limit in MODEL_CONTEXT_LIMITS.items():
+            if self._model_name.startswith(model_prefix):
+                return limit
+
+        return DEFAULT_CONTEXT_LIMIT
+
+    def get_context_usage(self) -> Dict[str, Any]:
+        """Get context window usage statistics.
+
+        Returns:
+            Dict containing:
+            - model: The model name
+            - context_limit: Maximum context window size
+            - total_tokens: Total tokens used in session
+            - prompt_tokens: Total prompt/input tokens
+            - output_tokens: Total output/completion tokens
+            - turns: Number of conversation turns
+            - percent_used: Percentage of context window used
+            - tokens_remaining: Tokens remaining in context window
+        """
+        turn_accounting = self.get_turn_accounting()
+
+        total_prompt = sum(t['prompt'] for t in turn_accounting)
+        total_output = sum(t['output'] for t in turn_accounting)
+        total_tokens = sum(t['total'] for t in turn_accounting)
+
+        context_limit = self.get_context_limit()
+        percent_used = (total_tokens / context_limit * 100) if context_limit > 0 else 0
+        tokens_remaining = max(0, context_limit - total_tokens)
+
+        return {
+            'model': self._model_name or 'unknown',
+            'context_limit': context_limit,
+            'total_tokens': total_tokens,
+            'prompt_tokens': total_prompt,
+            'output_tokens': total_output,
+            'turns': len(turn_accounting),
+            'percent_used': percent_used,
+            'tokens_remaining': tokens_remaining,
+        }
+
     def reset_session(self, history: Optional[List[types.Content]] = None) -> None:
         """Reset the chat session, optionally with modified history.
 
@@ -417,4 +497,4 @@ class JaatoClient:
         return response.text if response.text else ''
 
 
-__all__ = ['JaatoClient']
+__all__ = ['JaatoClient', 'MODEL_CONTEXT_LIMITS', 'DEFAULT_CONTEXT_LIMIT']
