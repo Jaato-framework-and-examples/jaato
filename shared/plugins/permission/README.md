@@ -52,20 +52,18 @@ The permission plugin is unique - it has two distinct roles controlled separatel
 | Role | Purpose | Control |
 |------|---------|---------|
 | **Middleware** | Enforces permissions on ALL tool executions | `executor.set_permission_plugin()` |
-| **Plugin** | Exposes `askPermission` tool for model to query | `registry.expose_tool("permission")` |
+| **Plugin** | Exposes `askPermission` tool for model to query | Exposed by default via `registry.expose_all()` |
 
 ```python
-# 1. Other plugins expose their tools via registry
-registry.expose_tool("cli", {"extra_paths": ["/usr/local/bin"]})
-registry.expose_tool("mcp", {"config_path": ".mcp.json"})
+# 1. All plugins are exposed by default (including permission)
+registry.expose_all({
+    "cli": {"extra_paths": ["/usr/local/bin"]},
+})
 
 # 2. Permission plugin as MIDDLEWARE (enforcement layer)
 permission_plugin = PermissionPlugin()
 permission_plugin.initialize(config)
 executor.set_permission_plugin(permission_plugin)
-
-# 3. Permission plugin as PLUGIN (optional - exposes askPermission tool)
-registry.expose_tool("permission")  # Only if you want model to query permissions
 ```
 
 **As middleware** (via `set_permission_plugin`):
@@ -74,10 +72,11 @@ registry.expose_tool("permission")  # Only if you want model to query permission
 - MCP plugin tools (any MCP server tool) → checked
 - `askPermission` tool → always allowed (to prevent deadlock)
 
-**As plugin** (via `registry.expose_tool("permission")`):
+**As plugin** (via `registry.expose_all()`):
 - Exposes `askPermission` tool so the model can proactively query permissions
-- Optional - enforcement works without exposing this tool
+- Exposed by default with all other plugins
 - Useful when you want the model to check before attempting blocked actions
+- Can be unexposed via `registry.unexpose_tool("permission")` if not needed
 
 ## Client Integration
 
@@ -95,8 +94,7 @@ client = genai.Client(vertexai=True, project="my-project", location="us-central1
 # Set up plugin registry
 registry = PluginRegistry()
 registry.discover()
-registry.expose_tool("cli")
-registry.expose_tool("mcp", {"config_path": ".mcp.json"})
+registry.expose_all()  # All plugins exposed by default
 
 # Create permission plugin
 permission_plugin = PermissionPlugin()
@@ -220,28 +218,29 @@ The permission plugin has two distinct roles that are controlled independently:
 | Role | Description | Control |
 |------|-------------|---------|
 | **Permission enforcement** | Wraps `ToolExecutor.execute()` to check permissions before any tool runs | `executor.set_permission_plugin(plugin)` |
-| **askPermission tool** | Exposes a tool for the model to proactively query permissions | `registry.expose_tool("permission")` |
+| **askPermission tool** | Exposes a tool for the model to proactively query permissions | Exposed by default via `registry.expose_all()` |
 
-**Enforcement only (no tool exposed to model):**
+**Both enforcement and proactive tool (default):**
 ```python
+# All plugins exposed by default (including permission)
+registry.expose_all()
+
 # Initialize and set permission plugin for enforcement
 permission_plugin = PermissionPlugin()
 permission_plugin.initialize({"config_path": "permissions.json"})
 executor.set_permission_plugin(permission_plugin)
-
-# Don't expose the permission plugin's askPermission tool
-# registry.expose_tool("permission")  # <-- NOT called
 ```
 
-**Both enforcement and proactive tool:**
+**Enforcement only (no askPermission tool exposed to model):**
 ```python
+# Expose all plugins, then unexpose permission
+registry.expose_all()
+registry.unexpose_tool("permission")
+
 # Initialize and set permission plugin for enforcement
 permission_plugin = PermissionPlugin()
 permission_plugin.initialize({"config_path": "permissions.json"})
 executor.set_permission_plugin(permission_plugin)
-
-# Also expose askPermission tool to the model
-registry.expose_tool("permission")
 ```
 
 Use enforcement-only when you want:
