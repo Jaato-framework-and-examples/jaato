@@ -136,6 +136,56 @@ sequenceDiagram
 
 ## Plugin System Architecture
 
+The framework supports two distinct plugin systems with different purposes:
+
+### Plugin Kind Identification
+
+Each plugin module declares its kind via a `PLUGIN_KIND` constant:
+
+```python
+# Tool plugins (for model function calling)
+PLUGIN_KIND = "tool"
+
+# GC plugins (for context garbage collection)
+PLUGIN_KIND = "gc"
+```
+
+Entry point groups are mapped by plugin kind:
+- `"tool"` → `jaato.plugins`
+- `"gc"` → `jaato.gc_plugins`
+
+### Tool Plugins (PluginRegistry)
+
+Tool plugins implement the `ToolPlugin` protocol and provide capabilities for model function calling. They are managed by `PluginRegistry`:
+
+```python
+registry = PluginRegistry()
+registry.discover(plugin_kind="tool")  # Default behavior
+registry.expose_tool('cli')
+```
+
+Tool plugins can provide:
+- **Function declarations** for model function calling
+- **Executors** that run when the model invokes tools
+- **System instructions** to guide model behavior
+- **User commands** for direct user invocation (bypassing the model)
+
+### GC Plugins (Separate System)
+
+GC plugins implement the `GCPlugin` protocol and manage context window overflow. They are **not** managed by `PluginRegistry` - they have their own discovery and loading system:
+
+```python
+from shared.plugins.gc import discover_gc_plugins, load_gc_plugin
+
+plugins = discover_gc_plugins()  # Uses jaato.gc_plugins entry point
+gc_plugin = load_gc_plugin('gc_truncate')
+client.set_gc_plugin(gc_plugin, GCConfig(threshold_percent=75.0))
+```
+
+GC plugins have a completely different interface focused on history management:
+- **should_collect()** - Check if garbage collection should trigger
+- **collect()** - Perform collection on conversation history
+
 ```mermaid
 classDiagram
     class UserCommand {
@@ -157,15 +207,31 @@ classDiagram
         +get_user_commands() List~UserCommand~
     }
 
+    class GCPlugin {
+        <<Protocol>>
+        +name: str
+        +initialize(config)
+        +shutdown()
+        +should_collect(context_usage, config) Tuple
+        +collect(history, context_usage, config, reason) Tuple
+    }
+
     class PluginRegistry {
-        -_available: Dict
-        -_exposed: Dict
-        +discover()
+        <<ToolPlugin only>>
+        -_plugins: Dict
+        -_exposed: Set
+        +discover(plugin_kind) List
         +expose_tool(name, config)
         +unexpose_tool(name)
         +get_exposed_declarations()
         +get_exposed_executors()
         +get_exposed_user_commands() List~UserCommand~
+    }
+
+    class GCDiscovery {
+        <<standalone functions>>
+        +discover_gc_plugins() Dict
+        +load_gc_plugin(name, config) GCPlugin
     }
 
     class CLIToolPlugin {
@@ -300,19 +366,23 @@ shared/
 └── plugins/
     ├── __init__.py          # Exports ToolPlugin, PluginRegistry, UserCommand
     ├── base.py              # ToolPlugin protocol, UserCommand NamedTuple
-    ├── registry.py          # PluginRegistry
-    ├── cli/
-    │   └── plugin.py        # CLIToolPlugin (model tools only)
-    ├── mcp/
-    │   └── plugin.py        # MCPToolPlugin (model tools only)
-    ├── permission/
-    │   └── plugin.py        # PermissionPlugin (model tools only)
-    ├── todo/
-    │   └── plugin.py        # TodoPlugin (model tools + user commands)
-    ├── references/
-    │   └── plugin.py        # ReferencesPlugin (model tools + user commands)
-    └── subagent/
-        └── plugin.py        # SubagentPlugin (model tools + user commands)
+    ├── registry.py          # PluginRegistry (for tool plugins)
+    │
+    │   # Tool Plugins (PLUGIN_KIND = "tool")
+    ├── cli/                 # CLIToolPlugin (model tools only)
+    ├── mcp/                 # MCPToolPlugin (model tools only)
+    ├── permission/          # PermissionPlugin (model tools only)
+    ├── todo/                # TodoPlugin (model tools + user commands)
+    ├── references/          # ReferencesPlugin (model tools + user commands)
+    ├── subagent/            # SubagentPlugin (model tools + user commands)
+    │
+    │   # GC Plugins (PLUGIN_KIND = "gc") - NOT managed by PluginRegistry
+    ├── gc/                  # Base types: GCPlugin protocol, GCConfig, GCResult
+    │   ├── base.py          # GCPlugin protocol definition
+    │   └── utils.py         # Shared utilities for GC plugins
+    ├── gc_truncate/         # TruncateGCPlugin - removes oldest turns
+    ├── gc_summarize/        # SummarizeGCPlugin - compresses old turns
+    └── gc_hybrid/           # HybridGCPlugin - generational collection
 ```
 
 ## User Commands vs Model Tools

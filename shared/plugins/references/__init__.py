@@ -36,6 +36,9 @@ Example usage:
     registry.expose_tool("references")
 """
 
+# Plugin kind identifier for registry discovery
+PLUGIN_KIND = "tool"
+
 from .models import (
     SourceType,
     InjectionMode,
