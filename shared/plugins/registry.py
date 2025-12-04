@@ -1,20 +1,20 @@
-"""Plugin registry for discovering, loading, and managing tool plugins."""
+"""Plugin registry for discovering, loading, and managing plugins."""
 
 import importlib
 import importlib.metadata
 import pkgutil
 import sys
 from pathlib import Path
-from typing import Dict, List, Set, Callable, Any, Optional
+from typing import Dict, List, Set, Callable, Any, Optional, Protocol, runtime_checkable
 from google.genai import types
 
 from .base import ToolPlugin, UserCommand
 
-# Entry point group name for jaato plugins
-# External packages can register plugins by adding to this group in their pyproject.toml:
-#   [project.entry-points."jaato.plugins"]
-#   my_plugin = "my_package.plugins:create_plugin"
-PLUGIN_ENTRY_POINT_GROUP = "jaato.plugins"
+# Entry point group names by plugin kind
+PLUGIN_ENTRY_POINT_GROUPS = {
+    "tool": "jaato.plugins",
+    "gc": "jaato.gc_plugins",
+}
 
 
 class PluginRegistry:
@@ -43,11 +43,15 @@ class PluginRegistry:
         self._exposed: Set[str] = set()
         self._configs: Dict[str, Dict[str, Any]] = {}
 
-    def discover(self, include_directory: bool = True) -> List[str]:
+    def discover(
+        self,
+        plugin_kind: str = "tool",
+        include_directory: bool = True
+    ) -> List[str]:
         """Discover plugins via entry points and optionally directory scanning.
 
         Discovery order:
-        1. Entry points (jaato.plugins group) - for installed packages
+        1. Entry points (group based on plugin_kind) - for installed packages
         2. Directory scanning (optional) - for development/local plugins
 
         Entry points allow external packages to register plugins:
@@ -55,9 +59,10 @@ class PluginRegistry:
             my_plugin = "my_package.plugins:create_plugin"
 
         Args:
+            plugin_kind: Kind of plugin to discover ('tool', 'gc', etc.).
+                        Only plugins with matching PLUGIN_KIND are loaded.
             include_directory: Also scan the plugins directory for local plugins.
                              Useful during development when package isn't installed.
-                             Default: True
 
         Returns:
             List of discovered plugin names.
@@ -65,33 +70,40 @@ class PluginRegistry:
         discovered = []
 
         # First, discover via entry points (installed packages)
-        discovered.extend(self._discover_via_entry_points())
+        discovered.extend(self._discover_via_entry_points(plugin_kind))
 
         # Then, optionally scan the plugins directory (development mode)
         if include_directory:
-            discovered.extend(self._discover_via_directory())
+            discovered.extend(self._discover_via_directory(plugin_kind))
 
         return discovered
 
-    def _discover_via_entry_points(self) -> List[str]:
+    def _discover_via_entry_points(self, plugin_kind: str) -> List[str]:
         """Discover plugins registered via entry points.
 
-        External packages can register plugins by adding to the jaato.plugins
+        External packages can register plugins by adding to the appropriate
         entry point group in their pyproject.toml.
+
+        Args:
+            plugin_kind: Kind of plugin to discover ('tool', 'gc', etc.).
 
         Returns:
             List of discovered plugin names.
         """
         discovered = []
 
+        entry_point_group = PLUGIN_ENTRY_POINT_GROUPS.get(plugin_kind)
+        if not entry_point_group:
+            return discovered
+
         try:
             # Python 3.10+ API
             if sys.version_info >= (3, 10):
-                eps = importlib.metadata.entry_points(group=PLUGIN_ENTRY_POINT_GROUP)
+                eps = importlib.metadata.entry_points(group=entry_point_group)
             else:
                 # Python 3.9 compatibility
                 all_eps = importlib.metadata.entry_points()
-                eps = all_eps.get(PLUGIN_ENTRY_POINT_GROUP, [])
+                eps = all_eps.get(entry_point_group, [])
 
             for ep in eps:
                 # Skip if already loaded (avoid duplicates with directory scan)
@@ -102,12 +114,14 @@ class PluginRegistry:
                     create_plugin = ep.load()
                     plugin = create_plugin()
 
-                    if isinstance(plugin, ToolPlugin):
-                        self._plugins[plugin.name] = plugin
-                        discovered.append(plugin.name)
-                    else:
+                    # For tool plugins, verify protocol implementation
+                    if plugin_kind == "tool" and not isinstance(plugin, ToolPlugin):
                         print(f"[PluginRegistry] Entry point '{ep.name}': "
                               f"plugin does not implement ToolPlugin protocol")
+                        continue
+
+                    self._plugins[plugin.name] = plugin
+                    discovered.append(plugin.name)
 
                 except Exception as exc:
                     print(f"[PluginRegistry] Error loading entry point '{ep.name}': {exc}")
@@ -118,13 +132,18 @@ class PluginRegistry:
 
         return discovered
 
-    def _discover_via_directory(self, plugin_dir: Optional[Path] = None) -> List[str]:
+    def _discover_via_directory(
+        self,
+        plugin_kind: str,
+        plugin_dir: Optional[Path] = None
+    ) -> List[str]:
         """Discover plugins by scanning the plugins directory.
 
         This is the fallback/development mode discovery that scans for Python
-        modules with a create_plugin() factory function.
+        modules with a create_plugin() factory function and matching PLUGIN_KIND.
 
         Args:
+            plugin_kind: Kind of plugin to discover ('tool', 'gc', etc.).
             plugin_dir: Directory to scan. Defaults to this package's directory.
 
         Returns:
@@ -147,17 +166,21 @@ class PluginRegistry:
             try:
                 module = importlib.import_module(f".{name}", package="shared.plugins")
 
+                # Check plugin kind - only load plugins matching requested kind
+                module_kind = getattr(module, 'PLUGIN_KIND', None)
+                if module_kind != plugin_kind:
+                    continue
+
                 if hasattr(module, 'create_plugin'):
                     plugin = module.create_plugin()
 
-                    # Verify it implements the protocol
-                    if isinstance(plugin, ToolPlugin):
-                        self._plugins[plugin.name] = plugin
-                        discovered.append(plugin.name)
-                    else:
+                    # For tool plugins, verify protocol implementation
+                    if plugin_kind == "tool" and not isinstance(plugin, ToolPlugin):
                         print(f"[PluginRegistry] {name}: plugin does not implement ToolPlugin protocol")
-                else:
-                    print(f"[PluginRegistry] {name}: no create_plugin() function found")
+                        continue
+
+                    self._plugins[plugin.name] = plugin
+                    discovered.append(plugin.name)
 
             except Exception as exc:
                 print(f"[PluginRegistry] Error loading plugin '{name}': {exc}")

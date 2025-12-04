@@ -20,6 +20,9 @@ Usage:
     client.set_gc_plugin(plugin, GCConfig(threshold_percent=75.0))
 """
 
+# Plugin kind identifier for registry discovery
+PLUGIN_KIND = "gc"
+
 from .plugin import HybridGCPlugin, create_plugin
 
 __all__ = ["HybridGCPlugin", "create_plugin"]
