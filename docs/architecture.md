@@ -74,6 +74,7 @@ flowchart TB
                 PERM[PermissionPlugin<br/>plugins/permission/]
                 TODO[TodoPlugin<br/>plugins/todo/]
                 REFS[ReferencesPlugin<br/>plugins/references/]
+                SUB[SubagentPlugin<br/>plugins/subagent/]
             end
         end
 
@@ -95,6 +96,7 @@ flowchart TB
     PR --> PERM
     PR --> TODO
     PR --> REFS
+    PR --> SUB
     TE --> PERM
     MCP --> MCM
     MCM --> MCPS
@@ -202,11 +204,19 @@ classDiagram
         +selectReferences user command
     }
 
+    class SubagentPlugin {
+        +name = "subagent"
+        +spawn_subagent()
+        +list_subagent_profiles()
+        +profiles user command
+    }
+
     ToolPlugin <|.. CLIToolPlugin
     ToolPlugin <|.. MCPToolPlugin
     ToolPlugin <|.. PermissionPlugin
     ToolPlugin <|.. TodoPlugin
     ToolPlugin <|.. ReferencesPlugin
+    ToolPlugin <|.. SubagentPlugin
     PluginRegistry o-- ToolPlugin
     ToolPlugin ..> UserCommand : returns
 ```
@@ -299,8 +309,10 @@ shared/
     │   └── plugin.py        # PermissionPlugin (model tools only)
     ├── todo/
     │   └── plugin.py        # TodoPlugin (model tools + user commands)
-    └── references/
-        └── plugin.py        # ReferencesPlugin (model tools + user commands)
+    ├── references/
+    │   └── plugin.py        # ReferencesPlugin (model tools + user commands)
+    └── subagent/
+        └── plugin.py        # SubagentPlugin (model tools + user commands)
 ```
 
 ## User Commands vs Model Tools

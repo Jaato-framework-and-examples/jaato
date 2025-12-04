@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional
 from google.genai import types
 
 from .config import SubagentConfig, SubagentProfile, SubagentResult
+from ..base import UserCommand
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,8 @@ class SubagentPlugin:
         return {
             'spawn_subagent': self._execute_spawn_subagent,
             'list_subagent_profiles': self._execute_list_profiles,
+            # User command alias
+            'profiles': self._execute_list_profiles,
         }
 
     def get_system_instructions(self) -> Optional[str]:
@@ -220,6 +223,20 @@ class SubagentPlugin:
         # list_subagent_profiles is safe and can be auto-approved
         # spawn_subagent should require permission unless the profile is auto_approved
         return ['list_subagent_profiles']
+
+    def get_user_commands(self) -> List[UserCommand]:
+        """Return user-facing commands for direct invocation.
+
+        Provides commands that users (human or agent) can type directly
+        to interact with the subagent system without model mediation.
+        """
+        return [
+            UserCommand(
+                "profiles",
+                "List available subagent profiles",
+                share_with_model=True  # Model should know what profiles are available
+            ),
+        ]
 
     def add_profile(self, profile: SubagentProfile) -> None:
         """Add a subagent profile dynamically.
