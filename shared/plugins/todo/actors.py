@@ -104,18 +104,16 @@ class ConsoleReporter(TodoReporter):
             self._console = None
 
     def _can_do_inplace(self) -> bool:
-        """Check if in-place updates are supported in current environment."""
+        """Check if in-place updates are supported in current environment.
+
+        In-place updates require rich library and a TTY terminal.
+        """
         if not self._inplace_updates:
             return False
-        # With rich: check if console exists and is a TTY
+        # Require rich console and TTY for in-place updates
         if self._console is not None:
             return self._console.is_terminal
-        # Without rich: need colors enabled, TTY, and default output
-        return (
-            self._use_colors
-            and self._output_func is None
-            and sys.stdout.isatty()
-        )
+        return False
 
     @property
     def name(self) -> str:
@@ -209,26 +207,17 @@ class ConsoleReporter(TodoReporter):
     def _move_cursor_up_and_clear(self, lines: int) -> None:
         """Move cursor up N lines and clear them for in-place updates.
 
-        Uses rich console control when available for cross-platform support,
-        otherwise falls back to ANSI escape codes.
+        Uses rich console control for cross-platform terminal support.
         """
-        if lines <= 0 or not self._can_do_inplace():
+        if lines <= 0 or self._console is None:
             return
 
-        if self._console is not None:
-            # Use rich's control sequences for portability
-            from rich.control import Control
-            # Move up N lines, clearing each one (move up FIRST, then erase)
-            for _ in range(lines):
-                self._console.control(Control.move(0, -1))  # Move up one line
-                self._console.control(Control.move_to_column(0))
-                self._console.control(Control.erase_line())
-        else:
-            # Fallback to raw ANSI codes
-            for _ in range(lines):
-                sys.stdout.write("\033[A\033[2K")
-            sys.stdout.write("\r")
-            sys.stdout.flush()
+        from rich.control import Control
+        # Move up N lines, clearing each one (move up FIRST, then erase)
+        for _ in range(lines):
+            self._console.control(Control.move(0, -1))  # Move up one line
+            self._console.control(Control.move_to_column(0))
+            self._console.control(Control.erase_line())
 
     def _print_with_tracking(self, text: str) -> None:
         """Print text and track line count for in-place updates."""
