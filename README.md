@@ -42,6 +42,9 @@ jaato is a future-proof framework for building agentic AI applications, featurin
 | [**permission**](shared/plugins/permission/README.md) | Control tool execution with blacklist/whitelist policies and interactive approval |
 | [**todo**](shared/plugins/todo/README.md) | Plan tracking with workflow enforcement for complex multi-step tasks |
 | [**references**](shared/plugins/references/README.md) | Manage documentation source injection with auto-load and user-selectable references |
+| [**gc**](shared/plugins/gc/README.md) | Context garbage collection to prevent context window overflow (truncate, summarize, or hybrid strategies) |
+| [**subagent**](shared/plugins/subagent/README.md) | Delegate tasks to specialized subagents with custom tool configurations |
+| [**web_search**](shared/plugins/web_search/README.md) | Search the web using DuckDuckGo for current information |
 
 See [shared/plugins/README.md](shared/plugins/README.md) for plugin development documentation.
 
