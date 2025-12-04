@@ -457,12 +457,24 @@ class SubagentPlugin:
         registry.discover()
 
         # Expose only the plugins specified in the profile
+        failed_plugins = []
         for plugin_name in profile.plugins:
             plugin_config = profile.plugin_configs.get(plugin_name, {})
             try:
                 registry.expose_tool(plugin_name, plugin_config)
             except Exception as e:
+                failed_plugins.append((plugin_name, str(e)))
                 logger.warning("Failed to expose plugin %s: %s", plugin_name, e)
+
+        # If any plugins failed, return error with available plugins
+        if failed_plugins:
+            available = registry.list_available()
+            errors = "; ".join(f"'{p}': {e}" for p, e in failed_plugins)
+            return SubagentResult(
+                success=False,
+                response='',
+                error=f"Failed to expose plugins: {errors}. Available plugins: {available}"
+            ).to_dict()
 
         # Create subagent client
         client = self._client_class()
