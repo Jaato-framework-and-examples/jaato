@@ -420,13 +420,12 @@ Commands (auto-complete as you type):
   history - Show full conversation history
   context - Show context window usage
   quit    - Exit the client
-  exit    - Exit the client
+  exit    - Exit the client""")
 
-Plugin commands (via plugins):
-  plan            - Show current plan status (todo plugin)
-  listReferences  - List available reference sources (references plugin)
-  selectReferences - Select reference sources to include (references plugin)
+        # Dynamically list plugin-contributed commands
+        self._print_plugin_commands()
 
+        print("""
 When the model tries to use a tool, you'll see a permission prompt:
   [y]es     - Allow this execution
   [n]o      - Deny this execution
@@ -467,6 +466,31 @@ Keyboard shortcuts:
         for decl in self.registry.get_exposed_declarations():
             print(f"  - {decl.name}: {decl.description}")
         print()
+
+    def _print_plugin_commands(self) -> None:
+        """Print plugin-contributed user commands grouped by plugin."""
+        if not self.registry:
+            return
+
+        # Collect commands by plugin
+        commands_by_plugin: Dict[str, list] = {}
+        for plugin_name in self.registry.list_exposed():
+            plugin = self.registry.get_plugin(plugin_name)
+            if plugin and hasattr(plugin, 'get_user_commands'):
+                commands = plugin.get_user_commands()
+                if commands:
+                    commands_by_plugin[plugin_name] = commands
+
+        if not commands_by_plugin:
+            return
+
+        print("\nPlugin commands:")
+        for plugin_name, commands in sorted(commands_by_plugin.items()):
+            for cmd in commands:
+                # Calculate padding for alignment
+                padding = max(2, 18 - len(cmd.name))
+                shared_marker = " [shared]" if cmd.share_with_model else ""
+                print(f"  {cmd.name}{' ' * padding}- {cmd.description} ({plugin_name}){shared_marker}")
 
     def _print_context(self) -> None:
         """Print context window usage statistics."""
