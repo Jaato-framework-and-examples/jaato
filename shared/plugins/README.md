@@ -514,6 +514,25 @@ Connects to MCP (Model Context Protocol) servers defined in `.mcp.json` and expo
 registry.expose_all()  # MCP tools are available automatically
 ```
 
+### Web Search Plugin (`web_search`)
+
+Searches the web for current information using DuckDuckGo.
+
+**Configuration:**
+- `max_results`: Maximum number of results to return (default: 10)
+- `safesearch`: Safe search level - "off", "moderate", "strict" (default: "moderate")
+- `region`: Region for search results (default: "wt-wt" for no region)
+
+**Tools:**
+- `web_search`: Search the web for information on any topic
+
+**Auto-approved:** Yes (read-only operation)
+
+**Example:**
+```python
+registry.expose_all({'web_search': {'max_results': 5, 'safesearch': 'strict'}})
+```
+
 ---
 
 ## File Structure
@@ -544,6 +563,10 @@ shared/plugins/
 │   ├── plugin.py
 │   ├── README.md
 │   └── tests/
+├── web_search/      # Web search plugin
+│   ├── __init__.py
+│   ├── plugin.py
+│   └── README.md
 └── references/      # Documentation injection plugin
     ├── __init__.py
     ├── plugin.py
