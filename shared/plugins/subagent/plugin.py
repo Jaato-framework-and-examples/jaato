@@ -5,6 +5,7 @@ tool configurations, enabling task delegation and specialization.
 """
 
 import logging
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 from google.genai import types
@@ -13,6 +14,19 @@ from .config import SubagentConfig, SubagentProfile, SubagentResult
 from ..base import UserCommand
 
 logger = logging.getLogger(__name__)
+
+
+def _get_env_connection() -> Dict[str, str]:
+    """Get connection settings from environment variables.
+
+    Returns:
+        Dict with project, location, and model from environment.
+    """
+    return {
+        'project': os.environ.get('PROJECT_ID', ''),
+        'location': os.environ.get('LOCATION', ''),
+        'model': os.environ.get('MODEL_NAME', 'gemini-2.5-flash'),
+    }
 
 
 class SubagentPlugin:
@@ -79,12 +93,29 @@ class SubagentPlugin:
                 - profiles: Dict of named subagent profiles
                 - allow_inline: Whether to allow inline subagent creation
                 - inline_allowed_plugins: Plugins allowed for inline creation
+
+        If project/location are not provided in config, the plugin will
+        attempt to read them from environment variables (PROJECT_ID, LOCATION,
+        MODEL_NAME). The connection can also be set later via set_connection().
         """
         if config:
             self._config = SubagentConfig.from_dict(config)
         else:
-            # Minimal config - requires explicit profile setup
+            # Minimal config - will try env vars as fallback
             self._config = SubagentConfig(project='', location='')
+
+        # Try to fill in missing connection info from environment variables
+        if not self._config.project or not self._config.location:
+            env_conn = _get_env_connection()
+            if not self._config.project and env_conn['project']:
+                self._config.project = env_conn['project']
+                logger.debug("Using PROJECT_ID from environment: %s", env_conn['project'])
+            if not self._config.location and env_conn['location']:
+                self._config.location = env_conn['location']
+                logger.debug("Using LOCATION from environment: %s", env_conn['location'])
+            if self._config.default_model == 'gemini-2.5-flash' and env_conn['model']:
+                self._config.default_model = env_conn['model']
+                logger.debug("Using MODEL_NAME from environment: %s", env_conn['model'])
 
         # Lazy import the classes we need
         from ..registry import PluginRegistry
@@ -94,8 +125,9 @@ class SubagentPlugin:
 
         self._initialized = True
         logger.info(
-            "Subagent plugin initialized with %d profiles",
-            len(self._config.profiles) if self._config else 0
+            "Subagent plugin initialized with %d profiles (connection: %s)",
+            len(self._config.profiles) if self._config else 0,
+            "configured" if (self._config.project and self._config.location) else "pending"
         )
 
     def shutdown(self) -> None:

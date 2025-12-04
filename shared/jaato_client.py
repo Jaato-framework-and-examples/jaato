@@ -78,6 +78,8 @@ class JaatoClient:
         # Connection state
         self._client: Optional[genai.Client] = None
         self._model_name: Optional[str] = None
+        self._project: Optional[str] = None
+        self._location: Optional[str] = None
 
         # Chat session (SDK-managed)
         self._chat = None  # genai Chat object
@@ -119,6 +121,8 @@ class JaatoClient:
         """
         self._client = genai.Client(vertexai=True, project=project, location=location)
         self._model_name = model
+        self._project = project
+        self._location = location
 
     def configure_tools(
         self,
@@ -135,6 +139,9 @@ class JaatoClient:
         """
         self._ledger = ledger
         self._executor = ToolExecutor(ledger=ledger)
+
+        # Pass connection info to subagent plugin if it's exposed
+        self._configure_subagent_plugin(registry)
 
         # Register executors from plugins
         for name, fn in registry.get_exposed_executors().items():
@@ -205,6 +212,27 @@ class JaatoClient:
 
         # Create chat session with configured tools
         self._create_chat()
+
+    def _configure_subagent_plugin(self, registry: 'PluginRegistry') -> None:
+        """Pass connection info to subagent plugin if exposed.
+
+        This allows subagents to inherit the parent's connection settings
+        (project, location, model) without requiring explicit configuration.
+
+        Args:
+            registry: PluginRegistry to check for subagent plugin.
+        """
+        if not self._project or not self._location or not self._model_name:
+            return  # No connection info to pass
+
+        # Check if subagent plugin is exposed
+        try:
+            subagent_plugin = registry.get_plugin('subagent')
+            if subagent_plugin and hasattr(subagent_plugin, 'set_connection'):
+                subagent_plugin.set_connection(self._project, self._location, self._model_name)
+        except (KeyError, AttributeError):
+            # Subagent plugin not exposed or not available
+            pass
 
     def _create_chat(self, history: Optional[List[types.Content]] = None) -> None:
         """Create or recreate the chat session.
