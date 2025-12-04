@@ -184,7 +184,12 @@ class SubagentPlugin:
                                 "plugins": {
                                     "type": "array",
                                     "items": {"type": "string"},
-                                    "description": "List of plugin names to enable"
+                                    "description": (
+                                        "List of plugin names to enable. Valid plugin names are: "
+                                        "'cli' (shell commands), 'mcp' (MCP servers), 'todo' (task tracking), "
+                                        "'references' (documentation), 'permission' (access control). "
+                                        "Note: Use plugin names, NOT tool names (e.g., use 'cli' not 'cli_based_tool')."
+                                    )
                                 },
                                 "system_instructions": {
                                     "type": "string",
