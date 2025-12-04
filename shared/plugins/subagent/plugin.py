@@ -73,6 +73,7 @@ class SubagentPlugin:
         """Initialize the subagent plugin."""
         self._config: Optional[SubagentConfig] = None
         self._initialized: bool = False
+        self._parent_plugins: List[str] = []
         # Lazy import to avoid circular dependencies
         self._registry_class = None
         self._client_class = None
@@ -233,10 +234,8 @@ class SubagentPlugin:
         if not self._config or not self._config.profiles:
             return (
                 "You have access to a subagent system that allows you to delegate "
-                "tasks to specialized subagents. No predefined profiles are configured, "
-                "but you can spawn subagents dynamically using inline_config.\n\n"
-                "Tailor the subagent's capabilities by selecting from the plugins you are aware of. "
-                "Choose plugins based on what the task requires and combine multiple if needed."
+                "tasks to specialized subagents. By default, subagents inherit your "
+                "current plugin configuration - just provide the task, no inline_config needed."
             )
 
         profile_descriptions = []
@@ -253,8 +252,7 @@ class SubagentPlugin:
             "Available subagent profiles:\n"
             f"{profiles_text}\n\n"
             "Use spawn_subagent with a profile name and task to delegate work. "
-            "Alternatively, use inline_config to create a custom subagent with specific plugins. "
-            "The subagent will run independently with its own tool set and return results."
+            "Without a profile, subagents inherit your current plugin configuration."
         )
 
     def get_auto_approved_tools(self) -> List[str]:
@@ -301,6 +299,17 @@ class SubagentPlugin:
             self._config.location = location
             self._config.default_model = model
 
+    def set_parent_plugins(self, plugins: List[str]) -> None:
+        """Set the parent's exposed plugins for inheritance.
+
+        Subagents will use these plugins by default when no explicit
+        inline_config is provided.
+
+        Args:
+            plugins: List of plugin names exposed in the parent agent.
+        """
+        self._parent_plugins = plugins
+
     def _execute_list_profiles(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List available subagent profiles.
 
@@ -314,10 +323,9 @@ class SubagentPlugin:
             return {
                 'profiles': [],
                 'message': (
-                    'No predefined profiles. Use inline_config to spawn subagents dynamically. '
-                    'Select from the plugins you are aware of based on task requirements.'
+                    'No predefined profiles. Subagents inherit your current plugins by default - '
+                    'just call spawn_subagent with a task.'
                 ),
-                'inline_allowed': self._config.allow_inline if self._config else True,
             }
 
         profiles = []
@@ -378,12 +386,12 @@ class SubagentPlugin:
                     response='',
                     error=f"Profile '{profile_name}' not found. Available: {available}"
                 ).to_dict()
-        elif inline_config and self._config and self._config.allow_inline:
-            # Create inline profile
+        elif inline_config:
+            # Create inline profile with specified plugins
             plugins = inline_config.get('plugins', [])
 
-            # Validate plugins against allowed list
-            if self._config.inline_allowed_plugins:
+            # Validate plugins against allowed list if configured
+            if self._config and self._config.inline_allowed_plugins:
                 disallowed = set(plugins) - set(self._config.inline_allowed_plugins)
                 if disallowed:
                     return SubagentResult(
@@ -400,11 +408,20 @@ class SubagentPlugin:
                 max_turns=inline_config.get('max_turns', 10),
             )
         else:
-            return SubagentResult(
-                success=False,
-                response='',
-                error='No profile specified and inline creation not allowed or not configured'
-            ).to_dict()
+            # No profile or inline_config - inherit parent's plugins
+            if not self._parent_plugins:
+                return SubagentResult(
+                    success=False,
+                    response='',
+                    error='No plugins available to inherit. Configure parent plugins first.'
+                ).to_dict()
+
+            profile = SubagentProfile(
+                name='_inherited',
+                description='Subagent with inherited plugins',
+                plugins=self._parent_plugins,
+                max_turns=10,
+            )
 
         # Build the full prompt
         full_prompt = task
