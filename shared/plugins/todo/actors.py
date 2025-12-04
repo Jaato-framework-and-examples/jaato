@@ -218,12 +218,11 @@ class ConsoleReporter(TodoReporter):
         if self._console is not None:
             # Use rich's control sequences for portability
             from rich.control import Control
-            # Move up N lines, clearing each one
+            # Move up N lines, clearing each one (move up FIRST, then erase)
             for _ in range(lines):
+                self._console.control(Control.move(0, -1))  # Move up one line
                 self._console.control(Control.move_to_column(0))
                 self._console.control(Control.erase_line())
-                self._console.control(Control.move(0, -1))
-            self._console.control(Control.move_to_column(0))
         else:
             # Fallback to raw ANSI codes
             for _ in range(lines):
