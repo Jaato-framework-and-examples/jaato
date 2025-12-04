@@ -39,13 +39,13 @@ from shared import (
     active_cert_bundle,
 )
 
-# Import file completion (local module)
+# Import file and command completion (local module)
 try:
-    from file_completer import AtFileCompleter, FileReferenceProcessor
+    from file_completer import CombinedCompleter, FileReferenceProcessor
     HAS_FILE_COMPLETER = True
 except ImportError:
     HAS_FILE_COMPLETER = False
-    AtFileCompleter = None
+    CombinedCompleter = None
     FileReferenceProcessor = None
 
 
@@ -66,7 +66,7 @@ class InteractiveClient:
 
         # Initialize prompt_toolkit components if available
         self._pt_history = InMemoryHistory() if HAS_PROMPT_TOOLKIT else None
-        self._file_completer = AtFileCompleter() if (HAS_PROMPT_TOOLKIT and HAS_FILE_COMPLETER) else None
+        self._completer = CombinedCompleter() if (HAS_PROMPT_TOOLKIT and HAS_FILE_COMPLETER) else None
         self._file_processor = FileReferenceProcessor() if HAS_FILE_COMPLETER else None
 
         # Prompt style for completion menu
@@ -83,19 +83,19 @@ class InteractiveClient:
             print(msg)
 
     def _get_user_input(self, prompt_str: str = "\nYou> ") -> str:
-        """Get user input with file completion support.
+        """Get user input with command and file completion support.
 
-        Uses prompt_toolkit if available for @file completion,
+        Uses prompt_toolkit if available for command and @file completion,
         falls back to standard input otherwise.
 
         Returns:
             User input string, or raises EOFError/KeyboardInterrupt
         """
-        if HAS_PROMPT_TOOLKIT and self._file_completer:
+        if HAS_PROMPT_TOOLKIT and self._completer:
             # Use prompt_toolkit with completion
             return pt_prompt(
                 prompt_str,
-                completer=self._file_completer,
+                completer=self._completer,
                 history=self._pt_history,
                 auto_suggest=AutoSuggestFromHistory(),
                 style=self._pt_style,
@@ -243,7 +243,8 @@ class InteractiveClient:
         print("\nEnter task descriptions for the model to execute.")
         print("Tool calls will prompt for your approval.")
         print("Use ↑/↓ arrows to navigate prompt history.")
-        if HAS_PROMPT_TOOLKIT and self._file_completer:
+        if HAS_PROMPT_TOOLKIT and self._completer:
+            print("Commands auto-complete as you type (help, tools, reset, etc.).")
             print("Use @path/to/file to reference files (completions appear as you type).")
         print("Type 'quit' or 'exit' to stop, 'help' for guidance.\n")
 
@@ -300,7 +301,7 @@ class InteractiveClient:
     def _print_help(self) -> None:
         """Print help information."""
         print("""
-Commands:
+Commands (auto-complete as you type):
   help    - Show this help message
   tools   - List available tools
   reset   - Clear conversation history
@@ -308,6 +309,7 @@ Commands:
   context - Show context window usage
   plan    - Show current plan status
   quit    - Exit the client
+  exit    - Exit the client
 
 When the model tries to use a tool, you'll see a permission prompt:
   [y]es     - Allow this execution
