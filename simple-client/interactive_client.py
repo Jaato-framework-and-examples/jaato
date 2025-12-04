@@ -9,8 +9,19 @@ Supports multi-turn conversation with history.
 import os
 import sys
 import pathlib
-import readline  # Enables arrow key history navigation
+import readline  # Enables arrow key history navigation (fallback)
 from typing import Optional
+
+# Try to import prompt_toolkit for enhanced completion
+try:
+    from prompt_toolkit import prompt as pt_prompt
+    from prompt_toolkit.history import InMemoryHistory
+    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+    from prompt_toolkit.styles import Style
+    HAS_PROMPT_TOOLKIT = True
+except ImportError:
+    HAS_PROMPT_TOOLKIT = False
+    pt_prompt = None
 
 # Add project root to path for imports
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -28,6 +39,15 @@ from shared import (
     active_cert_bundle,
 )
 
+# Import file completion (local module)
+try:
+    from file_completer import AtFileCompleter, FileReferenceProcessor
+    HAS_FILE_COMPLETER = True
+except ImportError:
+    HAS_FILE_COMPLETER = False
+    AtFileCompleter = None
+    FileReferenceProcessor = None
+
 
 class InteractiveClient:
     """Simple interactive console client with permission prompts and multi-turn history.
@@ -44,10 +64,60 @@ class InteractiveClient:
         self.todo_plugin: Optional[TodoPlugin] = None
         self.ledger = TokenLedger()
 
+        # Initialize prompt_toolkit components if available
+        self._pt_history = InMemoryHistory() if HAS_PROMPT_TOOLKIT else None
+        self._file_completer = AtFileCompleter() if (HAS_PROMPT_TOOLKIT and HAS_FILE_COMPLETER) else None
+        self._file_processor = FileReferenceProcessor() if HAS_FILE_COMPLETER else None
+
+        # Prompt style for completion menu
+        self._pt_style = Style.from_dict({
+            'completion-menu.completion': 'bg:#333333 #ffffff',
+            'completion-menu.completion.current': 'bg:#00aa00 #ffffff',
+            'completion-menu.meta.completion': 'bg:#333333 #888888',
+            'completion-menu.meta.completion.current': 'bg:#00aa00 #ffffff',
+        }) if HAS_PROMPT_TOOLKIT else None
+
     def log(self, msg: str) -> None:
         """Print message if verbose mode is enabled."""
         if self.verbose:
             print(msg)
+
+    def _get_user_input(self, prompt_str: str = "\nYou> ") -> str:
+        """Get user input with file completion support.
+
+        Uses prompt_toolkit if available for @file completion,
+        falls back to standard input otherwise.
+
+        Returns:
+            User input string, or raises EOFError/KeyboardInterrupt
+        """
+        if HAS_PROMPT_TOOLKIT and self._file_completer:
+            # Use prompt_toolkit with completion
+            return pt_prompt(
+                prompt_str,
+                completer=self._file_completer,
+                history=self._pt_history,
+                auto_suggest=AutoSuggestFromHistory(),
+                style=self._pt_style,
+                complete_while_typing=True,
+            ).strip()
+        else:
+            # Fallback to standard input
+            return input(prompt_str).strip()
+
+    def _expand_file_references(self, text: str) -> str:
+        """Expand @file references to include file contents.
+
+        If text contains @path/to/file references, reads those files
+        and appends their contents to the prompt for model context.
+
+        Returns:
+            Original text with file contents appended, or original text if no references
+        """
+        if not self._file_processor:
+            return text
+
+        return self._file_processor.expand_references(text)
 
     def initialize(self) -> bool:
         """Initialize the client, loading config and connecting to Vertex AI."""
@@ -173,6 +243,8 @@ class InteractiveClient:
         print("\nEnter task descriptions for the model to execute.")
         print("Tool calls will prompt for your approval.")
         print("Use ↑/↓ arrows to navigate prompt history.")
+        if HAS_PROMPT_TOOLKIT and self._file_completer:
+            print("Use @path/to/file to reference files (completions appear as you type).")
         print("Type 'quit' or 'exit' to stop, 'help' for guidance.\n")
 
         # Clear history at start of interactive session (unless continuing from initial prompt)
@@ -181,7 +253,7 @@ class InteractiveClient:
 
         while True:
             try:
-                user_input = input("\nYou> ").strip()
+                user_input = self._get_user_input()
             except (EOFError, KeyboardInterrupt):
                 print("\nGoodbye!")
                 break
@@ -218,8 +290,11 @@ class InteractiveClient:
                 self._print_context()
                 continue
 
+            # Expand @file references to include file contents
+            expanded_prompt = self._expand_file_references(user_input)
+
             # Execute the prompt
-            response = self.run_prompt(user_input)
+            response = self.run_prompt(expanded_prompt)
             print(f"\nModel> {response}")
 
     def _print_help(self) -> None:
@@ -241,19 +316,31 @@ When the model tries to use a tool, you'll see a permission prompt:
   [never]   - Deny and block for this session
   [once]    - Allow just this once
 
+File references:
+  Use @path/to/file to include file contents in your prompt.
+  - @src/main.py      - Reference a file (contents included)
+  - @./config.json    - Reference with explicit relative path
+  - @~/documents/     - Reference with home directory
+  - @/absolute/path   - Absolute path reference
+  Completions appear automatically as you type after @.
+  Use ↑/↓ to navigate the dropdown, Enter or TAB to accept.
+
 Example prompts:
   - "List files in the current directory"
   - "Show me the git status"
-  - "What is the current date and time?"
+  - "Review @src/utils.py for issues"
+  - "Explain what @./README.md describes"
 
 Multi-turn conversation:
   The model remembers previous exchanges in this session.
   Use 'reset' to start a fresh conversation.
 
 Keyboard shortcuts:
-  ↑/↓       - Navigate through prompt history
+  ↑/↓       - Navigate prompt history (or completion menu)
   ←/→       - Move cursor within line
   Ctrl+A/E  - Jump to start/end of line
+  TAB/Enter - Accept selected completion
+  Escape    - Dismiss completion menu
 """)
 
     def _print_tools(self) -> None:
