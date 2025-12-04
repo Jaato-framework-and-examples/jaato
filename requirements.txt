@@ -10,4 +10,4 @@ pyreadline3
 prompt_toolkit>=3.0.0
 rich>=13.0.0
 reportlab
-duckduckgo-search>=7.0.0  # provides web search via DuckDuckGo
+ddgs>=7.0.0  # provides web search via DuckDuckGo

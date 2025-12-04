@@ -135,11 +135,11 @@ Tips for effective searches:
 
             # Lazy import to avoid startup cost if plugin not used
             try:
-                from duckduckgo_search import DDGS
+                from ddgs import DDGS
             except ImportError:
                 return {
-                    'error': 'duckduckgo-search package not installed',
-                    'hint': 'Install with: pip install duckduckgo-search'
+                    'error': 'ddgs package not installed',
+                    'hint': 'Install with: pip install ddgs'
                 }
 
             # Perform the search

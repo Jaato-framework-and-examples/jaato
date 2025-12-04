@@ -164,10 +164,10 @@ Tips for effective searches:
 
 ## Dependencies
 
-This plugin requires the `duckduckgo-search` package:
+This plugin requires the `ddgs` package:
 
 ```bash
-pip install duckduckgo-search>=7.0.0
+pip install ddgs>=7.0.0
 ```
 
 The package is listed in the project's `requirements.txt`.
