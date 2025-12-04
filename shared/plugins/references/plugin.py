@@ -16,6 +16,7 @@ from google.genai import types
 from .models import ReferenceSource, InjectionMode
 from .actors import SelectionActor, ConsoleSelectionActor, create_actor
 from .config_loader import load_config, ReferencesConfig
+from ..base import UserCommand
 
 
 class ReferencesPlugin:
@@ -388,15 +389,18 @@ class ReferencesPlugin:
         """All tools are auto-approved - this is a user-triggered plugin."""
         return ["selectReferences", "listReferences"]
 
-    def get_user_commands(self) -> List[tuple[str, str]]:
+    def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for direct invocation.
 
         These commands can be typed directly by the user (human or agent)
         to interact with reference sources without model mediation.
+
+        listReferences: share_with_model=True - shows available sources, model should know
+        selectReferences: share_with_model=True - selection results should be known by model
         """
         return [
-            ("listReferences", "List available reference sources"),
-            ("selectReferences", "Select reference sources to include"),
+            UserCommand("listReferences", "List available reference sources", share_with_model=True),
+            UserCommand("selectReferences", "Select reference sources to include", share_with_model=True),
         ]
 
     # Public API for programmatic access

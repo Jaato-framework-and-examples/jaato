@@ -8,6 +8,8 @@ import subprocess
 from typing import Dict, List, Any, Callable, Optional
 from google.genai import types
 
+from ..base import UserCommand
+
 
 DEFAULT_MAX_OUTPUT_CHARS = 50000  # ~12k tokens at 4 chars/token
 
@@ -118,7 +120,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         """CLI tools require permission - return empty list."""
         return []
 
-    def get_user_commands(self) -> List[tuple[str, str]]:
+    def get_user_commands(self) -> List[UserCommand]:
         """CLI plugin provides model tools only, no user commands."""
         return []
 

@@ -171,11 +171,22 @@ Plugins provide two types of capabilities:
 Every plugin must implement these methods:
 
 ```python
-from typing import Protocol, List, Dict, Any, Callable, Optional, Tuple
+from typing import Protocol, List, Dict, Any, Callable, Optional, NamedTuple
 from google.genai import types
 
-# Type alias for user commands
-UserCommand = Tuple[str, str]  # (command_name, description)
+class UserCommand(NamedTuple):
+    """Declaration of a user-facing command.
+
+    Attributes:
+        name: Command name for invocation and autocompletion.
+        description: Brief description shown in autocompletion/help.
+        share_with_model: If True, command output is added to conversation
+            history so the model can see/use it. If False (default),
+            output is only shown to the user.
+    """
+    name: str
+    description: str
+    share_with_model: bool = False
 
 class ToolPlugin(Protocol):
     @property
@@ -224,11 +235,15 @@ class ToolPlugin(Protocol):
         The "user" can be a human operator OR another AI agent in
         agent-to-agent communication scenarios.
 
+        Each command declares share_with_model to control whether its output
+        is added to conversation history (visible to the model) or only
+        displayed to the user.
+
         Most plugins only provide model tools and should return an empty list.
         Use this for plugins that also provide direct interaction commands.
 
         Returns:
-            List of (command_name, description) tuples for autocompletion.
+            List of UserCommand objects for autocompletion and execution.
         """
         ...
 ```
@@ -242,6 +257,7 @@ Here's a minimal plugin that provides a single tool:
 
 from typing import Dict, List, Any, Callable, Optional
 from google.genai import types
+from shared.plugins.base import UserCommand
 
 
 class ExamplePlugin:
@@ -288,7 +304,7 @@ class ExamplePlugin:
         # Return empty list - this tool requires permission
         return []
 
-    def get_user_commands(self) -> List[tuple[str, str]]:
+    def get_user_commands(self) -> List[UserCommand]:
         # Return empty list - this plugin only provides model tools
         return []
 
@@ -395,6 +411,8 @@ class MultiToolPlugin:
 If your plugin provides commands that users can invoke directly (bypassing the model):
 
 ```python
+from shared.plugins.base import UserCommand
+
 class SearchPlugin:
     @property
     def name(self) -> str:
@@ -413,22 +431,27 @@ class SearchPlugin:
     def get_executors(self) -> Dict[str, Callable]:
         return {'search_index': self._execute_search}
 
-    def get_user_commands(self) -> List[tuple[str, str]]:
+    def get_user_commands(self) -> List[UserCommand]:
         # User commands - invoked directly by user (human or agent)
+        # share_with_model controls whether output is added to conversation history
         return [
-            ("search", "Search the index directly"),
-            ("reindex", "Rebuild the search index"),
-            ("stats", "Show index statistics"),
+            UserCommand("search", "Search the index directly", share_with_model=True),
+            UserCommand("reindex", "Rebuild the search index", share_with_model=False),
+            UserCommand("stats", "Show index statistics", share_with_model=False),
         ]
 
     # ... other methods ...
 ```
 
-User commands appear in client autocompletion and can be typed directly without going through the model's function calling. This is useful for:
+User commands appear in client autocompletion and can be typed directly without going through the model's function calling. The `share_with_model` flag controls whether the command's output is added to conversation history:
 
-- Administrative commands (reindex, clear cache, etc.)
-- Status commands (stats, health, etc.)
-- Commands that don't need AI interpretation
+- `share_with_model=True`: Output is added to history, model can see and use the results
+- `share_with_model=False` (default): Output is only displayed to the user
+
+This is useful for:
+
+- **Shared commands** (`share_with_model=True`): Search results, listing data, status that informs the model
+- **User-only commands** (`share_with_model=False`): Administrative tasks, health checks, cache operations
 
 ### Plugin with Background Resources
 
