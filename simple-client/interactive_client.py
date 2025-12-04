@@ -198,7 +198,33 @@ class InteractiveClient:
             all_decls.extend(self.permission_plugin.get_function_declarations())
         self.log(f"[client] Available tools: {[d.name for d in all_decls]}")
 
+        # Register plugin-contributed tools as completable commands
+        self._register_plugin_commands()
+
         return True
+
+    def _register_plugin_commands(self) -> None:
+        """Register plugin-contributed tools as completable commands.
+
+        Extracts tool names and descriptions from the plugin registry
+        and adds them to the completer so users can auto-complete tool names.
+        """
+        if not self._completer or not self.registry:
+            return
+
+        # Get all exposed tool declarations
+        decls = self.registry.get_exposed_declarations()
+
+        # Convert to command format: (name, description)
+        plugin_commands = [
+            (decl.name, decl.description[:60] + "..." if len(decl.description) > 60 else decl.description)
+            for decl in decls
+            if decl.name and decl.description
+        ]
+
+        if plugin_commands:
+            self._completer.add_commands(plugin_commands)
+            self.log(f"[client] Registered {len(plugin_commands)} tool(s) for completion")
 
     def run_prompt(self, prompt: str) -> str:
         """Execute a prompt and return the model's response.
