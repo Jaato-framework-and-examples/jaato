@@ -73,14 +73,11 @@ class ConsoleReporter(TodoReporter):
     Displays formatted progress updates with visual indicators
     for step status and overall plan progress.
 
-    Supports in-place updates where step status changes (e.g., IN_PROGRESS → COMPLETED)
-    are shown on the same line, reducing visual noise. Uses the `rich` library when
-    available for portable cross-platform terminal handling (including Windows).
+    In compact mode (default), only final statuses (COMPLETED, FAILED, SKIPPED)
+    are shown - IN_PROGRESS updates are suppressed to reduce output noise.
+    Set compact=False in config to see all status transitions.
 
-    In-place updates are automatically disabled when:
-    - Output is not a TTY (e.g., piped to a file)
-    - A custom output_func is provided (for testing)
-    - The rich library is not available
+    Uses the `rich` library when available for better terminal handling.
     """
 
     def __init__(self):
@@ -89,12 +86,9 @@ class ConsoleReporter(TodoReporter):
         self._progress_bar: bool = True
         self._use_colors: bool = True
         self._width: int = 60
-        self._inplace_updates: bool = True
+        self._compact_mode: bool = True  # Skip IN_PROGRESS, only show final status
         # Rich console for portable terminal output
         self._console: Optional["Console"] = None
-        # Track in-progress step for in-place updates
-        self._current_step_id: Optional[str] = None
-        self._lines_to_clear: int = 0
 
     def _init_console(self) -> None:
         """Initialize rich Console if available and appropriate."""
@@ -103,17 +97,6 @@ class ConsoleReporter(TodoReporter):
         else:
             self._console = None
 
-    def _can_do_inplace(self) -> bool:
-        """Check if in-place updates are supported in current environment.
-
-        In-place updates require rich library and a TTY terminal.
-        """
-        if not self._inplace_updates:
-            return False
-        # Require rich console and TTY for in-place updates
-        if self._console is not None:
-            return self._console.is_terminal
-        return False
 
     @property
     def name(self) -> str:
@@ -123,12 +106,12 @@ class ConsoleReporter(TodoReporter):
         """Initialize console reporter.
 
         Config options:
-            output_func: Custom output function (for testing, disables rich/inplace)
+            output_func: Custom output function (for testing, disables rich)
             show_timestamps: Show timestamps in output
             progress_bar: Show ASCII progress bar
             colors: Use ANSI colors (default True)
             width: Output width for progress bar
-            inplace_updates: Update step status in-place (default True)
+            compact: Compact mode - skip IN_PROGRESS, only show final status (default True)
         """
         if config:
             if "output_func" in config:
@@ -137,7 +120,7 @@ class ConsoleReporter(TodoReporter):
             self._progress_bar = config.get("progress_bar", True)
             self._use_colors = config.get("colors", True)
             self._width = config.get("width", 60)
-            self._inplace_updates = config.get("inplace_updates", True)
+            self._compact_mode = config.get("compact", True)
         # Initialize rich console after config is set
         self._init_console()
 
@@ -204,26 +187,6 @@ class ConsoleReporter(TodoReporter):
             return self._color(f"[{datetime.now().strftime('%H:%M:%S')}] ", "gray")
         return ""
 
-    def _move_cursor_up_and_clear(self, lines: int) -> None:
-        """Move cursor up N lines and clear them for in-place updates.
-
-        Uses rich console control for cross-platform terminal support.
-        """
-        if lines <= 0 or self._console is None:
-            return
-
-        from rich.control import Control
-        # Move up N lines, clearing each one (move up FIRST, then erase)
-        for _ in range(lines):
-            self._console.control(Control.move(0, -1))  # Move up one line
-            self._console.control(Control.move_to_column(0))
-            self._console.control(Control.erase_line())
-
-    def _print_with_tracking(self, text: str) -> None:
-        """Print text and track line count for in-place updates."""
-        self._print(text)
-        self._lines_to_clear += 1
-
     def report_plan_created(self, plan: TodoPlan) -> None:
         """Report new plan creation."""
         self._print("")
@@ -244,11 +207,15 @@ class ConsoleReporter(TodoReporter):
     def report_step_update(self, plan: TodoPlan, step: TodoStep) -> None:
         """Report step status change.
 
-        If inplace_updates is enabled and this step was previously shown as IN_PROGRESS,
-        the cursor moves back to overwrite the previous output with the new status.
-        This provides a cleaner visual experience where each step occupies a single
-        line that updates in place.
+        When compact mode is enabled (inplace_updates=True), only final statuses
+        (COMPLETED, FAILED, SKIPPED) are shown - IN_PROGRESS is suppressed to
+        reduce noise. This is simpler and more robust than cursor manipulation
+        which breaks when other output occurs between status changes.
         """
+        # In compact mode, skip IN_PROGRESS - only show final status
+        if self._compact_mode and step.status == StepStatus.IN_PROGRESS:
+            return
+
         symbol = self._status_symbol(step.status)
         status_text = step.status.value.upper()
 
@@ -263,39 +230,13 @@ class ConsoleReporter(TodoReporter):
         else:
             status_color = "gray"
 
-        # Check if in-place updates are possible in this environment
-        can_inplace = self._can_do_inplace()
-
-        # Check if we should update in-place (same step changing from IN_PROGRESS)
-        should_update_inplace = (
-            can_inplace
-            and self._current_step_id == step.step_id
-            and step.status != StepStatus.IN_PROGRESS
-            and self._lines_to_clear > 0
-        )
-
-        if should_update_inplace:
-            # Move cursor up and clear the previous IN_PROGRESS lines
-            self._move_cursor_up_and_clear(self._lines_to_clear)
-            self._lines_to_clear = 0
-            self._current_step_id = None
-
-        # Track this step if it's starting (IN_PROGRESS)
-        if step.status == StepStatus.IN_PROGRESS and can_inplace:
-            self._current_step_id = step.step_id
-            self._lines_to_clear = 0
-
         # Output the status line
         status_line = (
             f"{self._timestamp()}{symbol} "
             f"[{step.sequence}/{len(plan.steps)}] "
             f"{self._color(status_text, status_color)}: {step.description}"
         )
-
-        if can_inplace and step.status == StepStatus.IN_PROGRESS:
-            self._print_with_tracking(status_line)
-        else:
-            self._print(status_line)
+        self._print(status_line)
 
         # Show result or error for completed/failed/skipped steps
         if step.result and step.status in (StepStatus.COMPLETED, StepStatus.SKIPPED):
@@ -308,10 +249,7 @@ class ConsoleReporter(TodoReporter):
         if self._progress_bar:
             progress = plan.get_progress()
             progress_line = f"    {self._render_progress_bar(progress)}"
-            if can_inplace and step.status == StepStatus.IN_PROGRESS:
-                self._print_with_tracking(progress_line)
-            else:
-                self._print(progress_line)
+            self._print(progress_line)
 
     def report_plan_completed(self, plan: TodoPlan) -> None:
         """Report plan completion."""
