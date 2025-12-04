@@ -33,6 +33,9 @@ Example usage:
     )
 """
 
+# Plugin kind identifier for registry discovery
+PLUGIN_KIND = "tool"
+
 from .models import (
     StepStatus,
     PlanStatus,

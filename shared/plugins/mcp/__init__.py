@@ -6,6 +6,9 @@ their tools to the AI model.
 
 from .plugin import MCPToolPlugin, create_plugin
 
+# Plugin kind identifier for registry discovery
+PLUGIN_KIND = "tool"
+
 __all__ = [
     'MCPToolPlugin',
     'create_plugin',

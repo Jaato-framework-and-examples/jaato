@@ -6,6 +6,9 @@ on the local machine via subprocess.
 
 from .plugin import CLIToolPlugin, create_plugin
 
+# Plugin kind identifier for registry discovery
+PLUGIN_KIND = "tool"
+
 __all__ = [
     'CLIToolPlugin',
     'create_plugin',

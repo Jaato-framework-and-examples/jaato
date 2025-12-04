@@ -9,6 +9,9 @@ Also includes sanitization features for:
 - Path scope validation (sandbox to cwd)
 """
 
+# Plugin kind identifier for registry discovery
+PLUGIN_KIND = "tool"
+
 from .policy import PermissionPolicy, PermissionDecision, PolicyMatch
 from .config_loader import load_config, validate_config, PermissionConfig
 from .actors import Actor, ConsoleActor, WebhookActor, ActorResponse

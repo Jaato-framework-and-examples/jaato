@@ -24,6 +24,9 @@ Usage:
     client.set_gc_plugin(gc_plugin, GCConfig(threshold_percent=75.0))
 """
 
+# Plugin kind identifier for registry discovery
+PLUGIN_KIND = "gc"
+
 import sys
 from typing import Callable, Dict, Optional
 

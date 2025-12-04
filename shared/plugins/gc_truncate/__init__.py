@@ -12,6 +12,9 @@ Usage:
     client.set_gc_plugin(plugin, GCConfig(threshold_percent=75.0))
 """
 
+# Plugin kind identifier for registry discovery
+PLUGIN_KIND = "gc"
+
 from .plugin import TruncateGCPlugin, create_plugin
 
 __all__ = ["TruncateGCPlugin", "create_plugin"]

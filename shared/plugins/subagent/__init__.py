@@ -36,6 +36,9 @@ Example usage:
     # Plugin will be auto-discovered if in the plugins directory
 """
 
+# Plugin kind identifier for registry discovery
+PLUGIN_KIND = "tool"
+
 from .plugin import SubagentPlugin, create_plugin
 from .config import SubagentConfig, SubagentProfile, SubagentResult
 
