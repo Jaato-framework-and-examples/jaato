@@ -103,43 +103,25 @@ class AtFileCompleter(Completer):
         """Find the position of @ that starts a file reference.
 
         Returns -1 if no valid @ reference is found.
-        Skips @ symbols that are:
-        - Part of email addresses (preceded by alphanumerics)
-        - Escaped (preceded by backslash)
+        A valid @ is one that:
+        - Is at start of string, or preceded by whitespace/punctuation
+        - Is not part of an email address pattern
         """
-        pos = len(text) - 1
+        # Find the last @ in the text
+        at_pos = text.rfind('@')
+        if at_pos == -1:
+            return -1
 
-        # Scan backwards to find the most recent @
-        while pos >= 0:
-            if text[pos] == '@':
-                # Check if this @ is valid (not part of email, not escaped)
-                if pos > 0:
-                    prev_char = text[pos - 1]
-                    # Skip if escaped
-                    if prev_char == '\\':
-                        pos -= 1
-                        continue
-                    # Skip if likely email (alphanumeric before @)
-                    if prev_char.isalnum() or prev_char in '._-':
-                        # But allow if there's a space before the word
-                        word_start = pos - 1
-                        while word_start > 0 and text[word_start - 1] not in ' \t\n':
-                            word_start -= 1
-                        if word_start > 0 or text[0] not in ' \t\n@':
-                            # Check if there's @ before this word (likely email)
-                            if '@' not in text[word_start:pos]:
-                                pos -= 1
-                                continue
-                return pos
+        # Check if this @ looks like a file reference
+        # Valid: "@file", " @file", "(@file", '"@file'
+        # Invalid: "user@email" (alphanumeric before @)
+        if at_pos > 0:
+            prev_char = text[at_pos - 1]
+            # If preceded by alphanumeric, dot, underscore, or hyphen -> likely email
+            if prev_char.isalnum() or prev_char in '._-':
+                return -1
 
-            # Stop at whitespace - @ must be for current "word"
-            if text[pos] in ' \t\n':
-                # Continue looking for @ at start of a word
-                pass
-
-            pos -= 1
-
-        return -1
+        return at_pos
 
     def _resolve_path(self, base: str, completion: str) -> Optional[str]:
         """Resolve the full path for a completion."""
