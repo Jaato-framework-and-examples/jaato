@@ -244,7 +244,7 @@ class InteractiveClient:
         print("Tool calls will prompt for your approval.")
         print("Use ↑/↓ arrows to navigate prompt history.")
         if HAS_PROMPT_TOOLKIT and self._file_completer:
-            print("Use @path/to/file to reference files (TAB for completion).")
+            print("Use @path/to/file to reference files (completions appear as you type).")
         print("Type 'quit' or 'exit' to stop, 'help' for guidance.\n")
 
         # Clear history at start of interactive session (unless continuing from initial prompt)
@@ -322,8 +322,8 @@ File references:
   - @./config.json    - Reference with explicit relative path
   - @~/documents/     - Reference with home directory
   - @/absolute/path   - Absolute path reference
-  Start typing after @ and use TAB for path completion.
-  A dropdown menu will appear when multiple matches exist.
+  Completions appear automatically as you type after @.
+  Use ↑/↓ to navigate the dropdown, Enter or TAB to accept.
 
 Example prompts:
   - "List files in the current directory"
@@ -336,10 +336,11 @@ Multi-turn conversation:
   Use 'reset' to start a fresh conversation.
 
 Keyboard shortcuts:
-  ↑/↓       - Navigate through prompt history
+  ↑/↓       - Navigate prompt history (or completion menu)
   ←/→       - Move cursor within line
   Ctrl+A/E  - Jump to start/end of line
-  TAB       - Trigger/cycle file completion (after @)
+  TAB/Enter - Accept selected completion
+  Escape    - Dismiss completion menu
 """)
 
     def _print_tools(self) -> None:
