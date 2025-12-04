@@ -382,6 +382,24 @@ class SubagentPlugin:
             # Create inline profile
             plugins = inline_config.get('plugins', [])
 
+            # Check for common mistake: using tool names instead of plugin names
+            tool_to_plugin = {
+                'cli_based_tool': 'cli',
+                'call_mcp_tool': 'mcp',
+                'createPlan': 'todo',
+                'updateStep': 'todo',
+                'selectReferences': 'references',
+                'spawn_subagent': 'subagent',
+            }
+            corrected = []
+            for p in plugins:
+                if p in tool_to_plugin:
+                    corrected.append(tool_to_plugin[p])
+                else:
+                    corrected.append(p)
+            if corrected != plugins:
+                plugins = corrected
+
             # Validate plugins against allowed list
             if self._config.inline_allowed_plugins:
                 disallowed = set(plugins) - set(self._config.inline_allowed_plugins)
