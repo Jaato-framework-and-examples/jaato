@@ -6,7 +6,7 @@
 
 **j**ust **a**nother **a**gentic **t**ool **o**rchestrator
 
-An experimental project for exploring LLM function calling patterns with Google's Vertex AI and Gemini models.
+A framework for building agentic AI applications with LLM function calling on Google's Vertex AI and Gemini models.
 
 ### Etymology
 
@@ -16,14 +16,14 @@ The metaphor is intentional: just as a traditional jaato grinds raw grains into 
 
 ## Overview
 
-jaato is a sandbox for experimenting with:
+jaato is a future-proof framework for building agentic AI applications, featuring:
 
 - **Vertex AI Integration** - Using the `google-genai` SDK with Gemini models
 - **Function Calling** - Multi-turn tool execution loops with automatic result feeding
 - **Tool Orchestration** - Unified interface for CLI tools and MCP (Model Context Protocol) servers
 - **Token Accounting** - Detailed tracking of prompt/output tokens with retry logic
 
-> **Note**: This is an experimental project, not intended for production use.
+> **Note**: This project is currently experimental, but is being developed with the intention of becoming a production-ready orchestration framework. It follows best engineering practices and patterns, with AI-assisted development applied judiciously rather than relying on "vibe coding."
 
 ## Features
 
@@ -41,6 +41,7 @@ jaato is a sandbox for experimenting with:
 | [**mcp**](shared/plugins/mcp/README.md) | Connect to MCP (Model Context Protocol) servers and auto-discover their tools |
 | [**permission**](shared/plugins/permission/README.md) | Control tool execution with blacklist/whitelist policies and interactive approval |
 | [**todo**](shared/plugins/todo/README.md) | Plan tracking with workflow enforcement for complex multi-step tasks |
+| [**references**](shared/plugins/references/README.md) | Manage documentation source injection with auto-load and user-selectable references |
 
 See [shared/plugins/README.md](shared/plugins/README.md) for plugin development documentation.
 
@@ -48,7 +49,7 @@ See [shared/plugins/README.md](shared/plugins/README.md) for plugin development 
 
 - Python 3.10+
 - Google Cloud Platform account with Vertex AI enabled
-- Service account with Vertex AI permissions
+- GCP credentials file (service account key JSON) with Vertex AI permissions
 
 ## Installation
 
