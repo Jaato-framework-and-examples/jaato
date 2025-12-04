@@ -1,6 +1,9 @@
-"""File path completer for @ references.
+"""File path and command completer for interactive client.
 
-Provides intelligent file/folder completion when user types @path patterns.
+Provides intelligent completion for:
+- Commands (help, tools, reset, etc.) when typing at line start
+- File/folder paths when user types @path patterns
+
 Integrates with prompt_toolkit for rich interactive completion.
 """
 
@@ -10,6 +13,66 @@ from typing import Iterable, Optional
 
 from prompt_toolkit.completion import Completer, Completion, PathCompleter
 from prompt_toolkit.document import Document
+
+
+# Default commands available in the interactive client
+DEFAULT_COMMANDS = [
+    ("help", "Show help message and available commands"),
+    ("tools", "List available tools"),
+    ("reset", "Clear conversation history"),
+    ("history", "Show full conversation history"),
+    ("context", "Show context window usage"),
+    ("plan", "Show current plan status"),
+    ("quit", "Exit the client"),
+    ("exit", "Exit the client"),
+]
+
+
+class CommandCompleter(Completer):
+    """Complete commands at the start of input.
+
+    Provides completion for built-in commands like help, tools, reset, etc.
+    Only triggers when input appears to be a command (no @ or multi-word input).
+
+    Example usage:
+        "he" -> completes to "help"
+        "to" -> completes to "tools"
+    """
+
+    def __init__(self, commands: Optional[list[tuple[str, str]]] = None):
+        """Initialize the command completer.
+
+        Args:
+            commands: List of (command_name, description) tuples.
+                     Defaults to DEFAULT_COMMANDS if not provided.
+        """
+        self.commands = commands or DEFAULT_COMMANDS
+
+    def get_completions(
+        self, document: Document, complete_event
+    ) -> Iterable[Completion]:
+        """Get command completions for the current document."""
+        text = document.text_before_cursor.strip()
+
+        # Only complete if:
+        # - Input is a single word (no spaces)
+        # - Input doesn't contain @ (file reference)
+        # - Input is at the start (no leading content)
+        if ' ' in document.text_before_cursor or '@' in text:
+            return
+
+        # Get the word being typed
+        word = text.lower()
+
+        for cmd_name, cmd_desc in self.commands:
+            if cmd_name.startswith(word):
+                # Calculate how much to complete
+                yield Completion(
+                    cmd_name,
+                    start_position=-len(text),
+                    display=cmd_name,
+                    display_meta=cmd_desc,
+                )
 
 
 class AtFileCompleter(Completer):
@@ -321,3 +384,49 @@ class FileReferenceProcessor:
             return items
         except Exception:
             return []
+
+
+class CombinedCompleter(Completer):
+    """Combined completer for commands and file references.
+
+    Merges CommandCompleter and AtFileCompleter to provide:
+    - Command completion at line start (help, tools, reset, etc.)
+    - File path completion after @ symbols
+
+    This allows seamless autocompletion for both use cases.
+    """
+
+    def __init__(
+        self,
+        commands: Optional[list[tuple[str, str]]] = None,
+        only_directories: bool = False,
+        expanduser: bool = True,
+        base_path: Optional[str] = None,
+        file_filter: Optional[callable] = None,
+    ):
+        """Initialize the combined completer.
+
+        Args:
+            commands: List of (command_name, description) tuples for command completion.
+            only_directories: If True, only suggest directories for file completion.
+            expanduser: If True, expand ~ to home directory.
+            base_path: Base path for relative file completions (default: cwd).
+            file_filter: Optional callable(filename) -> bool to filter files.
+        """
+        self._command_completer = CommandCompleter(commands)
+        self._file_completer = AtFileCompleter(
+            only_directories=only_directories,
+            expanduser=expanduser,
+            base_path=base_path,
+            file_filter=file_filter,
+        )
+
+    def get_completions(
+        self, document: Document, complete_event
+    ) -> Iterable[Completion]:
+        """Get completions from both command and file completers."""
+        # Yield completions from both sources
+        # CommandCompleter will only yield if appropriate (single word, no @)
+        # AtFileCompleter will only yield if @ is present
+        yield from self._command_completer.get_completions(document, complete_event)
+        yield from self._file_completer.get_completions(document, complete_event)
