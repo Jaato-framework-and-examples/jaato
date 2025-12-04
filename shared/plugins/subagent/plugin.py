@@ -176,24 +176,23 @@ class SubagentPlugin:
                         "inline_config": {
                             "type": "object",
                             "description": (
-                                "Optional inline configuration for dynamic subagent creation. "
-                                "Only used if 'profile' is not specified and inline creation "
-                                "is allowed. Contains: plugins (list), system_instructions (string), "
-                                "max_turns (int)."
+                                "Optional overrides for subagent configuration. By default, "
+                                "subagents inherit your current plugins. Only specify properties "
+                                "you want to override."
                             ),
                             "properties": {
                                 "plugins": {
                                     "type": "array",
                                     "items": {"type": "string"},
                                     "description": (
-                                        "List of plugin names to enable for the subagent. "
-                                        "Select from the plugins you are aware of based on task requirements. "
-                                        "Use plugin names (e.g., 'cli'), NOT tool names (e.g., 'cli_based_tool')."
+                                        "Override inherited plugins. If not specified, inherits "
+                                        "parent's plugins. Use plugin names (e.g., 'cli'), NOT "
+                                        "tool names (e.g., 'cli_based_tool')."
                                     )
                                 },
                                 "system_instructions": {
                                     "type": "string",
-                                    "description": "System instructions for the subagent"
+                                    "description": "Additional system instructions for the subagent"
                                 },
                                 "max_turns": {
                                     "type": "integer",
@@ -235,7 +234,8 @@ class SubagentPlugin:
             return (
                 "You have access to a subagent system that allows you to delegate "
                 "tasks to specialized subagents. By default, subagents inherit your "
-                "current plugin configuration - just provide the task, no inline_config needed."
+                "current plugin configuration. Use inline_config only to override "
+                "specific properties like max_turns or system_instructions."
             )
 
         profile_descriptions = []
@@ -386,29 +386,8 @@ class SubagentPlugin:
                     response='',
                     error=f"Profile '{profile_name}' not found. Available: {available}"
                 ).to_dict()
-        elif inline_config:
-            # Create inline profile with specified plugins
-            plugins = inline_config.get('plugins', [])
-
-            # Validate plugins against allowed list if configured
-            if self._config and self._config.inline_allowed_plugins:
-                disallowed = set(plugins) - set(self._config.inline_allowed_plugins)
-                if disallowed:
-                    return SubagentResult(
-                        success=False,
-                        response='',
-                        error=f"Plugins not allowed for inline creation: {disallowed}"
-                    ).to_dict()
-
-            profile = SubagentProfile(
-                name='_inline',
-                description='Inline subagent',
-                plugins=plugins,
-                system_instructions=inline_config.get('system_instructions'),
-                max_turns=inline_config.get('max_turns', 10),
-            )
         else:
-            # No profile or inline_config - inherit parent's plugins
+            # No profile specified - use inherited plugins with optional overrides
             if not self._parent_plugins:
                 return SubagentResult(
                     success=False,
@@ -416,11 +395,35 @@ class SubagentPlugin:
                     error='No plugins available to inherit. Configure parent plugins first.'
                 ).to_dict()
 
+            # inline_config can override specific properties, defaults come from parent
+            plugins = self._parent_plugins
+            system_instructions = None
+            max_turns = 10
+
+            if inline_config:
+                # Override plugins only if explicitly specified
+                if 'plugins' in inline_config:
+                    plugins = inline_config['plugins']
+                    # Validate plugins against allowed list if configured
+                    if self._config and self._config.inline_allowed_plugins:
+                        disallowed = set(plugins) - set(self._config.inline_allowed_plugins)
+                        if disallowed:
+                            return SubagentResult(
+                                success=False,
+                                response='',
+                                error=f"Plugins not allowed for inline creation: {disallowed}"
+                            ).to_dict()
+                if 'system_instructions' in inline_config:
+                    system_instructions = inline_config['system_instructions']
+                if 'max_turns' in inline_config:
+                    max_turns = inline_config['max_turns']
+
             profile = SubagentProfile(
-                name='_inherited',
+                name='_inline' if inline_config else '_inherited',
                 description='Subagent with inherited plugins',
-                plugins=self._parent_plugins,
-                max_turns=10,
+                plugins=plugins,
+                system_instructions=system_instructions,
+                max_turns=max_turns,
             )
 
         # Build the full prompt
