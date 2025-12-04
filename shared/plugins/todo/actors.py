@@ -1,7 +1,7 @@
 """Reporter actors for the TODO plugin.
 
 Actors handle progress reporting through different transport protocols:
-- ConsoleReporter: Renders progress to terminal
+- ConsoleReporter: Renders progress to terminal (with in-place updates via rich)
 - WebhookReporter: Sends progress to HTTP endpoints
 - FileReporter: Writes progress to filesystem
 """
@@ -19,6 +19,13 @@ try:
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
+
+try:
+    from rich.console import Console
+    from rich.text import Text
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
 
 from .models import ProgressEvent, StepStatus, TodoPlan, TodoStep
 
@@ -65,14 +72,50 @@ class ConsoleReporter(TodoReporter):
 
     Displays formatted progress updates with visual indicators
     for step status and overall plan progress.
+
+    Supports in-place updates where step status changes (e.g., IN_PROGRESS → COMPLETED)
+    are shown on the same line, reducing visual noise. Uses the `rich` library when
+    available for portable cross-platform terminal handling (including Windows).
+
+    In-place updates are automatically disabled when:
+    - Output is not a TTY (e.g., piped to a file)
+    - A custom output_func is provided (for testing)
+    - The rich library is not available
     """
 
     def __init__(self):
-        self._output_func: Callable[[str], None] = print
+        self._output_func: Optional[Callable[[str], None]] = None
         self._show_timestamps: bool = True
         self._progress_bar: bool = True
         self._use_colors: bool = True
         self._width: int = 60
+        self._inplace_updates: bool = True
+        # Rich console for portable terminal output
+        self._console: Optional["Console"] = None
+        # Track in-progress step for in-place updates
+        self._current_step_id: Optional[str] = None
+        self._lines_to_clear: int = 0
+
+    def _init_console(self) -> None:
+        """Initialize rich Console if available and appropriate."""
+        if HAS_RICH and self._output_func is None and self._use_colors:
+            self._console = Console(force_terminal=None)  # Auto-detect TTY
+        else:
+            self._console = None
+
+    def _can_do_inplace(self) -> bool:
+        """Check if in-place updates are supported in current environment."""
+        if not self._inplace_updates:
+            return False
+        # With rich: check if console exists and is a TTY
+        if self._console is not None:
+            return self._console.is_terminal
+        # Without rich: need colors enabled, TTY, and default output
+        return (
+            self._use_colors
+            and self._output_func is None
+            and sys.stdout.isatty()
+        )
 
     @property
     def name(self) -> str:
@@ -82,11 +125,12 @@ class ConsoleReporter(TodoReporter):
         """Initialize console reporter.
 
         Config options:
-            output_func: Custom output function (for testing)
+            output_func: Custom output function (for testing, disables rich/inplace)
             show_timestamps: Show timestamps in output
             progress_bar: Show ASCII progress bar
-            colors: Use ANSI colors
+            colors: Use ANSI colors (default True)
             width: Output width for progress bar
+            inplace_updates: Update step status in-place (default True)
         """
         if config:
             if "output_func" in config:
@@ -95,6 +139,18 @@ class ConsoleReporter(TodoReporter):
             self._progress_bar = config.get("progress_bar", True)
             self._use_colors = config.get("colors", True)
             self._width = config.get("width", 60)
+            self._inplace_updates = config.get("inplace_updates", True)
+        # Initialize rich console after config is set
+        self._init_console()
+
+    def _print(self, text: str) -> None:
+        """Print text using either custom output_func, rich console, or print."""
+        if self._output_func is not None:
+            self._output_func(text)
+        elif self._console is not None:
+            self._console.print(text, highlight=False, markup=False)
+        else:
+            print(text)
 
     def _color(self, text: str, color: str) -> str:
         """Apply ANSI color to text if colors are enabled."""
@@ -150,25 +206,61 @@ class ConsoleReporter(TodoReporter):
             return self._color(f"[{datetime.now().strftime('%H:%M:%S')}] ", "gray")
         return ""
 
+    def _move_cursor_up_and_clear(self, lines: int) -> None:
+        """Move cursor up N lines and clear them for in-place updates.
+
+        Uses rich console control when available for cross-platform support,
+        otherwise falls back to ANSI escape codes.
+        """
+        if lines <= 0 or not self._can_do_inplace():
+            return
+
+        if self._console is not None:
+            # Use rich's control sequences for portability
+            from rich.control import Control
+            # Move up N lines, clearing each one
+            for _ in range(lines):
+                self._console.control(Control.move_to_column(0))
+                self._console.control(Control.erase_line())
+                self._console.control(Control.move(0, -1))
+            self._console.control(Control.move_to_column(0))
+        else:
+            # Fallback to raw ANSI codes
+            for _ in range(lines):
+                sys.stdout.write("\033[A\033[2K")
+            sys.stdout.write("\r")
+            sys.stdout.flush()
+
+    def _print_with_tracking(self, text: str) -> None:
+        """Print text and track line count for in-place updates."""
+        self._print(text)
+        self._lines_to_clear += 1
+
     def report_plan_created(self, plan: TodoPlan) -> None:
         """Report new plan creation."""
-        self._output_func("")
-        self._output_func("=" * self._width)
-        self._output_func(self._color(f"📋 PLAN: {plan.title}", "bold"))
-        self._output_func("=" * self._width)
-        self._output_func("")
+        self._print("")
+        self._print("=" * self._width)
+        self._print(self._color(f"📋 PLAN: {plan.title}", "bold"))
+        self._print("=" * self._width)
+        self._print("")
 
         for step in sorted(plan.steps, key=lambda s: s.sequence):
             symbol = self._status_symbol(step.status)
-            self._output_func(f"  {symbol} {step.sequence}. {step.description}")
+            self._print(f"  {symbol} {step.sequence}. {step.description}")
 
-        self._output_func("")
+        self._print("")
         if self._progress_bar:
-            self._output_func(self._render_progress_bar(plan.get_progress()))
-        self._output_func("")
+            self._print(self._render_progress_bar(plan.get_progress()))
+        self._print("")
 
     def report_step_update(self, plan: TodoPlan, step: TodoStep) -> None:
-        """Report step status change."""
+        """Report step status change.
+
+        If inplace_updates is enabled and this step was previously shown as IN_PROGRESS,
+        the cursor moves back to overwrite the previous output with the new status.
+        This provides a cleaner visual experience where each step occupies a single
+        line that updates in place.
+        """
         symbol = self._status_symbol(step.status)
         status_text = step.status.value.upper()
 
@@ -183,26 +275,60 @@ class ConsoleReporter(TodoReporter):
         else:
             status_color = "gray"
 
-        self._output_func(
+        # Check if in-place updates are possible in this environment
+        can_inplace = self._can_do_inplace()
+
+        # Check if we should update in-place (same step changing from IN_PROGRESS)
+        should_update_inplace = (
+            can_inplace
+            and self._current_step_id == step.step_id
+            and step.status != StepStatus.IN_PROGRESS
+            and self._lines_to_clear > 0
+        )
+
+        if should_update_inplace:
+            # Move cursor up and clear the previous IN_PROGRESS lines
+            self._move_cursor_up_and_clear(self._lines_to_clear)
+            self._lines_to_clear = 0
+            self._current_step_id = None
+
+        # Track this step if it's starting (IN_PROGRESS)
+        if step.status == StepStatus.IN_PROGRESS and can_inplace:
+            self._current_step_id = step.step_id
+            self._lines_to_clear = 0
+
+        # Output the status line
+        status_line = (
             f"{self._timestamp()}{symbol} "
             f"[{step.sequence}/{len(plan.steps)}] "
             f"{self._color(status_text, status_color)}: {step.description}"
         )
 
+        if can_inplace and step.status == StepStatus.IN_PROGRESS:
+            self._print_with_tracking(status_line)
+        else:
+            self._print(status_line)
+
+        # Show result or error for completed/failed/skipped steps
         if step.result and step.status in (StepStatus.COMPLETED, StepStatus.SKIPPED):
-            self._output_func(f"    → {step.result}")
+            self._print(f"    → {step.result}")
 
         if step.error and step.status == StepStatus.FAILED:
-            self._output_func(self._color(f"    ✗ Error: {step.error}", "red"))
+            self._print(self._color(f"    ✗ Error: {step.error}", "red"))
 
+        # Show progress bar
         if self._progress_bar:
             progress = plan.get_progress()
-            self._output_func(f"    {self._render_progress_bar(progress)}")
+            progress_line = f"    {self._render_progress_bar(progress)}"
+            if can_inplace and step.status == StepStatus.IN_PROGRESS:
+                self._print_with_tracking(progress_line)
+            else:
+                self._print(progress_line)
 
     def report_plan_completed(self, plan: TodoPlan) -> None:
         """Report plan completion."""
-        self._output_func("")
-        self._output_func("=" * self._width)
+        self._print("")
+        self._print("=" * self._width)
 
         progress = plan.get_progress()
 
@@ -216,20 +342,20 @@ class ConsoleReporter(TodoReporter):
             emoji = "⚠️"
             status_text = self._color("PLAN CANCELLED", "yellow")
 
-        self._output_func(f"{emoji} {status_text}: {plan.title}")
+        self._print(f"{emoji} {status_text}: {plan.title}")
 
         # Summary stats
-        self._output_func(
+        self._print(
             f"   Steps: {progress['completed']} completed, "
             f"{progress['failed']} failed, "
             f"{progress['skipped']} skipped"
         )
 
         if plan.summary:
-            self._output_func(f"   Summary: {plan.summary}")
+            self._print(f"   Summary: {plan.summary}")
 
-        self._output_func("=" * self._width)
-        self._output_func("")
+        self._print("=" * self._width)
+        self._print("")
 
 
 class WebhookReporter(TodoReporter):
