@@ -118,6 +118,10 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         """CLI tools require permission - return empty list."""
         return []
 
+    def get_user_commands(self) -> List[tuple[str, str]]:
+        """CLI plugin provides model tools only, no user commands."""
+        return []
+
     def _requires_shell(self, command: str) -> bool:
         """Check if a command requires shell interpretation.
 

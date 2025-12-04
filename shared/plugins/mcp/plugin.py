@@ -115,6 +115,10 @@ class MCPToolPlugin:
         """MCP tools require permission - return empty list."""
         return []
 
+    def get_user_commands(self) -> List[tuple[str, str]]:
+        """MCP plugin provides model tools only, no user commands."""
+        return []
+
     def _ensure_mcp_patch(self):
         """Lazily import mcp and apply the JSON-RPC validation patch."""
         if self._mcp_patch_applied:

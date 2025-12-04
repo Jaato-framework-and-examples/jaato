@@ -203,6 +203,10 @@ If a tool is denied, do not attempt to execute it."""
         """Permission tools require permission - return empty list."""
         return []
 
+    def get_user_commands(self) -> List[tuple[str, str]]:
+        """Permission plugin provides model tools only, no user commands."""
+        return []
+
     def _execute_ask_permission(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the askPermission tool.
 

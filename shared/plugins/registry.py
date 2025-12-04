@@ -295,3 +295,23 @@ class PluginRegistry:
             except Exception as exc:
                 print(f"[PluginRegistry] Error getting auto-approved tools from '{name}': {exc}")
         return tools
+
+    def get_exposed_user_commands(self) -> List[tuple[str, str]]:
+        """Collect user-facing commands from all exposed plugins.
+
+        User commands are different from model tools - they are commands
+        that users can type directly in the interactive client.
+
+        Returns:
+            List of (command_name, description) tuples for autocompletion.
+        """
+        commands = []
+        for name in self._exposed:
+            try:
+                if hasattr(self._plugins[name], 'get_user_commands'):
+                    user_commands = self._plugins[name].get_user_commands()
+                    if user_commands:
+                        commands.extend(user_commands)
+            except Exception as exc:
+                print(f"[PluginRegistry] Error getting user commands from '{name}': {exc}")
+        return commands

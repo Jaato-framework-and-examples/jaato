@@ -204,27 +204,23 @@ class InteractiveClient:
         return True
 
     def _register_plugin_commands(self) -> None:
-        """Register plugin-contributed tools as completable commands.
+        """Register plugin-contributed user commands for autocompletion.
 
-        Extracts tool names and descriptions from the plugin registry
-        and adds them to the completer so users can auto-complete tool names.
+        Collects user-facing commands from plugins (distinct from model tools)
+        and adds them to the completer for autocomplete support.
+
+        Note: This only registers commands explicitly marked as user-facing
+        via get_user_commands(), not model tools from get_function_declarations().
         """
         if not self._completer or not self.registry:
             return
 
-        # Get all exposed tool declarations
-        decls = self.registry.get_exposed_declarations()
-
-        # Convert to command format: (name, description)
-        plugin_commands = [
-            (decl.name, decl.description[:60] + "..." if len(decl.description) > 60 else decl.description)
-            for decl in decls
-            if decl.name and decl.description
-        ]
+        # Get user-facing commands from exposed plugins
+        plugin_commands = self.registry.get_exposed_user_commands()
 
         if plugin_commands:
             self._completer.add_commands(plugin_commands)
-            self.log(f"[client] Registered {len(plugin_commands)} tool(s) for completion")
+            self.log(f"[client] Registered {len(plugin_commands)} plugin command(s) for completion")
 
     def run_prompt(self, prompt: str) -> str:
         """Execute a prompt and return the model's response.

@@ -388,6 +388,10 @@ class ReferencesPlugin:
         """All tools are auto-approved - this is a user-triggered plugin."""
         return ["selectReferences", "listReferences"]
 
+    def get_user_commands(self) -> List[tuple[str, str]]:
+        """References plugin provides model tools only, no user commands."""
+        return []
+
     # Public API for programmatic access
 
     def get_sources(self) -> List[ReferenceSource]:

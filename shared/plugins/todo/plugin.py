@@ -301,6 +301,14 @@ class TodoPlugin:
         """
         return ["createPlan", "updateStep", "getPlanStatus", "completePlan", "addStep"]
 
+    def get_user_commands(self) -> List[tuple[str, str]]:
+        """TODO plugin provides model tools only, no user commands.
+
+        Note: The 'plan' command in the interactive client is handled by the
+        client itself (calling get_current_plan()), not as a plugin command.
+        """
+        return []
+
     def _execute_create_plan(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the createPlan tool."""
         title = args.get("title", "")
