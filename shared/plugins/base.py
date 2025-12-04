@@ -1,11 +1,25 @@
 """Base protocol for tool plugins."""
 
-from typing import Protocol, List, Dict, Any, Callable, Optional, Tuple, runtime_checkable
+from typing import Protocol, List, Dict, Any, Callable, Optional, NamedTuple, runtime_checkable
 from google.genai import types
 
 
-# Type alias for user commands: (name, description)
-UserCommand = Tuple[str, str]
+class UserCommand(NamedTuple):
+    """Declaration of a user-facing command.
+
+    User commands can be invoked directly by the user (human or agent)
+    without going through the model's function calling.
+
+    Attributes:
+        name: Command name for invocation and autocompletion.
+        description: Brief description shown in autocompletion/help.
+        share_with_model: If True, command output is added to conversation
+            history so the model can see/use it. If False (default),
+            output is only shown to the user.
+    """
+    name: str
+    description: str
+    share_with_model: bool = False
 
 
 @runtime_checkable

@@ -10,6 +10,8 @@ import time
 from typing import Dict, List, Any, Callable, Optional
 from google.genai import types
 
+from ..base import UserCommand
+
 
 class MCPToolPlugin:
     """Plugin that provides MCP (Model Context Protocol) tool execution.
@@ -115,7 +117,7 @@ class MCPToolPlugin:
         """MCP tools require permission - return empty list."""
         return []
 
-    def get_user_commands(self) -> List[tuple[str, str]]:
+    def get_user_commands(self) -> List[UserCommand]:
         """MCP plugin provides model tools only, no user commands."""
         return []
 

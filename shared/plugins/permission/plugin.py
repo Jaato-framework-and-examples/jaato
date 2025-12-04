@@ -18,6 +18,7 @@ from .actors import (
     ConsoleActor,
     create_actor,
 )
+from ..base import UserCommand
 
 
 class PermissionPlugin:
@@ -203,7 +204,7 @@ If a tool is denied, do not attempt to execute it."""
         """Permission tools require permission - return empty list."""
         return []
 
-    def get_user_commands(self) -> List[tuple[str, str]]:
+    def get_user_commands(self) -> List[UserCommand]:
         """Permission plugin provides model tools only, no user commands."""
         return []
 

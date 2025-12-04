@@ -12,6 +12,7 @@ from google.genai import types
 
 from .ai_tool_runner import ToolExecutor
 from .token_accounting import TokenLedger
+from .plugins.base import UserCommand
 
 # Context window limits for known Gemini models (total tokens)
 # These are approximate limits; actual limits may vary by API version
@@ -89,6 +90,9 @@ class JaatoClient:
         # Per-turn token accounting
         self._turn_accounting: List[Dict[str, int]] = []
 
+        # User commands: name -> UserCommand mapping
+        self._user_commands: Dict[str, UserCommand] = {}
+
     @property
     def is_connected(self) -> bool:
         """Check if client is connected to Vertex AI."""
@@ -157,6 +161,11 @@ class JaatoClient:
             if perm_instructions:
                 parts.append(perm_instructions)
         self._system_instruction = "\n\n".join(parts) if parts else None
+
+        # Store user commands for execute_user_command()
+        self._user_commands = {}
+        for cmd in registry.get_exposed_user_commands():
+            self._user_commands[cmd.name] = cmd
 
         # Create chat session with configured tools
         self._create_chat()
@@ -395,6 +404,99 @@ class JaatoClient:
         """
         self._turn_accounting = []
         self._create_chat(history)
+
+    def get_user_commands(self) -> Dict[str, UserCommand]:
+        """Get available user commands.
+
+        Returns:
+            Dict mapping command names to UserCommand objects.
+        """
+        return dict(self._user_commands)
+
+    def execute_user_command(
+        self,
+        command_name: str,
+        args: Optional[Dict[str, Any]] = None
+    ) -> tuple[Any, bool]:
+        """Execute a user command and optionally share with model.
+
+        User commands are plugin-provided commands that can be invoked
+        directly by the user. Each command declares whether its output
+        should be shared with the model via the share_with_model flag.
+
+        Args:
+            command_name: Name of the command to execute.
+            args: Optional arguments dict for the command.
+
+        Returns:
+            Tuple of (result, shared_with_model):
+            - result: The command's return value
+            - shared_with_model: True if the result was added to conversation history
+
+        Raises:
+            ValueError: If the command is not found.
+            RuntimeError: If executor is not configured.
+        """
+        if command_name not in self._user_commands:
+            raise ValueError(f"Unknown user command: {command_name}")
+
+        if not self._executor:
+            raise RuntimeError("Executor not configured. Call configure_tools() first.")
+
+        cmd = self._user_commands[command_name]
+        args = args or {}
+
+        # Execute the command
+        result = self._executor.execute(command_name, args)
+
+        # If share_with_model is True, add to conversation history
+        if cmd.share_with_model and self._chat:
+            # Add as a user message with function call and response
+            # This way the model sees what command was executed and what it returned
+            self._inject_command_into_history(command_name, args, result)
+
+        return result, cmd.share_with_model
+
+    def _inject_command_into_history(
+        self,
+        command_name: str,
+        args: Dict[str, Any],
+        result: Any
+    ) -> None:
+        """Inject a user command execution into conversation history.
+
+        This adds the command and its result to history so the model
+        can see what the user executed and use the information.
+
+        Args:
+            command_name: Name of the executed command.
+            args: Arguments passed to the command.
+            result: The command's return value.
+        """
+        # Get current history
+        current_history = self.get_history()
+
+        # Create a user message indicating the command was run
+        user_content = types.Content(
+            role='user',
+            parts=[types.Part.from_text(
+                f"[User executed command: {command_name}]"
+            )]
+        )
+
+        # Create a model message with the function call and response
+        # This simulates the model having called the function
+        model_content = types.Content(
+            role='model',
+            parts=[types.Part.from_function_response(
+                name=command_name,
+                response=result if isinstance(result, dict) else {"result": result}
+            )]
+        )
+
+        # Recreate chat with updated history
+        new_history = list(current_history) + [user_content, model_content]
+        self._create_chat(new_history)
 
     def generate(
         self,

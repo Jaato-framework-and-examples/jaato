@@ -18,6 +18,7 @@ from .models import PlanStatus, StepStatus, TodoPlan, TodoStep
 from .storage import TodoStorage, create_storage, InMemoryStorage
 from .actors import TodoReporter, ConsoleReporter, create_reporter
 from .config_loader import load_config, TodoConfig
+from ..base import UserCommand
 
 
 class TodoPlugin:
@@ -241,6 +242,8 @@ class TodoPlugin:
             "getPlanStatus": self._execute_get_plan_status,
             "completePlan": self._execute_complete_plan,
             "addStep": self._execute_add_step,
+            # User command alias for getPlanStatus
+            "plan": self._execute_get_plan_status,
         }
 
     def get_system_instructions(self) -> Optional[str]:
@@ -301,14 +304,17 @@ class TodoPlugin:
         """
         return ["createPlan", "updateStep", "getPlanStatus", "completePlan", "addStep"]
 
-    def get_user_commands(self) -> List[tuple[str, str]]:
+    def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for direct invocation.
 
         These commands can be typed directly by the user (human or agent)
         to check plan status without model mediation.
+
+        The plan command output is NOT shared with the model (share_with_model=False)
+        since it's purely for user visibility into progress.
         """
         return [
-            ("plan", "Show current plan status"),
+            UserCommand("plan", "Show current plan status", share_with_model=False),
         ]
 
     def _execute_create_plan(self, args: Dict[str, Any]) -> Dict[str, Any]:
