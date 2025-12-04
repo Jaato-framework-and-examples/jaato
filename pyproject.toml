@@ -50,6 +50,13 @@ permission = "shared.plugins.permission:create_plugin"
 todo = "shared.plugins.todo:create_plugin"
 references = "shared.plugins.references:create_plugin"
 
+# Entry points for GC strategy plugins
+# GC plugins implement context window garbage collection strategies
+[project.entry-points."jaato.gc_plugins"]
+gc_truncate = "shared.plugins.gc_truncate:create_plugin"
+gc_summarize = "shared.plugins.gc_summarize:create_plugin"
+gc_hybrid = "shared.plugins.gc_hybrid:create_plugin"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["shared*", "simple-client*"]
