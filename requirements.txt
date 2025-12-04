@@ -8,4 +8,5 @@ certifi
 python-dotenv
 pyreadline3
 prompt_toolkit>=3.0.0
+rich>=13.0.0
 reportlab
