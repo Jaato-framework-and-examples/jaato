@@ -389,8 +389,15 @@ class ReferencesPlugin:
         return ["selectReferences", "listReferences"]
 
     def get_user_commands(self) -> List[tuple[str, str]]:
-        """References plugin provides model tools only, no user commands."""
-        return []
+        """Return user-facing commands for direct invocation.
+
+        These commands can be typed directly by the user (human or agent)
+        to interact with reference sources without model mediation.
+        """
+        return [
+            ("listReferences", "List available reference sources"),
+            ("selectReferences", "Select reference sources to include"),
+        ]
 
     # Public API for programmatic access
 
