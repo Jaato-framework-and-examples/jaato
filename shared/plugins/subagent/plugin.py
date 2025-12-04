@@ -494,7 +494,7 @@ class SubagentPlugin:
                 success=False,
                 response='',
                 error=f"Failed to expose plugins: {errors}. Available plugins: {available}"
-            ).to_dict()
+            )
 
         # Create subagent client
         client = self._client_class()
