@@ -49,7 +49,7 @@ See [shared/plugins/README.md](shared/plugins/README.md) for plugin development 
 
 - Python 3.10+
 - Google Cloud Platform account with Vertex AI enabled
-- Service account with Vertex AI permissions
+- GCP credentials file (service account key JSON) with Vertex AI permissions
 
 ## Installation
 
