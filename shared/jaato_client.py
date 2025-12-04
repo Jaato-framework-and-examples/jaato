@@ -12,6 +12,7 @@ from google.genai import types
 
 from .ai_tool_runner import ToolExecutor
 from .token_accounting import TokenLedger
+from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
 
 # Context window limits for known Gemini models (total tokens)
 # These are approximate limits; actual limits may vary by API version
@@ -88,6 +89,11 @@ class JaatoClient:
 
         # Per-turn token accounting
         self._turn_accounting: List[Dict[str, int]] = []
+
+        # Context garbage collection
+        self._gc_plugin: Optional[GCPlugin] = None
+        self._gc_config: Optional[GCConfig] = None
+        self._gc_history: List[GCResult] = []
 
     @property
     def is_connected(self) -> bool:
@@ -218,6 +224,10 @@ class JaatoClient:
         The SDK manages conversation history internally. Use get_history()
         to access it and reset_session() to modify it.
 
+        If a GC plugin is configured with check_before_send=True, this will
+        automatically check and perform garbage collection if needed before
+        sending the message.
+
         Args:
             message: The user's message text.
 
@@ -231,6 +241,10 @@ class JaatoClient:
             raise RuntimeError("Client not connected. Call connect() first.")
         if not self._chat:
             raise RuntimeError("Tools not configured. Call configure_tools() first.")
+
+        # Check and perform GC if needed before sending
+        if self._gc_plugin and self._gc_config and self._gc_config.check_before_send:
+            self._maybe_collect_before_send()
 
         return self._run_chat_loop(message)
 
@@ -495,6 +509,107 @@ class JaatoClient:
         self._turn_accounting.append(turn_tokens)
 
         return response.text if response.text else ''
+
+    # ==================== Context Garbage Collection ====================
+
+    def set_gc_plugin(
+        self,
+        plugin: GCPlugin,
+        config: Optional[GCConfig] = None
+    ) -> None:
+        """Set the GC plugin for context management.
+
+        The GC plugin will be used to manage conversation history and
+        prevent context window overflow. Different plugins implement
+        different strategies (truncation, summarization, hybrid).
+
+        Args:
+            plugin: A plugin implementing the GCPlugin protocol.
+            config: Optional GC configuration. Uses defaults if not provided.
+
+        Example:
+            from shared.plugins.gc_truncate import create_plugin
+
+            gc_plugin = create_plugin()
+            gc_plugin.initialize({"preserve_recent_turns": 10})
+            client.set_gc_plugin(gc_plugin, GCConfig(threshold_percent=75.0))
+        """
+        self._gc_plugin = plugin
+        self._gc_config = config or GCConfig()
+
+    def remove_gc_plugin(self) -> None:
+        """Remove the GC plugin, disabling automatic garbage collection."""
+        if self._gc_plugin:
+            self._gc_plugin.shutdown()
+        self._gc_plugin = None
+        self._gc_config = None
+
+    def manual_gc(self) -> GCResult:
+        """Manually trigger garbage collection.
+
+        Forces a GC operation regardless of current context usage.
+        Useful for proactive cleanup or testing.
+
+        Returns:
+            GCResult with details about what was collected.
+
+        Raises:
+            RuntimeError: If no GC plugin is configured.
+        """
+        if not self._gc_plugin:
+            raise RuntimeError("No GC plugin configured. Call set_gc_plugin() first.")
+        if not self._gc_config:
+            self._gc_config = GCConfig()
+
+        history = self.get_history()
+        context_usage = self.get_context_usage()
+
+        new_history, result = self._gc_plugin.collect(
+            history, context_usage, self._gc_config, GCTriggerReason.MANUAL
+        )
+
+        if result.success:
+            self.reset_session(new_history)
+            self._gc_history.append(result)
+
+        return result
+
+    def get_gc_history(self) -> List[GCResult]:
+        """Get history of GC operations performed in this session.
+
+        Returns:
+            List of GCResult objects from previous collections.
+        """
+        return list(self._gc_history)
+
+    def _maybe_collect_before_send(self) -> Optional[GCResult]:
+        """Check and perform GC if needed before sending a message.
+
+        Called automatically by send_message() if GC is configured
+        with check_before_send=True.
+
+        Returns:
+            GCResult if GC was performed, None otherwise.
+        """
+        if not self._gc_plugin or not self._gc_config:
+            return None
+
+        context_usage = self.get_context_usage()
+        should_gc, reason = self._gc_plugin.should_collect(context_usage, self._gc_config)
+
+        if should_gc and reason:
+            history = self.get_history()
+            new_history, result = self._gc_plugin.collect(
+                history, context_usage, self._gc_config, reason
+            )
+
+            if result.success:
+                self.reset_session(new_history)
+                self._gc_history.append(result)
+
+            return result
+
+        return None
 
 
 __all__ = ['JaatoClient', 'MODEL_CONTEXT_LIMITS', 'DEFAULT_CONTEXT_LIMIT']
