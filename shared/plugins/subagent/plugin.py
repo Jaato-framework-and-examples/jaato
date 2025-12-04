@@ -185,10 +185,9 @@ class SubagentPlugin:
                                     "type": "array",
                                     "items": {"type": "string"},
                                     "description": (
-                                        "List of plugin names to enable. Valid plugin names are: "
-                                        "'cli' (shell commands), 'mcp' (MCP servers), 'todo' (task tracking), "
-                                        "'references' (documentation), 'permission' (access control). "
-                                        "Note: Use plugin names, NOT tool names (e.g., use 'cli' not 'cli_based_tool')."
+                                        "List of plugin names to enable for the subagent. "
+                                        "Select from the plugins you are aware of based on task requirements. "
+                                        "Use plugin names (e.g., 'cli'), NOT tool names (e.g., 'cli_based_tool')."
                                     )
                                 },
                                 "system_instructions": {
@@ -234,8 +233,10 @@ class SubagentPlugin:
         if not self._config or not self._config.profiles:
             return (
                 "You have access to a subagent system that allows you to delegate "
-                "tasks to specialized subagents. Use list_subagent_profiles to see "
-                "available profiles, then use spawn_subagent to delegate tasks."
+                "tasks to specialized subagents. No predefined profiles are configured, "
+                "but you can spawn subagents dynamically using inline_config.\n\n"
+                "Tailor the subagent's capabilities by selecting from the plugins you are aware of. "
+                "Choose plugins based on what the task requires and combine multiple if needed."
             )
 
         profile_descriptions = []
@@ -252,6 +253,7 @@ class SubagentPlugin:
             "Available subagent profiles:\n"
             f"{profiles_text}\n\n"
             "Use spawn_subagent with a profile name and task to delegate work. "
+            "Alternatively, use inline_config to create a custom subagent with specific plugins. "
             "The subagent will run independently with its own tool set and return results."
         )
 
@@ -311,8 +313,11 @@ class SubagentPlugin:
         if not self._config or not self._config.profiles:
             return {
                 'profiles': [],
-                'message': 'No subagent profiles configured.',
-                'inline_allowed': self._config.allow_inline if self._config else False,
+                'message': (
+                    'No predefined profiles. Use inline_config to spawn subagents dynamically. '
+                    'Select from the plugins you are aware of based on task requirements.'
+                ),
+                'inline_allowed': self._config.allow_inline if self._config else True,
             }
 
         profiles = []
