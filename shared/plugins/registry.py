@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Set, Callable, Any, Optional
 from google.genai import types
 
-from .base import ToolPlugin
+from .base import ToolPlugin, UserCommand
 
 # Entry point group name for jaato plugins
 # External packages can register plugins by adding to this group in their pyproject.toml:
@@ -295,3 +295,28 @@ class PluginRegistry:
             except Exception as exc:
                 print(f"[PluginRegistry] Error getting auto-approved tools from '{name}': {exc}")
         return tools
+
+    def get_exposed_user_commands(self) -> List[UserCommand]:
+        """Collect user-facing commands from all exposed plugins.
+
+        User commands are different from model tools - they are commands
+        that users can type directly in the interactive client.
+
+        Each UserCommand includes:
+        - name: Command name for invocation and autocompletion
+        - description: Brief description shown in autocompletion/help
+        - share_with_model: If True, output is added to conversation history
+
+        Returns:
+            List of UserCommand objects from all exposed plugins.
+        """
+        commands: List[UserCommand] = []
+        for name in self._exposed:
+            try:
+                if hasattr(self._plugins[name], 'get_user_commands'):
+                    user_commands = self._plugins[name].get_user_commands()
+                    if user_commands:
+                        commands.extend(user_commands)
+            except Exception as exc:
+                print(f"[PluginRegistry] Error getting user commands from '{name}': {exc}")
+        return commands

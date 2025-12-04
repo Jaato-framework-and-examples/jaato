@@ -34,6 +34,8 @@ class CommandCompleter(Completer):
     Provides completion for built-in commands like help, tools, reset, etc.
     Only triggers when input appears to be a command (no @ or multi-word input).
 
+    Supports dynamic registration of additional commands from plugins.
+
     Example usage:
         "he" -> completes to "help"
         "to" -> completes to "tools"
@@ -46,7 +48,30 @@ class CommandCompleter(Completer):
             commands: List of (command_name, description) tuples.
                      Defaults to DEFAULT_COMMANDS if not provided.
         """
-        self.commands = commands or DEFAULT_COMMANDS
+        self._builtin_commands = list(commands or DEFAULT_COMMANDS)
+        self._plugin_commands: list[tuple[str, str]] = []
+
+    @property
+    def commands(self) -> list[tuple[str, str]]:
+        """Get all commands (builtin + plugin-contributed)."""
+        return self._builtin_commands + self._plugin_commands
+
+    def add_commands(self, commands: list[tuple[str, str]]) -> None:
+        """Add commands dynamically (e.g., from plugins).
+
+        Args:
+            commands: List of (command_name, description) tuples to add.
+        """
+        # Avoid duplicates by checking existing names
+        existing_names = {cmd[0] for cmd in self.commands}
+        for cmd in commands:
+            if cmd[0] not in existing_names:
+                self._plugin_commands.append(cmd)
+                existing_names.add(cmd[0])
+
+    def clear_plugin_commands(self) -> None:
+        """Clear all plugin-contributed commands."""
+        self._plugin_commands.clear()
 
     def get_completions(
         self, document: Document, complete_event
@@ -420,6 +445,18 @@ class CombinedCompleter(Completer):
             base_path=base_path,
             file_filter=file_filter,
         )
+
+    def add_commands(self, commands: list[tuple[str, str]]) -> None:
+        """Add commands dynamically (e.g., from plugins).
+
+        Args:
+            commands: List of (command_name, description) tuples to add.
+        """
+        self._command_completer.add_commands(commands)
+
+    def clear_plugin_commands(self) -> None:
+        """Clear all plugin-contributed commands."""
+        self._command_completer.clear_plugin_commands()
 
     def get_completions(
         self, document: Document, complete_event

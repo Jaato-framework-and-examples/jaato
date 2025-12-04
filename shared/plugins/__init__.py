@@ -23,7 +23,7 @@ Usage:
     registry.unexpose_all()
 """
 
-from .base import ToolPlugin
+from .base import ToolPlugin, UserCommand
 from .registry import PluginRegistry
 
-__all__ = ['ToolPlugin', 'PluginRegistry']
+__all__ = ['ToolPlugin', 'PluginRegistry', 'UserCommand']
