@@ -479,9 +479,7 @@ class JaatoClient:
         # Create a user message indicating the command was run
         user_content = types.Content(
             role='user',
-            parts=[types.Part.from_text(
-                f"[User executed command: {command_name}]"
-            )]
+            parts=[types.Part(text=f"[User executed command: {command_name}]")]
         )
 
         # Create a model message with the function call and response
