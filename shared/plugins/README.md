@@ -58,18 +58,24 @@ registry.expose_tool('cli', config={'extra_paths': ['/usr/local/bin']})
 registry.unexpose_tool('cli')
 ```
 
-### Getting Tool Declarations and Executors
+### Getting Tool Declarations, Executors, and User Commands
 
-Once plugins are exposed, you can retrieve their tool declarations (for the AI model) and executors (for running the tools).
+Once plugins are exposed, you can retrieve their tool declarations (for the AI model), executors (for running the tools), and user commands (for direct user interaction).
 
 ```python
-# Get FunctionDeclarations for Vertex AI
+# Get FunctionDeclarations for Vertex AI (model tools)
 declarations = registry.get_exposed_declarations()
 
 # Get executor callables
 executors = registry.get_exposed_executors()
 # Returns: {'tool_name': callable, ...}
+
+# Get user-facing commands for autocompletion
+user_commands = registry.get_exposed_user_commands()
+# Returns: [('command_name', 'description'), ...]
 ```
+
+**Note**: User commands are distinct from model tools. They are commands that users (human or agent) can invoke directly without going through the model's function calling.
 
 ### Integration with JaatoClient
 
@@ -155,11 +161,32 @@ For quick development, add a Python file to `shared/plugins/` that implements th
 
 ### Plugin Protocol
 
+Plugins provide two types of capabilities:
+
+1. **Model tools**: Functions the AI model can invoke via function calling
+2. **User commands**: Commands the user can invoke directly (without model mediation)
+
+> **Note on "user"**: In this context, "user" refers to the entity directly interfacing with the client. This could be a human operator OR another AI agent in agent-to-agent communication scenarios. User commands bypass the model's function calling and execute directly.
+
 Every plugin must implement these methods:
 
 ```python
-from typing import Protocol, List, Dict, Any, Callable, Optional
+from typing import Protocol, List, Dict, Any, Callable, Optional, NamedTuple
 from google.genai import types
+
+class UserCommand(NamedTuple):
+    """Declaration of a user-facing command.
+
+    Attributes:
+        name: Command name for invocation and autocompletion.
+        description: Brief description shown in autocompletion/help.
+        share_with_model: If True, command output is added to conversation
+            history so the model can see/use it. If False (default),
+            output is only shown to the user.
+    """
+    name: str
+    description: str
+    share_with_model: bool = False
 
 class ToolPlugin(Protocol):
     @property
@@ -168,7 +195,10 @@ class ToolPlugin(Protocol):
         ...
 
     def get_function_declarations(self) -> List[types.FunctionDeclaration]:
-        """Return google-genai FunctionDeclaration objects for this plugin's tools."""
+        """Return google-genai FunctionDeclaration objects for model tools.
+
+        These are functions the AI model can invoke via function calling.
+        """
         ...
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
@@ -194,6 +224,28 @@ class ToolPlugin(Protocol):
         the permission plugin. Return empty list if all tools require permission.
         """
         ...
+
+    def get_user_commands(self) -> List[UserCommand]:
+        """Return user-facing commands this plugin provides.
+
+        User commands are different from model tools:
+        - Model tools: Invoked by the AI via function calling
+        - User commands: Invoked directly by the user without model mediation
+
+        The "user" can be a human operator OR another AI agent in
+        agent-to-agent communication scenarios.
+
+        Each command declares share_with_model to control whether its output
+        is added to conversation history (visible to the model) or only
+        displayed to the user.
+
+        Most plugins only provide model tools and should return an empty list.
+        Use this for plugins that also provide direct interaction commands.
+
+        Returns:
+            List of UserCommand objects for autocompletion and execution.
+        """
+        ...
 ```
 
 ### Minimal Plugin Example
@@ -205,6 +257,7 @@ Here's a minimal plugin that provides a single tool:
 
 from typing import Dict, List, Any, Callable, Optional
 from google.genai import types
+from shared.plugins.base import UserCommand
 
 
 class ExamplePlugin:
@@ -249,6 +302,10 @@ class ExamplePlugin:
 
     def get_auto_approved_tools(self) -> List[str]:
         # Return empty list - this tool requires permission
+        return []
+
+    def get_user_commands(self) -> List[UserCommand]:
+        # Return empty list - this plugin only provides model tools
         return []
 
     def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -348,6 +405,53 @@ class MultiToolPlugin:
             'tool_c': self._execute_c,
         }
 ```
+
+### Plugin with User Commands
+
+If your plugin provides commands that users can invoke directly (bypassing the model):
+
+```python
+from shared.plugins.base import UserCommand
+
+class SearchPlugin:
+    @property
+    def name(self) -> str:
+        return "search"
+
+    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
+        # Model tools - invoked by the AI
+        return [
+            types.FunctionDeclaration(
+                name='search_index',
+                description='Search the index',
+                parameters_json_schema={...}
+            )
+        ]
+
+    def get_executors(self) -> Dict[str, Callable]:
+        return {'search_index': self._execute_search}
+
+    def get_user_commands(self) -> List[UserCommand]:
+        # User commands - invoked directly by user (human or agent)
+        # share_with_model controls whether output is added to conversation history
+        return [
+            UserCommand("search", "Search the index directly", share_with_model=True),
+            UserCommand("reindex", "Rebuild the search index", share_with_model=False),
+            UserCommand("stats", "Show index statistics", share_with_model=False),
+        ]
+
+    # ... other methods ...
+```
+
+User commands appear in client autocompletion and can be typed directly without going through the model's function calling. The `share_with_model` flag controls whether the command's output is added to conversation history:
+
+- `share_with_model=True`: Output is added to history, model can see and use the results
+- `share_with_model=False` (default): Output is only displayed to the user
+
+This is useful for:
+
+- **Shared commands** (`share_with_model=True`): Search results, listing data, status that informs the model
+- **User-only commands** (`share_with_model=False`): Administrative tasks, health checks, cache operations
 
 ### Plugin with Background Resources
 

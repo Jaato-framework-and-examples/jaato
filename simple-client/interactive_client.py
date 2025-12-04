@@ -9,8 +9,9 @@ Supports multi-turn conversation with history.
 import os
 import sys
 import pathlib
+import json
 import readline  # Enables arrow key history navigation (fallback)
-from typing import Optional
+from typing import Optional, Dict, Any
 
 # Try to import prompt_toolkit for enhanced completion
 try:
@@ -119,6 +120,88 @@ class InteractiveClient:
 
         return self._file_processor.expand_references(text)
 
+    def _try_execute_plugin_command(self, user_input: str) -> Optional[Any]:
+        """Try to execute user input as a plugin-provided command.
+
+        Checks if the input matches a registered user command and executes it
+        via JaatoClient. If share_with_model is True, the result is automatically
+        added to conversation history by JaatoClient.
+
+        Args:
+            user_input: The user's input string
+
+        Returns:
+            The command result if executed, or None if not a plugin command
+        """
+        if not self._jaato:
+            return None
+
+        # Get available user commands
+        user_commands = self._jaato.get_user_commands()
+        if not user_commands:
+            return None
+
+        # Check if input matches a command (case-insensitive)
+        input_lower = user_input.lower().strip()
+        command_name = None
+        for cmd_name in user_commands:
+            if input_lower == cmd_name.lower():
+                command_name = cmd_name
+                break
+
+        if not command_name:
+            return None
+
+        # Execute the command via JaatoClient
+        try:
+            result, shared = self._jaato.execute_user_command(command_name, {})
+
+            # Display the result to the user
+            self._display_command_result(command_name, result, shared)
+
+            return result
+
+        except Exception as e:
+            print(f"\nError executing {command_name}: {e}")
+            return {"error": str(e)}
+
+    def _display_command_result(self, command_name: str, result: Any, shared: bool) -> None:
+        """Display the result of a plugin command to the user.
+
+        Args:
+            command_name: Name of the executed command
+            result: The command's return value
+            shared: Whether the result was shared with the model
+        """
+        print(f"\n[{command_name}]")
+
+        if isinstance(result, dict):
+            # Pretty-print dict results
+            for key, value in result.items():
+                if key.startswith('_'):
+                    continue  # Skip internal fields
+                if isinstance(value, (list, dict)):
+                    print(f"  {key}:")
+                    if isinstance(value, list):
+                        for item in value[:20]:  # Limit list display
+                            if isinstance(item, dict):
+                                # Format dict items compactly
+                                item_str = ", ".join(f"{k}: {v}" for k, v in item.items())
+                                print(f"    - {item_str}")
+                            else:
+                                print(f"    - {item}")
+                        if len(value) > 20:
+                            print(f"    ... and {len(value) - 20} more")
+                    else:
+                        print(f"    {json.dumps(value, indent=2)}")
+                else:
+                    print(f"  {key}: {value}")
+        else:
+            print(f"  {result}")
+
+        if shared:
+            print("  [Result shared with model]")
+
     def initialize(self) -> bool:
         """Initialize the client, loading config and connecting to Vertex AI."""
         # Load environment variables
@@ -198,7 +281,33 @@ class InteractiveClient:
             all_decls.extend(self.permission_plugin.get_function_declarations())
         self.log(f"[client] Available tools: {[d.name for d in all_decls]}")
 
+        # Register plugin-contributed tools as completable commands
+        self._register_plugin_commands()
+
         return True
+
+    def _register_plugin_commands(self) -> None:
+        """Register plugin-contributed user commands for autocompletion.
+
+        Collects user-facing commands from JaatoClient and adds them to the
+        completer for autocomplete support.
+
+        Note: Command execution and share_with_model handling is done by JaatoClient.
+        """
+        if not self._jaato or not self._completer:
+            return
+
+        # Get user commands from JaatoClient (which got them from registry)
+        user_commands = self._jaato.get_user_commands()
+
+        if not user_commands:
+            return
+
+        # Add to completer for autocompletion (need (name, description) tuples)
+        completer_cmds = [(cmd.name, cmd.description) for cmd in user_commands.values()]
+        self._completer.add_commands(completer_cmds)
+
+        self.log(f"[client] Registered {len(user_commands)} plugin command(s) for completion")
 
     def run_prompt(self, prompt: str) -> str:
         """Execute a prompt and return the model's response.
@@ -283,12 +392,15 @@ class InteractiveClient:
                 self._print_history()
                 continue
 
-            if user_input.lower() == 'plan':
-                self._print_plan()
-                continue
-
             if user_input.lower() == 'context':
                 self._print_context()
+                continue
+
+            # Check if input is a plugin-provided user command
+            # (includes 'plan' from todo plugin, 'listReferences', 'selectReferences' from references plugin)
+            plugin_result = self._try_execute_plugin_command(user_input)
+            if plugin_result is not None:
+                # Plugin command was executed, result already displayed
                 continue
 
             # Expand @file references to include file contents
@@ -307,10 +419,13 @@ Commands (auto-complete as you type):
   reset   - Clear conversation history
   history - Show full conversation history
   context - Show context window usage
-  plan    - Show current plan status
   quit    - Exit the client
-  exit    - Exit the client
+  exit    - Exit the client""")
 
+        # Dynamically list plugin-contributed commands
+        self._print_plugin_commands()
+
+        print("""
 When the model tries to use a tool, you'll see a permission prompt:
   [y]es     - Allow this execution
   [n]o      - Deny this execution
@@ -352,40 +467,30 @@ Keyboard shortcuts:
             print(f"  - {decl.name}: {decl.description}")
         print()
 
-    def _print_plan(self) -> None:
-        """Print current plan status."""
-        if not self.todo_plugin:
-            print("\n[Plan tracking not available]")
+    def _print_plugin_commands(self) -> None:
+        """Print plugin-contributed user commands grouped by plugin."""
+        if not self.registry:
             return
 
-        plan = self.todo_plugin.get_current_plan()
-        if not plan:
-            print("\n[No active plan]")
+        # Collect commands by plugin
+        commands_by_plugin: Dict[str, list] = {}
+        for plugin_name in self.registry.list_exposed():
+            plugin = self.registry.get_plugin(plugin_name)
+            if plugin and hasattr(plugin, 'get_user_commands'):
+                commands = plugin.get_user_commands()
+                if commands:
+                    commands_by_plugin[plugin_name] = commands
+
+        if not commands_by_plugin:
             return
 
-        progress = plan.get_progress()
-        print(f"\n{'=' * 50}")
-        print(f"  Plan: {plan.title}")
-        print(f"  Status: {plan.status.value}")
-        print(f"  Progress: {progress['completed']}/{progress['total']} ({progress['percent']:.0f}%)")
-        print(f"{'=' * 50}")
-
-        for step in sorted(plan.steps, key=lambda s: s.sequence):
-            status_icons = {
-                'pending': '○',
-                'in_progress': '●',
-                'completed': '✓',
-                'failed': '✗',
-                'skipped': '⊘',
-            }
-            icon = status_icons.get(step.status.value, '?')
-            print(f"  {icon} {step.sequence}. {step.description} [{step.status.value}]")
-            if step.result:
-                print(f"      → {step.result}")
-            if step.error:
-                print(f"      ✗ {step.error}")
-
-        print()
+        print("\nPlugin commands:")
+        for plugin_name, commands in sorted(commands_by_plugin.items()):
+            for cmd in commands:
+                # Calculate padding for alignment
+                padding = max(2, 18 - len(cmd.name))
+                shared_marker = " [shared]" if cmd.share_with_model else ""
+                print(f"  {cmd.name}{' ' * padding}- {cmd.description} ({plugin_name}){shared_marker}")
 
     def _print_context(self) -> None:
         """Print context window usage statistics."""
