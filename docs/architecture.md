@@ -20,6 +20,8 @@ This document describes the architecture of the jaato framework and how a generi
 │  │  • send_message(message) → response                                 │    │
 │  │  • get_history() / reset_session()                                  │    │
 │  │  • get_context_usage()                                              │    │
+│  │  • get_user_commands() → Dict[str, UserCommand]                     │    │
+│  │  • execute_user_command(name, args) → (result, shared)              │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                              │                               │
 │              ┌───────────────────────────────┼───────────────────────────┐   │
@@ -31,10 +33,12 @@ This document describes the architecture of the jaato framework and how a generi
 │  └─────────┬─────────┘       └───────────────────┘       └──────────────┘   │
 │            │                          │                                      │
 │            ▼                          ▼                                      │
-│  ┌───────────────────┐       ┌───────────────────┐                          │
-│  │PermissionPlugin   │       │   Tool Plugins    │                          │
-│  │ (Access control)  │       │ (CLI, MCP, etc.)  │                          │
-│  └───────────────────┘       └───────────────────┘                          │
+│  ┌───────────────────┐       ┌────────────────────────────────────────────┐ │
+│  │PermissionPlugin   │       │   Tool Plugins                              │ │
+│  │ (Access control)  │       │ (CLI, MCP, Todo, References, etc.)          │ │
+│  └───────────────────┘       │   • Model tools (function calling)          │ │
+│                              │   • User commands (direct invocation)        │ │
+│                              └────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────┘
                                               │
                                               ▼
@@ -68,6 +72,8 @@ flowchart TB
                 CLI[CLIToolPlugin<br/>plugins/cli/]
                 MCP[MCPToolPlugin<br/>plugins/mcp/]
                 PERM[PermissionPlugin<br/>plugins/permission/]
+                TODO[TodoPlugin<br/>plugins/todo/]
+                REFS[ReferencesPlugin<br/>plugins/references/]
             end
         end
 
@@ -87,6 +93,8 @@ flowchart TB
     PR --> CLI
     PR --> MCP
     PR --> PERM
+    PR --> TODO
+    PR --> REFS
     TE --> PERM
     MCP --> MCM
     MCM --> MCPS
@@ -128,6 +136,13 @@ sequenceDiagram
 
 ```mermaid
 classDiagram
+    class UserCommand {
+        <<NamedTuple>>
+        +name: str
+        +description: str
+        +share_with_model: bool = False
+    }
+
     class ToolPlugin {
         <<Protocol>>
         +name: str
@@ -137,6 +152,7 @@ classDiagram
         +shutdown()
         +get_system_instructions() str
         +get_auto_approved_tools() List
+        +get_user_commands() List~UserCommand~
     }
 
     class PluginRegistry {
@@ -147,6 +163,7 @@ classDiagram
         +unexpose_tool(name)
         +get_exposed_declarations()
         +get_exposed_executors()
+        +get_exposed_user_commands() List~UserCommand~
     }
 
     class CLIToolPlugin {
@@ -169,10 +186,29 @@ classDiagram
         +askPermission(tool)
     }
 
+    class TodoPlugin {
+        +name = "todo"
+        +createPlan()
+        +updateStep()
+        +getPlanStatus()
+        +plan user command
+    }
+
+    class ReferencesPlugin {
+        +name = "references"
+        +selectReferences()
+        +listReferences()
+        +listReferences user command
+        +selectReferences user command
+    }
+
     ToolPlugin <|.. CLIToolPlugin
     ToolPlugin <|.. MCPToolPlugin
     ToolPlugin <|.. PermissionPlugin
+    ToolPlugin <|.. TodoPlugin
+    ToolPlugin <|.. ReferencesPlugin
     PluginRegistry o-- ToolPlugin
+    ToolPlugin ..> UserCommand : returns
 ```
 
 ## Typical Client Usage
@@ -252,13 +288,30 @@ shared/
 ├── token_accounting.py      # TokenLedger for usage tracking
 ├── mcp_context_manager.py   # MCP server connections
 └── plugins/
-    ├── __init__.py
-    ├── base.py              # ToolPlugin protocol
+    ├── __init__.py          # Exports ToolPlugin, PluginRegistry, UserCommand
+    ├── base.py              # ToolPlugin protocol, UserCommand NamedTuple
     ├── registry.py          # PluginRegistry
     ├── cli/
-    │   └── plugin.py        # CLIToolPlugin
+    │   └── plugin.py        # CLIToolPlugin (model tools only)
     ├── mcp/
-    │   └── plugin.py        # MCPToolPlugin
-    └── permission/
-        └── plugin.py        # PermissionPlugin
+    │   └── plugin.py        # MCPToolPlugin (model tools only)
+    ├── permission/
+    │   └── plugin.py        # PermissionPlugin (model tools only)
+    ├── todo/
+    │   └── plugin.py        # TodoPlugin (model tools + user commands)
+    └── references/
+        └── plugin.py        # ReferencesPlugin (model tools + user commands)
 ```
+
+## User Commands vs Model Tools
+
+Plugins can provide two types of capabilities:
+
+| Type | Invocation | Example | History |
+|------|------------|---------|---------|
+| **Model tools** | AI calls via function calling | `cli_based_tool`, `createPlan` | Always in history |
+| **User commands** | User types directly | `plan`, `listReferences` | Configurable via `share_with_model` |
+
+User commands are declared via `get_user_commands()` returning `List[UserCommand]`:
+- `share_with_model=True`: Command output added to conversation history (model sees it)
+- `share_with_model=False`: Output only displayed to user (model doesn't see it)
