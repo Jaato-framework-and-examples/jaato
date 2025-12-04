@@ -214,22 +214,33 @@ class JaatoClient:
         self._create_chat()
 
     def _configure_subagent_plugin(self, registry: 'PluginRegistry') -> None:
-        """Pass connection info to subagent plugin if exposed.
+        """Pass connection info and parent plugins to subagent plugin if exposed.
 
         This allows subagents to inherit the parent's connection settings
-        (project, location, model) without requiring explicit configuration.
+        (project, location, model) and plugin configuration without requiring
+        explicit inline_config.
 
         Args:
             registry: PluginRegistry to check for subagent plugin.
         """
-        if not self._project or not self._location or not self._model_name:
-            return  # No connection info to pass
-
         # Check if subagent plugin is exposed
         try:
             subagent_plugin = registry.get_plugin('subagent')
-            if subagent_plugin and hasattr(subagent_plugin, 'set_connection'):
-                subagent_plugin.set_connection(self._project, self._location, self._model_name)
+            if not subagent_plugin:
+                return
+
+            # Pass connection info
+            if self._project and self._location and self._model_name:
+                if hasattr(subagent_plugin, 'set_connection'):
+                    subagent_plugin.set_connection(self._project, self._location, self._model_name)
+
+            # Pass parent's exposed plugins for inheritance
+            if hasattr(subagent_plugin, 'set_parent_plugins'):
+                exposed = registry.list_exposed()
+                # Exclude subagent itself to prevent recursion
+                parent_plugins = [p for p in exposed if p != 'subagent']
+                subagent_plugin.set_parent_plugins(parent_plugins)
+
         except (KeyError, AttributeError):
             # Subagent plugin not exposed or not available
             pass
