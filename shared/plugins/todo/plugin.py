@@ -314,7 +314,7 @@ class TodoPlugin:
         since it's purely for user visibility into progress.
         """
         return [
-            UserCommand("plan", "Show current plan status", share_with_model=False),
+            UserCommand("plan", "Show current or most recent plan status", share_with_model=False),
         ]
 
     def _execute_create_plan(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -465,11 +465,14 @@ class TodoPlugin:
         """Execute the getPlanStatus tool."""
         plan_id = args.get("plan_id")
 
-        # Get plan (specified or current)
+        # Get plan (specified, current, or most recent)
         if plan_id and self._storage:
             plan = self._storage.get_plan(plan_id)
         else:
             plan = self._get_current_plan()
+            # Fall back to most recent plan if no current plan
+            if not plan:
+                plan = self._get_most_recent_plan()
 
         if not plan:
             return {"error": "No plan found. Create a plan first with createPlan."}
@@ -591,6 +594,16 @@ class TodoPlugin:
         if not self._current_plan_id or not self._storage:
             return None
         return self._storage.get_plan(self._current_plan_id)
+
+    def _get_most_recent_plan(self) -> Optional[TodoPlan]:
+        """Get the most recently created plan from storage."""
+        if not self._storage:
+            return None
+        all_plans = self._storage.get_all_plans()
+        if not all_plans:
+            return None
+        # Sort by created_at descending and return the most recent
+        return max(all_plans, key=lambda p: p.created_at)
 
     # Convenience methods for programmatic access
 
