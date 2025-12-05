@@ -235,7 +235,18 @@ class ConsoleActor(Actor):
         # Format the request for display
         self._output_func("")
         self._output_func("=" * 60)
-        self._output_func("[askPermission] Tool execution request:")
+
+        # Display agent type to clarify who is asking for permission
+        agent_type = request.context.get("agent_type") if request.context else None
+        agent_name = request.context.get("agent_name") if request.context else None
+        if agent_type == "subagent":
+            if agent_name:
+                self._output_func(f"[askPermission] Subagent '{agent_name}' requesting tool execution:")
+            else:
+                self._output_func("[askPermission] Subagent requesting tool execution:")
+        else:
+            self._output_func("[askPermission] Main agent requesting tool execution:")
+
         # Display intent prominently if provided
         intent = request.context.get("intent") if request.context else None
         if intent:

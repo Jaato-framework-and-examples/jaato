@@ -140,8 +140,8 @@ class JaatoClient:
         self._ledger = ledger
         self._executor = ToolExecutor(ledger=ledger)
 
-        # Pass connection info to subagent plugin if it's exposed
-        self._configure_subagent_plugin(registry)
+        # Pass connection info and permission plugin to subagent plugin if it's exposed
+        self._configure_subagent_plugin(registry, permission_plugin)
 
         # Register executors from plugins
         for name, fn in registry.get_exposed_executors().items():
@@ -149,7 +149,11 @@ class JaatoClient:
 
         # Set permission plugin for enforcement
         if permission_plugin:
-            self._executor.set_permission_plugin(permission_plugin)
+            # Pass agent_type context so permission prompts can identify the requester
+            self._executor.set_permission_plugin(
+                permission_plugin,
+                context={"agent_type": "main"}
+            )
             # Also register askPermission tool
             for name, fn in permission_plugin.get_executors().items():
                 self._executor.register(name, fn)
@@ -213,15 +217,20 @@ class JaatoClient:
         # Create chat session with configured tools
         self._create_chat()
 
-    def _configure_subagent_plugin(self, registry: 'PluginRegistry') -> None:
-        """Pass connection info and parent plugins to subagent plugin if exposed.
+    def _configure_subagent_plugin(
+        self,
+        registry: 'PluginRegistry',
+        permission_plugin: Optional['PermissionPlugin'] = None
+    ) -> None:
+        """Pass connection info, parent plugins, and permission plugin to subagent plugin.
 
         This allows subagents to inherit the parent's connection settings
-        (project, location, model) and plugin configuration without requiring
-        explicit inline_config.
+        (project, location, model), plugin configuration, and permission
+        enforcement without requiring explicit inline_config.
 
         Args:
             registry: PluginRegistry to check for subagent plugin.
+            permission_plugin: Optional permission plugin to share with subagents.
         """
         # Check if subagent plugin is exposed
         try:
@@ -240,6 +249,10 @@ class JaatoClient:
                 # Exclude subagent itself to prevent recursion
                 parent_plugins = [p for p in exposed if p != 'subagent']
                 subagent_plugin.set_parent_plugins(parent_plugins)
+
+            # Pass permission plugin so subagents can use it with their own context
+            if permission_plugin and hasattr(subagent_plugin, 'set_permission_plugin'):
+                subagent_plugin.set_permission_plugin(permission_plugin)
 
         except (KeyError, AttributeError):
             # Subagent plugin not exposed or not available

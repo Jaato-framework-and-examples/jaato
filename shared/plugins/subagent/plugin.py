@@ -77,6 +77,7 @@ class SubagentPlugin:
         # Lazy import to avoid circular dependencies
         self._registry_class = None
         self._client_class = None
+        self._permission_plugin = None  # Optional permission plugin for subagents
 
     @property
     def name(self) -> str:
@@ -310,6 +311,18 @@ class SubagentPlugin:
         """
         self._parent_plugins = plugins
 
+    def set_permission_plugin(self, plugin) -> None:
+        """Set the permission plugin to use for subagent tool execution.
+
+        When set, subagents will use this permission plugin with context
+        indicating they are subagents, so permission prompts clearly
+        identify who is requesting permission.
+
+        Args:
+            plugin: PermissionPlugin instance from parent agent.
+        """
+        self._permission_plugin = plugin
+
     def _execute_list_profiles(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List available subagent profiles.
 
@@ -508,7 +521,24 @@ class SubagentPlugin:
                 self._config.location,
                 model
             )
-            client.configure_tools(registry)
+
+            # Configure tools with permission plugin if available
+            # Pass subagent context so permission prompts identify the requester
+            if self._permission_plugin:
+                # Create a subagent-specific context for permission checks
+                # We need to set this on the executor after configure_tools
+                client.configure_tools(registry, permission_plugin=self._permission_plugin)
+                # Override the permission context to identify as subagent
+                if client._executor:
+                    client._executor.set_permission_plugin(
+                        self._permission_plugin,
+                        context={
+                            "agent_type": "subagent",
+                            "agent_name": profile.name
+                        }
+                    )
+            else:
+                client.configure_tools(registry)
 
             # Run the conversation
             response = client.send_message(prompt)
