@@ -301,8 +301,10 @@ class TodoPlugin:
 
         Note: startPlan is intentionally excluded - it requires user permission
         to confirm they want the model to proceed with the proposed plan.
+
+        The 'plan' user command is also included since it's just a status query.
         """
-        return ["createPlan", "updateStep", "getPlanStatus", "completePlan", "addStep"]
+        return ["createPlan", "updateStep", "getPlanStatus", "completePlan", "addStep", "plan"]
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for direct invocation.

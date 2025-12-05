@@ -173,6 +173,13 @@ class InteractiveClient:
             result: The command's return value
             shared: Whether the result was shared with the model
         """
+        # Special formatting for plan command
+        if command_name == "plan" and isinstance(result, dict):
+            self._display_plan_result(result)
+            if shared:
+                print("  [Result shared with model]")
+            return
+
         print(f"\n[{command_name}]")
 
         if isinstance(result, dict):
@@ -201,6 +208,97 @@ class InteractiveClient:
 
         if shared:
             print("  [Result shared with model]")
+
+    def _display_plan_result(self, result: Dict[str, Any]) -> None:
+        """Display plan status in a user-friendly format.
+
+        Args:
+            result: The plan status dict from getPlanStatus
+        """
+        # Check for error
+        if "error" in result:
+            print(f"\n[plan] {result['error']}")
+            return
+
+        # Header with status
+        status = result.get("status", "unknown")
+        title = result.get("title", "Untitled Plan")
+
+        # Status emoji and color hint
+        status_display = {
+            "pending": "📋 PENDING",
+            "in_progress": "🔄 IN PROGRESS",
+            "completed": "✅ COMPLETED",
+            "failed": "❌ FAILED",
+            "cancelled": "⚠️  CANCELLED",
+        }.get(status, status.upper())
+
+        print(f"\n{'=' * 60}")
+        print(f"  {status_display}: {title}")
+        print(f"{'=' * 60}")
+
+        # Progress bar
+        progress = result.get("progress", {})
+        total = progress.get("total", 0)
+        completed = progress.get("completed", 0)
+        failed = progress.get("failed", 0)
+        in_prog = progress.get("in_progress", 0)
+        pending = progress.get("pending", 0)
+        percent = progress.get("percent", 0)
+
+        if total > 0:
+            bar_width = 40
+            filled = int(bar_width * percent / 100)
+            bar = '█' * filled + '░' * (bar_width - filled)
+            print(f"\n  Progress: [{bar}] {percent:.0f}%")
+            print(f"  Steps: {completed} completed, {in_prog} in progress, {pending} pending, {failed} failed")
+
+        # Summary if available
+        summary = result.get("summary")
+        if summary:
+            print(f"\n  Summary: {summary}")
+
+        # Steps list
+        steps = result.get("steps", [])
+        if steps:
+            print(f"\n  Steps:")
+            print(f"  {'-' * 56}")
+
+            for step in sorted(steps, key=lambda s: s.get("sequence", 0)):
+                seq = step.get("sequence", "?")
+                desc = step.get("description", "")
+                step_status = step.get("status", "pending")
+
+                # Status indicator
+                indicator = {
+                    "pending": "○",
+                    "in_progress": "◐",
+                    "completed": "●",
+                    "failed": "✗",
+                    "skipped": "○",
+                }.get(step_status, "?")
+
+                # Truncate long descriptions
+                max_desc_len = 50
+                if len(desc) > max_desc_len:
+                    desc = desc[:max_desc_len - 3] + "..."
+
+                print(f"  {indicator} {seq}. {desc}")
+
+                # Show result or error for completed/failed steps
+                step_result = step.get("result")
+                step_error = step.get("error")
+                if step_result and step_status == "completed":
+                    # Truncate long results
+                    if len(step_result) > 60:
+                        step_result = step_result[:57] + "..."
+                    print(f"      └─ {step_result}")
+                elif step_error and step_status == "failed":
+                    if len(step_error) > 60:
+                        step_error = step_error[:57] + "..."
+                    print(f"      └─ Error: {step_error}")
+
+        print(f"\n{'=' * 60}")
 
     def initialize(self) -> bool:
         """Initialize the client, loading config and connecting to Vertex AI."""
