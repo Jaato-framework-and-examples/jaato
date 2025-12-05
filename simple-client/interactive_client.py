@@ -422,7 +422,7 @@ class InteractiveClient:
         print("""
 Commands (auto-complete as you type):
   help    - Show this help message
-  tools   - List available tools
+  tools   - List tools available to the model
   reset   - Clear conversation history
   history - Show full conversation history
   context - Show context window usage
@@ -491,12 +491,12 @@ Keyboard shortcuts:
         if not commands_by_plugin:
             return
 
-        print("\nPlugin commands:")
+        print("\nPlugin-provided user commands:")
         for plugin_name, commands in sorted(commands_by_plugin.items()):
             for cmd in commands:
                 # Calculate padding for alignment
                 padding = max(2, 18 - len(cmd.name))
-                shared_marker = " [shared]" if cmd.share_with_model else ""
+                shared_marker = " [also available to the model as a tool]" if cmd.share_with_model else ""
                 print(f"  {cmd.name}{' ' * padding}- {cmd.description} ({plugin_name}){shared_marker}")
 
     def _print_context(self) -> None:
