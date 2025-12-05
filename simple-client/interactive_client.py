@@ -339,13 +339,8 @@ class InteractiveClient:
             self._jaato.reset_session()
         self.log("[client] Conversation history cleared")
 
-    def run_interactive(self, clear_history: bool = True) -> None:
-        """Run the interactive prompt loop with multi-turn conversation.
-
-        Args:
-            clear_history: If True (default), clears conversation history at start.
-                          Set to False when continuing from an initial prompt.
-        """
+    def _print_banner(self) -> None:
+        """Print the interactive client welcome banner."""
         print("\n" + "=" * 60)
         print("  Simple Interactive Client with Permission Prompts")
         print("=" * 60)
@@ -356,6 +351,18 @@ class InteractiveClient:
             print("Commands auto-complete as you type (help, tools, reset, etc.).")
             print("Use @path/to/file to reference files (completions appear as you type).")
         print("Type 'quit' or 'exit' to stop, 'help' for guidance.\n")
+
+    def run_interactive(self, clear_history: bool = True, show_banner: bool = True) -> None:
+        """Run the interactive prompt loop with multi-turn conversation.
+
+        Args:
+            clear_history: If True (default), clears conversation history at start.
+                          Set to False when continuing from an initial prompt.
+            show_banner: If True (default), displays the welcome banner.
+                        Set to False if banner was already shown.
+        """
+        if show_banner:
+            self._print_banner()
 
         # Clear history at start of interactive session (unless continuing from initial prompt)
         if clear_history:
@@ -415,7 +422,7 @@ class InteractiveClient:
         print("""
 Commands (auto-complete as you type):
   help    - Show this help message
-  tools   - List available tools
+  tools   - List tools available to the model
   reset   - Clear conversation history
   history - Show full conversation history
   context - Show context window usage
@@ -484,12 +491,12 @@ Keyboard shortcuts:
         if not commands_by_plugin:
             return
 
-        print("\nPlugin commands:")
+        print("\nPlugin-provided user commands:")
         for plugin_name, commands in sorted(commands_by_plugin.items()):
             for cmd in commands:
                 # Calculate padding for alignment
                 padding = max(2, 18 - len(cmd.name))
-                shared_marker = " [shared]" if cmd.share_with_model else ""
+                shared_marker = " [also available to the model as a tool]" if cmd.share_with_model else ""
                 print(f"  {cmd.name}{' ' * padding}- {cmd.description} ({plugin_name}){shared_marker}")
 
     def _print_context(self) -> None:
@@ -686,13 +693,14 @@ def main():
         if args.prompt:
             # Single prompt mode - run and exit
             response = client.run_prompt(args.prompt)
-            print(f"\n{response}")
+            print(f"\nModel> {response}")
         elif args.initial_prompt:
-            # Initial prompt mode - run prompt then continue interactively
+            # Initial prompt mode - show banner first, run prompt, then continue interactively
+            client._print_banner()
             readline.add_history(args.initial_prompt)  # Add to history for ↑ recall
             response = client.run_prompt(args.initial_prompt)
             print(f"\nModel> {response}")
-            client.run_interactive(clear_history=False)
+            client.run_interactive(clear_history=False, show_banner=False)
         else:
             # Interactive mode
             client.run_interactive()
