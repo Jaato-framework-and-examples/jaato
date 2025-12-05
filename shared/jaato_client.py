@@ -512,8 +512,8 @@ class JaatoClient:
         cmd = self._user_commands[command_name]
         args = args or {}
 
-        # Execute the command
-        result = self._executor.execute(command_name, args)
+        # Execute the command - executor returns (success_flag, result) tuple
+        _ok, result = self._executor.execute(command_name, args)
 
         # If share_with_model is True, add to conversation history
         if cmd.share_with_model and self._chat:
