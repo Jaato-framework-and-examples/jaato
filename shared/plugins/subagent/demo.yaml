@@ -1,0 +1,9 @@
+name: Subagent Plugin Demo
+timeout: 180
+
+steps:
+  - type: "Analyze this codebase structure and identify the main components"
+    permission: "y"
+
+  - type: "quit"
+    delay: 0.08

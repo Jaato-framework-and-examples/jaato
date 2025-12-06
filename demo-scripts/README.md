@@ -75,6 +75,10 @@ steps:
 |--------|-----------------|
 | CLI | `shared/plugins/cli/demo.yaml` |
 | File Edit | `shared/plugins/file_edit/demo.yaml` |
+| Web Search | `shared/plugins/web_search/demo.yaml` |
+| TODO | `shared/plugins/todo/demo.yaml` |
+| References | `shared/plugins/references/demo.yaml` |
+| Subagent | `shared/plugins/subagent/demo.yaml` |
 
 ## How It Works
 
