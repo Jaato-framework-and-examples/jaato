@@ -546,6 +546,9 @@ class InteractiveClient:
                 # Parse optional filename: "export" or "export filename.yaml"
                 parts = user_input.split(maxsplit=1)
                 filename = parts[1] if len(parts) > 1 else "session_export.yaml"
+                # Strip @ prefix if user used file completion
+                if filename.startswith('@'):
+                    filename = filename[1:]
                 self._export_session(filename)
                 continue
 
