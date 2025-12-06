@@ -47,6 +47,7 @@ jaato is a future-proof framework for building agentic AI applications, featurin
 | [**mcp**](shared/plugins/mcp/README.md) | Connect to MCP (Model Context Protocol) servers and auto-discover their tools |
 | [**permission**](shared/plugins/permission/README.md) | Control tool execution with blacklist/whitelist policies and interactive approval |
 | [**references**](shared/plugins/references/README.md) | Manage documentation source injection with auto-load and user-selectable references |
+| [**slash_command**](shared/plugins/slash_command/README.md) | Process /command references from .jaato/commands/ directory |
 | [**subagent**](shared/plugins/subagent/README.md) | Delegate tasks to specialized subagents with custom tool configurations |
 | [**todo**](shared/plugins/todo/README.md) | Plan tracking with workflow enforcement for complex multi-step tasks |
 | [**web_search**](shared/plugins/web_search/README.md) | Search the web using DuckDuckGo for current information |

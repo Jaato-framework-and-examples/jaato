@@ -488,6 +488,7 @@ class InteractiveClient:
         if HAS_PROMPT_TOOLKIT and self._completer:
             print("Commands auto-complete as you type (help, tools, reset, etc.).")
             print("Use @path/to/file to reference files (completions appear as you type).")
+            print("Use /command to invoke slash commands (from .jaato/commands/).")
         print("Type 'quit' or 'exit' to stop, 'help' for guidance.\n")
 
     def run_interactive(self, clear_history: bool = True, show_banner: bool = True) -> None:
@@ -587,11 +588,20 @@ File references:
   Completions appear automatically as you type after @.
   Use ↑/↓ to navigate the dropdown, Enter or TAB to accept.
 
+Slash commands:
+  Use /command_name [args...] to invoke slash commands from .jaato/commands/.
+  - Type / to see available commands with descriptions
+  - Pass arguments after the command name: /review file.py
+  - Command files use {{$1}}, {{$2}} for parameter substitution
+  - Use {{$1:default}} for optional parameters with defaults
+  Example: "/summarize" or "/review src/main.py"
+
 Example prompts:
   - "List files in the current directory"
   - "Show me the git status"
   - "Review @src/utils.py for issues"
   - "Explain what @./README.md describes"
+  - "/review src/main.py" - Invoke slash command with argument
 
 Multi-turn conversation:
   The model remembers previous exchanges in this session.
