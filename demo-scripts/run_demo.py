@@ -49,16 +49,31 @@ def type_slowly(child, text, delay=0.05):
 # Regex to match optional ANSI escape codes
 ANSI = r'(?:\x1b\[[0-9;]*m)*'
 
+# Pattern indices for expect
+PATTERN_PROMPT = 0
+PATTERN_PERMISSION = 1
+
 
 def wait_for_prompt(child, timeout=60):
     """Wait for the 'You>' prompt (with optional ANSI color codes)."""
     child.expect(rf'{ANSI}You>{ANSI}', timeout=timeout)
 
 
-def wait_for_permission(child, timeout=60):
-    """Wait for permission prompt options line."""
-    # Match "Options:" followed by the colored option letters
-    child.expect(r'Options:', timeout=timeout)
+def wait_for_permission_or_prompt(child, response='y', timeout=60):
+    """Wait for either permission prompt or next You> prompt.
+
+    If permission is requested, send the response and wait for prompt.
+    If prompt appears directly (permission already granted), just return.
+    """
+    patterns = [rf'{ANSI}You>{ANSI}', r'Options:']
+    index = child.expect(patterns, timeout=timeout)
+
+    if index == PATTERN_PERMISSION:
+        # Permission was requested, send response
+        time.sleep(0.3)
+        child.send(f'{response}\n')
+        # Now wait for the prompt after permission
+        wait_for_prompt(child, timeout=timeout)
 
 
 def run_cli_demo():
@@ -80,25 +95,15 @@ def run_cli_demo():
     # First command: list Python files
     type_slowly(child, "List the Python files in the current directory")
 
-    # Wait for permission prompt and approve
-    wait_for_permission(child)
-    time.sleep(0.3)
-    child.send('y\n')
-
-    # Wait for response and next prompt
-    wait_for_prompt(child)
+    # Wait for permission (or prompt if already granted) and approve with 'y'
+    wait_for_permission_or_prompt(child, response='y')
     time.sleep(0.5)
 
     # Second command: git status
     type_slowly(child, "Show me the git status")
 
-    # Approve with 'always'
-    wait_for_permission(child)
-    time.sleep(0.3)
-    child.send('a\n')
-
-    # Wait for response
-    wait_for_prompt(child)
+    # Wait for permission (or prompt if already granted) and approve with 'a' (always)
+    wait_for_permission_or_prompt(child, response='a')
     time.sleep(1.0)
 
     # Exit
@@ -140,12 +145,8 @@ DEBUG_MODE = False
     # Ask to update the file
     type_slowly(child, f"Update {test_file} to change MAX_RETRIES from 3 to 5")
 
-    # readFile is auto-approved, wait for updateFile permission
-    wait_for_permission(child)
-    time.sleep(0.5)
-    child.send('y\n')
-
-    wait_for_prompt(child)
+    # readFile is auto-approved, wait for updateFile permission (or prompt if granted)
+    wait_for_permission_or_prompt(child, response='y')
     time.sleep(1.0)
 
     # Exit
@@ -173,11 +174,8 @@ def run_web_search_demo():
     # Search query
     type_slowly(child, "Search the web for Python asyncio best practices")
 
-    wait_for_permission(child)
-    time.sleep(0.3)
-    child.send('y\n')
-
-    wait_for_prompt(child)
+    # Wait for permission (or prompt if already granted)
+    wait_for_permission_or_prompt(child, response='y')
     time.sleep(1.0)
 
     type_slowly(child, "quit", delay=0.08)
@@ -205,13 +203,7 @@ def run_todo_demo():
     type_slowly(child, "Help me refactor the authentication module. Create a plan first.")
 
     # createPlan might need permission depending on config
-    try:
-        wait_for_permission(child, timeout=10)
-        child.send('y\n')
-    except pexpect.TIMEOUT:
-        pass  # Auto-approved
-
-    wait_for_prompt(child)
+    wait_for_permission_or_prompt(child, response='y', timeout=60)
     time.sleep(0.5)
 
     # Check plan status
@@ -250,14 +242,8 @@ def run_references_demo():
     # Ask something that might trigger reference selection
     type_slowly(child, "I need to add a new API endpoint. What standards should I follow?")
 
-    # Handle permission if selectReferences is called
-    try:
-        wait_for_permission(child, timeout=15)
-        child.send('y\n')
-    except pexpect.TIMEOUT:
-        pass
-
-    wait_for_prompt(child)
+    # Handle permission if selectReferences is called (or prompt if granted/skipped)
+    wait_for_permission_or_prompt(child, response='y', timeout=60)
     time.sleep(1.0)
 
     type_slowly(child, "quit", delay=0.08)
@@ -290,14 +276,8 @@ def run_subagent_demo():
     # Ask for analysis that might spawn a subagent
     type_slowly(child, "Analyze this codebase structure and identify the main components")
 
-    # spawn_subagent requires permission
-    try:
-        wait_for_permission(child, timeout=30)
-        child.send('y\n')
-    except pexpect.TIMEOUT:
-        pass
-
-    wait_for_prompt(child, timeout=120)  # Subagent execution takes time
+    # spawn_subagent requires permission (use longer timeout for subagent execution)
+    wait_for_permission_or_prompt(child, response='y', timeout=120)
     time.sleep(1.0)
 
     type_slowly(child, "quit", delay=0.08)
