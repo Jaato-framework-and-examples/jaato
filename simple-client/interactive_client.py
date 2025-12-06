@@ -19,10 +19,12 @@ try:
     from prompt_toolkit.history import InMemoryHistory
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.styles import Style
+    from prompt_toolkit.formatted_text import ANSI
     HAS_PROMPT_TOOLKIT = True
 except ImportError:
     HAS_PROMPT_TOOLKIT = False
     pt_prompt = None
+    ANSI = None
 
 # Add project root to path for imports
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -119,8 +121,10 @@ class InteractiveClient:
 
         if HAS_PROMPT_TOOLKIT and self._completer:
             # Use prompt_toolkit with completion
+            # Wrap ANSI-colored prompt for prompt_toolkit to interpret
+            formatted_prompt = ANSI(prompt_str) if ANSI else prompt_str
             return pt_prompt(
-                prompt_str,
+                formatted_prompt,
                 completer=self._completer,
                 history=self._pt_history,
                 auto_suggest=AutoSuggestFromHistory(),
