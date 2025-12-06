@@ -65,6 +65,11 @@ def wait_for_permission_or_prompt(child, response='y', timeout=60):
     If permission is requested, send the response and wait for prompt.
     If prompt appears directly (permission already granted), just return.
     """
+    # First wait for the client to acknowledge the command
+    # This ensures we're past the input phase before looking for output patterns
+    child.expect(r'\[client\]', timeout=timeout)
+
+    # Now wait for either permission prompt or next You> prompt
     patterns = [rf'{ANSI}You>{ANSI}', r'Options:']
     index = child.expect(patterns, timeout=timeout)
 
