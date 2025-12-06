@@ -2,6 +2,10 @@
 
 The Subagent plugin (`spawn_subagent`, `list_subagent_profiles`) enables the parent model to delegate tasks to specialized subagents with their own tool configurations, system instructions, and model selection.
 
+## Demo
+
+![Subagent Plugin Demo](demo.svg)
+
 ## Architecture Overview
 
 ```
