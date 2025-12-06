@@ -97,6 +97,9 @@ class InteractiveClient:
             'cyan': '\033[36m',
         }
 
+        # Track original user inputs for export (before file reference expansion)
+        self._original_inputs: list[str] = []
+
     def _c(self, text: str, color: str) -> str:
         """Apply ANSI color to text."""
         code = self._colors.get(color, '')
@@ -475,6 +478,7 @@ class InteractiveClient:
         """Clear conversation history."""
         if self._jaato:
             self._jaato.reset_session()
+        self._original_inputs = []
         self.log("[client] Conversation history cleared")
 
     def _print_banner(self) -> None:
@@ -542,12 +546,25 @@ class InteractiveClient:
                 self._print_context()
                 continue
 
+            if user_input.lower().startswith('export'):
+                # Parse optional filename: "export" or "export filename.yaml"
+                parts = user_input.split(maxsplit=1)
+                filename = parts[1] if len(parts) > 1 else "session_export.yaml"
+                # Strip @ prefix if user used file completion
+                if filename.startswith('@'):
+                    filename = filename[1:]
+                self._export_session(filename)
+                continue
+
             # Check if input is a plugin-provided user command
             # (includes 'plan' from todo plugin, 'listReferences', 'selectReferences' from references plugin)
             plugin_result = self._try_execute_plugin_command(user_input)
             if plugin_result is not None:
                 # Plugin command was executed, result already displayed
                 continue
+
+            # Track original input for export (before expansion)
+            self._original_inputs.append(user_input)
 
             # Expand @file references to include file contents
             expanded_prompt = self._expand_file_references(user_input)
@@ -560,13 +577,14 @@ class InteractiveClient:
         """Print help information."""
         print("""
 Commands (auto-complete as you type):
-  help    - Show this help message
-  tools   - List tools available to the model
-  reset   - Clear conversation history
-  history - Show full conversation history
-  context - Show context window usage
-  quit    - Exit the client
-  exit    - Exit the client""")
+  help          - Show this help message
+  tools         - List tools available to the model
+  reset         - Clear conversation history
+  history       - Show full conversation history
+  context       - Show context window usage
+  export [file] - Export session to YAML for replay (default: session_export.yaml)
+  quit          - Exit the client
+  exit          - Exit the client""")
 
         # Dynamically list plugin-contributed commands
         self._print_plugin_commands()
@@ -791,6 +809,142 @@ Keyboard shortcuts:
         else:
             # Unknown part type
             print(f"  (unknown part: {type(part).__name__})")
+
+    def _export_session(self, filename: str) -> None:
+        """Export current session to a YAML file for replay.
+
+        Generates a YAML file in the format expected by demo-scripts/run_demo.py,
+        allowing the session to be replayed later. Uses original user inputs
+        (before file reference expansion) for cleaner, replayable output.
+
+        Args:
+            filename: Path to the output YAML file.
+        """
+        try:
+            import yaml
+        except ImportError:
+            print("\nError: PyYAML is required for export. Install with: pip install pyyaml")
+            return
+
+        if not self._jaato:
+            print("\n[No session to export - client not initialized]")
+            return
+
+        if not self._original_inputs:
+            print("\n[No conversation history to export]")
+            return
+
+        # Extract permission decisions from history, grouped by user turn
+        history = self._jaato.get_history()
+        turn_permissions: list[list[str]] = []
+        current_permissions: list[str] = []
+        in_user_turn = False
+
+        for content in history:
+            role = getattr(content, 'role', None) or 'unknown'
+            parts = getattr(content, 'parts', None) or []
+
+            if role == 'user':
+                # Check if this is a user text message (starts new turn)
+                for part in parts:
+                    if hasattr(part, 'text') and part.text:
+                        text = part.text.strip()
+                        if text.startswith('[User executed command:'):
+                            continue
+                        # Save previous turn's permissions and start new turn
+                        if in_user_turn:
+                            turn_permissions.append(current_permissions)
+                        current_permissions = []
+                        in_user_turn = True
+
+            elif role == 'model':
+                # Collect permission data from function responses
+                for part in parts:
+                    if hasattr(part, 'function_response') and part.function_response:
+                        fr = part.function_response
+                        response = getattr(fr, 'response', {})
+                        if isinstance(response, dict):
+                            perm = response.get('_permission')
+                            if perm:
+                                decision = perm.get('decision', '')
+                                method = perm.get('method', '')
+                                perm_value = self._map_permission_to_yaml(decision, method)
+                                current_permissions.append(perm_value)
+
+        # Don't forget the last turn's permissions
+        if in_user_turn:
+            turn_permissions.append(current_permissions)
+
+        # Build steps from original inputs with matched permissions
+        final_steps = []
+        for i, user_input in enumerate(self._original_inputs):
+            # Get permissions for this turn (if available)
+            perms = turn_permissions[i] if i < len(turn_permissions) else []
+
+            # Determine permission value
+            permission = 'y'  # Default
+            if perms:
+                # Use the most permissive permission granted
+                # Priority: 'a' (always) > 'y' (yes) > 'n' (no)
+                if 'a' in perms:
+                    permission = 'a'
+                elif 'y' in perms or 'once' in perms:
+                    permission = 'y'
+                elif 'n' in perms:
+                    permission = 'n'
+                elif 'never' in perms:
+                    permission = 'never'
+
+            final_steps.append({
+                'type': user_input,
+                'permission': permission,
+            })
+
+        # Add quit step
+        final_steps.append({'type': 'quit', 'delay': 0.08})
+
+        # Build the YAML document
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+        export_data = {
+            'name': f'Session Export [{timestamp}]',
+            'timeout': 120,
+            'steps': final_steps,
+        }
+
+        # Write to file
+        try:
+            with open(filename, 'w') as f:
+                yaml.dump(export_data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            print(f"\n[Session exported to: {filename}]")
+            print(f"  Steps: {len(final_steps) - 1} interaction(s) + quit")
+            print(f"  Replay with: python demo-scripts/run_demo.py {filename}")
+        except IOError as e:
+            print(f"\nError writing file: {e}")
+
+    def _map_permission_to_yaml(self, decision: str, method: str) -> str:
+        """Map permission decision/method to YAML permission value.
+
+        Args:
+            decision: 'allowed' or 'denied'
+            method: 'user', 'remembered', 'whitelist', etc.
+
+        Returns:
+            YAML permission value: 'y', 'n', 'a', 'never', 'once'
+        """
+        if decision == 'allowed':
+            if method == 'remembered':
+                return 'a'  # Was 'always' - permission remembered
+            elif method == 'whitelist':
+                return 'a'  # Auto-approved, use 'always' for replay
+            else:
+                return 'y'  # User approved this one
+        else:  # denied
+            if method == 'remembered':
+                return 'never'  # Was 'never' - denial remembered
+            else:
+                return 'n'  # User denied this one
 
     def shutdown(self) -> None:
         """Clean up resources."""
