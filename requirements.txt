@@ -11,3 +11,5 @@ prompt_toolkit>=3.0.0
 rich>=13.0.0
 reportlab
 ddgs>=7.0.0  # provides web search via DuckDuckGo
+pyyaml
+

@@ -34,3 +34,4 @@ test_traces/
 # OS files
 .DS_Store
 Thumbs.db
+.jaato
