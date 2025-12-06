@@ -68,18 +68,34 @@ class CLIToolPlugin:
         """Return the FunctionDeclaration for the CLI tool."""
         return [types.FunctionDeclaration(
             name='cli_based_tool',
-            description='Execute a local CLI command',
+            description=(
+                'Execute any shell command on the local machine. This tool provides full access to '
+                'the command line, allowing you to: create/delete/move files and directories, '
+                'read and write file contents, run scripts and programs, manage git repositories, '
+                'install packages, and perform any operation that a user could do in a terminal. '
+                'Supports shell features like pipes (|), redirections (>, >>), and command chaining (&&, ||).'
+            ),
             parameters_json_schema={
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Full command string, e.g. 'gh issue view 123' or 'git status'"
+                        "description": (
+                            "The shell command to execute. Examples: "
+                            "'mkdir -p /path/to/new/folder' (create directories), "
+                            "'echo \"content\" > file.txt' (create/write files), "
+                            "'cat file.txt' (read files), "
+                            "'rm -rf /path/to/delete' (delete files/directories), "
+                            "'mv old.txt new.txt' (rename/move files), "
+                            "'ls -la' (list directory contents), "
+                            "'git status' (check repository status), "
+                            "'grep -r \"pattern\" /path' (search in files)"
+                        )
                     },
                     "args": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Argument list for the executable"
+                        "description": "Optional argument list if passing executable and args separately"
                     }
                 },
                 "required": ["command"]
@@ -92,29 +108,44 @@ class CLIToolPlugin:
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the CLI tool."""
-        return """You have access to `cli_based_tool` which executes local shell commands on the user's machine.
+        return """You have access to `cli_based_tool` which executes shell commands on the user's machine.
 
-Use it to run commands like `ls`, `cat`, `grep`, `find`, `git`, `gh`, etc.
+This tool gives you FULL access to the command line. You can perform ANY operation that a user could do in a terminal, including but not limited to:
 
-Example usage:
-- List files: cli_based_tool(command="ls -la")
-- Read a file: cli_based_tool(command="cat /path/to/file")
-- Check git status: cli_based_tool(command="git status")
-- Search for text: cli_based_tool(command="grep -r 'pattern' /path")
+FILESYSTEM OPERATIONS:
+- Create directories: cli_based_tool(command="mkdir -p /path/to/new/folder")
+- Create/write files: cli_based_tool(command="echo 'content' > file.txt")
+- Append to files: cli_based_tool(command="echo 'more content' >> file.txt")
+- Read files: cli_based_tool(command="cat /path/to/file")
+- Delete files/directories: cli_based_tool(command="rm -rf /path/to/delete")
+- Move/rename files: cli_based_tool(command="mv old.txt new.txt")
+- Copy files: cli_based_tool(command="cp source.txt destination.txt")
+- List directory contents: cli_based_tool(command="ls -la")
+- Check disk usage: cli_based_tool(command="du -sh /path")
 
-Shell features like pipes and redirections are supported:
+SEARCHING AND FILTERING:
+- Find files: cli_based_tool(command="find /path -name '*.py'")
+- Search file contents: cli_based_tool(command="grep -r 'pattern' /path")
 - Filter output: cli_based_tool(command="ls -la | grep '.py'")
-- Chain commands: cli_based_tool(command="cd /tmp && ls -la")
-- Redirect output: cli_based_tool(command="echo 'hello' > /tmp/test.txt")
-- Find oldest file: cli_based_tool(command="ls -t | tail -1")
+
+VERSION CONTROL:
+- Check git status: cli_based_tool(command="git status")
+- View git log: cli_based_tool(command="git log --oneline -10")
+- Create branches: cli_based_tool(command="git checkout -b new-branch")
+
+RUNNING PROGRAMS:
+- Execute scripts: cli_based_tool(command="python script.py")
+- Run tests: cli_based_tool(command="pytest tests/")
+- Install packages: cli_based_tool(command="pip install package-name")
+
+Shell features like pipes (|), redirections (>, >>), and command chaining (&&, ||) are fully supported.
 
 The tool returns stdout, stderr, and returncode from the executed command.
 
 IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid truncation:
 - Use filters (grep, awk) to narrow results
 - Use head/tail to limit output lines
-- Use -maxdepth with find to limit recursion
-- Avoid commands that list entire directory trees without limits"""
+- Use -maxdepth with find to limit recursion"""
 
     def get_auto_approved_tools(self) -> List[str]:
         """CLI tools require permission - return empty list."""
