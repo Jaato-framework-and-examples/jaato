@@ -79,9 +79,8 @@ class TestClarificationPluginExecutors:
             "context": "Test",
             "questions": [
                 {
-                    "id": "q1",
                     "text": "Question",
-                    "choices": [{"id": "a", "text": "A"}],
+                    "choices": ["A"],
                 },
             ],
         })

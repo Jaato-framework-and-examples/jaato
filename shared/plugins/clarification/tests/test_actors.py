@@ -20,7 +20,7 @@ class TestConsoleActor:
         assert actor is not None
 
     def test_single_choice_question(self):
-        input_stream = io.StringIO("a\n")
+        input_stream = io.StringIO("1\n")
         output_stream = io.StringIO()
 
         actor = ConsoleActor(
@@ -33,12 +33,11 @@ class TestConsoleActor:
             context="Testing",
             questions=[
                 Question(
-                    id="q1",
                     text="Pick one",
                     question_type=QuestionType.SINGLE_CHOICE,
                     choices=[
-                        Choice(id="a", text="Option A"),
-                        Choice(id="b", text="Option B"),
+                        Choice(text="Option A"),
+                        Choice(text="Option B"),
                     ],
                 ),
             ],
@@ -48,11 +47,11 @@ class TestConsoleActor:
 
         assert not response.cancelled
         assert len(response.answers) == 1
-        assert response.answers[0].question_id == "q1"
-        assert response.answers[0].selected_choice_ids == ["a"]
+        assert response.answers[0].question_index == 1
+        assert response.answers[0].selected_choices == [1]
 
     def test_multiple_choice_question(self):
-        input_stream = io.StringIO("a, c\n")
+        input_stream = io.StringIO("1, 3\n")
         output_stream = io.StringIO()
 
         actor = ConsoleActor(
@@ -65,13 +64,12 @@ class TestConsoleActor:
             context="Testing",
             questions=[
                 Question(
-                    id="q1",
                     text="Select all that apply",
                     question_type=QuestionType.MULTIPLE_CHOICE,
                     choices=[
-                        Choice(id="a", text="A"),
-                        Choice(id="b", text="B"),
-                        Choice(id="c", text="C"),
+                        Choice(text="A"),
+                        Choice(text="B"),
+                        Choice(text="C"),
                     ],
                 ),
             ],
@@ -81,7 +79,7 @@ class TestConsoleActor:
 
         assert not response.cancelled
         assert len(response.answers) == 1
-        assert set(response.answers[0].selected_choice_ids) == {"a", "c"}
+        assert set(response.answers[0].selected_choices) == {1, 3}
 
     def test_free_text_question(self):
         input_stream = io.StringIO("This is my answer\n")
@@ -97,7 +95,6 @@ class TestConsoleActor:
             context="Testing",
             questions=[
                 Question(
-                    id="q1",
                     text="Describe your needs",
                     question_type=QuestionType.FREE_TEXT,
                 ),
@@ -111,7 +108,7 @@ class TestConsoleActor:
         assert response.answers[0].free_text == "This is my answer"
 
     def test_multiple_questions(self):
-        input_stream = io.StringIO("a\nHello world\n1,2\n")
+        input_stream = io.StringIO("1\nHello world\n1,2\n")
         output_stream = io.StringIO()
 
         actor = ConsoleActor(
@@ -124,27 +121,24 @@ class TestConsoleActor:
             context="Need multiple inputs",
             questions=[
                 Question(
-                    id="q1",
                     text="Single choice",
                     question_type=QuestionType.SINGLE_CHOICE,
                     choices=[
-                        Choice(id="a", text="A"),
-                        Choice(id="b", text="B"),
+                        Choice(text="A"),
+                        Choice(text="B"),
                     ],
                 ),
                 Question(
-                    id="q2",
                     text="Free text",
                     question_type=QuestionType.FREE_TEXT,
                 ),
                 Question(
-                    id="q3",
                     text="Multiple choice",
                     question_type=QuestionType.MULTIPLE_CHOICE,
                     choices=[
-                        Choice(id="1", text="One"),
-                        Choice(id="2", text="Two"),
-                        Choice(id="3", text="Three"),
+                        Choice(text="One"),
+                        Choice(text="Two"),
+                        Choice(text="Three"),
                     ],
                 ),
             ],
@@ -154,9 +148,9 @@ class TestConsoleActor:
 
         assert not response.cancelled
         assert len(response.answers) == 3
-        assert response.answers[0].selected_choice_ids == ["a"]
+        assert response.answers[0].selected_choices == [1]
         assert response.answers[1].free_text == "Hello world"
-        assert set(response.answers[2].selected_choice_ids) == {"1", "2"}
+        assert set(response.answers[2].selected_choices) == {1, 2}
 
     def test_cancel_request(self):
         input_stream = io.StringIO("cancel\n")
@@ -172,10 +166,9 @@ class TestConsoleActor:
             context="Testing",
             questions=[
                 Question(
-                    id="q1",
                     text="Pick one",
                     question_type=QuestionType.SINGLE_CHOICE,
-                    choices=[Choice(id="a", text="A")],
+                    choices=[Choice(text="A")],
                 ),
             ],
         )
@@ -198,14 +191,13 @@ class TestConsoleActor:
             context="Testing",
             questions=[
                 Question(
-                    id="q1",
                     text="Pick one",
                     question_type=QuestionType.SINGLE_CHOICE,
                     choices=[
-                        Choice(id="a", text="A"),
-                        Choice(id="b", text="B"),
+                        Choice(text="A"),
+                        Choice(text="B"),
                     ],
-                    default_choice_id="b",
+                    default_choice=2,
                 ),
             ],
         )
@@ -213,7 +205,7 @@ class TestConsoleActor:
         response = actor.request_clarification(request)
 
         assert not response.cancelled
-        assert response.answers[0].selected_choice_ids == ["b"]
+        assert response.answers[0].selected_choices == [2]
 
     def test_optional_question_skipped(self):
         input_stream = io.StringIO("\n")  # Empty input skips optional
@@ -229,7 +221,6 @@ class TestConsoleActor:
             context="Testing",
             questions=[
                 Question(
-                    id="q1",
                     text="Optional question",
                     question_type=QuestionType.FREE_TEXT,
                     required=False,
@@ -243,8 +234,8 @@ class TestConsoleActor:
         assert response.answers[0].skipped is True
 
     def test_invalid_choice_retry(self):
-        # First input is invalid, second is valid
-        input_stream = io.StringIO("x\na\n")
+        # First input is invalid (99), second is valid (1)
+        input_stream = io.StringIO("99\n1\n")
         output_stream = io.StringIO()
 
         actor = ConsoleActor(
@@ -257,12 +248,11 @@ class TestConsoleActor:
             context="Testing",
             questions=[
                 Question(
-                    id="q1",
                     text="Pick one",
                     question_type=QuestionType.SINGLE_CHOICE,
                     choices=[
-                        Choice(id="a", text="A"),
-                        Choice(id="b", text="B"),
+                        Choice(text="A"),
+                        Choice(text="B"),
                     ],
                 ),
             ],
@@ -271,10 +261,63 @@ class TestConsoleActor:
         response = actor.request_clarification(request)
 
         assert not response.cancelled
-        assert response.answers[0].selected_choice_ids == ["a"]
+        assert response.answers[0].selected_choices == [1]
 
         output = output_stream.getvalue()
         assert "Invalid choice" in output
+
+    def test_shows_required_status(self):
+        input_stream = io.StringIO("1\n")
+        output_stream = io.StringIO()
+
+        actor = ConsoleActor(
+            input_stream=input_stream,
+            output_stream=output_stream,
+            use_colors=False,
+        )
+
+        request = ClarificationRequest(
+            context="Testing",
+            questions=[
+                Question(
+                    text="Required question",
+                    question_type=QuestionType.SINGLE_CHOICE,
+                    choices=[Choice(text="A")],
+                    required=True,
+                ),
+            ],
+        )
+
+        actor.request_clarification(request)
+
+        output = output_stream.getvalue()
+        assert "*required" in output or "required" in output
+
+    def test_shows_optional_status(self):
+        input_stream = io.StringIO("\n")
+        output_stream = io.StringIO()
+
+        actor = ConsoleActor(
+            input_stream=input_stream,
+            output_stream=output_stream,
+            use_colors=False,
+        )
+
+        request = ClarificationRequest(
+            context="Testing",
+            questions=[
+                Question(
+                    text="Optional question",
+                    question_type=QuestionType.FREE_TEXT,
+                    required=False,
+                ),
+            ],
+        )
+
+        actor.request_clarification(request)
+
+        output = output_stream.getvalue()
+        assert "optional" in output
 
 
 class TestAutoActor:
@@ -291,14 +334,13 @@ class TestAutoActor:
             context="Testing",
             questions=[
                 Question(
-                    id="q1",
                     text="Pick one",
                     question_type=QuestionType.SINGLE_CHOICE,
                     choices=[
-                        Choice(id="a", text="A"),
-                        Choice(id="b", text="B"),
+                        Choice(text="A"),
+                        Choice(text="B"),
                     ],
-                    default_choice_id="b",
+                    default_choice=2,
                 ),
             ],
         )
@@ -306,7 +348,7 @@ class TestAutoActor:
         response = actor.request_clarification(request)
 
         assert not response.cancelled
-        assert response.answers[0].selected_choice_ids == ["b"]
+        assert response.answers[0].selected_choices == [2]
 
     def test_auto_single_choice_first_option(self):
         actor = AutoActor()
@@ -315,12 +357,11 @@ class TestAutoActor:
             context="Testing",
             questions=[
                 Question(
-                    id="q1",
                     text="Pick one",
                     question_type=QuestionType.SINGLE_CHOICE,
                     choices=[
-                        Choice(id="a", text="A"),
-                        Choice(id="b", text="B"),
+                        Choice(text="A"),
+                        Choice(text="B"),
                     ],
                 ),
             ],
@@ -328,7 +369,7 @@ class TestAutoActor:
 
         response = actor.request_clarification(request)
 
-        assert response.answers[0].selected_choice_ids == ["a"]
+        assert response.answers[0].selected_choices == [1]
 
     def test_auto_multiple_choice_with_default(self):
         actor = AutoActor()
@@ -337,22 +378,21 @@ class TestAutoActor:
             context="Testing",
             questions=[
                 Question(
-                    id="q1",
                     text="Select features",
                     question_type=QuestionType.MULTIPLE_CHOICE,
                     choices=[
-                        Choice(id="1", text="One"),
-                        Choice(id="2", text="Two"),
-                        Choice(id="3", text="Three"),
+                        Choice(text="One"),
+                        Choice(text="Two"),
+                        Choice(text="Three"),
                     ],
-                    default_choice_id="1,3",
+                    default_choice=2,
                 ),
             ],
         )
 
         response = actor.request_clarification(request)
 
-        assert set(response.answers[0].selected_choice_ids) == {"1", "3"}
+        assert response.answers[0].selected_choices == [2]
 
     def test_auto_free_text(self):
         actor = AutoActor(default_free_text="custom response")
@@ -361,7 +401,6 @@ class TestAutoActor:
             context="Testing",
             questions=[
                 Question(
-                    id="q1",
                     text="Describe",
                     question_type=QuestionType.FREE_TEXT,
                 ),
@@ -379,13 +418,11 @@ class TestAutoActor:
             context="Testing",
             questions=[
                 Question(
-                    id="q1",
                     text="Q1",
                     question_type=QuestionType.SINGLE_CHOICE,
-                    choices=[Choice(id="a", text="A")],
+                    choices=[Choice(text="A")],
                 ),
                 Question(
-                    id="q2",
                     text="Q2",
                     question_type=QuestionType.FREE_TEXT,
                 ),
@@ -395,7 +432,7 @@ class TestAutoActor:
         response = actor.request_clarification(request)
 
         assert len(response.answers) == 2
-        assert response.answers[0].selected_choice_ids == ["a"]
+        assert response.answers[0].selected_choices == [1]
         assert response.answers[1].free_text == "auto-response"
 
 

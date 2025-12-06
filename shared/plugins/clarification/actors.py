@@ -2,7 +2,7 @@
 
 import sys
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import List, Optional
 
 from .models import (
     Answer,
@@ -68,6 +68,9 @@ class ConsoleActor(ClarificationActor):
     def _green(self, text: str) -> str:
         return self._color(text, "32")
 
+    def _red(self, text: str) -> str:
+        return self._color(text, "31")
+
     def _dim(self, text: str) -> str:
         return self._color(text, "2")
 
@@ -107,8 +110,10 @@ class ConsoleActor(ClarificationActor):
 
         answers = []
         for i, question in enumerate(request.questions, 1):
-            self._write(self._bold(f"Question {i}/{len(request.questions)}:"))
-            answer = self._ask_question(question)
+            # Show question number and required/optional status
+            req_status = self._red("*required") if question.required else self._dim("optional")
+            self._write(self._bold(f"Question {i}/{len(request.questions)}") + f" [{req_status}]")
+            answer = self._ask_question(i, question)
 
             if answer is None:  # User cancelled
                 return ClarificationResponse(cancelled=True)
@@ -121,53 +126,55 @@ class ConsoleActor(ClarificationActor):
 
         return ClarificationResponse(answers=answers)
 
-    def _ask_question(self, question: Question) -> Optional[Answer]:
+    def _ask_question(self, question_index: int, question: Question) -> Optional[Answer]:
         """Ask a single question and return the answer, or None if cancelled."""
         self._write(f"  {self._yellow(question.text)}")
 
         if question.question_type == QuestionType.FREE_TEXT:
-            return self._ask_free_text(question)
+            return self._ask_free_text(question_index, question)
         elif question.question_type == QuestionType.SINGLE_CHOICE:
-            return self._ask_single_choice(question)
+            return self._ask_single_choice(question_index, question)
         elif question.question_type == QuestionType.MULTIPLE_CHOICE:
-            return self._ask_multiple_choice(question)
+            return self._ask_multiple_choice(question_index, question)
         else:
             # Fallback to free text for unknown types
-            return self._ask_free_text(question)
+            return self._ask_free_text(question_index, question)
 
-    def _ask_free_text(self, question: Question) -> Optional[Answer]:
+    def _ask_free_text(self, question_index: int, question: Question) -> Optional[Answer]:
         """Ask a free text question."""
-        prompt_parts = ["  > "]
         if not question.required:
-            prompt_parts.append(self._dim("(optional, press Enter to skip) "))
+            self._write(self._dim("  (press Enter to skip)"))
 
         while True:
-            response = self._read_line("".join(prompt_parts))
+            response = self._read_line("  > ")
 
             if response.lower() == "cancel":
                 return None
 
             if not response and not question.required:
-                return Answer(question_id=question.id, skipped=True)
+                return Answer(question_index=question_index, skipped=True)
 
             if not response and question.required:
                 self._write(self._yellow("  Please provide an answer."))
                 continue
 
-            return Answer(question_id=question.id, free_text=response)
+            return Answer(question_index=question_index, free_text=response)
 
-    def _ask_single_choice(self, question: Question) -> Optional[Answer]:
+    def _ask_single_choice(self, question_index: int, question: Question) -> Optional[Answer]:
         """Ask a single choice question."""
-        # Display choices
-        for choice in question.choices:
+        # Display choices with 1-based indices
+        for i, choice in enumerate(question.choices, 1):
             default_marker = ""
-            if choice.id == question.default_choice_id:
+            if question.default_choice == i:
                 default_marker = self._dim(" (default)")
-            self._write(f"    [{self._cyan(choice.id)}] {choice.text}{default_marker}")
+            self._write(f"    {self._cyan(str(i))}. {choice.text}{default_marker}")
 
         # Build prompt
-        valid_ids = [c.id for c in question.choices]
-        prompt_hint = "/".join(valid_ids)
+        num_choices = len(question.choices)
+        if num_choices == 1:
+            prompt_hint = "1"
+        else:
+            prompt_hint = f"1-{num_choices}"
         prompt = f"  Enter choice [{prompt_hint}]: "
 
         while True:
@@ -177,42 +184,50 @@ class ConsoleActor(ClarificationActor):
                 return None
 
             # Use default if available and no input
-            if not response and question.default_choice_id:
+            if not response and question.default_choice:
                 return Answer(
-                    question_id=question.id,
-                    selected_choice_ids=[question.default_choice_id],
+                    question_index=question_index,
+                    selected_choices=[question.default_choice],
                 )
 
             # Skip if optional and no input
             if not response and not question.required:
-                return Answer(question_id=question.id, skipped=True)
+                return Answer(question_index=question_index, skipped=True)
+
+            # Required but no input
+            if not response:
+                self._write(self._yellow("  Please select an option."))
+                continue
 
             # Validate choice
-            if response in valid_ids:
-                return Answer(
-                    question_id=question.id, selected_choice_ids=[response]
-                )
+            try:
+                choice_num = int(response)
+                if 1 <= choice_num <= num_choices:
+                    return Answer(
+                        question_index=question_index, selected_choices=[choice_num]
+                    )
+            except ValueError:
+                pass
 
             self._write(
-                self._yellow(f"  Invalid choice. Please enter one of: {prompt_hint}")
+                self._yellow(f"  Invalid choice. Please enter a number from {prompt_hint}")
             )
 
-    def _ask_multiple_choice(self, question: Question) -> Optional[Answer]:
+    def _ask_multiple_choice(self, question_index: int, question: Question) -> Optional[Answer]:
         """Ask a multiple choice question."""
-        # Display choices
-        self._write(self._dim("  (Select multiple by entering comma-separated values)"))
-        for choice in question.choices:
+        # Display choices with 1-based indices
+        self._write(self._dim("  (Enter comma-separated numbers, e.g., 1,3)"))
+        default_indices: List[int] = []
+        for i, choice in enumerate(question.choices, 1):
             default_marker = ""
-            if (
-                question.default_choice_id
-                and choice.id in question.default_choice_id.split(",")
-            ):
+            if question.default_choice and i == question.default_choice:
                 default_marker = self._dim(" (default)")
-            self._write(f"    [{self._cyan(choice.id)}] {choice.text}{default_marker}")
+                default_indices.append(i)
+            self._write(f"    {self._cyan(str(i))}. {choice.text}{default_marker}")
 
         # Build prompt
-        valid_ids = [c.id for c in question.choices]
-        prompt = f"  Enter choices (comma-separated): "
+        num_choices = len(question.choices)
+        prompt = "  Enter choices: "
 
         while True:
             response = self._read_line(prompt)
@@ -221,33 +236,51 @@ class ConsoleActor(ClarificationActor):
                 return None
 
             # Use default if available and no input
-            if not response and question.default_choice_id:
-                default_ids = [
-                    id.strip() for id in question.default_choice_id.split(",")
-                ]
+            if not response and default_indices:
                 return Answer(
-                    question_id=question.id, selected_choice_ids=default_ids
+                    question_index=question_index, selected_choices=default_indices
                 )
 
             # Skip if optional and no input
             if not response and not question.required:
-                return Answer(question_id=question.id, skipped=True)
+                return Answer(question_index=question_index, skipped=True)
 
-            # Parse and validate choices
-            selected = [id.strip() for id in response.split(",") if id.strip()]
-
-            if not selected and question.required:
+            # Required but no input
+            if not response and question.required:
                 self._write(self._yellow("  Please select at least one option."))
                 continue
 
-            invalid = [id for id in selected if id not in valid_ids]
-            if invalid:
-                self._write(
-                    self._yellow(f"  Invalid choice(s): {', '.join(invalid)}")
-                )
-                continue
+            # Parse and validate choices
+            try:
+                selected = []
+                invalid = []
+                for part in response.split(","):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    num = int(part)
+                    if 1 <= num <= num_choices:
+                        if num not in selected:
+                            selected.append(num)
+                    else:
+                        invalid.append(part)
 
-            return Answer(question_id=question.id, selected_choice_ids=selected)
+                if invalid:
+                    self._write(
+                        self._yellow(f"  Invalid choice(s): {', '.join(invalid)}. Use 1-{num_choices}.")
+                    )
+                    continue
+
+                if not selected and question.required:
+                    self._write(self._yellow("  Please select at least one option."))
+                    continue
+
+                return Answer(question_index=question_index, selected_choices=selected)
+
+            except ValueError:
+                self._write(
+                    self._yellow(f"  Invalid input. Enter numbers from 1-{num_choices}, separated by commas.")
+                )
 
 
 class AutoActor(ClarificationActor):
@@ -271,38 +304,30 @@ class AutoActor(ClarificationActor):
         """Automatically answer all questions with defaults."""
         answers = []
 
-        for question in request.questions:
-            answer = self._auto_answer(question)
+        for i, question in enumerate(request.questions, 1):
+            answer = self._auto_answer(i, question)
             answers.append(answer)
 
         return ClarificationResponse(answers=answers)
 
-    def _auto_answer(self, question: Question) -> Answer:
+    def _auto_answer(self, question_index: int, question: Question) -> Answer:
         """Generate an automatic answer for a question."""
         if question.question_type == QuestionType.FREE_TEXT:
-            return Answer(question_id=question.id, free_text=self._default_free_text)
+            return Answer(question_index=question_index, free_text=self._default_free_text)
 
-        # For choice questions, use default or first choice
-        if question.default_choice_id:
-            if question.question_type == QuestionType.MULTIPLE_CHOICE:
-                selected = [
-                    id.strip() for id in question.default_choice_id.split(",")
-                ]
-            else:
-                selected = [question.default_choice_id]
-            return Answer(question_id=question.id, selected_choice_ids=selected)
+        # For choice questions, use default or first choice (1-based)
+        if question.default_choice:
+            return Answer(question_index=question_index, selected_choices=[question.default_choice])
 
-        # Use first choice if available
+        # Use first choice if available (1-based index)
         if question.choices:
-            return Answer(
-                question_id=question.id, selected_choice_ids=[question.choices[0].id]
-            )
+            return Answer(question_index=question_index, selected_choices=[1])
 
         # Fallback for edge cases
         if not question.required:
-            return Answer(question_id=question.id, skipped=True)
+            return Answer(question_index=question_index, skipped=True)
 
-        return Answer(question_id=question.id, free_text=self._default_free_text)
+        return Answer(question_index=question_index, free_text=self._default_free_text)
 
 
 def create_actor(actor_type: str = "console", **kwargs) -> ClarificationActor:

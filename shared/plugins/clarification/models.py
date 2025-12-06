@@ -15,49 +15,63 @@ class QuestionType(str, Enum):
 
 @dataclass
 class Choice:
-    """A single choice option for a question."""
+    """A single choice option for a question.
 
-    id: str  # Unique identifier for this choice (e.g., "a", "b", "1", "2")
+    Choices are identified by their ordinal position (1-based index).
+    """
+
     text: str  # Display text for the choice
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "text": self.text}
+        return {"text": self.text}
 
     @classmethod
     def from_dict(cls, data: dict) -> "Choice":
-        return cls(id=data["id"], text=data["text"])
+        # Support both new format (text only) and legacy format (with id)
+        if isinstance(data, str):
+            return cls(text=data)
+        return cls(text=data.get("text", ""))
 
 
 @dataclass
 class Question:
-    """A question that can be asked to the user for clarification."""
+    """A question that can be asked to the user for clarification.
 
-    id: str  # Unique identifier for this question
+    Questions are identified by their ordinal position (1-based index).
+    """
+
     text: str  # The question text
     question_type: QuestionType = QuestionType.SINGLE_CHOICE
     choices: List[Choice] = field(default_factory=list)
     required: bool = True  # Whether an answer is required
-    default_choice_id: Optional[str] = None  # Default choice if not answered
+    default_choice: Optional[int] = None  # 1-based index of default choice
 
     def to_dict(self) -> dict:
         return {
-            "id": self.id,
             "text": self.text,
             "question_type": self.question_type.value,
             "choices": [c.to_dict() for c in self.choices],
             "required": self.required,
-            "default_choice_id": self.default_choice_id,
+            "default_choice": self.default_choice,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "Question":
+        choices_data = data.get("choices", [])
+        choices = [Choice.from_dict(c) for c in choices_data]
+
+        question_type_str = data.get("question_type", "single_choice")
+        try:
+            question_type = QuestionType(question_type_str)
+        except ValueError:
+            question_type = QuestionType.SINGLE_CHOICE
+
         return cls(
-            id=data["id"],
-            text=data["text"],
-            question_type=QuestionType(data.get("question_type", "single_choice")),
-            choices=[Choice.from_dict(c) for c in data.get("choices", [])],
+            text=data.get("text", ""),
+            question_type=question_type,
+            choices=choices,
             required=data.get("required", True),
-            default_choice_id=data.get("default_choice_id"),
+            default_choice=data.get("default_choice"),
         )
 
 
@@ -84,17 +98,21 @@ class ClarificationRequest:
 
 @dataclass
 class Answer:
-    """User's answer to a single question."""
+    """User's answer to a single question.
 
-    question_id: str  # ID of the question being answered
-    selected_choice_ids: List[str] = field(default_factory=list)  # For choice questions
+    question_index: 1-based index of the question being answered
+    selected_choices: List of 1-based indices of selected choices
+    """
+
+    question_index: int  # 1-based index of the question
+    selected_choices: List[int] = field(default_factory=list)  # 1-based indices
     free_text: Optional[str] = None  # For free text questions
-    skipped: bool = False  # True if user skipped a non-required question
+    skipped: bool = False  # True if user skipped an optional question
 
     def to_dict(self) -> dict:
         return {
-            "question_id": self.question_id,
-            "selected_choice_ids": self.selected_choice_ids,
+            "question_index": self.question_index,
+            "selected_choices": self.selected_choices,
             "free_text": self.free_text,
             "skipped": self.skipped,
         }
@@ -102,8 +120,8 @@ class Answer:
     @classmethod
     def from_dict(cls, data: dict) -> "Answer":
         return cls(
-            question_id=data["question_id"],
-            selected_choice_ids=data.get("selected_choice_ids", []),
+            question_index=data.get("question_index", 0),
+            selected_choices=data.get("selected_choices", []),
             free_text=data.get("free_text"),
             skipped=data.get("skipped", False),
         )
@@ -129,9 +147,9 @@ class ClarificationResponse:
             cancelled=data.get("cancelled", False),
         )
 
-    def get_answer(self, question_id: str) -> Optional[Answer]:
-        """Get the answer for a specific question by ID."""
+    def get_answer(self, question_index: int) -> Optional[Answer]:
+        """Get the answer for a specific question by 1-based index."""
         for answer in self.answers:
-            if answer.question_id == question_id:
+            if answer.question_index == question_index:
                 return answer
         return None

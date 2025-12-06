@@ -79,12 +79,11 @@ class TestClarificationPluginFunctionDeclarations:
         schema = declarations[0].parameters_json_schema
 
         question_schema = schema["properties"]["questions"]["items"]
-        assert "id" in question_schema["properties"]
         assert "text" in question_schema["properties"]
         assert "question_type" in question_schema["properties"]
         assert "choices" in question_schema["properties"]
         assert "required" in question_schema["properties"]
-        assert "default_choice_id" in question_schema["properties"]
+        assert "default_choice" in question_schema["properties"]
 
     def test_question_type_enum(self):
         plugin = ClarificationPlugin()
@@ -118,7 +117,7 @@ class TestRequestClarificationExecutor:
 
         result = executors["request_clarification"]({
             "context": "Test",
-            "questions": [{"id": "q1", "text": "Q1"}],
+            "questions": [{"text": "Q1"}],
         })
 
         assert "error" in result
@@ -132,23 +131,19 @@ class TestRequestClarificationExecutor:
             "context": "Need to know your preference",
             "questions": [
                 {
-                    "id": "env",
                     "text": "Which environment?",
                     "question_type": "single_choice",
-                    "choices": [
-                        {"id": "dev", "text": "Development"},
-                        {"id": "prod", "text": "Production"},
-                    ],
-                    "default_choice_id": "dev",
+                    "choices": ["Development", "Production"],
+                    "default_choice": 1,
                 },
             ],
         })
 
         assert "error" not in result
         assert "responses" in result
-        assert "env" in result["responses"]
-        assert result["responses"]["env"]["value"] == "dev"
-        assert result["responses"]["env"]["type"] == "single_choice"
+        assert "1" in result["responses"]
+        assert result["responses"]["1"]["selected"] == 1
+        assert result["responses"]["1"]["type"] == "single_choice"
 
     def test_execute_multiple_choice_question(self):
         plugin = ClarificationPlugin()
@@ -159,24 +154,19 @@ class TestRequestClarificationExecutor:
             "context": "Select features",
             "questions": [
                 {
-                    "id": "features",
                     "text": "Which features?",
                     "question_type": "multiple_choice",
-                    "choices": [
-                        {"id": "logging", "text": "Logging"},
-                        {"id": "metrics", "text": "Metrics"},
-                        {"id": "tracing", "text": "Tracing"},
-                    ],
-                    "default_choice_id": "logging,metrics",
+                    "choices": ["Logging", "Metrics", "Tracing"],
+                    "default_choice": 1,
                 },
             ],
         })
 
         assert "error" not in result
         assert "responses" in result
-        assert "features" in result["responses"]
-        assert result["responses"]["features"]["type"] == "multiple_choice"
-        assert set(result["responses"]["features"]["values"]) == {"logging", "metrics"}
+        assert "1" in result["responses"]
+        assert result["responses"]["1"]["type"] == "multiple_choice"
+        assert 1 in result["responses"]["1"]["selected"]
 
     def test_execute_free_text_question(self):
         plugin = ClarificationPlugin()
@@ -190,7 +180,6 @@ class TestRequestClarificationExecutor:
             "context": "Need description",
             "questions": [
                 {
-                    "id": "description",
                     "text": "Describe your requirements",
                     "question_type": "free_text",
                 },
@@ -199,8 +188,8 @@ class TestRequestClarificationExecutor:
 
         assert "error" not in result
         assert "responses" in result
-        assert result["responses"]["description"]["value"] == "my custom answer"
-        assert result["responses"]["description"]["type"] == "free_text"
+        assert result["responses"]["1"]["value"] == "my custom answer"
+        assert result["responses"]["1"]["type"] == "free_text"
 
     def test_execute_multiple_questions(self):
         plugin = ClarificationPlugin()
@@ -211,36 +200,27 @@ class TestRequestClarificationExecutor:
             "context": "Configuration needed",
             "questions": [
                 {
-                    "id": "q1",
                     "text": "Environment",
                     "question_type": "single_choice",
-                    "choices": [
-                        {"id": "dev", "text": "Dev"},
-                        {"id": "prod", "text": "Prod"},
-                    ],
+                    "choices": ["Dev", "Prod"],
                 },
                 {
-                    "id": "q2",
                     "text": "Description",
                     "question_type": "free_text",
                 },
                 {
-                    "id": "q3",
                     "text": "Features",
                     "question_type": "multiple_choice",
-                    "choices": [
-                        {"id": "a", "text": "A"},
-                        {"id": "b", "text": "B"},
-                    ],
+                    "choices": ["A", "B"],
                 },
             ],
         })
 
         assert "error" not in result
         assert "responses" in result
-        assert "q1" in result["responses"]
-        assert "q2" in result["responses"]
-        assert "q3" in result["responses"]
+        assert "1" in result["responses"]
+        assert "2" in result["responses"]
+        assert "3" in result["responses"]
 
     def test_execute_with_defaults(self):
         plugin = ClarificationPlugin()
@@ -251,18 +231,14 @@ class TestRequestClarificationExecutor:
             "context": "Quick config",
             "questions": [
                 {
-                    "id": "q1",
                     "text": "Select",
-                    "choices": [
-                        {"id": "a", "text": "A"},
-                        {"id": "b", "text": "B"},
-                    ],
-                    "default_choice_id": "b",
+                    "choices": ["A", "B"],
+                    "default_choice": 2,
                 },
             ],
         })
 
-        assert result["responses"]["q1"]["value"] == "b"
+        assert result["responses"]["1"]["selected"] == 2
 
     def test_execute_question_type_defaults_to_single_choice(self):
         plugin = ClarificationPlugin()
@@ -273,16 +249,15 @@ class TestRequestClarificationExecutor:
             "context": "Test",
             "questions": [
                 {
-                    "id": "q1",
                     "text": "Pick",
-                    "choices": [{"id": "x", "text": "X"}],
+                    "choices": ["X"],
                     # No question_type specified
                 },
             ],
         })
 
         assert "error" not in result
-        assert result["responses"]["q1"]["type"] == "single_choice"
+        assert result["responses"]["1"]["type"] == "single_choice"
 
 
 class TestClarificationPluginSystemInstructions:
@@ -328,30 +303,19 @@ class TestClarificationPluginWorkflow:
             "context": "I need to configure the deployment. Please provide the following information.",
             "questions": [
                 {
-                    "id": "environment",
                     "text": "Which environment should I deploy to?",
                     "question_type": "single_choice",
-                    "choices": [
-                        {"id": "dev", "text": "Development"},
-                        {"id": "staging", "text": "Staging"},
-                        {"id": "prod", "text": "Production"},
-                    ],
-                    "default_choice_id": "dev",
+                    "choices": ["Development", "Staging", "Production"],
+                    "default_choice": 1,
                 },
                 {
-                    "id": "features",
                     "text": "Which optional features should be enabled?",
                     "question_type": "multiple_choice",
-                    "choices": [
-                        {"id": "logging", "text": "Enhanced logging"},
-                        {"id": "metrics", "text": "Metrics collection"},
-                        {"id": "debug", "text": "Debug mode"},
-                    ],
+                    "choices": ["Enhanced logging", "Metrics collection", "Debug mode"],
                     "required": False,
-                    "default_choice_id": "logging",
+                    "default_choice": 1,
                 },
                 {
-                    "id": "notes",
                     "text": "Any additional deployment notes?",
                     "question_type": "free_text",
                     "required": False,
@@ -363,13 +327,13 @@ class TestClarificationPluginWorkflow:
         assert "responses" in result
 
         # Check environment response
-        env = result["responses"]["environment"]
-        assert env["value"] == "dev"
+        env = result["responses"]["1"]
+        assert env["selected"] == 1
         assert env["text"] == "Development"
 
         # Check features response
-        features = result["responses"]["features"]
-        assert "logging" in features["values"]
+        features = result["responses"]["2"]
+        assert 1 in features["selected"]
 
     def test_workflow_ambiguous_request(self):
         plugin = ClarificationPlugin()
@@ -381,28 +345,18 @@ class TestClarificationPluginWorkflow:
             "context": "Your request to 'add authentication' could be implemented in several ways. Please clarify your preferences.",
             "questions": [
                 {
-                    "id": "auth_type",
                     "text": "What type of authentication?",
                     "question_type": "single_choice",
-                    "choices": [
-                        {"id": "session", "text": "Session-based (cookies)"},
-                        {"id": "jwt", "text": "JWT tokens"},
-                        {"id": "oauth", "text": "OAuth 2.0"},
-                    ],
+                    "choices": ["Session-based (cookies)", "JWT tokens", "OAuth 2.0"],
                 },
                 {
-                    "id": "providers",
                     "text": "Which OAuth providers should be supported?",
                     "question_type": "multiple_choice",
-                    "choices": [
-                        {"id": "google", "text": "Google"},
-                        {"id": "github", "text": "GitHub"},
-                        {"id": "microsoft", "text": "Microsoft"},
-                    ],
+                    "choices": ["Google", "GitHub", "Microsoft"],
                 },
             ],
         })
 
         assert "error" not in result
-        assert "auth_type" in result["responses"]
-        assert "providers" in result["responses"]
+        assert "1" in result["responses"]
+        assert "2" in result["responses"]
