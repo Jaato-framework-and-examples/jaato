@@ -66,7 +66,8 @@ class ClarificationPlugin:
                     "Use this when you need more information to proceed with a task. "
                     "Each question can be single-choice (pick one), multiple-choice (pick many), "
                     "or free-text (open response). Provide context explaining why you need "
-                    "this information."
+                    "this information. Questions and choices are identified by their ordinal "
+                    "position (1-based)."
                 ),
                 parameters_json_schema={
                     "type": "object",
@@ -80,17 +81,13 @@ class ClarificationPlugin:
                         },
                         "questions": {
                             "type": "array",
-                            "description": "List of questions to ask the user",
+                            "description": (
+                                "List of questions to ask. Questions are numbered automatically "
+                                "(1, 2, 3...). Each question's choices are also numbered."
+                            ),
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "id": {
-                                        "type": "string",
-                                        "description": (
-                                            "Unique identifier for this question "
-                                            "(e.g., 'q1', 'deployment_env')"
-                                        ),
-                                    },
                                     "text": {
                                         "type": "string",
                                         "description": "The question text to display",
@@ -105,51 +102,36 @@ class ClarificationPlugin:
                                         "description": (
                                             "Type of question: 'single_choice' (pick one), "
                                             "'multiple_choice' (pick many), or 'free_text' "
-                                            "(open response)"
+                                            "(open response). Defaults to 'single_choice'."
                                         ),
-                                        "default": "single_choice",
                                     },
                                     "choices": {
                                         "type": "array",
                                         "description": (
-                                            "Available choices for single/multiple choice "
-                                            "questions. Not needed for free_text."
+                                            "Available choices (for single/multiple choice). "
+                                            "Choices are numbered 1, 2, 3... automatically."
                                         ),
                                         "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "id": {
-                                                    "type": "string",
-                                                    "description": (
-                                                        "Short identifier for the choice "
-                                                        "(e.g., 'a', 'b', '1', '2')"
-                                                    ),
-                                                },
-                                                "text": {
-                                                    "type": "string",
-                                                    "description": "Display text for this choice",
-                                                },
-                                            },
-                                            "required": ["id", "text"],
+                                            "type": "string",
+                                            "description": "Choice text",
                                         },
                                     },
                                     "required": {
                                         "type": "boolean",
                                         "description": (
-                                            "Whether an answer is required. "
+                                            "Whether an answer is required (default: true). "
                                             "Optional questions can be skipped."
                                         ),
-                                        "default": True,
                                     },
-                                    "default_choice_id": {
-                                        "type": "string",
+                                    "default_choice": {
+                                        "type": "integer",
                                         "description": (
-                                            "ID of default choice if user doesn't select one. "
-                                            "For multiple_choice, use comma-separated IDs."
+                                            "1-based index of the default choice. "
+                                            "Used if the user doesn't select anything."
                                         ),
                                     },
                                 },
-                                "required": ["id", "text"],
+                                "required": ["text"],
                             },
                             "minItems": 1,
                         },
@@ -182,9 +164,8 @@ You have access to a `request_clarification` tool that allows you to ask the use
    - `single_choice`: When exactly one option must be selected
    - `multiple_choice`: When zero or more options can be selected
    - `free_text`: When you need an open-ended response
-4. Provide meaningful choice IDs (e.g., 'a', 'b' or descriptive like 'dev', 'prod')
-5. Set reasonable defaults when possible
-6. Mark questions as optional (`required: false`) when appropriate
+4. Set reasonable defaults when possible using `default_choice` (1-based index)
+5. Mark questions as optional (`required: false`) when appropriate
 
 ### Example usage:
 ```json
@@ -192,28 +173,35 @@ You have access to a `request_clarification` tool that allows you to ask the use
   "context": "I need to know your deployment preferences to set up the configuration correctly.",
   "questions": [
     {
-      "id": "env",
       "text": "Which environment should I configure?",
       "question_type": "single_choice",
-      "choices": [
-        {"id": "dev", "text": "Development"},
-        {"id": "staging", "text": "Staging"},
-        {"id": "prod", "text": "Production"}
-      ],
-      "default_choice_id": "dev"
+      "choices": ["Development", "Staging", "Production"],
+      "default_choice": 1
     },
     {
-      "id": "features",
       "text": "Which optional features would you like enabled?",
       "question_type": "multiple_choice",
-      "choices": [
-        {"id": "logging", "text": "Verbose logging"},
-        {"id": "metrics", "text": "Metrics collection"},
-        {"id": "tracing", "text": "Distributed tracing"}
-      ],
+      "choices": ["Verbose logging", "Metrics collection", "Distributed tracing"],
+      "required": false
+    },
+    {
+      "text": "Any additional notes for the deployment?",
+      "question_type": "free_text",
       "required": false
     }
   ]
+}
+```
+
+### Response format:
+The tool returns responses keyed by question number (1-based):
+```json
+{
+  "responses": {
+    "1": {"selected": 1, "text": "Development", "type": "single_choice"},
+    "2": {"selected": [1, 3], "texts": ["Verbose logging", "Distributed tracing"], "type": "multiple_choice"},
+    "3": {"value": "Please enable debug mode", "type": "free_text"}
+  }
 }
 ```
 """
@@ -259,48 +247,42 @@ You have access to a `request_clarification` tool that allows you to ask the use
                     "message": "User cancelled the clarification request.",
                 }
 
-            # Build a structured response
+            # Build a structured response keyed by question number
             result = {"responses": {}}
 
             for answer in response.answers:
+                q_key = str(answer.question_index)
+                question = request.questions[answer.question_index - 1] if answer.question_index <= len(request.questions) else None
+
                 if answer.skipped:
-                    result["responses"][answer.question_id] = {
-                        "skipped": True,
-                    }
+                    result["responses"][q_key] = {"skipped": True}
                 elif answer.free_text is not None:
-                    result["responses"][answer.question_id] = {
+                    result["responses"][q_key] = {
                         "value": answer.free_text,
                         "type": "free_text",
                     }
                 else:
-                    # Find the question to get choice texts and type
-                    question = next(
-                        (q for q in request.questions if q.id == answer.question_id),
-                        None,
-                    )
+                    # Get choice texts for selected indices
                     choice_texts = []
                     if question:
-                        choice_map = {c.id: c.text for c in question.choices}
-                        choice_texts = [
-                            choice_map.get(cid, cid)
-                            for cid in answer.selected_choice_ids
-                        ]
+                        for idx in answer.selected_choices:
+                            if 1 <= idx <= len(question.choices):
+                                choice_texts.append(question.choices[idx - 1].text)
 
-                    # Use question type to determine response format
                     is_multiple_choice = (
                         question
                         and question.question_type == QuestionType.MULTIPLE_CHOICE
                     )
 
                     if is_multiple_choice:
-                        result["responses"][answer.question_id] = {
-                            "values": answer.selected_choice_ids,
+                        result["responses"][q_key] = {
+                            "selected": answer.selected_choices,
                             "texts": choice_texts,
                             "type": "multiple_choice",
                         }
                     else:
-                        result["responses"][answer.question_id] = {
-                            "value": answer.selected_choice_ids[0] if answer.selected_choice_ids else None,
+                        result["responses"][q_key] = {
+                            "selected": answer.selected_choices[0] if answer.selected_choices else None,
                             "text": choice_texts[0] if choice_texts else None,
                             "type": "single_choice",
                         }
@@ -317,10 +299,14 @@ You have access to a `request_clarification` tool that allows you to ask the use
 
         questions = []
         for q_data in questions_data:
-            choices = [
-                Choice(id=c["id"], text=c["text"])
-                for c in q_data.get("choices", [])
-            ]
+            # Choices can be either strings or dicts with text
+            choices_raw = q_data.get("choices", [])
+            choices = []
+            for c in choices_raw:
+                if isinstance(c, str):
+                    choices.append(Choice(text=c))
+                elif isinstance(c, dict):
+                    choices.append(Choice(text=c.get("text", "")))
 
             question_type_str = q_data.get("question_type", "single_choice")
             try:
@@ -329,12 +315,11 @@ You have access to a `request_clarification` tool that allows you to ask the use
                 question_type = QuestionType.SINGLE_CHOICE
 
             question = Question(
-                id=q_data["id"],
-                text=q_data["text"],
+                text=q_data.get("text", ""),
                 question_type=question_type,
                 choices=choices,
                 required=q_data.get("required", True),
-                default_choice_id=q_data.get("default_choice_id"),
+                default_choice=q_data.get("default_choice"),
             )
             questions.append(question)
 

@@ -25,61 +25,60 @@ class TestChoice:
     """Tests for Choice dataclass."""
 
     def test_create_choice(self):
-        choice = Choice(id="a", text="Option A")
-        assert choice.id == "a"
+        choice = Choice(text="Option A")
         assert choice.text == "Option A"
 
     def test_choice_to_dict(self):
-        choice = Choice(id="1", text="First option")
+        choice = Choice(text="First option")
         data = choice.to_dict()
 
-        assert data["id"] == "1"
         assert data["text"] == "First option"
 
     def test_choice_from_dict(self):
-        data = {"id": "b", "text": "Option B"}
+        data = {"text": "Option B"}
         choice = Choice.from_dict(data)
 
-        assert choice.id == "b"
         assert choice.text == "Option B"
+
+    def test_choice_from_string(self):
+        choice = Choice.from_dict("Option C")
+
+        assert choice.text == "Option C"
 
 
 class TestQuestion:
     """Tests for Question dataclass."""
 
     def test_create_question_defaults(self):
-        question = Question(id="q1", text="What is your preference?")
+        question = Question(text="What is your preference?")
 
-        assert question.id == "q1"
         assert question.text == "What is your preference?"
         assert question.question_type == QuestionType.SINGLE_CHOICE
         assert question.choices == []
         assert question.required is True
-        assert question.default_choice_id is None
+        assert question.default_choice is None
 
     def test_create_question_with_choices(self):
         choices = [
-            Choice(id="a", text="Option A"),
-            Choice(id="b", text="Option B"),
+            Choice(text="Option A"),
+            Choice(text="Option B"),
         ]
         question = Question(
-            id="q1",
             text="Pick one",
             question_type=QuestionType.SINGLE_CHOICE,
             choices=choices,
         )
 
         assert len(question.choices) == 2
-        assert question.choices[0].id == "a"
+        assert question.choices[0].text == "Option A"
 
     def test_create_question_multiple_choice(self):
         question = Question(
-            id="q1",
             text="Select all that apply",
             question_type=QuestionType.MULTIPLE_CHOICE,
             choices=[
-                Choice(id="1", text="Feature 1"),
-                Choice(id="2", text="Feature 2"),
+                Choice(text="Feature 1"),
+                Choice(text="Feature 2"),
             ],
         )
 
@@ -87,7 +86,6 @@ class TestQuestion:
 
     def test_create_question_free_text(self):
         question = Question(
-            id="q1",
             text="Describe your requirements",
             question_type=QuestionType.FREE_TEXT,
         )
@@ -96,7 +94,6 @@ class TestQuestion:
 
     def test_create_optional_question(self):
         question = Question(
-            id="q1",
             text="Any comments?",
             required=False,
         )
@@ -105,60 +102,55 @@ class TestQuestion:
 
     def test_create_question_with_default(self):
         question = Question(
-            id="q1",
             text="Environment",
             choices=[
-                Choice(id="dev", text="Development"),
-                Choice(id="prod", text="Production"),
+                Choice(text="Development"),
+                Choice(text="Production"),
             ],
-            default_choice_id="dev",
+            default_choice=1,
         )
 
-        assert question.default_choice_id == "dev"
+        assert question.default_choice == 1
 
     def test_question_to_dict(self):
         question = Question(
-            id="q1",
             text="Pick one",
             question_type=QuestionType.SINGLE_CHOICE,
-            choices=[Choice(id="a", text="A")],
+            choices=[Choice(text="A")],
             required=True,
-            default_choice_id="a",
+            default_choice=1,
         )
 
         data = question.to_dict()
 
-        assert data["id"] == "q1"
         assert data["text"] == "Pick one"
         assert data["question_type"] == "single_choice"
         assert len(data["choices"]) == 1
         assert data["required"] is True
-        assert data["default_choice_id"] == "a"
+        assert data["default_choice"] == 1
 
     def test_question_from_dict(self):
         data = {
-            "id": "q2",
             "text": "Select features",
             "question_type": "multiple_choice",
             "choices": [
-                {"id": "1", "text": "Feature 1"},
-                {"id": "2", "text": "Feature 2"},
+                {"text": "Feature 1"},
+                {"text": "Feature 2"},
             ],
             "required": False,
-            "default_choice_id": "1,2",
+            "default_choice": 2,
         }
 
         question = Question.from_dict(data)
 
-        assert question.id == "q2"
         assert question.text == "Select features"
         assert question.question_type == QuestionType.MULTIPLE_CHOICE
         assert len(question.choices) == 2
         assert question.required is False
-        assert question.default_choice_id == "1,2"
+        assert question.default_choice == 2
 
     def test_question_from_dict_defaults(self):
-        data = {"id": "q1", "text": "Simple question"}
+        data = {"text": "Simple question"}
 
         question = Question.from_dict(data)
 
@@ -174,8 +166,8 @@ class TestClarificationRequest:
         request = ClarificationRequest(
             context="I need more info",
             questions=[
-                Question(id="q1", text="Question 1"),
-                Question(id="q2", text="Question 2"),
+                Question(text="Question 1"),
+                Question(text="Question 2"),
             ],
         )
 
@@ -191,7 +183,7 @@ class TestClarificationRequest:
     def test_request_to_dict(self):
         request = ClarificationRequest(
             context="Context here",
-            questions=[Question(id="q1", text="Q1")],
+            questions=[Question(text="Q1")],
         )
 
         data = request.to_dict()
@@ -203,8 +195,8 @@ class TestClarificationRequest:
         data = {
             "context": "Need info",
             "questions": [
-                {"id": "q1", "text": "First question"},
-                {"id": "q2", "text": "Second question"},
+                {"text": "First question"},
+                {"text": "Second question"},
             ],
         }
 
@@ -212,7 +204,7 @@ class TestClarificationRequest:
 
         assert request.context == "Need info"
         assert len(request.questions) == 2
-        assert request.questions[0].id == "q1"
+        assert request.questions[0].text == "First question"
 
 
 class TestAnswer:
@@ -220,35 +212,35 @@ class TestAnswer:
 
     def test_create_answer_single_choice(self):
         answer = Answer(
-            question_id="q1",
-            selected_choice_ids=["a"],
+            question_index=1,
+            selected_choices=[1],
         )
 
-        assert answer.question_id == "q1"
-        assert answer.selected_choice_ids == ["a"]
+        assert answer.question_index == 1
+        assert answer.selected_choices == [1]
         assert answer.free_text is None
         assert answer.skipped is False
 
     def test_create_answer_multiple_choice(self):
         answer = Answer(
-            question_id="q1",
-            selected_choice_ids=["1", "3", "5"],
+            question_index=1,
+            selected_choices=[1, 3, 5],
         )
 
-        assert len(answer.selected_choice_ids) == 3
+        assert len(answer.selected_choices) == 3
 
     def test_create_answer_free_text(self):
         answer = Answer(
-            question_id="q1",
+            question_index=1,
             free_text="This is my answer",
         )
 
         assert answer.free_text == "This is my answer"
-        assert answer.selected_choice_ids == []
+        assert answer.selected_choices == []
 
     def test_create_answer_skipped(self):
         answer = Answer(
-            question_id="q1",
+            question_index=1,
             skipped=True,
         )
 
@@ -256,29 +248,29 @@ class TestAnswer:
 
     def test_answer_to_dict(self):
         answer = Answer(
-            question_id="q1",
-            selected_choice_ids=["a", "b"],
+            question_index=1,
+            selected_choices=[1, 2],
         )
 
         data = answer.to_dict()
 
-        assert data["question_id"] == "q1"
-        assert data["selected_choice_ids"] == ["a", "b"]
+        assert data["question_index"] == 1
+        assert data["selected_choices"] == [1, 2]
         assert data["free_text"] is None
         assert data["skipped"] is False
 
     def test_answer_from_dict(self):
         data = {
-            "question_id": "q2",
-            "selected_choice_ids": ["x"],
+            "question_index": 2,
+            "selected_choices": [3],
             "free_text": None,
             "skipped": False,
         }
 
         answer = Answer.from_dict(data)
 
-        assert answer.question_id == "q2"
-        assert answer.selected_choice_ids == ["x"]
+        assert answer.question_index == 2
+        assert answer.selected_choices == [3]
 
 
 class TestClarificationResponse:
@@ -287,8 +279,8 @@ class TestClarificationResponse:
     def test_create_response(self):
         response = ClarificationResponse(
             answers=[
-                Answer(question_id="q1", selected_choice_ids=["a"]),
-                Answer(question_id="q2", free_text="my answer"),
+                Answer(question_index=1, selected_choices=[1]),
+                Answer(question_index=2, free_text="my answer"),
             ],
         )
 
@@ -303,7 +295,7 @@ class TestClarificationResponse:
 
     def test_response_to_dict(self):
         response = ClarificationResponse(
-            answers=[Answer(question_id="q1", selected_choice_ids=["a"])],
+            answers=[Answer(question_index=1, selected_choices=[1])],
         )
 
         data = response.to_dict()
@@ -314,7 +306,7 @@ class TestClarificationResponse:
     def test_response_from_dict(self):
         data = {
             "answers": [
-                {"question_id": "q1", "selected_choice_ids": ["b"]},
+                {"question_index": 1, "selected_choices": [2]},
             ],
             "cancelled": False,
         }
@@ -322,34 +314,34 @@ class TestClarificationResponse:
         response = ClarificationResponse.from_dict(data)
 
         assert len(response.answers) == 1
-        assert response.answers[0].question_id == "q1"
+        assert response.answers[0].question_index == 1
 
     def test_get_answer(self):
         response = ClarificationResponse(
             answers=[
-                Answer(question_id="q1", selected_choice_ids=["a"]),
-                Answer(question_id="q2", free_text="text"),
-                Answer(question_id="q3", skipped=True),
+                Answer(question_index=1, selected_choices=[1]),
+                Answer(question_index=2, free_text="text"),
+                Answer(question_index=3, skipped=True),
             ],
         )
 
-        answer1 = response.get_answer("q1")
+        answer1 = response.get_answer(1)
         assert answer1 is not None
-        assert answer1.selected_choice_ids == ["a"]
+        assert answer1.selected_choices == [1]
 
-        answer2 = response.get_answer("q2")
+        answer2 = response.get_answer(2)
         assert answer2 is not None
         assert answer2.free_text == "text"
 
-        answer3 = response.get_answer("q3")
+        answer3 = response.get_answer(3)
         assert answer3 is not None
         assert answer3.skipped is True
 
     def test_get_answer_not_found(self):
         response = ClarificationResponse(
-            answers=[Answer(question_id="q1", selected_choice_ids=["a"])],
+            answers=[Answer(question_index=1, selected_choices=[1])],
         )
 
-        answer = response.get_answer("nonexistent")
+        answer = response.get_answer(99)
 
         assert answer is None
