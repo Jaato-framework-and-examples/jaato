@@ -21,6 +21,8 @@ try:
     from prompt_toolkit.styles import Style
     from prompt_toolkit.formatted_text import ANSI
     from prompt_toolkit.output.vt100 import Vt100_Output
+    from prompt_toolkit.data_structures import Size
+    import shutil
     HAS_PROMPT_TOOLKIT = True
 except ImportError:
     HAS_PROMPT_TOOLKIT = False
@@ -124,7 +126,12 @@ class InteractiveClient:
             # Use prompt_toolkit with ANSI-formatted prompt
             # Create output with enable_cpr=False to avoid CPR queries in PTY environments
             formatted_prompt = ANSI(prompt_str) if ANSI else prompt_str
-            output = Vt100_Output(sys.stdout, enable_cpr=False)
+
+            def get_size():
+                cols, rows = shutil.get_terminal_size()
+                return Size(rows=rows, columns=cols)
+
+            output = Vt100_Output(sys.stdout, get_size=get_size, enable_cpr=False)
             return pt_prompt(
                 formatted_prompt,
                 completer=self._completer,
