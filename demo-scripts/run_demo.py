@@ -95,21 +95,21 @@ def run_cli_demo():
 
     # Wait for initialization
     wait_for_prompt(child)
-    time.sleep(0.5)
+    time.sleep(0.3)
 
     # First command: list Python files
     type_slowly(child, "List the Python files in the current directory")
 
     # Wait for permission (or prompt if already granted) and approve with 'y'
     wait_for_permission_or_prompt(child, response='y')
-    time.sleep(0.5)
+    time.sleep(0.3)
 
     # Second command: git status
     type_slowly(child, "Show me the git status")
 
     # Wait for permission (or prompt if already granted) and approve with 'a' (always)
     wait_for_permission_or_prompt(child, response='a')
-    time.sleep(1.0)
+    time.sleep(0.5)
 
     # Exit
     type_slowly(child, "quit", delay=0.08)
@@ -145,14 +145,14 @@ DEBUG_MODE = False
     child.logfile_read = sys.stdout
 
     wait_for_prompt(child)
-    time.sleep(0.5)
+    time.sleep(0.3)
 
     # Ask to update the file
     type_slowly(child, f"Update {test_file} to change MAX_RETRIES from 3 to 5")
 
     # readFile is auto-approved, wait for updateFile permission (or prompt if granted)
     wait_for_permission_or_prompt(child, response='y')
-    time.sleep(1.0)
+    time.sleep(0.5)
 
     # Exit
     type_slowly(child, "quit", delay=0.08)
@@ -174,14 +174,14 @@ def run_web_search_demo():
     child.logfile_read = sys.stdout
 
     wait_for_prompt(child)
-    time.sleep(0.5)
+    time.sleep(0.3)
 
     # Search query
     type_slowly(child, "Search the web for Python asyncio best practices")
 
     # Wait for permission (or prompt if already granted)
     wait_for_permission_or_prompt(child, response='y')
-    time.sleep(1.0)
+    time.sleep(0.5)
 
     type_slowly(child, "quit", delay=0.08)
 
@@ -202,20 +202,20 @@ def run_todo_demo():
     child.logfile_read = sys.stdout
 
     wait_for_prompt(child)
-    time.sleep(0.5)
+    time.sleep(0.3)
 
     # Ask for a task that triggers plan creation
     type_slowly(child, "Help me refactor the authentication module. Create a plan first.")
 
     # createPlan might need permission depending on config
     wait_for_permission_or_prompt(child, response='y', timeout=60)
-    time.sleep(0.5)
+    time.sleep(0.3)
 
     # Check plan status
     type_slowly(child, "plan", delay=0.08)
 
     wait_for_prompt(child)
-    time.sleep(1.0)
+    time.sleep(0.5)
 
     type_slowly(child, "quit", delay=0.08)
 
@@ -236,20 +236,20 @@ def run_references_demo():
     child.logfile_read = sys.stdout
 
     wait_for_prompt(child)
-    time.sleep(0.5)
+    time.sleep(0.3)
 
     # List available references
     type_slowly(child, "listReferences", delay=0.08)
 
     wait_for_prompt(child)
-    time.sleep(0.5)
+    time.sleep(0.3)
 
     # Ask something that might trigger reference selection
     type_slowly(child, "I need to add a new API endpoint. What standards should I follow?")
 
     # Handle permission if selectReferences is called (or prompt if granted/skipped)
     wait_for_permission_or_prompt(child, response='y', timeout=60)
-    time.sleep(1.0)
+    time.sleep(0.5)
 
     type_slowly(child, "quit", delay=0.08)
 
@@ -270,20 +270,20 @@ def run_subagent_demo():
     child.logfile_read = sys.stdout
 
     wait_for_prompt(child)
-    time.sleep(0.5)
+    time.sleep(0.3)
 
     # List available profiles
     type_slowly(child, "profiles", delay=0.08)
 
     wait_for_prompt(child)
-    time.sleep(0.5)
+    time.sleep(0.3)
 
     # Ask for analysis that might spawn a subagent
     type_slowly(child, "Analyze this codebase structure and identify the main components")
 
     # spawn_subagent requires permission (use longer timeout for subagent execution)
     wait_for_permission_or_prompt(child, response='y', timeout=120)
-    time.sleep(1.0)
+    time.sleep(0.5)
 
     type_slowly(child, "quit", delay=0.08)
 
