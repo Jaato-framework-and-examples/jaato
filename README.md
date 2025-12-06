@@ -8,6 +8,10 @@
 
 A framework for building agentic AI applications with LLM function calling on Google's Vertex AI and Gemini models.
 
+## Demo
+
+![jaato Demo](demo.svg)
+
 ### Etymology
 
 While "jaato" serves as an acronym, the name also carries deeper meaning. In the Himalayan region (Nepal, Sikkim, Darjeeling, and Bhutan), a **jaato** (जाँतो) is a traditional rotary hand-quern or grinder used to mill grains. This ancient tool consists of two round stones with a wooden handle (*hāto*) used to turn the top stone in a circular motion.
@@ -261,6 +265,21 @@ You can also export to PlantUML or Mermaid formats:
   --trace traces/trace.json --export-mermaid diagram.mmd
 ```
 
+### Demo Recording
+
+Record terminal demos of plugins using YAML-driven scripts with `termtosvg`:
+
+```bash
+# Record a specific plugin demo
+cd demo-scripts
+termtosvg -c "python run_demo.py ../shared/plugins/cli/demo.yaml" -g 100x40 ../shared/plugins/cli/demo.svg
+
+# Record all plugin demos
+./record_all.sh
+```
+
+Demo scripts are defined in YAML format and live in each plugin's directory. See [demo-scripts/README.md](demo-scripts/README.md) for the script format and available options.
+
 ## Project Structure
 
 ```
@@ -278,6 +297,7 @@ jaato/
 │   └── prompt_templates/       # Domain-specific prompts
 ├── simple-client/              # Interactive console client
 ├── cli_vs_mcp/                 # CLI vs MCP comparison harness
+├── demo-scripts/               # YAML-driven demo recording scripts
 ├── sequence-diagram-generator/ # Trace visualization tool
 ├── simple-connectivity-test/   # Basic Vertex AI test
 ├── modlog-training-set-test/   # COBOL training data generator
