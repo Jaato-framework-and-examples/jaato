@@ -75,6 +75,7 @@ flowchart TB
                 TODO[TodoPlugin<br/>plugins/todo/]
                 REFS[ReferencesPlugin<br/>plugins/references/]
                 SUB[SubagentPlugin<br/>plugins/subagent/]
+                FEDIT[FileEditPlugin<br/>plugins/file_edit/]
             end
         end
 
@@ -97,6 +98,7 @@ flowchart TB
     PR --> TODO
     PR --> REFS
     PR --> SUB
+    PR --> FEDIT
     TE --> PERM
     MCP --> MCM
     MCM --> MCPS
@@ -277,12 +279,23 @@ classDiagram
         +profiles user command
     }
 
+    class FileEditPlugin {
+        +name = "file_edit"
+        -backup_manager: BackupManager
+        +readFile(path)
+        +updateFile(path, new_content)
+        +writeNewFile(path, content)
+        +removeFile(path)
+        +undoFileChange(path)
+    }
+
     ToolPlugin <|.. CLIToolPlugin
     ToolPlugin <|.. MCPToolPlugin
     ToolPlugin <|.. PermissionPlugin
     ToolPlugin <|.. TodoPlugin
     ToolPlugin <|.. ReferencesPlugin
     ToolPlugin <|.. SubagentPlugin
+    ToolPlugin <|.. FileEditPlugin
     PluginRegistry o-- ToolPlugin
     ToolPlugin ..> UserCommand : returns
 ```
@@ -375,6 +388,7 @@ shared/
     ├── todo/                # TodoPlugin (model tools + user commands)
     ├── references/          # ReferencesPlugin (model tools + user commands)
     ├── subagent/            # SubagentPlugin (model tools + user commands)
+    ├── file_edit/           # FileEditPlugin (file operations with diff approval)
     │
     │   # GC Plugins (PLUGIN_KIND = "gc") - NOT managed by PluginRegistry
     ├── gc/                  # Base types: GCPlugin protocol, GCConfig, GCResult

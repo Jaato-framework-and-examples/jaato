@@ -343,3 +343,24 @@ class PluginRegistry:
             except Exception as exc:
                 print(f"[PluginRegistry] Error getting user commands from '{name}': {exc}")
         return commands
+
+    def get_plugin_for_tool(self, tool_name: str) -> Optional['ToolPlugin']:
+        """Get the plugin that provides a specific tool.
+
+        This is useful for the permission system to call plugin-specific
+        formatting methods when displaying tool execution requests.
+
+        Args:
+            tool_name: Name of the tool to look up.
+
+        Returns:
+            The ToolPlugin instance that provides this tool, or None if not found.
+        """
+        for name in self._exposed:
+            try:
+                plugin = self._plugins[name]
+                if tool_name in plugin.get_executors():
+                    return plugin
+            except Exception:
+                pass
+        return None

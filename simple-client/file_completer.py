@@ -341,20 +341,29 @@ class FileReferenceProcessor:
         """Expand @file references to include file contents inline.
 
         Returns a new prompt with file contents appended in a structured format.
+        The @ prefixes are removed from the prompt text since they were only
+        used for autocompletion and file resolution.
         """
         processed_text, references = self.process(text)
 
         if not references:
             return text
 
+        # Remove @ prefixes from the original text
+        # Replace each @path with just path (without the @)
+        clean_text = text
+        for ref in references:
+            clean_text = clean_text.replace(ref['reference'], ref['path'])
+
         # Build expanded prompt
-        parts = [text, "\n\n--- Referenced Files ---\n"]
+        parts = [clean_text, "\n\n--- Referenced Files ---\n"]
 
         for ref in references:
+            # Use path (without @) in headers
             if not ref['exists']:
-                parts.append(f"\n[{ref['reference']}: File not found]\n")
+                parts.append(f"\n[{ref['path']}: File not found]\n")
             elif ref['is_directory']:
-                parts.append(f"\n[{ref['reference']}: Directory]\n")
+                parts.append(f"\n[{ref['path']}: Directory]\n")
                 if 'listing' in ref:
                     parts.append("Contents:\n")
                     for item in ref['listing'][:50]:  # Limit directory listing
@@ -362,7 +371,7 @@ class FileReferenceProcessor:
                     if len(ref.get('listing', [])) > 50:
                         parts.append(f"  ... and {len(ref['listing']) - 50} more items\n")
             else:
-                parts.append(f"\n[{ref['reference']}]\n")
+                parts.append(f"\n[{ref['path']}]\n")
                 if 'contents' in ref and ref['contents']:
                     parts.append(f"```\n{ref['contents']}\n```\n")
                 elif ref.get('size', 0) > self.max_file_size:
