@@ -1,0 +1,18 @@
+name: Session Export [2025-12-06 22:09]
+timeout: 120
+steps:
+- type: create folder @.jaato/commands
+  permission: y
+- type: add a file there of name "overview" and contents "Provide me a short overview
+    of the contents of file {{1}}"
+  permission: y
+- type: /overview
+  permission: y
+- type: /overview @.mcp.json
+  permission: y
+- type: edit the file and rephrase the "short overview" with "a very detailed overview"
+  permission: y
+- type: /overview @.mcp.json
+  permission: y
+- type: quit
+  delay: 0.08
