@@ -51,7 +51,11 @@ record_demo() {
         -g "100x40" \
         "$output_file"
 
-    echo "Saved: $output_file"
+    # Make animation play only once (not loop indefinitely)
+    if [ -f "$output_file" ]; then
+        sed -i 's/repeatCount="indefinite"/repeatCount="1"/g' "$output_file"
+        echo "Saved: $output_file (single play)"
+    fi
     echo ""
 }
 
