@@ -486,6 +486,10 @@ class FileReferenceProcessor:
         Returns a new prompt with file contents appended in a structured format.
         The @ prefixes are removed from the prompt text since they were only
         used for autocompletion and file resolution.
+
+        Non-existent paths have their @ stripped but are not included in the
+        Referenced Files section - the user may be referring to paths they
+        want to create.
         """
         processed_text, references = self.process(text)
 
@@ -498,14 +502,19 @@ class FileReferenceProcessor:
         for ref in references:
             clean_text = clean_text.replace(ref['reference'], ref['path'])
 
-        # Build expanded prompt
+        # Filter to only existing files/directories for the context section
+        existing_refs = [ref for ref in references if ref.get('exists', False)]
+
+        # If no existing references, just return the clean text without @ symbols
+        if not existing_refs:
+            return clean_text
+
+        # Build expanded prompt with existing file contents
         parts = [clean_text, "\n\n--- Referenced Files ---\n"]
 
-        for ref in references:
+        for ref in existing_refs:
             # Use path (without @) in headers
-            if not ref['exists']:
-                parts.append(f"\n[{ref['path']}: File not found]\n")
-            elif ref['is_directory']:
+            if ref['is_directory']:
                 parts.append(f"\n[{ref['path']}: Directory]\n")
                 if 'listing' in ref:
                     parts.append("Contents:\n")
