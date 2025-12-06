@@ -15,7 +15,7 @@ from typing import Optional, Dict, Any
 
 # Try to import prompt_toolkit for enhanced completion
 try:
-    from prompt_toolkit import prompt as pt_prompt
+    from prompt_toolkit import PromptSession
     from prompt_toolkit.history import InMemoryHistory
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.styles import Style
@@ -26,7 +26,7 @@ try:
     HAS_PROMPT_TOOLKIT = True
 except ImportError:
     HAS_PROMPT_TOOLKIT = False
-    pt_prompt = None
+    PromptSession = None
     ANSI = None
 
 # Add project root to path for imports
@@ -132,8 +132,7 @@ class InteractiveClient:
                 return Size(rows=rows, columns=cols)
 
             output = Vt100_Output(sys.stdout, get_size=get_size, enable_cpr=False)
-            return pt_prompt(
-                formatted_prompt,
+            session = PromptSession(
                 completer=self._completer,
                 history=self._pt_history,
                 auto_suggest=AutoSuggestFromHistory(),
@@ -141,7 +140,8 @@ class InteractiveClient:
                 complete_while_typing=True,
                 refresh_interval=0,
                 output=output,
-            ).strip()
+            )
+            return session.prompt(formatted_prompt).strip()
         else:
             # Fallback to standard input
             return input(prompt_str).strip()
