@@ -2,6 +2,10 @@
 
 The TODO plugin (`createPlan`, `updateStep`, `getPlanStatus`, `completePlan`) provides plan registration and progress tracking for LLMs in the jaato orchestration framework. It enables models to register execution plans with ordered steps and progressively report progress through configurable transport protocols.
 
+## Demo
+
+![TODO Plugin Demo](demo.svg)
+
 ## Architecture Overview
 
 ```

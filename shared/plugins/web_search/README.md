@@ -2,6 +2,10 @@
 
 The web search plugin provides the `web_search` function for performing internet searches using DuckDuckGo in the jaato framework.
 
+## Demo
+
+![Web Search Plugin Demo](demo.svg)
+
 ## Overview
 
 This plugin allows models to search the web for current information on any topic. It uses DuckDuckGo as the search backend, which provides good results without requiring API keys.
