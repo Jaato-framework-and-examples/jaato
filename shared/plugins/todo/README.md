@@ -33,6 +33,12 @@ The TODO plugin (`createPlan`, `updateStep`, `getPlanStatus`, `completePlan`) pr
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+## Demo
+
+The following shows the TODO plugin in action, creating and tracking a plan with console progress reporting:
+
+![TODO Plugin Demo](demo/demo.svg)
+
 ## Features
 
 - **Plan Registration**: Register multi-step execution plans before starting tasks
