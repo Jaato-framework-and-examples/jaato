@@ -1,0 +1,9 @@
+name: Web Search Plugin Demo
+timeout: 120
+
+steps:
+  - type: "Search the web for Python asyncio best practices"
+    permission: "y"
+
+  - type: "quit"
+    delay: 0.08

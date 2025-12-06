@@ -15,14 +15,19 @@ from typing import Optional, Dict, Any
 
 # Try to import prompt_toolkit for enhanced completion
 try:
-    from prompt_toolkit import prompt as pt_prompt
+    from prompt_toolkit import PromptSession
     from prompt_toolkit.history import InMemoryHistory
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.styles import Style
+    from prompt_toolkit.formatted_text import ANSI
+    from prompt_toolkit.output.vt100 import Vt100_Output
+    from prompt_toolkit.data_structures import Size
+    import shutil
     HAS_PROMPT_TOOLKIT = True
 except ImportError:
     HAS_PROMPT_TOOLKIT = False
-    pt_prompt = None
+    PromptSession = None
+    ANSI = None
 
 # Add project root to path for imports
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -48,6 +53,11 @@ except ImportError:
     HAS_FILE_COMPLETER = False
     CombinedCompleter = None
     FileReferenceProcessor = None
+
+
+# ANSI color codes for terminal output (module-level for use in main())
+ANSI_RESET = '\033[0m'
+ANSI_BOLD = '\033[1m'
 
 
 class InteractiveClient:
@@ -78,12 +88,29 @@ class InteractiveClient:
             'completion-menu.meta.completion.current': 'bg:#00aa00 #ffffff',
         }) if HAS_PROMPT_TOOLKIT else None
 
+        # ANSI color codes for terminal output
+        self._colors = {
+            'reset': '\033[0m',
+            'bold': '\033[1m',
+            'dim': '\033[2m',
+            'green': '\033[32m',
+            'cyan': '\033[36m',
+        }
+
+    def _c(self, text: str, color: str) -> str:
+        """Apply ANSI color to text."""
+        code = self._colors.get(color, '')
+        return f"{code}{text}{self._colors['reset']}" if code else text
+
     def log(self, msg: str) -> None:
-        """Print message if verbose mode is enabled."""
+        """Print message if verbose mode is enabled, with colorized [client] tag."""
         if self.verbose:
+            # Colorize [client] prefix
+            if msg.startswith('[client]'):
+                msg = self._c('[client]', 'cyan') + msg[8:]
             print(msg)
 
-    def _get_user_input(self, prompt_str: str = "\nYou> ") -> str:
+    def _get_user_input(self, prompt_str: str = None) -> str:
         """Get user input with command and file completion support.
 
         Uses prompt_toolkit if available for command and @file completion,
@@ -92,16 +119,29 @@ class InteractiveClient:
         Returns:
             User input string, or raises EOFError/KeyboardInterrupt
         """
+        if prompt_str is None:
+            prompt_str = f"\n{self._c('You>', 'green')} "
+
         if HAS_PROMPT_TOOLKIT and self._completer:
-            # Use prompt_toolkit with completion
-            return pt_prompt(
-                prompt_str,
+            # Use prompt_toolkit with ANSI-formatted prompt
+            # Create output with enable_cpr=False to avoid CPR queries in PTY environments
+            formatted_prompt = ANSI(prompt_str) if ANSI else prompt_str
+
+            def get_size():
+                cols, rows = shutil.get_terminal_size()
+                return Size(rows=rows, columns=cols)
+
+            output = Vt100_Output(sys.stdout, get_size=get_size, enable_cpr=False)
+            session = PromptSession(
                 completer=self._completer,
                 history=self._pt_history,
                 auto_suggest=AutoSuggestFromHistory(),
                 style=self._pt_style,
                 complete_while_typing=True,
-            ).strip()
+                refresh_interval=0,
+                output=output,
+            )
+            return session.prompt(formatted_prompt).strip()
         else:
             # Fallback to standard input
             return input(prompt_str).strip()
@@ -513,7 +553,7 @@ class InteractiveClient:
 
             # Execute the prompt
             response = self.run_prompt(expanded_prompt)
-            print(f"\nModel> {response}")
+            print(f"\n{self._c('Model>', 'bold')} {response}")
 
     def _print_help(self) -> None:
         """Print help information."""
@@ -791,13 +831,13 @@ def main():
         if args.prompt:
             # Single prompt mode - run and exit
             response = client.run_prompt(args.prompt)
-            print(f"\nModel> {response}")
+            print(f"\n{ANSI_BOLD}Model>{ANSI_RESET} {response}")
         elif args.initial_prompt:
             # Initial prompt mode - show banner first, run prompt, then continue interactively
             client._print_banner()
             readline.add_history(args.initial_prompt)  # Add to history for ↑ recall
             response = client.run_prompt(args.initial_prompt)
-            print(f"\nModel> {response}")
+            print(f"\n{ANSI_BOLD}Model>{ANSI_RESET} {response}")
             client.run_interactive(clear_history=False, show_banner=False)
         else:
             # Interactive mode

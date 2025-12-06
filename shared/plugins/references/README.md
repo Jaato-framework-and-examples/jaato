@@ -2,6 +2,10 @@
 
 The References plugin manages documentation and reference source injection into the model's context. It maintains a catalog of reference sources and handles user selection via configurable communication protocols.
 
+## Demo
+
+![References Plugin Demo](demo.svg)
+
 ## Overview
 
 Reference sources can be configured in two modes:

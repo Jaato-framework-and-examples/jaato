@@ -211,6 +211,31 @@ permission_config = {
 | `actor_type` | `str` | `"console"` | Actor type for interactive approval |
 | `actor_config` | `dict` | `{}` | Actor-specific settings |
 
+### Actor-Specific Configuration
+
+**Console Actor** (`actor_type: "console"`):
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `use_colors` | `bool` | `True` | Enable ANSI colorized output for prompts and diffs |
+| `skip_readline_history` | `bool` | `True` | Avoid polluting readline history with y/n responses |
+
+**Webhook Actor** (`actor_type: "webhook"`):
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `endpoint` | `str` | Required | URL to send permission requests to |
+| `timeout` | `int` | `30` | Request timeout in seconds |
+| `headers` | `dict` | `{}` | Additional HTTP headers |
+| `auth_token` | `str` | `None` | Bearer token (or use `PERMISSION_WEBHOOK_TOKEN` env var) |
+
+**File Actor** (`actor_type: "file"`):
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `base_path` | `str` | Required | Directory for request/response files |
+| `poll_interval` | `float` | `0.5` | Seconds between polling attempts |
+
 ### Dual Nature: Enforcement vs Tool
 
 The permission plugin has two distinct roles that are controlled independently:

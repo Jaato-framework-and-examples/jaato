@@ -1,0 +1,9 @@
+name: References Plugin Demo
+timeout: 120
+
+steps:
+  - type: "I need to add a new API endpoint. What standards should I follow?"
+    permission: "y"
+
+  - type: "quit"
+    delay: 0.08

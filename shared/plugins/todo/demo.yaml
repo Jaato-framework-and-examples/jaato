@@ -1,0 +1,13 @@
+name: TODO Plugin Demo
+timeout: 120
+
+steps:
+  - type: "Create a plan for refactoring the authentication module. Just create the plan, don't execute any steps yet."
+    permission: "y"
+
+  - type: "plan"
+    delay: 0.08
+    local: true
+
+  - type: "quit"
+    delay: 0.08

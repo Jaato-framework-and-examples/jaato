@@ -1,0 +1,9 @@
+name: Subagent Plugin Demo
+timeout: 180
+
+steps:
+  - type: "Spawn a code-review subagent to analyze the shared/plugins/cli/cli.py file for potential improvements"
+    permission: "y"
+
+  - type: "quit"
+    delay: 0.08
