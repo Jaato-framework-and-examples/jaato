@@ -71,7 +71,7 @@ def run_cli_demo():
         timeout=120,
         cwd=str(PROJECT_ROOT)
     )
-    child.logfile = sys.stdout
+    child.logfile_read = sys.stdout
 
     # Wait for initialization
     wait_for_prompt(child)
@@ -132,7 +132,7 @@ DEBUG_MODE = False
         timeout=120,
         cwd=str(PROJECT_ROOT)
     )
-    child.logfile = sys.stdout
+    child.logfile_read = sys.stdout
 
     wait_for_prompt(child)
     time.sleep(0.5)
@@ -165,7 +165,7 @@ def run_web_search_demo():
         timeout=120,
         cwd=str(PROJECT_ROOT)
     )
-    child.logfile = sys.stdout
+    child.logfile_read = sys.stdout
 
     wait_for_prompt(child)
     time.sleep(0.5)
@@ -196,7 +196,7 @@ def run_todo_demo():
         timeout=120,
         cwd=str(PROJECT_ROOT)
     )
-    child.logfile = sys.stdout
+    child.logfile_read = sys.stdout
 
     wait_for_prompt(child)
     time.sleep(0.5)
@@ -236,7 +236,7 @@ def run_references_demo():
         timeout=120,
         cwd=str(PROJECT_ROOT)
     )
-    child.logfile = sys.stdout
+    child.logfile_read = sys.stdout
 
     wait_for_prompt(child)
     time.sleep(0.5)
@@ -276,7 +276,7 @@ def run_subagent_demo():
         timeout=180,  # Subagents take longer
         cwd=str(PROJECT_ROOT)
     )
-    child.logfile = sys.stdout
+    child.logfile_read = sys.stdout
 
     wait_for_prompt(child)
     time.sleep(0.5)
