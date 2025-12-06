@@ -16,7 +16,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..base import PermissionDisplayInfo
 
 try:
     import requests
@@ -163,10 +166,18 @@ class ConsoleActor(Actor):
     can review and approve/deny tool execution requests.
     """
 
+    # ANSI color codes for diff display
+    ANSI_RESET = "\033[0m"
+    ANSI_RED = "\033[31m"
+    ANSI_GREEN = "\033[32m"
+    ANSI_CYAN = "\033[36m"
+    ANSI_DIM = "\033[2m"
+
     def __init__(self):
         self._input_func: Callable[[], str] = input
         self._output_func: Callable[[str], None] = print
         self._skip_readline_history: bool = True
+        self._use_colors: bool = True  # Can be disabled for non-terminal output
 
     def _read_input(self) -> str:
         """Read input, optionally avoiding readline history pollution.
@@ -211,6 +222,7 @@ class ConsoleActor(Actor):
             input_func: Custom input function (for testing)
             output_func: Custom output function (for testing)
             skip_readline_history: Whether to remove responses from readline history (default: True)
+            use_colors: Whether to use ANSI colors for diff display (default: True)
         """
         if config:
             if "input_func" in config:
@@ -219,11 +231,72 @@ class ConsoleActor(Actor):
                 self._output_func = config["output_func"]
             if "skip_readline_history" in config:
                 self._skip_readline_history = config["skip_readline_history"]
+            if "use_colors" in config:
+                self._use_colors = config["use_colors"]
+
+    def _colorize_diff_line(self, line: str) -> str:
+        """Colorize a single diff line based on its prefix."""
+        if not self._use_colors:
+            return line
+
+        if line.startswith('+++') or line.startswith('---'):
+            return f"{self.ANSI_DIM}{line}{self.ANSI_RESET}"
+        elif line.startswith('@@'):
+            return f"{self.ANSI_CYAN}{line}{self.ANSI_RESET}"
+        elif line.startswith('+'):
+            return f"{self.ANSI_GREEN}{line}{self.ANSI_RESET}"
+        elif line.startswith('-'):
+            return f"{self.ANSI_RED}{line}{self.ANSI_RESET}"
+        else:
+            return line
+
+    def _colorize_diff(self, diff_text: str) -> str:
+        """Colorize a unified diff for terminal display."""
+        lines = diff_text.split('\n')
+        colorized = [self._colorize_diff_line(line) for line in lines]
+        return '\n'.join(colorized)
+
+    def _render_display_info(self, display_info: 'PermissionDisplayInfo') -> str:
+        """Render PermissionDisplayInfo for console display.
+
+        Args:
+            display_info: Display info from the source plugin
+
+        Returns:
+            Formatted string for console output
+        """
+        from ..base import PermissionDisplayInfo  # Import here to avoid circular
+
+        lines = []
+
+        # Summary line
+        lines.append(f"  {display_info.summary}")
+        lines.append("")
+
+        # Details with format-specific rendering
+        if display_info.format_hint == "diff":
+            lines.append(self._colorize_diff(display_info.details))
+        else:
+            # For text, json, code - display as-is
+            lines.append(display_info.details)
+
+        # Truncation warning
+        if display_info.truncated:
+            lines.append("")
+            if display_info.original_lines:
+                lines.append(f"  [Truncated: showing partial content, {display_info.original_lines} lines total]")
+            else:
+                lines.append("  [Truncated: content was too large to display in full]")
+
+        return '\n'.join(lines)
 
     def request_permission(self, request: PermissionRequest) -> ActorResponse:
         """Prompt user in console for permission.
 
         Displays tool name, intent, and arguments, then asks for approval.
+        If a PermissionDisplayInfo is provided in the context, uses that for
+        custom rendering (e.g., colorized diffs for file operations).
+
         Supported responses:
             y/yes     -> ALLOW
             n/no      -> DENY
@@ -232,6 +305,8 @@ class ConsoleActor(Actor):
             once      -> ALLOW_ONCE (don't remember)
             all       -> ALLOW_ALL (pre-approve all future requests in session)
         """
+        from ..base import PermissionDisplayInfo  # Import here to avoid circular
+
         # Format the request for display
         self._output_func("")
         self._output_func("=" * 60)
@@ -251,8 +326,17 @@ class ConsoleActor(Actor):
         intent = request.context.get("intent") if request.context else None
         if intent:
             self._output_func(f"  Intent: {intent}")
-        self._output_func(f"  Tool: {request.tool_name}")
-        self._output_func(f"  Arguments: {json.dumps(request.arguments, indent=4)}")
+
+        # Check for custom display info from source plugin
+        display_info = request.context.get("display_info") if request.context else None
+        if display_info and isinstance(display_info, PermissionDisplayInfo):
+            # Use custom rendering from the source plugin
+            self._output_func(self._render_display_info(display_info))
+        else:
+            # Default display: tool name and JSON arguments
+            self._output_func(f"  Tool: {request.tool_name}")
+            self._output_func(f"  Arguments: {json.dumps(request.arguments, indent=4)}")
+
         self._output_func("=" * 60)
         self._output_func("")
         self._output_func("Options: [y]es, [n]o, [a]lways, [never], [once], [all]")
