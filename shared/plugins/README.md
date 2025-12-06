@@ -533,6 +533,30 @@ Searches the web for current information using DuckDuckGo.
 registry.expose_all({'web_search': {'max_results': 5, 'safesearch': 'strict'}})
 ```
 
+### File Edit Plugin (`file_edit`)
+
+Provides tools for reading, modifying, and managing files with integrated permission approval (showing diffs) and automatic backups.
+
+**Configuration:**
+- `backup_dir`: Directory for storing backups (default: `.jaato/backups`)
+
+**Tools:**
+- `readFile`: Read file contents (auto-approved)
+- `updateFile`: Update existing file (shows diff for approval, creates backup)
+- `writeNewFile`: Create new file (shows content for approval)
+- `removeFile`: Delete file (creates backup)
+- `undoFileChange`: Restore from most recent backup (auto-approved)
+
+**Auto-approved:** `readFile`, `undoFileChange`
+
+**Environment Variables:**
+- `JAATO_FILE_BACKUP_COUNT`: Maximum backups per file (default: 5)
+
+**Example:**
+```python
+registry.expose_all({'file_edit': {'backup_dir': '/custom/backup/path'}})
+```
+
 ---
 
 ## File Structure
@@ -567,6 +591,13 @@ shared/plugins/
 │   ├── __init__.py
 │   ├── plugin.py
 │   └── README.md
+├── file_edit/       # File editing plugin
+│   ├── __init__.py
+│   ├── plugin.py
+│   ├── backup.py
+│   ├── diff_utils.py
+│   ├── README.md
+│   └── tests/
 └── references/      # Documentation injection plugin
     ├── __init__.py
     ├── plugin.py
