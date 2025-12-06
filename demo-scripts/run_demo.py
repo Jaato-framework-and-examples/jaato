@@ -46,14 +46,19 @@ def type_slowly(child, text, delay=0.05):
     child.send('\n')
 
 
+# Regex to match optional ANSI escape codes
+ANSI = r'(?:\x1b\[[0-9;]*m)*'
+
+
 def wait_for_prompt(child, timeout=60):
-    """Wait for the 'You>' prompt."""
-    child.expect(r'You>', timeout=timeout)
+    """Wait for the 'You>' prompt (with optional ANSI color codes)."""
+    child.expect(rf'{ANSI}You>{ANSI}', timeout=timeout)
 
 
 def wait_for_permission(child, timeout=60):
-    """Wait for permission prompt."""
-    child.expect(r'Options:.*>', timeout=timeout)
+    """Wait for permission prompt options line."""
+    # Match "Options:" followed by the colored option letters
+    child.expect(r'Options:', timeout=timeout)
 
 
 def run_cli_demo():
