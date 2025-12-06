@@ -101,6 +101,18 @@ This produces authentic recordings of the actual client behavior.
 4. Test with: `python run_demo.py path/to/demo.yaml`
 5. Record with: `termtosvg -c "python run_demo.py path/to/demo.yaml" output.svg`
 
+## Animation Behavior
+
+By default, `record_all.sh` post-processes SVG files to play only once instead of looping indefinitely. To fix existing SVGs:
+
+```bash
+# Make a single SVG play once
+sed -i 's/repeatCount="indefinite"/repeatCount="1"/g' demo.svg
+
+# Fix all SVGs in plugin directories
+find shared/plugins -name "demo.svg" -exec sed -i 's/repeatCount="indefinite"/repeatCount="1"/g' {} \;
+```
+
 ## Troubleshooting
 
 ### "pexpect not found"
