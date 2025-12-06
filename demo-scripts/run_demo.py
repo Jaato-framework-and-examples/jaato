@@ -22,8 +22,14 @@ Requirements:
 """
 
 import sys
+import os
 import time
 import argparse
+from pathlib import Path
+
+# Determine project root relative to this script
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
 
 try:
     import pexpect
@@ -57,7 +63,8 @@ def run_cli_demo():
     child = pexpect.spawn(
         'python', ['simple-client/interactive_client.py', '--env-file', '.env'],
         encoding='utf-8',
-        timeout=120
+        timeout=120,
+        cwd=str(PROJECT_ROOT)
     )
     child.logfile = sys.stdout
 
@@ -118,7 +125,7 @@ DEBUG_MODE = False
         'python', ['simple-client/interactive_client.py', '--env-file', '.env'],
         encoding='utf-8',
         timeout=120,
-        cwd='/home/user/jaato'
+        cwd=str(PROJECT_ROOT)
     )
     child.logfile = sys.stdout
 
@@ -150,7 +157,8 @@ def run_web_search_demo():
     child = pexpect.spawn(
         'python', ['simple-client/interactive_client.py', '--env-file', '.env'],
         encoding='utf-8',
-        timeout=120
+        timeout=120,
+        cwd=str(PROJECT_ROOT)
     )
     child.logfile = sys.stdout
 
@@ -180,7 +188,8 @@ def run_todo_demo():
     child = pexpect.spawn(
         'python', ['simple-client/interactive_client.py', '--env-file', '.env'],
         encoding='utf-8',
-        timeout=120
+        timeout=120,
+        cwd=str(PROJECT_ROOT)
     )
     child.logfile = sys.stdout
 
@@ -219,7 +228,8 @@ def run_references_demo():
     child = pexpect.spawn(
         'python', ['simple-client/interactive_client.py', '--env-file', '.env'],
         encoding='utf-8',
-        timeout=120
+        timeout=120,
+        cwd=str(PROJECT_ROOT)
     )
     child.logfile = sys.stdout
 
@@ -258,7 +268,8 @@ def run_subagent_demo():
     child = pexpect.spawn(
         'python', ['simple-client/interactive_client.py', '--env-file', '.env'],
         encoding='utf-8',
-        timeout=180  # Subagents take longer
+        timeout=180,  # Subagents take longer
+        cwd=str(PROJECT_ROOT)
     )
     child.logfile = sys.stdout
 
@@ -333,8 +344,7 @@ Examples:
         return
 
     # Change to project root
-    import os
-    os.chdir('/home/user/jaato')
+    os.chdir(PROJECT_ROOT)
 
     DEMOS[args.demo]()
 
