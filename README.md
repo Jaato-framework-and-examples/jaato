@@ -137,8 +137,63 @@ The primary way to use jaato is through the **Interactive Client**, which provid
 | `tools` | List all registered tools |
 | `reset` | Clear conversation history and start fresh |
 | `history` | Display conversation history |
+| `context` | Show context window usage |
+| `export [file]` | Export session to YAML for replay |
 | `plan` | Show current task plan (TODO plugin) |
 | `quit` | Exit the session |
+
+### Session Export for Replay
+
+The interactive client can export your conversation session to a YAML file that can be replayed later using the demo runner. This is useful for:
+
+- **Creating reproducible demos** from real interactions
+- **Testing and regression** by replaying sessions
+- **Sharing workflows** with others
+
+#### Exporting a Session
+
+During an interactive session, use the `export` command:
+
+```
+You> List the Python files in the current directory
+Model> [executes cli_execute tool...]
+
+You> Show me the git status
+Model> [executes cli_execute tool...]
+
+You> export my_session.yaml
+[Session exported to: my_session.yaml]
+  Steps: 2 interaction(s) + quit
+  Replay with: python demo-scripts/run_demo.py my_session.yaml
+```
+
+The exported YAML captures your prompts and permission decisions:
+
+```yaml
+name: Session Export [2025-12-06 14:30]
+timeout: 120
+steps:
+  - type: List the Python files in the current directory
+    permission: y
+  - type: Show me the git status
+    permission: a
+  - type: quit
+    delay: 0.08
+```
+
+#### Replaying an Exported Session
+
+Use the demo runner to replay the session:
+
+```bash
+# Simple replay
+python demo-scripts/run_demo.py my_session.yaml
+
+# Record as SVG animation
+termtosvg -c "python demo-scripts/run_demo.py my_session.yaml" -g 100x40 my_demo.svg
+```
+
+See [demo-scripts/README.md](demo-scripts/README.md) for the complete YAML script format and options.
 
 See [simple-client/README.md](simple-client/README.md) for full documentation.
 
