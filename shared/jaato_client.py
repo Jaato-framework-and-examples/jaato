@@ -149,6 +149,9 @@ class JaatoClient:
 
         # Set permission plugin for enforcement
         if permission_plugin:
+            # Give permission plugin access to registry for plugin lookups
+            # This enables format_permission_request() calls for custom diff display
+            permission_plugin.set_registry(registry)
             # Pass agent_type context so permission prompts can identify the requester
             self._executor.set_permission_plugin(
                 permission_plugin,
