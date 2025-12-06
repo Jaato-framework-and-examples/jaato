@@ -2,6 +2,10 @@
 
 The slash command plugin enables users to invoke commands from `.jaato/commands/` directory using `/command_name [args...]` syntax. When users type a slash command, it's sent to the model which calls the `processCommand` tool to read the command file, substitute parameters, and follow the instructions.
 
+## Demo
+
+![Slash Command Plugin Demo](demo.svg)
+
 ## How It Works
 
 1. User types `/command_name arg1 arg2` (e.g., `/summarize file.py`)
