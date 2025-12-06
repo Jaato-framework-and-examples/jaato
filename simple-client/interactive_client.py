@@ -19,10 +19,12 @@ try:
     from prompt_toolkit.history import InMemoryHistory
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.styles import Style
+    from prompt_toolkit.formatted_text import ANSI
     HAS_PROMPT_TOOLKIT = True
 except ImportError:
     HAS_PROMPT_TOOLKIT = False
     pt_prompt = None
+    ANSI = None
 
 # Add project root to path for imports
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -118,16 +120,17 @@ class InteractiveClient:
             prompt_str = f"\n{self._c('You>', 'green')} "
 
         if HAS_PROMPT_TOOLKIT and self._completer:
-            # Print colored prompt separately (works reliably in PTY environments)
-            # then use prompt_toolkit with empty prompt for input with completion
-            print(prompt_str, end='', flush=True)
+            # Use prompt_toolkit with ANSI-formatted prompt
+            # refresh_interval=0 prevents CPR queries that cause issues in PTY environments
+            formatted_prompt = ANSI(prompt_str) if ANSI else prompt_str
             return pt_prompt(
-                '',  # Empty prompt - the colored one is already printed
+                formatted_prompt,
                 completer=self._completer,
                 history=self._pt_history,
                 auto_suggest=AutoSuggestFromHistory(),
                 style=self._pt_style,
                 complete_while_typing=True,
+                refresh_interval=0,  # Disable background refresh to avoid CPR issues
             ).strip()
         else:
             # Fallback to standard input
