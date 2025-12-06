@@ -116,21 +116,30 @@ def run_demo(script_path: Path):
     for step in steps:
         if isinstance(step, str):
             # Simple string = just type it
-            type_slowly(child, step)
-            if step.lower() != 'quit':
-                wait_for_permission_or_prompt(child, response='y', timeout=timeout)
-                time.sleep(0.3)
-        elif isinstance(step, dict):
-            # Dict with type and optional permission
+            text = step
+            is_local = False
+            permission = 'y'
+            delay = 0.05
+        else:
+            # Dict with type and optional settings
             text = step.get('type', '')
             permission = step.get('permission', 'y')
             delay = step.get('delay', 0.05)
+            is_local = step.get('local', False)
 
-            type_slowly(child, text, delay=delay)
+        type_slowly(child, text, delay=delay)
 
-            if text.lower() != 'quit':
-                wait_for_permission_or_prompt(child, response=permission, timeout=timeout)
-                time.sleep(0.3)
+        if text.lower() == 'quit':
+            # Quit doesn't need any waiting
+            pass
+        elif is_local:
+            # Local commands (like "plan") just wait for next prompt
+            wait_for_prompt(child, timeout=timeout)
+            time.sleep(0.3)
+        else:
+            # Model commands wait for [client] then permission/prompt
+            wait_for_permission_or_prompt(child, response=permission, timeout=timeout)
+            time.sleep(0.3)
 
     # Wait for EOF
     child.expect(pexpect.EOF, timeout=10)

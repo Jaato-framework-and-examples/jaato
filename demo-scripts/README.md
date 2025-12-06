@@ -68,6 +68,7 @@ steps:
 | `type` | string | required | Text to type at the prompt |
 | `permission` | string | "y" | Permission response: y, n, a, never, once, all |
 | `delay` | float | 0.05 | Delay between keystrokes (seconds) |
+| `local` | bool | false | Local command (like "plan") that doesn't go through the model |
 
 ## Available Demos
 
