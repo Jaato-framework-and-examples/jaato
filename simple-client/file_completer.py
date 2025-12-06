@@ -3,13 +3,14 @@
 Provides intelligent completion for:
 - Commands (help, tools, reset, etc.) when typing at line start
 - File/folder paths when user types @path patterns
+- Slash commands when user types /command patterns (from .jaato/commands/)
 
 Integrates with prompt_toolkit for rich interactive completion.
 """
 
 import os
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Callable
 
 from prompt_toolkit.completion import Completer, Completion, PathCompleter
 from prompt_toolkit.document import Document
@@ -82,8 +83,9 @@ class CommandCompleter(Completer):
         # Only complete if:
         # - Input is a single word (no spaces)
         # - Input doesn't contain @ (file reference)
+        # - Input doesn't start with / (slash command)
         # - Input is at the start (no leading content)
-        if ' ' in document.text_before_cursor or '@' in text:
+        if ' ' in document.text_before_cursor or '@' in text or text.startswith('/'):
             return
 
         # Get the word being typed
@@ -263,6 +265,146 @@ class AtFileCompleter(Completer):
         return type_map.get(ext, 'file')
 
 
+class SlashCommandCompleter(Completer):
+    """Complete slash commands from .jaato/commands/ directory.
+
+    Triggers completion when user types /, providing:
+    - Command file suggestions from .jaato/commands/
+    - Visual dropdown with arrow key navigation
+    - Command descriptions from file contents (first line)
+
+    Example usage:
+        "/sum" -> completes to "/summarize" (if summarize file exists)
+        "/" -> shows all available commands
+    """
+
+    # Default commands directory
+    DEFAULT_COMMANDS_DIR = ".jaato/commands"
+
+    def __init__(
+        self,
+        commands_dir: Optional[str] = None,
+        base_path: Optional[str] = None,
+    ):
+        """Initialize the completer.
+
+        Args:
+            commands_dir: Path to commands directory (default: .jaato/commands)
+            base_path: Base path for resolving relative commands_dir (default: cwd)
+        """
+        self.commands_dir = commands_dir or self.DEFAULT_COMMANDS_DIR
+        self.base_path = base_path or os.getcwd()
+        self._command_descriptions: dict[str, str] = {}
+
+    def _get_commands_path(self) -> Path:
+        """Get the absolute path to the commands directory."""
+        commands_path = Path(self.commands_dir)
+        if not commands_path.is_absolute():
+            commands_path = Path(self.base_path) / commands_path
+        return commands_path
+
+    def _load_command_descriptions(self) -> dict[str, str]:
+        """Load command descriptions from first line of each command file."""
+        commands_path = self._get_commands_path()
+        if not commands_path.exists():
+            return {}
+
+        descriptions = {}
+        for item in commands_path.iterdir():
+            if item.is_file():
+                try:
+                    # Read first line as description
+                    with open(item, 'r', encoding='utf-8') as f:
+                        first_line = f.readline().strip()
+                        # Remove common comment prefixes for cleaner display
+                        for prefix in ['#', '//', '/*', '--', '"""', "'''"]:
+                            if first_line.startswith(prefix):
+                                first_line = first_line[len(prefix):].strip()
+                                break
+                        # Truncate if too long
+                        if len(first_line) > 60:
+                            first_line = first_line[:57] + "..."
+                        descriptions[item.name] = first_line or "command"
+                except Exception:
+                    descriptions[item.name] = "command"
+        return descriptions
+
+    def list_commands(self) -> list[str]:
+        """List available command names."""
+        commands_path = self._get_commands_path()
+        if not commands_path.exists():
+            return []
+        return sorted([item.name for item in commands_path.iterdir() if item.is_file()])
+
+    def get_completions(
+        self, document: Document, complete_event
+    ) -> Iterable[Completion]:
+        """Get completions for slash commands.
+
+        Looks for / patterns and provides command completions.
+        """
+        text = document.text_before_cursor
+
+        # Find the last / that starts a slash command
+        slash_pos = self._find_slash_position(text)
+        if slash_pos == -1:
+            return
+
+        # Extract the command portion after /
+        command_text = text[slash_pos + 1:]
+
+        # Skip if there's a space after / (not a slash command)
+        if command_text and command_text[0] == ' ':
+            return
+
+        # Load command descriptions (cached for this completion session)
+        descriptions = self._load_command_descriptions()
+        commands = list(descriptions.keys())
+
+        # Filter commands that match the typed text
+        command_lower = command_text.lower()
+        for cmd_name in commands:
+            if cmd_name.lower().startswith(command_lower):
+                description = descriptions.get(cmd_name, "command")
+                # Complete with the command name (without /)
+                yield Completion(
+                    cmd_name,
+                    start_position=-len(command_text),
+                    display=f"/{cmd_name}",
+                    display_meta=description,
+                )
+
+    def _find_slash_position(self, text: str) -> int:
+        """Find the position of / that starts a slash command.
+
+        Returns -1 if no valid / command is found.
+        A valid / is one that:
+        - Is at start of string, or preceded by whitespace
+        - Is not part of a path (like /home/user)
+        """
+        # Find the last / in the text
+        slash_pos = text.rfind('/')
+        if slash_pos == -1:
+            return -1
+
+        # Check if this / looks like a slash command start
+        # Valid: "/cmd", " /cmd"
+        # Invalid: "/home/user" (path), "a/b" (middle of word)
+
+        # Must be at start or preceded by whitespace
+        if slash_pos > 0:
+            prev_char = text[slash_pos - 1]
+            if not prev_char.isspace():
+                return -1
+
+        # Check if it's followed by more slashes (likely a path)
+        remaining = text[slash_pos + 1:]
+        if '/' in remaining:
+            return -1
+
+        return slash_pos
+
+
 class FileReferenceProcessor:
     """Process @file references in user input.
 
@@ -421,13 +563,14 @@ class FileReferenceProcessor:
 
 
 class CombinedCompleter(Completer):
-    """Combined completer for commands and file references.
+    """Combined completer for commands, file references, and slash commands.
 
-    Merges CommandCompleter and AtFileCompleter to provide:
+    Merges CommandCompleter, AtFileCompleter, and SlashCommandCompleter to provide:
     - Command completion at line start (help, tools, reset, etc.)
     - File path completion after @ symbols
+    - Slash command completion after / symbols (from .jaato/commands/)
 
-    This allows seamless autocompletion for both use cases.
+    This allows seamless autocompletion for all use cases.
     """
 
     def __init__(
@@ -437,6 +580,7 @@ class CombinedCompleter(Completer):
         expanduser: bool = True,
         base_path: Optional[str] = None,
         file_filter: Optional[callable] = None,
+        commands_dir: Optional[str] = None,
     ):
         """Initialize the combined completer.
 
@@ -446,6 +590,7 @@ class CombinedCompleter(Completer):
             expanduser: If True, expand ~ to home directory.
             base_path: Base path for relative file completions (default: cwd).
             file_filter: Optional callable(filename) -> bool to filter files.
+            commands_dir: Path to slash commands directory (default: .jaato/commands).
         """
         self._command_completer = CommandCompleter(commands)
         self._file_completer = AtFileCompleter(
@@ -453,6 +598,10 @@ class CombinedCompleter(Completer):
             expanduser=expanduser,
             base_path=base_path,
             file_filter=file_filter,
+        )
+        self._slash_completer = SlashCommandCompleter(
+            commands_dir=commands_dir,
+            base_path=base_path,
         )
 
     def add_commands(self, commands: list[tuple[str, str]]) -> None:
@@ -470,9 +619,11 @@ class CombinedCompleter(Completer):
     def get_completions(
         self, document: Document, complete_event
     ) -> Iterable[Completion]:
-        """Get completions from both command and file completers."""
-        # Yield completions from both sources
-        # CommandCompleter will only yield if appropriate (single word, no @)
+        """Get completions from command, file, and slash command completers."""
+        # Yield completions from all sources
+        # CommandCompleter will only yield if appropriate (single word, no @ or /)
         # AtFileCompleter will only yield if @ is present
+        # SlashCommandCompleter will only yield if / is present at start of word
         yield from self._command_completer.get_completions(document, complete_event)
         yield from self._file_completer.get_completions(document, complete_event)
+        yield from self._slash_completer.get_completions(document, complete_event)
