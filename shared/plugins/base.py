@@ -1,7 +1,31 @@
 """Base protocol for tool plugins."""
 
+from dataclasses import dataclass
 from typing import Protocol, List, Dict, Any, Callable, Optional, NamedTuple, runtime_checkable
 from google.genai import types
+
+
+@dataclass
+class PermissionDisplayInfo:
+    """Display information for permission approval UI.
+
+    Plugins can provide this to customize how their tools are displayed
+    when requesting permission from the user/actor.
+
+    Attributes:
+        summary: Brief one-line description (e.g., "Update file: src/main.py")
+        details: Full content to display (e.g., unified diff)
+        format_hint: How to render details - "diff", "json", "text", "code"
+        language: Programming language for syntax highlighting (when format_hint="code")
+        truncated: Whether details were truncated due to size
+        original_lines: Original line count before truncation (if truncated)
+    """
+    summary: str
+    details: str
+    format_hint: str = "text"
+    language: Optional[str] = None
+    truncated: bool = False
+    original_lines: Optional[int] = None
 
 
 class UserCommand(NamedTuple):
@@ -110,3 +134,28 @@ class ToolPlugin(Protocol):
             Return empty list if no user-facing commands are provided.
         """
         ...
+
+    # Optional method - not part of the required protocol, but recognized by
+    # the permission system if implemented:
+    #
+    # def format_permission_request(
+    #     self,
+    #     tool_name: str,
+    #     arguments: Dict[str, Any],
+    #     actor_type: str
+    # ) -> Optional[PermissionDisplayInfo]:
+    #     """Format a permission request for display.
+    #
+    #     This optional method allows plugins to provide custom formatting for
+    #     their tools when displayed in the permission approval UI. If not
+    #     implemented or returns None, the default JSON display is used.
+    #
+    #     Args:
+    #         tool_name: Name of the tool being executed
+    #         arguments: Arguments passed to the tool
+    #         actor_type: Type of actor requesting approval ("console", "webhook", "file")
+    #
+    #     Returns:
+    #         PermissionDisplayInfo with formatted content, or None to use default.
+    #     """
+    #     ...

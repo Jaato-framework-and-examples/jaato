@@ -18,7 +18,12 @@ from .actors import (
     ConsoleActor,
     create_actor,
 )
-from ..base import UserCommand
+from ..base import UserCommand, PermissionDisplayInfo
+
+# Import TYPE_CHECKING to avoid circular imports
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ..registry import PluginRegistry
 
 
 class PermissionPlugin:
@@ -49,11 +54,23 @@ class PermissionPlugin:
         self._config: Optional[PermissionConfig] = None
         self._policy: Optional[PermissionPolicy] = None
         self._actor: Optional[Actor] = None
+        self._registry: Optional['PluginRegistry'] = None
         self._initialized = False
         self._wrapped_executors: Dict[str, Callable] = {}
         self._original_executors: Dict[str, Callable] = {}
         self._execution_log: List[Dict[str, Any]] = []
         self._allow_all: bool = False  # When True, auto-approve all requests
+
+    def set_registry(self, registry: 'PluginRegistry') -> None:
+        """Set the plugin registry for tool-to-plugin lookups.
+
+        This enables the permission system to call format_permission_request()
+        on the source plugin to get customized display info for approval UI.
+
+        Args:
+            registry: The PluginRegistry instance.
+        """
+        self._registry = registry
 
     @property
     def name(self) -> str:
@@ -118,6 +135,7 @@ class PermissionPlugin:
             self._actor.shutdown()
         self._policy = None
         self._actor = None
+        self._registry = None
         self._initialized = False
         self._wrapped_executors.clear()
         self._original_executors.clear()
@@ -285,11 +303,20 @@ If a tool is denied, do not attempt to execute it."""
                 self._log_decision(tool_name, args, "deny", "No actor configured")
                 return False, {'reason': 'No actor configured for approval', 'method': 'no_actor'}
 
+            # Get custom display info from source plugin if available
+            actor_type = self._actor.name if self._actor else "console"
+            display_info = self._get_display_info(tool_name, args, actor_type)
+
+            # Build context with display info
+            request_context = dict(context) if context else {}
+            if display_info:
+                request_context["display_info"] = display_info
+
             request = PermissionRequest.create(
                 tool_name=tool_name,
                 arguments=args,
                 timeout=self._config.actor_timeout if self._config else 30,
-                context=context,
+                context=request_context,
             )
 
             response = self._actor.request_permission(request)
@@ -365,6 +392,41 @@ If a tool is denied, do not attempt to execute it."""
             "decision": decision,
             "reason": reason,
         })
+
+    def _get_display_info(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        actor_type: str
+    ) -> Optional[PermissionDisplayInfo]:
+        """Get display info for a tool from its source plugin.
+
+        Looks up the plugin that provides the tool and calls its
+        format_permission_request() method if available.
+
+        Args:
+            tool_name: Name of the tool
+            args: Arguments passed to the tool
+            actor_type: Type of actor requesting display info
+
+        Returns:
+            PermissionDisplayInfo if plugin provides custom formatting, None otherwise.
+        """
+        if not self._registry:
+            return None
+
+        plugin = self._registry.get_plugin_for_tool(tool_name)
+        if not plugin:
+            return None
+
+        if hasattr(plugin, 'format_permission_request'):
+            try:
+                return plugin.format_permission_request(tool_name, args, actor_type)
+            except Exception:
+                # If formatting fails, fall back to default
+                return None
+
+        return None
 
     def get_execution_log(self) -> List[Dict[str, Any]]:
         """Get the log of permission decisions."""
