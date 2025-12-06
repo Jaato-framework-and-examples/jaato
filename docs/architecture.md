@@ -294,7 +294,7 @@ classDiagram
     class SlashCommandPlugin {
         +name = "slash_command"
         -commands_dir: str
-        +processCommand(command_name)
+        +processCommand(command_name, args)
     }
 
     ToolPlugin <|.. CLIToolPlugin
