@@ -542,6 +542,13 @@ class InteractiveClient:
                 self._print_context()
                 continue
 
+            if user_input.lower().startswith('export'):
+                # Parse optional filename: "export" or "export filename.yaml"
+                parts = user_input.split(maxsplit=1)
+                filename = parts[1] if len(parts) > 1 else "session_export.yaml"
+                self._export_session(filename)
+                continue
+
             # Check if input is a plugin-provided user command
             # (includes 'plan' from todo plugin, 'listReferences', 'selectReferences' from references plugin)
             plugin_result = self._try_execute_plugin_command(user_input)
@@ -560,13 +567,14 @@ class InteractiveClient:
         """Print help information."""
         print("""
 Commands (auto-complete as you type):
-  help    - Show this help message
-  tools   - List tools available to the model
-  reset   - Clear conversation history
-  history - Show full conversation history
-  context - Show context window usage
-  quit    - Exit the client
-  exit    - Exit the client""")
+  help          - Show this help message
+  tools         - List tools available to the model
+  reset         - Clear conversation history
+  history       - Show full conversation history
+  context       - Show context window usage
+  export [file] - Export session to YAML for replay (default: session_export.yaml)
+  quit          - Exit the client
+  exit          - Exit the client""")
 
         # Dynamically list plugin-contributed commands
         self._print_plugin_commands()
@@ -791,6 +799,136 @@ Keyboard shortcuts:
         else:
             # Unknown part type
             print(f"  (unknown part: {type(part).__name__})")
+
+    def _export_session(self, filename: str) -> None:
+        """Export current session to a YAML file for replay.
+
+        Generates a YAML file in the format expected by demo-scripts/run_demo.py,
+        allowing the session to be replayed later.
+
+        Args:
+            filename: Path to the output YAML file.
+        """
+        try:
+            import yaml
+        except ImportError:
+            print("\nError: PyYAML is required for export. Install with: pip install pyyaml")
+            return
+
+        if not self._jaato:
+            print("\n[No session to export - client not initialized]")
+            return
+
+        history = self._jaato.get_history()
+        if not history:
+            print("\n[No conversation history to export]")
+            return
+
+        # Build steps from conversation history
+        steps = []
+        current_permissions = []
+
+        for content in history:
+            role = getattr(content, 'role', None) or 'unknown'
+            parts = getattr(content, 'parts', None) or []
+
+            if role == 'user':
+                # Check if this is a user text message (not function response)
+                for part in parts:
+                    if hasattr(part, 'text') and part.text:
+                        text = part.text.strip()
+                        # Skip internal command indicators
+                        if text.startswith('[User executed command:'):
+                            continue
+                        # If we have pending permissions from previous step, finalize it
+                        if current_permissions:
+                            # Associate permissions with previous step
+                            pass
+                        # Start a new step
+                        current_permissions = []
+                        steps.append({
+                            'type': text,
+                            'permission': 'y',  # Default, will be updated if we find permission data
+                            '_permissions': current_permissions,  # Temp storage
+                        })
+
+            elif role == 'model':
+                # Check for function responses with permission data
+                for part in parts:
+                    if hasattr(part, 'function_response') and part.function_response:
+                        fr = part.function_response
+                        response = getattr(fr, 'response', {})
+                        if isinstance(response, dict):
+                            perm = response.get('_permission')
+                            if perm:
+                                decision = perm.get('decision', '')
+                                method = perm.get('method', '')
+                                # Map decision/method to YAML permission value
+                                perm_value = self._map_permission_to_yaml(decision, method)
+                                current_permissions.append(perm_value)
+
+        # Process steps to determine final permission values
+        final_steps = []
+        for step in steps:
+            perms = step.pop('_permissions', [])
+            if perms:
+                # Use the most permissive permission granted
+                # Priority: 'a' (always) > 'y' (yes) > 'n' (no)
+                if 'a' in perms:
+                    step['permission'] = 'a'
+                elif 'y' in perms or 'once' in perms:
+                    step['permission'] = 'y'
+                elif 'n' in perms:
+                    step['permission'] = 'n'
+                elif 'never' in perms:
+                    step['permission'] = 'never'
+            final_steps.append(step)
+
+        # Add quit step
+        final_steps.append({'type': 'quit', 'delay': 0.08})
+
+        # Build the YAML document
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+        export_data = {
+            'name': f'Session Export [{timestamp}]',
+            'timeout': 120,
+            'steps': final_steps,
+        }
+
+        # Write to file
+        try:
+            with open(filename, 'w') as f:
+                yaml.dump(export_data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            print(f"\n[Session exported to: {filename}]")
+            print(f"  Steps: {len(final_steps) - 1} interaction(s) + quit")
+            print(f"  Replay with: python demo-scripts/run_demo.py {filename}")
+        except IOError as e:
+            print(f"\nError writing file: {e}")
+
+    def _map_permission_to_yaml(self, decision: str, method: str) -> str:
+        """Map permission decision/method to YAML permission value.
+
+        Args:
+            decision: 'allowed' or 'denied'
+            method: 'user', 'remembered', 'whitelist', etc.
+
+        Returns:
+            YAML permission value: 'y', 'n', 'a', 'never', 'once'
+        """
+        if decision == 'allowed':
+            if method == 'remembered':
+                return 'a'  # Was 'always' - permission remembered
+            elif method == 'whitelist':
+                return 'a'  # Auto-approved, use 'always' for replay
+            else:
+                return 'y'  # User approved this one
+        else:  # denied
+            if method == 'remembered':
+                return 'never'  # Was 'never' - denial remembered
+            else:
+                return 'n'  # User denied this one
 
     def shutdown(self) -> None:
         """Clean up resources."""

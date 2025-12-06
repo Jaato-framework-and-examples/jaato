@@ -23,6 +23,7 @@ DEFAULT_COMMANDS = [
     ("reset", "Clear conversation history"),
     ("history", "Show full conversation history"),
     ("context", "Show context window usage"),
+    ("export", "Export session to YAML for replay"),
     ("plan", "Show current plan status"),
     ("quit", "Exit the client"),
     ("exit", "Exit the client"),
