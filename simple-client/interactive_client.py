@@ -20,6 +20,7 @@ try:
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.styles import Style
     from prompt_toolkit.formatted_text import ANSI
+    from prompt_toolkit.output.vt100 import Vt100_Output
     HAS_PROMPT_TOOLKIT = True
 except ImportError:
     HAS_PROMPT_TOOLKIT = False
@@ -121,8 +122,9 @@ class InteractiveClient:
 
         if HAS_PROMPT_TOOLKIT and self._completer:
             # Use prompt_toolkit with ANSI-formatted prompt
-            # refresh_interval=0 prevents CPR queries that cause issues in PTY environments
+            # Create output with enable_cpr=False to avoid CPR queries in PTY environments
             formatted_prompt = ANSI(prompt_str) if ANSI else prompt_str
+            output = Vt100_Output(sys.stdout, enable_cpr=False)
             return pt_prompt(
                 formatted_prompt,
                 completer=self._completer,
@@ -130,7 +132,8 @@ class InteractiveClient:
                 auto_suggest=AutoSuggestFromHistory(),
                 style=self._pt_style,
                 complete_while_typing=True,
-                refresh_interval=0,  # Disable background refresh to avoid CPR issues
+                refresh_interval=0,
+                output=output,
             ).strip()
         else:
             # Fallback to standard input
