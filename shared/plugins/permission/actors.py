@@ -166,12 +166,14 @@ class ConsoleActor(Actor):
     can review and approve/deny tool execution requests.
     """
 
-    # ANSI color codes for diff display
+    # ANSI color codes for display
     ANSI_RESET = "\033[0m"
+    ANSI_BOLD = "\033[1m"
+    ANSI_DIM = "\033[2m"
     ANSI_RED = "\033[31m"
     ANSI_GREEN = "\033[32m"
+    ANSI_YELLOW = "\033[33m"
     ANSI_CYAN = "\033[36m"
-    ANSI_DIM = "\033[2m"
 
     def __init__(self):
         self._input_func: Callable[[], str] = input
@@ -233,6 +235,12 @@ class ConsoleActor(Actor):
                 self._skip_readline_history = config["skip_readline_history"]
             if "use_colors" in config:
                 self._use_colors = config["use_colors"]
+
+    def _c(self, text: str, *codes: str) -> str:
+        """Apply ANSI color codes to text if colors are enabled."""
+        if not self._use_colors:
+            return text
+        return f"{''.join(codes)}{text}{self.ANSI_RESET}"
 
     def _colorize_diff_line(self, line: str) -> str:
         """Colorize a single diff line based on its prefix."""
@@ -309,18 +317,27 @@ class ConsoleActor(Actor):
 
         # Format the request for display
         self._output_func("")
-        self._output_func("=" * 60)
+        self._output_func(self._c("=" * 60, self.ANSI_BOLD))
 
         # Display agent type to clarify who is asking for permission
         agent_type = request.context.get("agent_type") if request.context else None
         agent_name = request.context.get("agent_name") if request.context else None
         if agent_type == "subagent":
             if agent_name:
-                self._output_func(f"[askPermission] Subagent '{agent_name}' requesting tool execution:")
+                self._output_func(
+                    f"{self._c('[askPermission]', self.ANSI_YELLOW)} "
+                    f"Subagent '{agent_name}' requesting tool execution:"
+                )
             else:
-                self._output_func("[askPermission] Subagent requesting tool execution:")
+                self._output_func(
+                    f"{self._c('[askPermission]', self.ANSI_YELLOW)} "
+                    "Subagent requesting tool execution:"
+                )
         else:
-            self._output_func("[askPermission] Main agent requesting tool execution:")
+            self._output_func(
+                f"{self._c('[askPermission]', self.ANSI_YELLOW)} "
+                "Main agent requesting tool execution:"
+            )
 
         # Display intent prominently if provided
         intent = request.context.get("intent") if request.context else None
@@ -334,12 +351,23 @@ class ConsoleActor(Actor):
             self._output_func(self._render_display_info(display_info))
         else:
             # Default display: tool name and JSON arguments
-            self._output_func(f"  Tool: {request.tool_name}")
+            self._output_func(f"  {self._c('Tool:', self.ANSI_BOLD)} {request.tool_name}")
             self._output_func(f"  Arguments: {json.dumps(request.arguments, indent=4)}")
 
-        self._output_func("=" * 60)
+        self._output_func(self._c("=" * 60, self.ANSI_BOLD))
         self._output_func("")
-        self._output_func("Options: [y]es, [n]o, [a]lways, [never], [once], [all]")
+
+        # Colorized options line
+        options = (
+            f"Options: "
+            f"[{self._c('y', self.ANSI_GREEN)}]es, "
+            f"[{self._c('n', self.ANSI_RED)}]o, "
+            f"[{self._c('a', self.ANSI_CYAN)}]lways, "
+            f"[{self._c('never', self.ANSI_YELLOW)}], "
+            f"[once], "
+            f"[all]"
+        )
+        self._output_func(options)
 
         try:
             response = self._read_input().strip().lower()
