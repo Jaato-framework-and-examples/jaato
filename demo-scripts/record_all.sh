@@ -61,10 +61,16 @@ record_demo() {
 
 # Find demo scripts to record
 if [ $# -eq 0 ]; then
-    # Find all demo.yaml files in plugin directories
+    # Find all demo.yaml files in plugin directories + root demo
     DEMO_FILES=$(find shared/plugins -name "demo.yaml" -type f 2>/dev/null)
+
+    # Also include the main README demo if it exists
+    if [ -f "demo.yaml" ]; then
+        DEMO_FILES="demo.yaml $DEMO_FILES"
+    fi
+
     if [ -z "$DEMO_FILES" ]; then
-        echo "No demo.yaml files found in shared/plugins/"
+        echo "No demo.yaml files found"
         exit 1
     fi
 else
