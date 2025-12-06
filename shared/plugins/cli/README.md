@@ -2,6 +2,10 @@
 
 The CLI plugin provides the `cli_based_tool` function for executing local shell commands in the jaato framework.
 
+## Demo
+
+![CLI Plugin Demo](demo.svg)
+
 ## Overview
 
 This plugin allows models to run shell commands on the local machine via subprocess. Simple commands are executed without a shell for safety, while commands requiring shell features (pipes, redirections, command chaining) are automatically detected and executed through the shell.

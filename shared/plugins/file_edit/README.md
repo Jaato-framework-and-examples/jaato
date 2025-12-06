@@ -2,6 +2,10 @@
 
 The file_edit plugin provides tools for reading, modifying, and managing files with integrated permission approval (showing diffs) and automatic backups.
 
+## Demo
+
+![File Edit Plugin Demo](demo.svg)
+
 ## Overview
 
 This plugin enables the model to perform file operations with safety features:
