@@ -1,0 +1,408 @@
+"""Tests for the clarification plugin."""
+
+import pytest
+
+from ..plugin import ClarificationPlugin, create_plugin
+from ..actors import AutoActor
+
+
+class TestClarificationPluginInitialization:
+    """Tests for plugin initialization."""
+
+    def test_create_plugin_factory(self):
+        plugin = create_plugin()
+        assert isinstance(plugin, ClarificationPlugin)
+
+    def test_plugin_name(self):
+        plugin = ClarificationPlugin()
+        assert plugin.name == "clarification"
+
+    def test_initialize_without_config(self):
+        plugin = ClarificationPlugin()
+        plugin.initialize()
+        assert plugin._initialized is True
+        assert plugin._actor is not None
+
+    def test_initialize_with_console_actor(self):
+        plugin = ClarificationPlugin()
+        plugin.initialize({"actor_type": "console"})
+        assert plugin._initialized is True
+
+    def test_initialize_with_auto_actor(self):
+        plugin = ClarificationPlugin()
+        plugin.initialize({"actor_type": "auto"})
+        assert plugin._initialized is True
+        assert isinstance(plugin._actor, AutoActor)
+
+    def test_initialize_with_auto_actor_config(self):
+        plugin = ClarificationPlugin()
+        plugin.initialize({
+            "actor_type": "auto",
+            "actor_config": {"default_free_text": "custom"},
+        })
+        assert plugin._initialized is True
+
+    def test_shutdown(self):
+        plugin = ClarificationPlugin()
+        plugin.initialize()
+        plugin.shutdown()
+
+        assert plugin._initialized is False
+        assert plugin._actor is None
+
+
+class TestClarificationPluginFunctionDeclarations:
+    """Tests for function declarations."""
+
+    def test_get_function_declarations(self):
+        plugin = ClarificationPlugin()
+        declarations = plugin.get_function_declarations()
+
+        assert len(declarations) == 1
+        assert declarations[0].name == "request_clarification"
+
+    def test_request_clarification_schema(self):
+        plugin = ClarificationPlugin()
+        declarations = plugin.get_function_declarations()
+        decl = declarations[0]
+        schema = decl.parameters_json_schema
+
+        assert schema["type"] == "object"
+        assert "context" in schema["properties"]
+        assert "questions" in schema["properties"]
+        assert "context" in schema["required"]
+        assert "questions" in schema["required"]
+
+    def test_question_schema_structure(self):
+        plugin = ClarificationPlugin()
+        declarations = plugin.get_function_declarations()
+        schema = declarations[0].parameters_json_schema
+
+        question_schema = schema["properties"]["questions"]["items"]
+        assert "id" in question_schema["properties"]
+        assert "text" in question_schema["properties"]
+        assert "question_type" in question_schema["properties"]
+        assert "choices" in question_schema["properties"]
+        assert "required" in question_schema["properties"]
+        assert "default_choice_id" in question_schema["properties"]
+
+    def test_question_type_enum(self):
+        plugin = ClarificationPlugin()
+        declarations = plugin.get_function_declarations()
+        schema = declarations[0].parameters_json_schema
+
+        question_type_schema = schema["properties"]["questions"]["items"]["properties"]["question_type"]
+        assert "enum" in question_type_schema
+        assert "single_choice" in question_type_schema["enum"]
+        assert "multiple_choice" in question_type_schema["enum"]
+        assert "free_text" in question_type_schema["enum"]
+
+
+class TestClarificationPluginExecutors:
+    """Tests for executor methods."""
+
+    def test_get_executors(self):
+        plugin = ClarificationPlugin()
+        executors = plugin.get_executors()
+
+        assert "request_clarification" in executors
+        assert callable(executors["request_clarification"])
+
+
+class TestRequestClarificationExecutor:
+    """Tests for request_clarification executor."""
+
+    def test_execute_not_initialized(self):
+        plugin = ClarificationPlugin()
+        executors = plugin.get_executors()
+
+        result = executors["request_clarification"]({
+            "context": "Test",
+            "questions": [{"id": "q1", "text": "Q1"}],
+        })
+
+        assert "error" in result
+
+    def test_execute_single_choice_question(self):
+        plugin = ClarificationPlugin()
+        plugin.initialize({"actor_type": "auto"})
+        executors = plugin.get_executors()
+
+        result = executors["request_clarification"]({
+            "context": "Need to know your preference",
+            "questions": [
+                {
+                    "id": "env",
+                    "text": "Which environment?",
+                    "question_type": "single_choice",
+                    "choices": [
+                        {"id": "dev", "text": "Development"},
+                        {"id": "prod", "text": "Production"},
+                    ],
+                    "default_choice_id": "dev",
+                },
+            ],
+        })
+
+        assert "error" not in result
+        assert "responses" in result
+        assert "env" in result["responses"]
+        assert result["responses"]["env"]["value"] == "dev"
+        assert result["responses"]["env"]["type"] == "single_choice"
+
+    def test_execute_multiple_choice_question(self):
+        plugin = ClarificationPlugin()
+        plugin.initialize({"actor_type": "auto"})
+        executors = plugin.get_executors()
+
+        result = executors["request_clarification"]({
+            "context": "Select features",
+            "questions": [
+                {
+                    "id": "features",
+                    "text": "Which features?",
+                    "question_type": "multiple_choice",
+                    "choices": [
+                        {"id": "logging", "text": "Logging"},
+                        {"id": "metrics", "text": "Metrics"},
+                        {"id": "tracing", "text": "Tracing"},
+                    ],
+                    "default_choice_id": "logging,metrics",
+                },
+            ],
+        })
+
+        assert "error" not in result
+        assert "responses" in result
+        assert "features" in result["responses"]
+        assert result["responses"]["features"]["type"] == "multiple_choice"
+        assert set(result["responses"]["features"]["values"]) == {"logging", "metrics"}
+
+    def test_execute_free_text_question(self):
+        plugin = ClarificationPlugin()
+        plugin.initialize({
+            "actor_type": "auto",
+            "actor_config": {"default_free_text": "my custom answer"},
+        })
+        executors = plugin.get_executors()
+
+        result = executors["request_clarification"]({
+            "context": "Need description",
+            "questions": [
+                {
+                    "id": "description",
+                    "text": "Describe your requirements",
+                    "question_type": "free_text",
+                },
+            ],
+        })
+
+        assert "error" not in result
+        assert "responses" in result
+        assert result["responses"]["description"]["value"] == "my custom answer"
+        assert result["responses"]["description"]["type"] == "free_text"
+
+    def test_execute_multiple_questions(self):
+        plugin = ClarificationPlugin()
+        plugin.initialize({"actor_type": "auto"})
+        executors = plugin.get_executors()
+
+        result = executors["request_clarification"]({
+            "context": "Configuration needed",
+            "questions": [
+                {
+                    "id": "q1",
+                    "text": "Environment",
+                    "question_type": "single_choice",
+                    "choices": [
+                        {"id": "dev", "text": "Dev"},
+                        {"id": "prod", "text": "Prod"},
+                    ],
+                },
+                {
+                    "id": "q2",
+                    "text": "Description",
+                    "question_type": "free_text",
+                },
+                {
+                    "id": "q3",
+                    "text": "Features",
+                    "question_type": "multiple_choice",
+                    "choices": [
+                        {"id": "a", "text": "A"},
+                        {"id": "b", "text": "B"},
+                    ],
+                },
+            ],
+        })
+
+        assert "error" not in result
+        assert "responses" in result
+        assert "q1" in result["responses"]
+        assert "q2" in result["responses"]
+        assert "q3" in result["responses"]
+
+    def test_execute_with_defaults(self):
+        plugin = ClarificationPlugin()
+        plugin.initialize({"actor_type": "auto"})
+        executors = plugin.get_executors()
+
+        result = executors["request_clarification"]({
+            "context": "Quick config",
+            "questions": [
+                {
+                    "id": "q1",
+                    "text": "Select",
+                    "choices": [
+                        {"id": "a", "text": "A"},
+                        {"id": "b", "text": "B"},
+                    ],
+                    "default_choice_id": "b",
+                },
+            ],
+        })
+
+        assert result["responses"]["q1"]["value"] == "b"
+
+    def test_execute_question_type_defaults_to_single_choice(self):
+        plugin = ClarificationPlugin()
+        plugin.initialize({"actor_type": "auto"})
+        executors = plugin.get_executors()
+
+        result = executors["request_clarification"]({
+            "context": "Test",
+            "questions": [
+                {
+                    "id": "q1",
+                    "text": "Pick",
+                    "choices": [{"id": "x", "text": "X"}],
+                    # No question_type specified
+                },
+            ],
+        })
+
+        assert "error" not in result
+        assert result["responses"]["q1"]["type"] == "single_choice"
+
+
+class TestClarificationPluginSystemInstructions:
+    """Tests for system instructions."""
+
+    def test_get_system_instructions(self):
+        plugin = ClarificationPlugin()
+        instructions = plugin.get_system_instructions()
+
+        assert instructions is not None
+        assert "request_clarification" in instructions
+        assert "single_choice" in instructions
+        assert "multiple_choice" in instructions
+        assert "free_text" in instructions
+
+    def test_system_instructions_has_example(self):
+        plugin = ClarificationPlugin()
+        instructions = plugin.get_system_instructions()
+
+        assert "Example" in instructions or "example" in instructions
+
+
+class TestClarificationPluginAutoApproved:
+    """Tests for auto-approved tools."""
+
+    def test_get_auto_approved_tools(self):
+        plugin = ClarificationPlugin()
+        auto_approved = plugin.get_auto_approved_tools()
+
+        assert "request_clarification" in auto_approved
+
+
+class TestClarificationPluginWorkflow:
+    """Tests for complete clarification workflows."""
+
+    def test_full_workflow_deployment_config(self):
+        plugin = ClarificationPlugin()
+        plugin.initialize({"actor_type": "auto"})
+        executors = plugin.get_executors()
+
+        # Simulate model asking for deployment configuration
+        result = executors["request_clarification"]({
+            "context": "I need to configure the deployment. Please provide the following information.",
+            "questions": [
+                {
+                    "id": "environment",
+                    "text": "Which environment should I deploy to?",
+                    "question_type": "single_choice",
+                    "choices": [
+                        {"id": "dev", "text": "Development"},
+                        {"id": "staging", "text": "Staging"},
+                        {"id": "prod", "text": "Production"},
+                    ],
+                    "default_choice_id": "dev",
+                },
+                {
+                    "id": "features",
+                    "text": "Which optional features should be enabled?",
+                    "question_type": "multiple_choice",
+                    "choices": [
+                        {"id": "logging", "text": "Enhanced logging"},
+                        {"id": "metrics", "text": "Metrics collection"},
+                        {"id": "debug", "text": "Debug mode"},
+                    ],
+                    "required": False,
+                    "default_choice_id": "logging",
+                },
+                {
+                    "id": "notes",
+                    "text": "Any additional deployment notes?",
+                    "question_type": "free_text",
+                    "required": False,
+                },
+            ],
+        })
+
+        assert "error" not in result
+        assert "responses" in result
+
+        # Check environment response
+        env = result["responses"]["environment"]
+        assert env["value"] == "dev"
+        assert env["text"] == "Development"
+
+        # Check features response
+        features = result["responses"]["features"]
+        assert "logging" in features["values"]
+
+    def test_workflow_ambiguous_request(self):
+        plugin = ClarificationPlugin()
+        plugin.initialize({"actor_type": "auto"})
+        executors = plugin.get_executors()
+
+        # Simulate model clarifying an ambiguous user request
+        result = executors["request_clarification"]({
+            "context": "Your request to 'add authentication' could be implemented in several ways. Please clarify your preferences.",
+            "questions": [
+                {
+                    "id": "auth_type",
+                    "text": "What type of authentication?",
+                    "question_type": "single_choice",
+                    "choices": [
+                        {"id": "session", "text": "Session-based (cookies)"},
+                        {"id": "jwt", "text": "JWT tokens"},
+                        {"id": "oauth", "text": "OAuth 2.0"},
+                    ],
+                },
+                {
+                    "id": "providers",
+                    "text": "Which OAuth providers should be supported?",
+                    "question_type": "multiple_choice",
+                    "choices": [
+                        {"id": "google", "text": "Google"},
+                        {"id": "github", "text": "GitHub"},
+                        {"id": "microsoft", "text": "Microsoft"},
+                    ],
+                },
+            ],
+        })
+
+        assert "error" not in result
+        assert "auth_type" in result["responses"]
+        assert "providers" in result["responses"]
