@@ -6,12 +6,6 @@ The web search plugin provides the `web_search` function for performing internet
 
 This plugin allows models to search the web for current information on any topic. It uses DuckDuckGo as the search backend, which provides good results without requiring API keys.
 
-## Demo
-
-The following shows the web_search plugin in action, searching the web with permission prompts:
-
-![Web Search Plugin Demo](demo/demo.svg)
-
 ## Tool Declaration
 
 The plugin exposes a single tool:

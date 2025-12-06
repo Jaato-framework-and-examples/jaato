@@ -11,12 +11,6 @@ Reference sources can be configured in two modes:
 
 The model is responsible for fetching content using existing tools (CLI for local files, MCP tools, URL fetch, etc.). This plugin only manages the catalog metadata and user interaction.
 
-## Demo
-
-The following shows the references plugin in action, listing available sources and loading documentation into context:
-
-![References Plugin Demo](demo/demo.svg)
-
 ## Configuration
 
 ### Config File Location

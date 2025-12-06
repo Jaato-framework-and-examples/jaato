@@ -9,12 +9,6 @@ This plugin enables the model to perform file operations with safety features:
 - **Automatic backups**: Updates and deletions create backups that can be restored
 - **Colorized display**: Console approval shows colorized diffs (green for additions, red for deletions)
 
-## Demo
-
-The following shows the file_edit plugin in action, updating a file with a diff preview for approval:
-
-![File Edit Plugin Demo](demo/demo.svg)
-
 ## Tool Declarations
 
 The plugin exposes five tools:

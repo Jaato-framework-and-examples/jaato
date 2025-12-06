@@ -26,12 +26,6 @@ The Subagent plugin (`spawn_subagent`, `list_subagent_profiles`) enables the par
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Demo
-
-The following shows the subagent plugin in action, spawning a specialized analyst subagent:
-
-![Subagent Plugin Demo](demo/demo.svg)
-
 ## Features
 
 - **Plugin Inheritance**: Subagents automatically inherit the parent's plugin configuration by default
