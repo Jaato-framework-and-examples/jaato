@@ -97,6 +97,9 @@ class InteractiveClient:
             'cyan': '\033[36m',
         }
 
+        # Track original user inputs for export (before file reference expansion)
+        self._original_inputs: list[str] = []
+
     def _c(self, text: str, color: str) -> str:
         """Apply ANSI color to text."""
         code = self._colors.get(color, '')
@@ -475,6 +478,7 @@ class InteractiveClient:
         """Clear conversation history."""
         if self._jaato:
             self._jaato.reset_session()
+        self._original_inputs = []
         self.log("[client] Conversation history cleared")
 
     def _print_banner(self) -> None:
@@ -558,6 +562,9 @@ class InteractiveClient:
             if plugin_result is not None:
                 # Plugin command was executed, result already displayed
                 continue
+
+            # Track original input for export (before expansion)
+            self._original_inputs.append(user_input)
 
             # Expand @file references to include file contents
             expanded_prompt = self._expand_file_references(user_input)
@@ -807,7 +814,8 @@ Keyboard shortcuts:
         """Export current session to a YAML file for replay.
 
         Generates a YAML file in the format expected by demo-scripts/run_demo.py,
-        allowing the session to be replayed later.
+        allowing the session to be replayed later. Uses original user inputs
+        (before file reference expansion) for cleaner, replayable output.
 
         Args:
             filename: Path to the output YAML file.
@@ -822,41 +830,35 @@ Keyboard shortcuts:
             print("\n[No session to export - client not initialized]")
             return
 
-        history = self._jaato.get_history()
-        if not history:
+        if not self._original_inputs:
             print("\n[No conversation history to export]")
             return
 
-        # Build steps from conversation history
-        steps = []
-        current_permissions = []
+        # Extract permission decisions from history, grouped by user turn
+        history = self._jaato.get_history()
+        turn_permissions: list[list[str]] = []
+        current_permissions: list[str] = []
+        in_user_turn = False
 
         for content in history:
             role = getattr(content, 'role', None) or 'unknown'
             parts = getattr(content, 'parts', None) or []
 
             if role == 'user':
-                # Check if this is a user text message (not function response)
+                # Check if this is a user text message (starts new turn)
                 for part in parts:
                     if hasattr(part, 'text') and part.text:
                         text = part.text.strip()
-                        # Skip internal command indicators
                         if text.startswith('[User executed command:'):
                             continue
-                        # If we have pending permissions from previous step, finalize it
-                        if current_permissions:
-                            # Associate permissions with previous step
-                            pass
-                        # Start a new step
+                        # Save previous turn's permissions and start new turn
+                        if in_user_turn:
+                            turn_permissions.append(current_permissions)
                         current_permissions = []
-                        steps.append({
-                            'type': text,
-                            'permission': 'y',  # Default, will be updated if we find permission data
-                            '_permissions': current_permissions,  # Temp storage
-                        })
+                        in_user_turn = True
 
             elif role == 'model':
-                # Check for function responses with permission data
+                # Collect permission data from function responses
                 for part in parts:
                     if hasattr(part, 'function_response') and part.function_response:
                         fr = part.function_response
@@ -866,26 +868,37 @@ Keyboard shortcuts:
                             if perm:
                                 decision = perm.get('decision', '')
                                 method = perm.get('method', '')
-                                # Map decision/method to YAML permission value
                                 perm_value = self._map_permission_to_yaml(decision, method)
                                 current_permissions.append(perm_value)
 
-        # Process steps to determine final permission values
+        # Don't forget the last turn's permissions
+        if in_user_turn:
+            turn_permissions.append(current_permissions)
+
+        # Build steps from original inputs with matched permissions
         final_steps = []
-        for step in steps:
-            perms = step.pop('_permissions', [])
+        for i, user_input in enumerate(self._original_inputs):
+            # Get permissions for this turn (if available)
+            perms = turn_permissions[i] if i < len(turn_permissions) else []
+
+            # Determine permission value
+            permission = 'y'  # Default
             if perms:
                 # Use the most permissive permission granted
                 # Priority: 'a' (always) > 'y' (yes) > 'n' (no)
                 if 'a' in perms:
-                    step['permission'] = 'a'
+                    permission = 'a'
                 elif 'y' in perms or 'once' in perms:
-                    step['permission'] = 'y'
+                    permission = 'y'
                 elif 'n' in perms:
-                    step['permission'] = 'n'
+                    permission = 'n'
                 elif 'never' in perms:
-                    step['permission'] = 'never'
-            final_steps.append(step)
+                    permission = 'never'
+
+            final_steps.append({
+                'type': user_input,
+                'permission': permission,
+            })
 
         # Add quit step
         final_steps.append({'type': 'quit', 'delay': 0.08})
