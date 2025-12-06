@@ -1,12 +1,12 @@
 # Plugin Demo Recording Scripts
 
-Scripts for recording authentic terminal demos of each jaato plugin using the real simple client.
+Scripts for recording authentic terminal demos of jaato plugins using the real simple client.
 
 ## Prerequisites
 
 ```bash
 # Install required packages
-pip install pexpect termtosvg
+pip install pexpect pyyaml termtosvg
 
 # Ensure you have valid API credentials in .env
 ```
@@ -14,72 +14,87 @@ pip install pexpect termtosvg
 ## Quick Start
 
 ```bash
-# Record all demos
-./record_all.sh
+# Record a plugin demo
+cd demo-scripts
+termtosvg -c "python run_demo.py ../shared/plugins/cli/demo.yaml" -g 100x40 ../shared/plugins/cli/demo.svg
 
-# Record specific demo
-./record_all.sh cli
-
-# Record multiple demos
-./record_all.sh cli file_edit web_search
+# Or run without recording to test
+python run_demo.py ../shared/plugins/cli/demo.yaml
 ```
 
-## Manual Recording
+## Demo Script Format
 
-You can also record demos manually with custom settings:
+Demos are defined in YAML files located in each plugin's directory:
 
-```bash
-# Record CLI demo with custom geometry
-termtosvg -c "python run_demo.py cli" -g 100x40 cli_demo.svg
+```yaml
+name: CLI Plugin Demo
+timeout: 120
 
-# Record with different template
-termtosvg -c "python run_demo.py file_edit" -t window_frame file_edit_demo.svg
+# Optional setup commands (run before starting client)
+setup:
+  - mkdir -p /tmp/demo
+  - echo "test" > /tmp/demo/file.txt
+
+steps:
+  # Full form with explicit permission response
+  - type: "List the Python files in the current directory"
+    permission: "y"
+
+  # Use 'a' for "always" permission
+  - type: "Show me the git status"
+    permission: "a"
+
+  # Simple string (uses default 'y' permission)
+  - "What files are in /tmp?"
+
+  # Exit command (no permission wait)
+  - type: "quit"
+    delay: 0.08
 ```
+
+### Script Options
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | filename | Display name for the demo |
+| `timeout` | int | 120 | Timeout in seconds for each operation |
+| `setup` | list | none | Shell commands to run before starting |
+| `steps` | list | required | List of interaction steps |
+
+### Step Options
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | string | required | Text to type at the prompt |
+| `permission` | string | "y" | Permission response: y, n, a, never, once, all |
+| `delay` | float | 0.05 | Delay between keystrokes (seconds) |
 
 ## Available Demos
 
-| Demo | Description | Recommended Size |
-|------|-------------|------------------|
-| `cli` | Shell command execution with permission prompts | 100x40 |
-| `file_edit` | File modification with diff preview | 100x45 |
-| `web_search` | Web search queries and results | 100x40 |
-| `todo` | Plan creation and progress tracking | 100x45 |
-| `references` | Documentation source selection | 100x42 |
-| `subagent` | Spawning specialized subagents | 100x45 |
+| Plugin | Script Location |
+|--------|-----------------|
+| CLI | `shared/plugins/cli/demo.yaml` |
+| File Edit | `shared/plugins/file_edit/demo.yaml` |
 
 ## How It Works
 
 The `run_demo.py` script uses `pexpect` to:
 
-1. Spawn the real `simple-client/interactive_client.py`
-2. Wait for prompts and feed user inputs via PTY
-3. Respond to permission prompts automatically
-4. Type inputs with realistic delays for visual effect
+1. Run optional setup commands from the script
+2. Spawn the real `simple-client/interactive_client.py`
+3. Wait for prompts and feed user inputs via PTY
+4. Respond to permission prompts automatically
+5. Type inputs with realistic delays for visual effect
 
 This produces authentic recordings of the actual client behavior.
 
-## Customizing Demos
+## Creating New Demos
 
-Edit `run_demo.py` to modify:
-
-- **Prompts**: Change what questions are asked
-- **Timing**: Adjust `time.sleep()` calls for pacing
-- **Typing speed**: Modify `delay` parameter in `type_slowly()`
-- **Permission responses**: Change 'y', 'a', 'n' responses
-
-## Output
-
-Recordings are saved to `demo-scripts/recordings/` by default.
-
-After recording, you can copy them to plugin directories:
-
-```bash
-# Manually copy
-cp recordings/cli_demo.svg ../shared/plugins/cli/demo/demo.svg
-
-# Or use the script's prompt after recording
-./record_all.sh  # Will ask to copy after recording
-```
+1. Create a `demo.yaml` in your plugin directory
+2. Define the steps (prompts, permission responses)
+3. Add optional setup commands if needed
+4. Test with: `python run_demo.py path/to/demo.yaml`
+5. Record with: `termtosvg -c "python run_demo.py path/to/demo.yaml" output.svg`
 
 ## Troubleshooting
 
@@ -88,16 +103,21 @@ cp recordings/cli_demo.svg ../shared/plugins/cli/demo/demo.svg
 pip install pexpect
 ```
 
+### "pyyaml not found"
+```bash
+pip install pyyaml
+```
+
 ### "termtosvg not found"
 ```bash
 pip install termtosvg
 ```
 
 ### Recordings are blank/too short
-- Increase timeout values in `run_demo.py`
+- Increase timeout values in the YAML script
 - Check that `.env` has valid credentials
-- Run demo directly first: `python run_demo.py cli`
+- Run demo directly first: `python run_demo.py demo.yaml`
 
 ### Permission prompts not detected
-- Adjust the regex patterns in `wait_for_permission()`
 - Some tools are auto-approved and won't show prompts
+- The script handles both cases (permission asked or already granted)

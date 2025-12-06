@@ -1,0 +1,12 @@
+name: CLI Plugin Demo
+timeout: 120
+
+steps:
+  - type: "List the Python files in the current directory"
+    permission: "y"
+
+  - type: "Show me the git status"
+    permission: "a"
+
+  - type: "quit"
+    delay: 0.08

@@ -3,26 +3,20 @@
 Demo runner for recording plugin demos with termsvg.
 
 This script uses pexpect to interact with the real simple client,
-feeding it prompts and responses via PTY to produce authentic recordings.
+running demo scripts defined in YAML files.
 
 Usage:
-    # Record CLI plugin demo
-    termtosvg -c "python run_demo.py cli" -g 100x40 cli_demo.svg
+    # Run a demo script
+    python run_demo.py shared/plugins/cli/demo.yaml
 
-    # Record file_edit plugin demo
-    termtosvg -c "python run_demo.py file_edit" -g 100x45 file_edit_demo.svg
-
-    # Record all demos
-    ./record_all.sh
+    # Record with termtosvg
+    termtosvg -c "python run_demo.py shared/plugins/cli/demo.yaml" -g 100x40 demo.svg
 
 Requirements:
-    pip install pexpect
-
-    Also requires a valid .env file with API credentials.
+    pip install pexpect pyyaml
 """
 
 import sys
-import os
 import time
 import argparse
 from pathlib import Path
@@ -35,6 +29,12 @@ try:
     import pexpect
 except ImportError:
     print("Error: pexpect is required. Install with: pip install pexpect")
+    sys.exit(1)
+
+try:
+    import yaml
+except ImportError:
+    print("Error: pyyaml is required. Install with: pip install pyyaml")
     sys.exit(1)
 
 
@@ -66,7 +66,6 @@ def wait_for_permission_or_prompt(child, response='y', timeout=60):
     If prompt appears directly (permission already granted), just return.
     """
     # First wait for the client to acknowledge the command
-    # This ensures we're past the input phase before looking for output patterns
     child.expect(r'\[client\]', timeout=timeout)
 
     # Now wait for either permission prompt or next You> prompt
@@ -81,262 +80,99 @@ def wait_for_permission_or_prompt(child, response='y', timeout=60):
         wait_for_prompt(child, timeout=timeout)
 
 
-def run_cli_demo():
-    """Run CLI plugin demo - shell command execution."""
-    print("Starting CLI plugin demo...")
+def run_demo(script_path: Path):
+    """Run a demo from a YAML script file."""
+    # Load the script
+    with open(script_path) as f:
+        script = yaml.safe_load(f)
 
+    name = script.get('name', script_path.stem)
+    timeout = script.get('timeout', 120)
+    steps = script.get('steps', [])
+    setup = script.get('setup')
+
+    print(f"Starting {name}...")
+
+    # Run setup commands if specified
+    if setup:
+        import subprocess
+        for cmd in setup:
+            subprocess.run(cmd, shell=True, cwd=PROJECT_ROOT)
+
+    # Spawn the client
     child = pexpect.spawn(
         'python', ['simple-client/interactive_client.py', '--env-file', '.env'],
         encoding='utf-8',
-        timeout=120,
+        timeout=timeout,
         cwd=str(PROJECT_ROOT)
     )
     child.logfile_read = sys.stdout
 
-    # Wait for initialization
+    # Wait for initial prompt
     wait_for_prompt(child)
     time.sleep(0.3)
 
-    # First command: list Python files
-    type_slowly(child, "List the Python files in the current directory")
+    # Execute each step
+    for step in steps:
+        if isinstance(step, str):
+            # Simple string = just type it
+            type_slowly(child, step)
+            if step.lower() != 'quit':
+                wait_for_permission_or_prompt(child, response='y', timeout=timeout)
+                time.sleep(0.3)
+        elif isinstance(step, dict):
+            # Dict with type and optional permission
+            text = step.get('type', '')
+            permission = step.get('permission', 'y')
+            delay = step.get('delay', 0.05)
 
-    # Wait for permission (or prompt if already granted) and approve with 'y'
-    wait_for_permission_or_prompt(child, response='y')
-    time.sleep(0.3)
+            type_slowly(child, text, delay=delay)
 
-    # Second command: git status
-    type_slowly(child, "Show me the git status")
+            if text.lower() != 'quit':
+                wait_for_permission_or_prompt(child, response=permission, timeout=timeout)
+                time.sleep(0.3)
 
-    # Wait for permission (or prompt if already granted) and approve with 'a' (always)
-    wait_for_permission_or_prompt(child, response='a')
-    time.sleep(0.5)
-
-    # Exit
-    type_slowly(child, "quit", delay=0.08)
-
-    child.expect(pexpect.EOF, timeout=5)
-    print("\nCLI demo completed.")
-
-
-def run_file_edit_demo():
-    """Run file_edit plugin demo - file modification with diff."""
-    print("Starting file_edit plugin demo...")
-
-    # Create a test file first
-    import os
-    test_dir = "/tmp/jaato_demo"
-    os.makedirs(test_dir, exist_ok=True)
-    test_file = f"{test_dir}/config.py"
-
-    with open(test_file, 'w') as f:
-        f.write('''# Configuration file
-DEFAULT_TIMEOUT = 30
-MAX_RETRIES = 3
-ENABLE_LOGGING = True
-DEBUG_MODE = False
-''')
-
-    child = pexpect.spawn(
-        'python', ['simple-client/interactive_client.py', '--env-file', '.env'],
-        encoding='utf-8',
-        timeout=120,
-        cwd=str(PROJECT_ROOT)
-    )
-    child.logfile_read = sys.stdout
-
-    wait_for_prompt(child)
-    time.sleep(0.3)
-
-    # Ask to update the file
-    type_slowly(child, f"Update {test_file} to change MAX_RETRIES from 3 to 5")
-
-    # readFile is auto-approved, wait for updateFile permission (or prompt if granted)
-    wait_for_permission_or_prompt(child, response='y')
-    time.sleep(0.5)
-
-    # Exit
-    type_slowly(child, "quit", delay=0.08)
-
-    child.expect(pexpect.EOF, timeout=5)
-    print("\nfile_edit demo completed.")
-
-
-def run_web_search_demo():
-    """Run web_search plugin demo - web search."""
-    print("Starting web_search plugin demo...")
-
-    child = pexpect.spawn(
-        'python', ['simple-client/interactive_client.py', '--env-file', '.env'],
-        encoding='utf-8',
-        timeout=120,
-        cwd=str(PROJECT_ROOT)
-    )
-    child.logfile_read = sys.stdout
-
-    wait_for_prompt(child)
-    time.sleep(0.3)
-
-    # Search query
-    type_slowly(child, "Search the web for Python asyncio best practices")
-
-    # Wait for permission (or prompt if already granted)
-    wait_for_permission_or_prompt(child, response='y')
-    time.sleep(0.5)
-
-    type_slowly(child, "quit", delay=0.08)
-
-    child.expect(pexpect.EOF, timeout=5)
-    print("\nweb_search demo completed.")
-
-
-def run_todo_demo():
-    """Run TODO plugin demo - plan creation and tracking."""
-    print("Starting TODO plugin demo...")
-
-    child = pexpect.spawn(
-        'python', ['simple-client/interactive_client.py', '--env-file', '.env'],
-        encoding='utf-8',
-        timeout=120,
-        cwd=str(PROJECT_ROOT)
-    )
-    child.logfile_read = sys.stdout
-
-    wait_for_prompt(child)
-    time.sleep(0.3)
-
-    # Ask for a task that triggers plan creation
-    type_slowly(child, "Help me refactor the authentication module. Create a plan first.")
-
-    # createPlan might need permission depending on config
-    wait_for_permission_or_prompt(child, response='y', timeout=60)
-    time.sleep(0.3)
-
-    # Check plan status
-    type_slowly(child, "plan", delay=0.08)
-
-    wait_for_prompt(child)
-    time.sleep(0.5)
-
-    type_slowly(child, "quit", delay=0.08)
-
-    child.expect(pexpect.EOF, timeout=5)
-    print("\nTODO demo completed.")
-
-
-def run_references_demo():
-    """Run references plugin demo - documentation loading."""
-    print("Starting references plugin demo...")
-
-    child = pexpect.spawn(
-        'python', ['simple-client/interactive_client.py', '--env-file', '.env'],
-        encoding='utf-8',
-        timeout=120,
-        cwd=str(PROJECT_ROOT)
-    )
-    child.logfile_read = sys.stdout
-
-    wait_for_prompt(child)
-    time.sleep(0.3)
-
-    # List available references
-    type_slowly(child, "listReferences", delay=0.08)
-
-    wait_for_prompt(child)
-    time.sleep(0.3)
-
-    # Ask something that might trigger reference selection
-    type_slowly(child, "I need to add a new API endpoint. What standards should I follow?")
-
-    # Handle permission if selectReferences is called (or prompt if granted/skipped)
-    wait_for_permission_or_prompt(child, response='y', timeout=60)
-    time.sleep(0.5)
-
-    type_slowly(child, "quit", delay=0.08)
-
-    child.expect(pexpect.EOF, timeout=5)
-    print("\nreferences demo completed.")
-
-
-def run_subagent_demo():
-    """Run subagent plugin demo - spawning specialized agents."""
-    print("Starting subagent plugin demo...")
-
-    child = pexpect.spawn(
-        'python', ['simple-client/interactive_client.py', '--env-file', '.env'],
-        encoding='utf-8',
-        timeout=180,  # Subagents take longer
-        cwd=str(PROJECT_ROOT)
-    )
-    child.logfile_read = sys.stdout
-
-    wait_for_prompt(child)
-    time.sleep(0.3)
-
-    # List available profiles
-    type_slowly(child, "profiles", delay=0.08)
-
-    wait_for_prompt(child)
-    time.sleep(0.3)
-
-    # Ask for analysis that might spawn a subagent
-    type_slowly(child, "Analyze this codebase structure and identify the main components")
-
-    # spawn_subagent requires permission (use longer timeout for subagent execution)
-    wait_for_permission_or_prompt(child, response='y', timeout=120)
-    time.sleep(0.5)
-
-    type_slowly(child, "quit", delay=0.08)
-
-    child.expect(pexpect.EOF, timeout=5)
-    print("\nsubagent demo completed.")
-
-
-DEMOS = {
-    'cli': run_cli_demo,
-    'file_edit': run_file_edit_demo,
-    'web_search': run_web_search_demo,
-    'todo': run_todo_demo,
-    'references': run_references_demo,
-    'subagent': run_subagent_demo,
-}
+    # Wait for EOF
+    child.expect(pexpect.EOF, timeout=10)
+    print(f"\n{name} completed.")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Run plugin demos for termsvg recording',
-        epilog='''
+        description='Run demo scripts for plugin recordings',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
 Examples:
-    # Record single demo
-    termtosvg -c "python run_demo.py cli" -g 100x40 cli_demo.svg
+    python run_demo.py shared/plugins/cli/demo.yaml
+    python run_demo.py shared/plugins/file_edit/demo.yaml
 
-    # Run demo directly (for testing)
-    python run_demo.py cli
-
-    # List available demos
-    python run_demo.py --list
-'''
+Script format (YAML):
+    name: CLI Plugin Demo
+    timeout: 120
+    setup:
+      - mkdir -p /tmp/demo
+    steps:
+      - type: "List the Python files"
+        permission: "y"
+      - type: "Show git status"
+        permission: "a"
+      - "quit"
+        """
     )
-    parser.add_argument('demo', nargs='?', choices=list(DEMOS.keys()),
-                        help='Demo to run')
-    parser.add_argument('--list', action='store_true',
-                        help='List available demos')
+    parser.add_argument('script', type=Path, help='Path to demo YAML script')
 
     args = parser.parse_args()
 
-    if args.list:
-        print("Available demos:")
-        for name in DEMOS:
-            print(f"  - {name}")
-        return
+    if not args.script.exists():
+        # Try relative to project root
+        script_path = PROJECT_ROOT / args.script
+        if not script_path.exists():
+            print(f"Error: Script not found: {args.script}")
+            sys.exit(1)
+    else:
+        script_path = args.script
 
-    if not args.demo:
-        parser.print_help()
-        return
-
-    # Change to project root
-    os.chdir(PROJECT_ROOT)
-
-    DEMOS[args.demo]()
+    run_demo(script_path)
 
 
 if __name__ == '__main__':
