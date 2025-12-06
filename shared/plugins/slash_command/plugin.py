@@ -1,11 +1,17 @@
 """Slash command plugin for processing /command references.
 
-This plugin enables users to type /command_name which gets sent to the model.
+This plugin enables users to type /command_name arg1 arg2 which gets sent to the model.
 The model understands this as a reference to a command file in .jaato/commands/
-and calls the processCommand tool to read and process the file.
+and calls the processCommand tool to read, substitute parameters, and process the file.
+
+Template syntax in command files:
+- {{$1}}, {{$2}}, etc. - Positional parameters (1-indexed)
+- {{$1:default}} - Positional parameter with default value
+- {{$0}} - All arguments joined with spaces
 """
 
 import os
+import re
 from pathlib import Path
 from typing import Dict, List, Any, Callable, Optional
 from google.genai import types
@@ -18,6 +24,9 @@ DEFAULT_COMMANDS_DIR = ".jaato/commands"
 
 # Maximum file size to read (100KB)
 MAX_COMMAND_FILE_SIZE = 100_000
+
+# Pattern to match template variables: {{$1}}, {{$2:default}}, etc.
+TEMPLATE_PATTERN = re.compile(r'\{\{\$(\d+)(?::([^}]*))?\}\}')
 
 
 class SlashCommandPlugin:
@@ -82,14 +91,22 @@ class SlashCommandPlugin:
         return [types.FunctionDeclaration(
             name='processCommand',
             description='Process a slash command by reading its file from .jaato/commands/ directory. '
-                       'Call this when the user types /command_name to retrieve the command file contents.',
+                       'Call this when the user types /command_name [args...] to retrieve and process '
+                       'the command file contents with parameter substitution.',
             parameters_json_schema={
                 "type": "object",
                 "properties": {
                     "command_name": {
                         "type": "string",
                         "description": "The name of the command file to process (without leading /). "
-                                      "For example, if user types '/summarize', pass 'summarize'."
+                                      "For example, if user types '/summarize file.py', pass 'summarize'."
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Positional arguments passed after the command name. "
+                                      "For '/summarize file.py --verbose', pass ['file.py', '--verbose']. "
+                                      "These are substituted into the command template as {{$1}}, {{$2}}, etc."
                     }
                 },
                 "required": ["command_name"]
@@ -108,27 +125,35 @@ class SlashCommandPlugin:
 
         return f"""You have access to slash commands via `processCommand`.
 
-When the user types a message starting with "/" (e.g., "/summarize", "/review", "/help"),
+When the user types a message starting with "/" (e.g., "/summarize file.py", "/review src/"),
 this is a slash command referencing a command file in .jaato/commands/ directory.
 
 To process a slash command:
-1. Extract the command name (the part after "/")
-2. Call processCommand(command_name="<name>") to read the command file
-3. Follow the instructions contained in the command file
+1. Extract the command name (the first word after "/")
+2. Extract any arguments (words after the command name)
+3. Call processCommand(command_name="<name>", args=["arg1", "arg2", ...])
+4. Follow the instructions in the returned content
 
 Currently available commands: {commands_list}
 
-Example:
+Examples:
 - User types: "/summarize"
-- You call: processCommand(command_name="summarize")
-- The tool returns the command file contents with instructions to follow
+  You call: processCommand(command_name="summarize")
 
-The command file may contain:
-- A prompt template or instructions for how to respond
-- Parameters or context for the task
-- Specific formatting requirements
+- User types: "/summarize file.py"
+  You call: processCommand(command_name="summarize", args=["file.py"])
 
-After reading the command file, execute the instructions it contains.
+- User types: "/review src/main.py tests/"
+  You call: processCommand(command_name="review", args=["src/main.py", "tests/"])
+
+The command file may contain template variables that get substituted with args:
+- {{{{$1}}}} - First argument
+- {{{{$2}}}} - Second argument
+- {{{{$1:default}}}} - First argument with default value if not provided
+- {{{{$0}}}} - All arguments joined with spaces
+
+After processing, the tool returns the command content with parameters substituted.
+Execute the instructions contained in the returned content.
 If the command file is not found, inform the user and suggest listing available commands."""
 
     def get_auto_approved_tools(self) -> List[str]:
@@ -142,16 +167,54 @@ If the command file is not found, inform the user and suggest listing available 
         """
         return []
 
-    def _execute_process_command(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Process a slash command by reading its file.
+    def _substitute_parameters(self, content: str, args: List[str]) -> tuple[str, List[str]]:
+        """Substitute template variables in command content with provided arguments.
+
+        Template syntax:
+        - {{$1}}, {{$2}}, etc. - Positional parameters (1-indexed)
+        - {{$1:default}} - Positional parameter with default value
+        - {{$0}} - All arguments joined with spaces
 
         Args:
-            args: Dict containing 'command_name'.
+            content: The command file content with template variables
+            args: List of positional arguments
 
         Returns:
-            Dict containing the command file contents or an error.
+            Tuple of (substituted_content, list of missing required parameters)
+        """
+        missing_params = []
+
+        def replace_match(match: re.Match) -> str:
+            index = int(match.group(1))
+            default = match.group(2)  # None if no default specified
+
+            if index == 0:
+                # {{$0}} - all arguments joined
+                return ' '.join(args) if args else (default if default is not None else '')
+
+            # 1-indexed positional parameter
+            if index <= len(args):
+                return args[index - 1]
+            elif default is not None:
+                return default
+            else:
+                missing_params.append(f'${index}')
+                return f'{{{{${index}}}}}'  # Leave unreplaced
+
+        result = TEMPLATE_PATTERN.sub(replace_match, content)
+        return result, missing_params
+
+    def _execute_process_command(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Process a slash command by reading its file and substituting parameters.
+
+        Args:
+            args: Dict containing 'command_name' and optionally 'args' (list of strings).
+
+        Returns:
+            Dict containing the processed command content or an error.
         """
         command_name = args.get('command_name', '').strip()
+        command_args = args.get('args', []) or []
 
         if not command_name:
             return {
@@ -209,13 +272,29 @@ If the command file is not found, inform the user and suggest listing available 
 
         # Read the command file
         try:
-            content = command_file.read_text(encoding='utf-8')
-            return {
-                'command_name': command_name,
-                'content': content,
-                'file_path': str(command_file),
-                'size': file_size
-            }
+            raw_content = command_file.read_text(encoding='utf-8')
+
+            # Substitute parameters if any args provided
+            if command_args:
+                content, missing = self._substitute_parameters(raw_content, command_args)
+                result = {
+                    'command_name': command_name,
+                    'content': content,
+                    'file_path': str(command_file),
+                    'size': file_size,
+                    'args_provided': command_args,
+                }
+                if missing:
+                    result['missing_parameters'] = missing
+                    result['hint'] = f'Some parameters were not provided: {", ".join(missing)}'
+                return result
+            else:
+                return {
+                    'command_name': command_name,
+                    'content': raw_content,
+                    'file_path': str(command_file),
+                    'size': file_size
+                }
         except Exception as e:
             return {
                 'error': f'Failed to read command file: {e}',

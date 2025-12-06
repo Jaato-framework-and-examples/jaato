@@ -549,18 +549,19 @@ File references:
   Use ↑/↓ to navigate the dropdown, Enter or TAB to accept.
 
 Slash commands:
-  Use /command_name to invoke slash commands from .jaato/commands/.
+  Use /command_name [args...] to invoke slash commands from .jaato/commands/.
   - Type / to see available commands with descriptions
-  - The model reads the command file and follows its instructions
-  - Command files can contain prompts, templates, or task definitions
-  Example: "/summarize" runs .jaato/commands/summarize
+  - Pass arguments after the command name: /review file.py
+  - Command files use {{$1}}, {{$2}} for parameter substitution
+  - Use {{$1:default}} for optional parameters with defaults
+  Example: "/summarize" or "/review src/main.py"
 
 Example prompts:
   - "List files in the current directory"
   - "Show me the git status"
   - "Review @src/utils.py for issues"
   - "Explain what @./README.md describes"
-  - "/summarize" - Invoke a slash command
+  - "/review src/main.py" - Invoke slash command with argument
 
 Multi-turn conversation:
   The model remembers previous exchanges in this session.
