@@ -2,59 +2,19 @@
 # Record all plugin demos with termtosvg
 #
 # Prerequisites:
-#   pip install pexpect termtosvg
+#   pip install pexpect pyyaml termtosvg
 #   Valid .env file with API credentials
 #
 # Usage:
-#   ./record_all.sh              # Record all demos
-#   ./record_all.sh cli          # Record specific demo
-#   ./record_all.sh cli file_edit # Record multiple demos
+#   ./record_all.sh                           # Record all demos
+#   ./record_all.sh shared/plugins/cli        # Record specific plugin demo
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-OUTPUT_DIR="$SCRIPT_DIR/recordings"
 
 cd "$PROJECT_ROOT"
-
-# Create output directory
-mkdir -p "$OUTPUT_DIR"
-
-# Demo configurations: name, width, height
-declare -A DEMO_CONFIGS=(
-    ["cli"]="100x40"
-    ["file_edit"]="100x45"
-    ["web_search"]="100x40"
-    ["todo"]="100x45"
-    ["references"]="100x42"
-    ["subagent"]="100x45"
-)
-
-record_demo() {
-    local name=$1
-    local geometry=${DEMO_CONFIGS[$name]}
-
-    echo "=============================================="
-    echo "Recording: $name ($geometry)"
-    echo "=============================================="
-
-    termtosvg \
-        -c "python $SCRIPT_DIR/run_demo.py $name" \
-        -g "$geometry" \
-        "$OUTPUT_DIR/${name}_demo.svg"
-
-    echo "Saved: $OUTPUT_DIR/${name}_demo.svg"
-    echo ""
-}
-
-# Determine which demos to record
-if [ $# -eq 0 ]; then
-    # Record all demos
-    DEMOS=("cli" "file_edit" "web_search" "todo" "references" "subagent")
-else
-    DEMOS=("$@")
-fi
 
 # Check prerequisites
 if ! command -v termtosvg &> /dev/null; then
@@ -67,37 +27,62 @@ python -c "import pexpect" 2>/dev/null || {
     exit 1
 }
 
+python -c "import yaml" 2>/dev/null || {
+    echo "Error: pyyaml not found. Install with: pip install pyyaml"
+    exit 1
+}
+
 if [ ! -f "$PROJECT_ROOT/.env" ]; then
     echo "Warning: .env file not found. Demos require valid API credentials."
 fi
 
-# Record requested demos
-for demo in "${DEMOS[@]}"; do
-    if [[ -v "DEMO_CONFIGS[$demo]" ]]; then
-        record_demo "$demo"
-    else
-        echo "Unknown demo: $demo"
-        echo "Available demos: ${!DEMO_CONFIGS[*]}"
+record_demo() {
+    local yaml_file=$1
+    local plugin_dir=$(dirname "$yaml_file")
+    local output_file="$plugin_dir/demo.svg"
+
+    echo "=============================================="
+    echo "Recording: $yaml_file"
+    echo "Output: $output_file"
+    echo "=============================================="
+
+    termtosvg \
+        -c "python $SCRIPT_DIR/run_demo.py $yaml_file" \
+        -g "100x40" \
+        "$output_file"
+
+    echo "Saved: $output_file"
+    echo ""
+}
+
+# Find demo scripts to record
+if [ $# -eq 0 ]; then
+    # Find all demo.yaml files in plugin directories
+    DEMO_FILES=$(find shared/plugins -name "demo.yaml" -type f 2>/dev/null)
+    if [ -z "$DEMO_FILES" ]; then
+        echo "No demo.yaml files found in shared/plugins/"
         exit 1
     fi
+else
+    # Use provided paths
+    DEMO_FILES=""
+    for arg in "$@"; do
+        if [ -f "$arg/demo.yaml" ]; then
+            DEMO_FILES="$DEMO_FILES $arg/demo.yaml"
+        elif [ -f "$arg" ]; then
+            DEMO_FILES="$DEMO_FILES $arg"
+        else
+            echo "Error: Not found: $arg or $arg/demo.yaml"
+            exit 1
+        fi
+    done
+fi
+
+# Record each demo
+for yaml_file in $DEMO_FILES; do
+    record_demo "$yaml_file"
 done
 
 echo "=============================================="
 echo "Recording complete!"
-echo "Output directory: $OUTPUT_DIR"
 echo "=============================================="
-
-# Optionally copy to plugin directories
-read -p "Copy recordings to plugin demo directories? [y/N] " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    for demo in "${DEMOS[@]}"; do
-        src="$OUTPUT_DIR/${demo}_demo.svg"
-        if [ -f "$src" ]; then
-            dest="$PROJECT_ROOT/shared/plugins/$demo/demo/demo.svg"
-            mkdir -p "$(dirname "$dest")"
-            cp "$src" "$dest"
-            echo "Copied: $dest"
-        fi
-    done
-fi

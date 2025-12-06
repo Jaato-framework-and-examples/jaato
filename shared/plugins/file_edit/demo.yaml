@@ -1,0 +1,23 @@
+name: File Edit Plugin Demo
+timeout: 120
+
+setup:
+  - mkdir -p /tmp/jaato_demo
+  - |
+    cat > /tmp/jaato_demo/config.py << 'EOF'
+    # Configuration file
+    DEFAULT_TIMEOUT = 30
+    MAX_RETRIES = 3
+    ENABLE_LOGGING = True
+    DEBUG_MODE = False
+    EOF
+
+steps:
+  - type: "Read the file /tmp/jaato_demo/config.py"
+    permission: "y"
+
+  - type: "Update /tmp/jaato_demo/config.py to change MAX_RETRIES from 3 to 5"
+    permission: "y"
+
+  - type: "quit"
+    delay: 0.08
