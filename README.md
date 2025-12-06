@@ -101,9 +101,7 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Interactive Client
-
-The interactive client provides a conversational interface with multi-turn support and permission prompts:
+The primary way to use jaato is through the **Interactive Client**, which provides a full-featured conversational interface for interacting with LLMs and tools.
 
 ```bash
 # Start interactive session
@@ -116,19 +114,41 @@ The interactive client provides a conversational interface with multi-turn suppo
 .venv/bin/python simple-client/interactive_client.py -p "What time is it?"
 ```
 
-Features:
-- **Multi-turn conversations** with context preservation
-- **Permission prompts** for tool execution approval
-- **Plan tracking** with the TODO plugin for complex tasks
-- **Readline history** with ↑/↓ navigation
+### Features
 
-Commands in interactive mode: `help`, `tools`, `reset`, `history`, `plan`, `quit`
+- **Multi-turn conversations** with full context preservation
+- **Permission prompts** for tool execution approval (approve, deny, or allow-all)
+- **Plan tracking** with the TODO plugin for complex multi-step tasks
+- **Readline history** with ↑/↓ navigation and persistent history
+- **Subagent delegation** for specialized task handling
+- **Web search** integration for current information
+
+### Interactive Commands
+
+| Command | Description |
+|---------|-------------|
+| `help` | Show available commands |
+| `tools` | List all registered tools |
+| `reset` | Clear conversation history and start fresh |
+| `history` | Display conversation history |
+| `plan` | Show current task plan (TODO plugin) |
+| `quit` | Exit the session |
 
 See [simple-client/README.md](simple-client/README.md) for full documentation.
 
+## Other Tools
+
+### Simple Connectivity Test
+
+Verify your Vertex AI setup is working correctly:
+
+```bash
+.venv/bin/python simple-connectivity-test/simple-connectivity-test.py
+```
+
 ### CLI vs MCP Harness
 
-Compare token usage between CLI and MCP tool approaches:
+A benchmarking tool to compare token usage between CLI and MCP tool approaches:
 
 ```bash
 .venv/bin/python cli_vs_mcp/cli_mcp_harness.py \
@@ -197,14 +217,6 @@ Examples:
 
 # List children
 --domain-params '{"parent_page_id": "123456789", "limit": 20}'
-```
-
-### Simple Connectivity Test
-
-Verify your Vertex AI setup:
-
-```bash
-.venv/bin/python simple-connectivity-test/simple-connectivity-test.py
 ```
 
 ### COBOL ModLog Training Generator
