@@ -503,8 +503,20 @@ class FileSessionPlugin:
         return None  # Instructions are injected via prompt enrichment when needed
 
     def get_auto_approved_tools(self) -> List[str]:
-        """Session description is safe to auto-approve."""
-        return ["session_describe"]
+        """Return tools that should be auto-approved without permission prompts.
+
+        Includes both the model tool (session_describe) and user commands
+        (save, resume, sessions, delete-session). User commands are invoked
+        directly by the user, so they should never require permission prompts.
+        """
+        return [
+            "session_describe",
+            # User commands - these are invoked directly by the user
+            "save",
+            "resume",
+            "sessions",
+            "delete-session",
+        ]
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for session management."""
