@@ -2,6 +2,10 @@
 
 The permission plugin (`askPermission`) provides access control for tool execution in the jaato orchestration framework. It intercepts tool calls and enforces blacklist/whitelist policies, with support for interactive approval when policies are ambiguous.
 
+## Demo
+
+![Permission Plugin Demo](demo.svg)
+
 ## Architecture Overview
 
 ```

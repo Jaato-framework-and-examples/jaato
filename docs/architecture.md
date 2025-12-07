@@ -77,6 +77,7 @@ flowchart TB
                 SUB[SubagentPlugin<br/>plugins/subagent/]
                 FEDIT[FileEditPlugin<br/>plugins/file_edit/]
                 SLASH[SlashCommandPlugin<br/>plugins/slash_command/]
+                CLAR[ClarificationPlugin<br/>plugins/clarification/]
             end
         end
 
@@ -101,6 +102,7 @@ flowchart TB
     PR --> SUB
     PR --> FEDIT
     PR --> SLASH
+    PR --> CLAR
     TE --> PERM
     MCP --> MCM
     MCM --> MCPS
@@ -367,6 +369,10 @@ classDiagram
         +subscribes_to_prompt_enrichment() bool
         +enrich_prompt(prompt) PromptEnrichmentResult
         +get_model_requirements() List~str~
+    class ClarificationPlugin {
+        +name = "clarification"
+        -actor: ClarificationActor
+        +request_clarification(context, questions)
     }
 
     ToolPlugin <|.. CLIToolPlugin
@@ -378,6 +384,7 @@ classDiagram
     ToolPlugin <|.. FileEditPlugin
     ToolPlugin <|.. SlashCommandPlugin
     ToolPlugin <|.. MultimodalPlugin
+    ToolPlugin <|.. ClarificationPlugin
     PluginRegistry o-- ToolPlugin
     ToolPlugin ..> UserCommand : returns
 ```
@@ -473,6 +480,7 @@ shared/
     ├── subagent/            # SubagentPlugin (model tools + user commands)
     ├── file_edit/           # FileEditPlugin (file operations with diff approval)
     ├── slash_command/       # SlashCommandPlugin (process /command references)
+    ├── clarification/       # ClarificationPlugin (request user input)
     │
     │   # GC Plugins (PLUGIN_KIND = "gc") - NOT managed by PluginRegistry
     ├── gc/                  # Base types: GCPlugin protocol, GCConfig, GCResult

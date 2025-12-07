@@ -557,6 +557,52 @@ Provides tools for reading, modifying, and managing files with integrated permis
 registry.expose_all({'file_edit': {'backup_dir': '/custom/backup/path'}})
 ```
 
+### Clarification Plugin (`clarification`)
+
+Allows the model to request clarification from users by asking questions with multiple choice options or free-text responses.
+
+**Configuration:**
+- `actor_type`: How to collect responses - `"console"` (default) or `"auto"` (for testing)
+- `actor_config`: Actor-specific configuration
+
+**Tools:**
+- `request_clarification`: Ask the user one or more questions
+
+**Auto-approved:** Yes (user interaction is inherently approved)
+
+**Features:**
+- Multiple questions per request
+- Question types: `single_choice`, `multiple_choice`, `free_text`
+- Optional questions with defaults
+- Questions and choices use ordinal indices (1, 2, 3...) for simplicity
+- Console UI shows required/optional status
+
+**Example:**
+```python
+registry.expose_all({'clarification': {'actor_type': 'console'}})
+```
+
+**Tool Usage Example:**
+```json
+{
+  "context": "I need to configure the deployment.",
+  "questions": [
+    {
+      "text": "Which environment?",
+      "question_type": "single_choice",
+      "choices": ["Development", "Staging", "Production"],
+      "default_choice": 1
+    },
+    {
+      "text": "Enable optional features?",
+      "question_type": "multiple_choice",
+      "choices": ["Logging", "Metrics", "Tracing"],
+      "required": false
+    }
+  ]
+}
+```
+
 ---
 
 ## File Structure
@@ -597,6 +643,12 @@ shared/plugins/
 │   ├── backup.py
 │   ├── diff_utils.py
 │   ├── README.md
+│   └── tests/
+├── clarification/   # User clarification plugin
+│   ├── __init__.py
+│   ├── plugin.py
+│   ├── models.py
+│   ├── actors.py
 │   └── tests/
 └── references/      # Documentation injection plugin
     ├── __init__.py

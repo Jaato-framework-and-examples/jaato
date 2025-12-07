@@ -124,6 +124,36 @@ class JaatoClient:
         """Get the configured model name."""
         return self._model_name
 
+    def list_available_models(self, prefix: Optional[str] = None) -> List[str]:
+        """List models from Vertex AI.
+
+        Note: This returns the model catalog, not region-specific availability.
+        Some models may not be available in all regions. Use location='global'
+        when connecting for widest model access, or check Google's documentation
+        for region-specific availability.
+
+        Args:
+            prefix: Optional name prefix to filter by (e.g., "gemini").
+                    Defaults to None (all models).
+
+        Returns:
+            List of model names from the catalog.
+
+        Raises:
+            RuntimeError: If client is not connected.
+        """
+        if not self._client:
+            raise RuntimeError("Client not connected. Call connect() first.")
+
+        models = []
+        for model in self._client.models.list():
+            # Filter by prefix if specified
+            if prefix and not model.name.startswith(prefix):
+                continue
+            models.append(model.name)
+
+        return models
+
     def connect(self, project: str, location: str, model: str) -> None:
         """Connect to Vertex AI.
 
