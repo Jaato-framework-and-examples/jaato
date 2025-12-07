@@ -14,7 +14,6 @@ import readline  # Enables arrow key history navigation (fallback)
 from typing import Optional, Dict, Any, List
 import shutil
 import textwrap
-from typing import Optional, Dict, Any
 
 # Try to import prompt_toolkit for enhanced completion
 try:
