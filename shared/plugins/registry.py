@@ -48,6 +48,7 @@ class PluginRegistry:
         """
         self._plugins: Dict[str, ToolPlugin] = {}
         self._exposed: Set[str] = set()
+        self._enrichment_only: Set[str] = set()  # Plugins for prompt enrichment only
         self._configs: Dict[str, Dict[str, Any]] = {}
         self._model_name: Optional[str] = model_name
         self._skipped_plugins: Dict[str, List[str]] = {}  # name -> required patterns
@@ -225,6 +226,39 @@ class PluginRegistry:
     def get_plugin(self, name: str) -> Optional[ToolPlugin]:
         """Get a plugin by name, or None if not found."""
         return self._plugins.get(name)
+
+    def register_plugin(
+        self,
+        plugin: ToolPlugin,
+        expose: bool = False,
+        enrichment_only: bool = False,
+        config: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Manually register a plugin with the registry.
+
+        Use this for plugins that aren't discovered via entry points or directory
+        scanning, such as the session plugin which is configured separately.
+
+        This allows the plugin to participate in prompt enrichment and other
+        registry-managed features without being discovered.
+
+        Args:
+            plugin: The plugin instance to register.
+            expose: If True, also expose the plugin's tools (calls initialize).
+            enrichment_only: If True, only participate in prompt enrichment
+                           (not included in get_exposed_declarations/executors).
+            config: Optional configuration dict if exposing.
+
+        Example:
+            # Register session plugin for prompt enrichment only
+            registry.register_plugin(session_plugin, enrichment_only=True)
+        """
+        self._plugins[plugin.name] = plugin
+
+        if enrichment_only:
+            self._enrichment_only.add(plugin.name)
+        elif expose:
+            self.expose_tool(plugin.name, config)
 
     def expose_tool(self, name: str, config: Optional[Dict[str, Any]] = None) -> bool:
         """Expose a plugin's tools to the model.
@@ -416,13 +450,17 @@ class PluginRegistry:
     # ==================== Prompt Enrichment ====================
 
     def get_prompt_enrichment_subscribers(self) -> List[ToolPlugin]:
-        """Get exposed plugins that subscribe to prompt enrichment.
+        """Get plugins that subscribe to prompt enrichment.
+
+        Includes both exposed plugins and enrichment-only plugins.
 
         Returns:
             List of plugins that have subscribed to prompt enrichment.
         """
         subscribers = []
-        for name in self._exposed:
+        # Include both exposed and enrichment-only plugins
+        all_enrichment_names = self._exposed | self._enrichment_only
+        for name in all_enrichment_names:
             try:
                 plugin = self._plugins[name]
                 if (hasattr(plugin, 'subscribes_to_prompt_enrichment') and

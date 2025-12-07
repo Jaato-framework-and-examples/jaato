@@ -379,7 +379,7 @@ class JaatoClient:
         """
         enriched_prompt = prompt
 
-        # Run through plugin enrichment pipeline
+        # Run through plugin enrichment pipeline (all registered plugins)
         if self._registry:
             result = self._registry.enrich_prompt(prompt)
             enriched_prompt = result.prompt
