@@ -77,6 +77,29 @@ user_commands = registry.get_exposed_user_commands()
 
 **Note**: User commands are distinct from model tools. They are commands that users (human or agent) can invoke directly without going through the model's function calling.
 
+### Model-Aware Plugin Registry
+
+Some plugins require specific model capabilities. For example, the `multimodal` plugin requires Gemini 3+ for multimodal function responses. Pass the `model_name` to the registry to enable automatic compatibility checking:
+
+```python
+from shared.plugins import PluginRegistry
+
+# Create registry with model name for compatibility checking
+model_name = 'gemini-2.5-flash'
+registry = PluginRegistry(model_name=model_name)
+registry.discover()
+
+# expose_tool() will skip plugins that don't support this model
+registry.expose_all()
+# Output: [PluginRegistry] Plugin 'multimodal' skipped: model 'gemini-2.5-flash' not in ['gemini-3-pro*', ...]
+
+# Check which plugins were skipped and why
+skipped = registry.list_skipped_plugins()
+# Returns: {'multimodal': ['gemini-3-pro*', 'gemini-3.5-*', 'gemini-4*']}
+```
+
+This prevents runtime errors when a plugin's features aren't supported by the current model.
+
 ### Integration with JaatoClient
 
 The recommended way to use plugins is with `JaatoClient`:
@@ -84,14 +107,16 @@ The recommended way to use plugins is with `JaatoClient`:
 ```python
 from shared import JaatoClient, PluginRegistry, TokenLedger
 
-# Setup
-registry = PluginRegistry()
+model_name = 'gemini-2.5-flash'
+
+# Setup with model-aware registry
+registry = PluginRegistry(model_name=model_name)
 registry.discover()
-registry.expose_all()  # Expose all plugins by default
+registry.expose_all()  # Incompatible plugins automatically skipped
 
 # Create and configure client
 jaato = JaatoClient()
-jaato.connect('my-project', 'us-central1', 'gemini-2.5-flash')
+jaato.connect('my-project', 'us-central1', model_name)
 jaato.configure_tools(registry, ledger=TokenLedger())
 
 # Run prompts (SDK manages history internally)
@@ -118,11 +143,12 @@ Note: Calling `configure_tools()` creates a new chat session, so conversation hi
 ```python
 from shared import JaatoClient, PluginRegistry
 
-registry = PluginRegistry()
+model_name = 'gemini-2.5-flash'
+registry = PluginRegistry(model_name=model_name)
 registry.discover()
 
 jaato = JaatoClient()
-jaato.connect('my-project', 'us-central1', 'gemini-2.5-flash')
+jaato.connect('my-project', 'us-central1', model_name)
 
 # First session: All plugins
 registry.expose_all()
@@ -244,6 +270,59 @@ class ToolPlugin(Protocol):
 
         Returns:
             List of UserCommand objects for autocompletion and execution.
+        """
+        ...
+
+    # ==================== Optional Methods ====================
+    # The following methods are optional extensions to the protocol.
+    # Implement them to enable model-specific or prompt enrichment features.
+
+    def get_model_requirements(self) -> Optional[List[str]]:
+        """Return glob patterns for models this plugin requires.
+
+        If the PluginRegistry has a model_name set and it doesn't match
+        any of the patterns, the plugin will be skipped during expose_tool()
+        with a warning message.
+
+        Examples:
+            ["gemini-3-pro*", "gemini-3.5-*"]  # Requires Gemini 3+
+            ["gemini-2.5-*", "gemini-3-*"]     # Requires 2.5 or 3.x
+            None                               # Works with any model (default)
+
+        Returns:
+            List of glob patterns, or None if plugin works with any model.
+        """
+        ...
+
+    def subscribes_to_prompt_enrichment(self) -> bool:
+        """Return True if this plugin wants to process prompts before sending.
+
+        Plugins that subscribe will have their enrich_prompt() method called
+        with the user's prompt before it is sent to the model. This enables:
+        - Detecting and processing @file references
+        - Adding context or instructions based on prompt content
+        - Tracking referenced resources for later tool calls
+
+        Returns:
+            True to subscribe, False otherwise (default).
+        """
+        ...
+
+    def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
+        """Enrich a user prompt before sending to the model.
+
+        Called only if subscribes_to_prompt_enrichment() returns True.
+        The plugin can inspect and modify the prompt.
+
+        IMPORTANT: Plugins should NOT remove @references from the prompt.
+        The framework handles @reference cleanup after all plugins have
+        processed the prompt.
+
+        Args:
+            prompt: The user's original prompt text.
+
+        Returns:
+            PromptEnrichmentResult with the enriched prompt and metadata.
         """
         ...
 ```
