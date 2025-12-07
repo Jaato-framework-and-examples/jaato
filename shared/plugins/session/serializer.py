@@ -183,13 +183,14 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
         JSON-compatible dictionary.
     """
     return {
-        'version': '1.0',
+        'version': '1.1',  # Bumped for user_inputs support
         'session_id': state.session_id,
         'description': state.description,
         'created_at': state.created_at.isoformat(),
         'updated_at': state.updated_at.isoformat(),
         'turn_count': state.turn_count,
         'turn_accounting': state.turn_accounting,
+        'user_inputs': state.user_inputs,
         'metadata': state.metadata,
         'connection': {
             'project': state.project,
@@ -226,6 +227,7 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         description=data.get('description'),
         turn_count=data.get('turn_count', 0),
         turn_accounting=data.get('turn_accounting', []),
+        user_inputs=data.get('user_inputs', []),  # Added in 1.1
         metadata=data.get('metadata', {}),
         project=connection.get('project'),
         location=connection.get('location'),
