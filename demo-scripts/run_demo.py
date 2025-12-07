@@ -99,9 +99,9 @@ def run_demo(script_path: Path):
         for cmd in setup:
             subprocess.run(cmd, shell=True, cwd=PROJECT_ROOT)
 
-    # Spawn the client
+    # Spawn the client with --auto-clarify to auto-answer any clarification questions
     child = pexpect.spawn(
-        'python', ['simple-client/interactive_client.py', '--env-file', '.env'],
+        'python', ['simple-client/interactive_client.py', '--env-file', '.env', '--auto-clarify'],
         encoding='utf-8',
         timeout=timeout,
         cwd=str(PROJECT_ROOT)
