@@ -573,13 +573,119 @@ class FileReferenceProcessor:
             return []
 
 
-class CombinedCompleter(Completer):
-    """Combined completer for commands, file references, and slash commands.
+class SessionIdCompleter(Completer):
+    """Complete session IDs for session commands.
 
-    Merges CommandCompleter, AtFileCompleter, and SlashCommandCompleter to provide:
+    Triggers completion when user types session commands followed by a space:
+    - "delete-session " -> completes with available session IDs
+    - "resume " -> completes with available session IDs
+
+    Supports both full session IDs and numeric indexes.
+    """
+
+    # Commands that accept session ID arguments
+    SESSION_COMMANDS = ['delete-session', 'resume']
+
+    def __init__(self, session_provider: Optional[Callable[[], list]] = None):
+        """Initialize the session ID completer.
+
+        Args:
+            session_provider: Callback that returns list of SessionInfo objects
+                            with session_id and description attributes.
+        """
+        self._session_provider = session_provider
+
+    def set_session_provider(self, provider: Callable[[], list]) -> None:
+        """Set the session provider callback.
+
+        Args:
+            provider: Callback that returns list of session info objects.
+        """
+        self._session_provider = provider
+
+    def get_completions(
+        self, document: Document, complete_event
+    ) -> Iterable[Completion]:
+        """Get session ID completions for session commands."""
+        # Don't strip - we need to detect the space after the command
+        text = document.text_before_cursor
+
+        # Check if input starts with a session command followed by space
+        command_match = None
+        text_lower = text.lower()
+        for cmd in self.SESSION_COMMANDS:
+            if text_lower.startswith(cmd + ' '):
+                command_match = cmd
+                break
+
+        if not command_match:
+            return
+
+        # Extract the argument portion after the command (may have leading space)
+        arg_text = text[len(command_match) + 1:]  # +1 for the space
+
+        # Get available sessions
+        if not self._session_provider:
+            return
+
+        try:
+            sessions = self._session_provider()
+        except Exception:
+            return
+
+        if not sessions:
+            return
+
+        # Provide completions - prefer numeric indexes, show session IDs only when typed
+        for i, session in enumerate(sessions, 1):
+            session_id = getattr(session, 'session_id', str(session))
+            description = getattr(session, 'description', None) or '(unnamed)'
+            index_str = str(i)
+
+            if not arg_text:
+                # No input yet - show only numeric indexes (cleaner UX)
+                yield Completion(
+                    index_str,
+                    start_position=0,
+                    display=f"{index_str}",
+                    display_meta=f"{session_id} - {description}",
+                )
+            elif arg_text.isdigit():
+                # User typing a number - could be index or start of session_id
+                if index_str.startswith(arg_text):
+                    yield Completion(
+                        index_str,
+                        start_position=-len(arg_text),
+                        display=f"{index_str}",
+                        display_meta=f"{session_id} - {description}",
+                    )
+                if session_id.startswith(arg_text):
+                    yield Completion(
+                        session_id,
+                        start_position=-len(arg_text),
+                        display=session_id,
+                        display_meta=description,
+                    )
+            else:
+                # User typing non-numeric - must be session_id
+                if session_id.startswith(arg_text):
+                    yield Completion(
+                        session_id,
+                        start_position=-len(arg_text),
+                        display=session_id,
+                        display_meta=description,
+                    )
+
+
+class CombinedCompleter(Completer):
+    """Combined completer for commands, file references, slash commands, and session IDs.
+
+    Merges CommandCompleter, AtFileCompleter, SlashCommandCompleter, and
+    SessionIdCompleter to provide:
     - Command completion at line start (help, tools, reset, etc.)
     - File path completion after @ symbols
     - Slash command completion after / symbols (from .jaato/commands/)
+    - Session ID completion after session commands (delete-session, resume)
 
     This allows seamless autocompletion for all use cases.
     """
@@ -592,6 +698,7 @@ class CombinedCompleter(Completer):
         base_path: Optional[str] = None,
         file_filter: Optional[callable] = None,
         commands_dir: Optional[str] = None,
+        session_provider: Optional[Callable[[], list]] = None,
     ):
         """Initialize the combined completer.
 
@@ -602,6 +709,7 @@ class CombinedCompleter(Completer):
             base_path: Base path for relative file completions (default: cwd).
             file_filter: Optional callable(filename) -> bool to filter files.
             commands_dir: Path to slash commands directory (default: .jaato/commands).
+            session_provider: Callback that returns list of session info objects.
         """
         self._command_completer = CommandCompleter(commands)
         self._file_completer = AtFileCompleter(
@@ -614,6 +722,15 @@ class CombinedCompleter(Completer):
             commands_dir=commands_dir,
             base_path=base_path,
         )
+        self._session_completer = SessionIdCompleter(session_provider)
+
+    def set_session_provider(self, provider: Callable[[], list]) -> None:
+        """Set the session provider callback for session ID completion.
+
+        Args:
+            provider: Callback that returns list of session info objects.
+        """
+        self._session_completer.set_session_provider(provider)
 
     def add_commands(self, commands: list[tuple[str, str]]) -> None:
         """Add commands dynamically (e.g., from plugins).
@@ -630,11 +747,13 @@ class CombinedCompleter(Completer):
     def get_completions(
         self, document: Document, complete_event
     ) -> Iterable[Completion]:
-        """Get completions from command, file, and slash command completers."""
+        """Get completions from all completers."""
         # Yield completions from all sources
         # CommandCompleter will only yield if appropriate (single word, no @ or /)
         # AtFileCompleter will only yield if @ is present
         # SlashCommandCompleter will only yield if / is present at start of word
+        # SessionIdCompleter will only yield after session commands (delete-session, resume)
         yield from self._command_completer.get_completions(document, complete_event)
         yield from self._file_completer.get_completions(document, complete_event)
         yield from self._slash_completer.get_completions(document, complete_event)
+        yield from self._session_completer.get_completions(document, complete_event)

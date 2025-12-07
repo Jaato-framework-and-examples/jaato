@@ -386,6 +386,32 @@ class FileSessionPlugin:
         except Exception as e:
             return {"status": "error", "message": f"Error saving session: {e}"}
 
+    def _resolve_session_id(self, session_id: Any) -> Optional[str]:
+        """Resolve a session ID, supporting numeric indexes.
+
+        Users can specify sessions by:
+        - Full session ID (e.g., "20251207_185349")
+        - Numeric index (e.g., 1, 2, 3) matching the `sessions` list order
+
+        Args:
+            session_id: Either a session ID string or a numeric index (1-based)
+
+        Returns:
+            The resolved session ID string, or None if not found
+        """
+        if session_id is None:
+            return None
+
+        # If it's a numeric index, look up the actual session ID
+        if isinstance(session_id, int):
+            sessions = self._client.list_sessions()
+            if 1 <= session_id <= len(sessions):
+                return sessions[session_id - 1].session_id
+            return None
+
+        # Otherwise, treat as a direct session ID string
+        return str(session_id)
+
     def _execute_resume(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the resume user command.
 
@@ -394,10 +420,15 @@ class FileSessionPlugin:
         if not self._client:
             return {"status": "error", "message": "Session plugin not properly configured"}
 
-        session_id = args.get("session_id")
+        raw_session_id = args.get("session_id")
 
         try:
-            if session_id:
+            if raw_session_id is not None:
+                # Resolve numeric index to actual session ID
+                session_id = self._resolve_session_id(raw_session_id)
+                if session_id is None:
+                    return {"status": "error", "message": f"Session not found: {raw_session_id}"}
+
                 # Resume specific session
                 state = self._client.resume_session(session_id)
                 desc = f' - "{state.description}"' if state.description else ''
@@ -451,6 +482,7 @@ class FileSessionPlugin:
 
             lines.append("=" * 60)
             lines.append("Use 'resume <session_id>' to restore a session.")
+            lines.append("Use 'delete-session <session_id or index>' to delete a session.")
 
             return {"status": "ok", "message": "\n".join(lines)}
 
@@ -460,14 +492,19 @@ class FileSessionPlugin:
     def _execute_delete_session(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the delete-session user command.
 
-        Deletes a saved session.
+        Deletes a saved session. Supports both full session IDs and numeric indexes.
         """
         if not self._client:
             return {"status": "error", "message": "Session plugin not properly configured"}
 
-        session_id = args.get("session_id")
-        if not session_id:
-            return {"status": "error", "message": "Usage: delete-session <session_id>"}
+        raw_session_id = args.get("session_id")
+        if raw_session_id is None:
+            return {"status": "error", "message": "Usage: delete-session <session_id or index>"}
+
+        # Resolve numeric index to actual session ID
+        session_id = self._resolve_session_id(raw_session_id)
+        if session_id is None:
+            return {"status": "error", "message": f"Session not found: {raw_session_id}"}
 
         try:
             if self._client.delete_session(session_id):
@@ -562,8 +599,20 @@ class FileSessionPlugin:
         return None  # Instructions are injected via prompt enrichment when needed
 
     def get_auto_approved_tools(self) -> List[str]:
-        """Session description is safe to auto-approve."""
-        return ["session_describe"]
+        """Return tools that should be auto-approved without permission prompts.
+
+        Includes both the model tool (session_describe) and user commands
+        (save, resume, sessions, delete-session). User commands are invoked
+        directly by the user, so they should never require permission prompts.
+        """
+        return [
+            "session_describe",
+            # User commands - these are invoked directly by the user
+            "save",
+            "resume",
+            "sessions",
+            "delete-session",
+        ]
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for session management."""

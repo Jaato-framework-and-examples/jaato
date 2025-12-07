@@ -230,6 +230,57 @@ class InteractiveClient:
             print(f"\nError executing {command_name}: {e}")
             return {"error": str(e)}
 
+    def _parse_command_args(self, command_name: str, raw_args: str) -> Dict[str, Any]:
+        """Parse raw argument string into named arguments dict.
+
+        Maps positional arguments to named parameters based on command.
+
+        Args:
+            command_name: The command being executed
+            raw_args: Raw argument string from user input
+
+        Returns:
+            Dictionary of named arguments
+        """
+        args: Dict[str, Any] = {}
+        raw_args = raw_args.strip()
+
+        if not raw_args:
+            return args
+
+        # Define argument mappings for commands that take positional args
+        # Format: command_name -> list of positional arg names
+        arg_mappings = {
+            "delete-session": ["session_id"],
+            "resume": ["session_id"],
+            "save": ["description"],  # Optional description for save
+        }
+
+        if command_name in arg_mappings:
+            param_names = arg_mappings[command_name]
+
+            # Special handling for commands that take a single string argument
+            # (e.g., "save My session description" should capture entire string)
+            if command_name == "save" and raw_args:
+                args["description"] = raw_args
+            else:
+                # Split args by whitespace for other commands
+                arg_parts = raw_args.split()
+                for i, param_name in enumerate(param_names):
+                    if i < len(arg_parts):
+                        val = arg_parts[i]
+                        # Only convert to int if it's purely numeric (no underscores)
+                        # Python allows underscores in int() which would corrupt session IDs
+                        if val.isdigit():
+                            args[param_name] = int(val)
+                        else:
+                            args[param_name] = val
+        else:
+            # For unknown commands, pass the raw args as 'args'
+            args["args"] = raw_args
+
+        return args
+
     def _display_command_result(self, command_name: str, result: Any, shared: bool) -> None:
         """Display the result of a plugin command to the user.
 
@@ -526,6 +577,12 @@ class InteractiveClient:
         # Add to completer for autocompletion (need (name, description) tuples)
         completer_cmds = [(cmd.name, cmd.description) for cmd in user_commands.values()]
         self._completer.add_commands(completer_cmds)
+
+        # Set up session ID completion if session plugin is available
+        if hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
+            session_plugin = self._jaato._session_plugin
+            if hasattr(session_plugin, 'list_sessions'):
+                self._completer.set_session_provider(session_plugin.list_sessions)
 
         self.log(f"[client] Registered {len(user_commands)} plugin command(s) for completion")
 
