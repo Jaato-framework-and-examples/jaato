@@ -4,6 +4,8 @@ The file_edit plugin provides tools for reading, modifying, and managing files w
 
 ## Demo
 
+The demo below shows the file edit workflow: reading a config file, then updating it to change `MAX_RETRIES` from 3 to 5. The update shows a colorized diff for approval before modifying the file.
+
 ![File Edit Plugin Demo](demo.svg)
 
 ## Overview

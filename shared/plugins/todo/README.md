@@ -4,6 +4,8 @@ The TODO plugin (`createPlan`, `updateStep`, `getPlanStatus`, `completePlan`) pr
 
 ## Demo
 
+The demo below shows creating an execution plan for refactoring the authentication module. The model registers the plan with ordered steps, and the console displays the plan status with visual progress indicators.
+
 ![TODO Plugin Demo](demo.svg)
 
 ## Architecture Overview
