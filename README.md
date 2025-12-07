@@ -41,6 +41,7 @@ jaato is a future-proof framework for building agentic AI applications, featurin
 
 | Plugin | Description |
 |--------|-------------|
+| [**background**](shared/plugins/background/README.md) | Run long-running tools in background with auto-backgrounding and task management |
 | [**clarification**](shared/plugins/clarification/README.md) | Request user clarification with multiple-choice or free-text questions |
 | [**cli**](shared/plugins/cli/README.md) | Execute local command-line tools via subprocess |
 | [**file_edit**](shared/plugins/file_edit/README.md) | Read, update, create, and delete files with diff-based approval and automatic backups |
@@ -49,10 +50,10 @@ jaato is a future-proof framework for building agentic AI applications, featurin
 | [**multimodal**](shared/plugins/multimodal/README.md) | Image viewing via @file references with model-driven decision to load visual content (Gemini 3+) |
 | [**permission**](shared/plugins/permission/README.md) | Control tool execution with blacklist/whitelist policies and interactive approval |
 | [**references**](shared/plugins/references/README.md) | Manage documentation source injection with auto-load and user-selectable references |
+| [**session**](shared/plugins/session/README.md) | Session persistence for saving/resuming conversations across restarts |
 | [**slash_command**](shared/plugins/slash_command/README.md) | Process /command references from .jaato/commands/ directory |
 | [**subagent**](shared/plugins/subagent/README.md) | Delegate tasks to specialized subagents with custom tool configurations |
 | [**todo**](shared/plugins/todo/README.md) | Plan tracking with workflow enforcement for complex multi-step tasks |
-| [**session**](shared/plugins/session/README.md) | Session persistence for saving/resuming conversations across restarts |
 | [**web_search**](shared/plugins/web_search/README.md) | Search the web using DuckDuckGo for current information |
 
 See [shared/plugins/README.md](shared/plugins/README.md) for plugin development documentation.

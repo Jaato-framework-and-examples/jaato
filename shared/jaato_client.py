@@ -191,6 +191,12 @@ class JaatoClient:
         for name, fn in registry.get_exposed_executors().items():
             self._executor.register(name, fn)
 
+        # Pass registry to executor for auto-background support
+        self._executor.set_registry(registry)
+
+        # Configure background plugin if exposed
+        self._configure_background_plugin(registry)
+
         # Set permission plugin for enforcement
         if permission_plugin:
             # Give permission plugin access to registry for plugin lookups
@@ -303,6 +309,23 @@ class JaatoClient:
 
         except (KeyError, AttributeError):
             # Subagent plugin not exposed or not available
+            pass
+
+    def _configure_background_plugin(self, registry: 'PluginRegistry') -> None:
+        """Pass registry to background plugin for capability discovery.
+
+        This allows the background plugin to discover which other plugins
+        implement BackgroundCapable and can have their tools backgrounded.
+
+        Args:
+            registry: PluginRegistry to check for background plugin.
+        """
+        try:
+            background_plugin = registry.get_plugin('background')
+            if background_plugin and hasattr(background_plugin, 'set_registry'):
+                background_plugin.set_registry(registry)
+        except (KeyError, AttributeError):
+            # Background plugin not exposed or not available
             pass
 
     def _create_chat(self, history: Optional[List[types.Content]] = None) -> None:
