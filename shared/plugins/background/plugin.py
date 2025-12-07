@@ -94,17 +94,13 @@ class BackgroundPlugin:
                 description="""Start a tool execution in the background.
 
 Use this when you anticipate a tool call will take significant time
-(e.g., long builds, complex searches, external API calls). The task
-runs asynchronously and you can continue with other work.
+(e.g., long builds, installs, complex searches). The task runs
+asynchronously and you can continue with other work.
 
 Returns a task_id you can use to check status or get results later.""",
                 parameters=types.Schema(
                     type=types.Type.OBJECT,
                     properties={
-                        "plugin_name": types.Schema(
-                            type=types.Type.STRING,
-                            description="Name of the plugin providing the tool"
-                        ),
                         "tool_name": types.Schema(
                             type=types.Type.STRING,
                             description="Name of the tool to execute"
@@ -118,7 +114,7 @@ Returns a task_id you can use to check status or get results later.""",
                             description="Optional timeout in seconds"
                         ),
                     },
-                    required=["plugin_name", "tool_name", "arguments"]
+                    required=["tool_name", "arguments"]
                 )
             ),
             types.FunctionDeclaration(
@@ -210,42 +206,39 @@ Use this to discover which tools can be run in background mode.""",
         """Start a background task.
 
         Args:
-            args: Dict containing plugin_name, tool_name, arguments,
+            args: Dict containing tool_name, arguments,
                   and optional timeout_seconds.
 
         Returns:
             Dict with success status and task handle info or error.
         """
-        plugin_name = args.get("plugin_name")
         tool_name = args.get("tool_name")
         arguments = args.get("arguments", {})
         timeout = args.get("timeout_seconds")
 
-        if not plugin_name or not tool_name:
+        if not tool_name:
             return {
                 "success": False,
-                "error": "plugin_name and tool_name are required"
+                "error": "tool_name is required"
             }
 
         # Refresh capable plugins list
         self._discover_capable_plugins()
 
-        # Find the capable plugin
-        if plugin_name not in self._capable_plugins:
+        # Find the plugin that provides this tool
+        plugin = None
+        plugin_name = None
+        for pname, p in self._capable_plugins.items():
+            if p.supports_background(tool_name):
+                plugin = p
+                plugin_name = pname
+                break
+
+        if plugin is None:
             return {
                 "success": False,
-                "error": f"Plugin '{plugin_name}' does not support background execution. "
-                         f"Capable plugins: {list(self._capable_plugins.keys())}"
-            }
-
-        plugin = self._capable_plugins[plugin_name]
-
-        # Check if specific tool supports background
-        if not plugin.supports_background(tool_name):
-            return {
-                "success": False,
-                "error": f"Tool '{tool_name}' in plugin '{plugin_name}' "
-                         f"does not support background execution"
+                "error": f"Tool '{tool_name}' does not support background execution. "
+                         f"Use listBackgroundCapableTools to see available tools."
             }
 
         try:
@@ -433,7 +426,7 @@ You have the ability to run long-running tool executions in the background.
 - Operations where you can do other useful work while waiting
 
 **Workflow:**
-1. Call `startBackgroundTask` with the plugin, tool, and arguments
+1. Call `startBackgroundTask` with the tool_name and arguments
 2. Continue with other work or inform the user the task is running
 3. Periodically check `getBackgroundTaskStatus`
 4. Once complete, use `getBackgroundTaskResult` to get the output

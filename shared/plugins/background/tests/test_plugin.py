@@ -181,13 +181,12 @@ class TestBackgroundPlugin:
         assert result["success"] is False
         assert "required" in result["error"]
 
-    def test_start_task_plugin_not_capable(self):
-        """Test startBackgroundTask with non-capable plugin."""
+    def test_start_task_tool_not_found(self):
+        """Test startBackgroundTask with tool that doesn't support background."""
         plugin = BackgroundPlugin()
         plugin._capable_plugins = {}
 
         result = plugin._start_task({
-            "plugin_name": "unknown",
             "tool_name": "some_tool",
             "arguments": {},
         })
@@ -205,7 +204,6 @@ class TestBackgroundPlugin:
         plugin.set_registry(registry)
 
         result = plugin._start_task({
-            "plugin_name": "mock_capable",
             "tool_name": "normal_tool",  # Not in supports_background
             "arguments": {},
         })
@@ -223,7 +221,6 @@ class TestBackgroundPlugin:
         plugin.set_registry(registry)
 
         result = plugin._start_task({
-            "plugin_name": "mock_capable",
             "tool_name": "bg_tool",
             "arguments": {"duration": 0.1},
         })
@@ -252,7 +249,6 @@ class TestBackgroundPlugin:
 
         # Start a task
         start_result = plugin._start_task({
-            "plugin_name": "mock_capable",
             "tool_name": "bg_tool",
             "arguments": {"duration": 0.5},
         })
@@ -285,7 +281,6 @@ class TestBackgroundPlugin:
 
         # Start and wait for task
         start_result = plugin._start_task({
-            "plugin_name": "mock_capable",
             "tool_name": "bg_tool",
             "arguments": {"duration": 0.1, "key": "value"},
         })
@@ -312,7 +307,6 @@ class TestBackgroundPlugin:
 
         # Start a slightly longer task
         start_result = plugin._start_task({
-            "plugin_name": "mock_capable",
             "tool_name": "bg_tool",
             "arguments": {"duration": 0.3},
         })
@@ -342,7 +336,6 @@ class TestBackgroundPlugin:
 
         # Start a long task
         start_result = plugin._start_task({
-            "plugin_name": "mock_capable",
             "tool_name": "slow_bg_tool",
             "arguments": {"duration": 10.0},
         })
@@ -376,7 +369,6 @@ class TestBackgroundPlugin:
         task_ids = []
         for i in range(3):
             result = plugin._start_task({
-                "plugin_name": "mock_capable",
                 "tool_name": "slow_bg_tool",
                 "arguments": {"duration": 5.0, "i": i},
             })
@@ -396,33 +388,32 @@ class TestBackgroundPlugin:
 
     def test_list_tasks_filter_by_plugin(self):
         """Test listBackgroundTasks with plugin filter."""
-        capable1 = MockCapablePlugin("plugin1")
-        capable2 = MockCapablePlugin("plugin2")
-
+        capable = MockCapablePlugin()
         registry = MockRegistry()
-        registry.add_plugin(capable1)
-        registry.add_plugin(capable2)
+        registry.add_plugin(capable)
 
         plugin = BackgroundPlugin()
         plugin.set_registry(registry)
 
-        # Start tasks on different plugins
+        # Start some tasks
         result1 = plugin._start_task({
-            "plugin_name": "plugin1",
             "tool_name": "slow_bg_tool",
             "arguments": {"duration": 5.0},
         })
         result2 = plugin._start_task({
-            "plugin_name": "plugin2",
             "tool_name": "slow_bg_tool",
             "arguments": {"duration": 5.0},
         })
 
-        # Filter by plugin1
-        list_result = plugin._list_tasks({"plugin_name": "plugin1"})
+        # Filter by mock_capable plugin
+        list_result = plugin._list_tasks({"plugin_name": "mock_capable"})
 
-        assert list_result["count"] == 1
-        assert list_result["tasks"][0]["plugin_name"] == "plugin1"
+        assert list_result["count"] == 2
+        assert all(t["plugin_name"] == "mock_capable" for t in list_result["tasks"])
+
+        # Filter by non-existent plugin - should return empty
+        list_result_empty = plugin._list_tasks({"plugin_name": "other_plugin"})
+        assert list_result_empty["count"] == 0
 
         # Cleanup
         plugin._cancel_task({"task_id": result1["task_id"]})
@@ -477,7 +468,6 @@ class TestBackgroundPluginIntegration:
 
         # 2. Start a background task
         start = plugin._start_task({
-            "plugin_name": "mock_capable",
             "tool_name": "bg_tool",
             "arguments": {"data": "test", "duration": 0.2},
         })
