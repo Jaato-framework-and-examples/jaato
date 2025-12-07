@@ -165,6 +165,8 @@ Script format (YAML):
         permission: "y"
       - type: "Show git status"
         permission: "a"
+      - type: "plan"
+        local: true       # Plugin commands that don't go to model
       - "quit"
         """
     )
