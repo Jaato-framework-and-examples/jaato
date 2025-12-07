@@ -4,6 +4,8 @@ The web search plugin provides the `web_search` function for performing internet
 
 ## Demo
 
+The demo below shows the web search plugin performing a search for "Python asyncio best practices" and returning relevant results with titles, URLs, and snippets.
+
 ![Web Search Plugin Demo](demo.svg)
 
 ## Overview
