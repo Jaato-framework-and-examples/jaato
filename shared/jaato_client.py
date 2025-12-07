@@ -111,6 +111,19 @@ class JaatoClient:
         """Get the configured model name."""
         return self._model_name
 
+    def list_available_models(self) -> List[str]:
+        """List available models from Vertex AI.
+
+        Returns:
+            List of model names available in the configured project/location.
+
+        Raises:
+            RuntimeError: If client is not connected.
+        """
+        if not self._client:
+            raise RuntimeError("Client not connected. Call connect() first.")
+        return [model.name for model in self._client.models.list()]
+
     def connect(self, project: str, location: str, model: str) -> None:
         """Connect to Vertex AI.
 
