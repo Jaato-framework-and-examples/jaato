@@ -11,7 +11,7 @@ import sys
 import pathlib
 import json
 import readline  # Enables arrow key history navigation (fallback)
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 # Try to import prompt_toolkit for enhanced completion
 try:
