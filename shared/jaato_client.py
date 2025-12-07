@@ -114,9 +114,6 @@ class JaatoClient:
         # Plugin registry for prompt enrichment
         self._registry: Optional['PluginRegistry'] = None
 
-        # Permission plugin reference for late-registered plugins
-        self._permission_plugin: Optional['PermissionPlugin'] = None
-
     @property
     def is_connected(self) -> bool:
         """Check if client is connected to Vertex AI."""
@@ -196,8 +193,6 @@ class JaatoClient:
 
         # Set permission plugin for enforcement
         if permission_plugin:
-            # Store reference for late-registered plugins (e.g., session plugin)
-            self._permission_plugin = permission_plugin
             # Give permission plugin access to registry for plugin lookups
             # This enables format_permission_request() calls for custom diff display
             permission_plugin.set_registry(registry)
@@ -1005,12 +1000,6 @@ class JaatoClient:
         if hasattr(plugin, 'get_executors') and self._executor:
             for name, fn in plugin.get_executors().items():
                 self._executor.register(name, fn)
-
-        # Whitelist session plugin's auto-approved tools
-        if self._permission_plugin and hasattr(plugin, 'get_auto_approved_tools'):
-            auto_approved = plugin.get_auto_approved_tools()
-            if auto_approved:
-                self._permission_plugin.add_whitelist_tools(auto_approved)
 
         # Add session plugin's function declarations to chat tools
         if hasattr(plugin, 'get_function_declarations'):
