@@ -11,6 +11,8 @@ import sys
 import pathlib
 import json
 import readline  # Enables arrow key history navigation (fallback)
+import shutil
+import textwrap
 from typing import Optional, Dict, Any
 
 # Try to import prompt_toolkit for enhanced completion
@@ -22,7 +24,6 @@ try:
     from prompt_toolkit.formatted_text import ANSI
     from prompt_toolkit.output.vt100 import Vt100_Output
     from prompt_toolkit.data_structures import Size
-    import shutil
     HAS_PROMPT_TOOLKIT = True
 except ImportError:
     HAS_PROMPT_TOOLKIT = False
@@ -107,6 +108,55 @@ class InteractiveClient:
         """Apply ANSI color to text."""
         code = self._colors.get(color, '')
         return f"{code}{text}{self._colors['reset']}" if code else text
+
+    def _wrap_text(self, text: str, prefix: str = "", initial_prefix: str = None) -> str:
+        """Wrap text to fit terminal width with word boundaries.
+
+        Args:
+            text: The text to wrap
+            prefix: Prefix for continuation lines (e.g., spaces for indentation)
+            initial_prefix: Prefix for first line (defaults to prefix if not specified)
+
+        Returns:
+            Word-wrapped text that fits the terminal width
+        """
+        terminal_width = shutil.get_terminal_size().columns
+        # Leave some margin for safety
+        width = max(40, terminal_width - 2)
+
+        if initial_prefix is None:
+            initial_prefix = prefix
+
+        # Handle multi-paragraph text by wrapping each paragraph separately
+        paragraphs = text.split('\n')
+        wrapped_paragraphs = []
+
+        for i, para in enumerate(paragraphs):
+            if not para.strip():
+                # Preserve empty lines
+                wrapped_paragraphs.append('')
+                continue
+
+            # Use initial_prefix only for the very first paragraph
+            if i == 0:
+                wrapper = textwrap.TextWrapper(
+                    width=width,
+                    initial_indent=initial_prefix,
+                    subsequent_indent=prefix,
+                    break_long_words=True,
+                    break_on_hyphens=True,
+                )
+            else:
+                wrapper = textwrap.TextWrapper(
+                    width=width,
+                    initial_indent=prefix,
+                    subsequent_indent=prefix,
+                    break_long_words=True,
+                    break_on_hyphens=True,
+                )
+            wrapped_paragraphs.append(wrapper.fill(para))
+
+        return '\n'.join(wrapped_paragraphs)
 
     def log(self, msg: str) -> None:
         """Print message if verbose mode is enabled, with colorized [client] tag."""
@@ -713,7 +763,12 @@ class InteractiveClient:
 
             # Execute the prompt
             response = self.run_prompt(expanded_prompt)
-            print(f"\n{self._c('Model>', 'bold')} {response}")
+            # Word-wrap the response to fit terminal width
+            model_prefix = self._c('Model>', 'bold') + ' '
+            # Use spaces for continuation lines to align with the text after "Model> "
+            continuation_indent = "       "  # 7 spaces to match "Model> " width
+            wrapped = self._wrap_text(response, prefix=continuation_indent, initial_prefix="")
+            print(f"\n{model_prefix}{wrapped}")
 
     def _print_help(self) -> None:
         """Print help information."""
@@ -1186,13 +1241,19 @@ def main():
         if args.prompt:
             # Single prompt mode - run and exit
             response = client.run_prompt(args.prompt)
-            print(f"\n{ANSI_BOLD}Model>{ANSI_RESET} {response}")
+            # Word-wrap the response to fit terminal width
+            continuation_indent = "       "  # 7 spaces to match "Model> " width
+            wrapped = client._wrap_text(response, prefix=continuation_indent, initial_prefix="")
+            print(f"\n{ANSI_BOLD}Model>{ANSI_RESET} {wrapped}")
         elif args.initial_prompt:
             # Initial prompt mode - show banner first, run prompt, then continue interactively
             client._print_banner()
             readline.add_history(args.initial_prompt)  # Add to history for ↑ recall
             response = client.run_prompt(args.initial_prompt)
-            print(f"\n{ANSI_BOLD}Model>{ANSI_RESET} {response}")
+            # Word-wrap the response to fit terminal width
+            continuation_indent = "       "  # 7 spaces to match "Model> " width
+            wrapped = client._wrap_text(response, prefix=continuation_indent, initial_prefix="")
+            print(f"\n{ANSI_BOLD}Model>{ANSI_RESET} {wrapped}")
             client.run_interactive(clear_history=False, show_banner=False)
         else:
             # Interactive mode
