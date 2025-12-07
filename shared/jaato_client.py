@@ -15,6 +15,7 @@ from .ai_tool_runner import ToolExecutor
 from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, PromptEnrichmentResult
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
+from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
 
 # Pattern to match @references in prompts (e.g., @file.png, @path/to/file.txt)
 # Matches @ followed by a path-like string (no spaces, common file chars)
@@ -105,6 +106,10 @@ class JaatoClient:
         self._gc_plugin: Optional[GCPlugin] = None
         self._gc_config: Optional[GCConfig] = None
         self._gc_history: List[GCResult] = []
+
+        # Session persistence
+        self._session_plugin: Optional[SessionPlugin] = None
+        self._session_config: Optional[SessionConfig] = None
 
         # Plugin registry for prompt enrichment
         self._registry: Optional['PluginRegistry'] = None
@@ -326,7 +331,12 @@ class JaatoClient:
         # Run prompt enrichment pipeline if registry is configured
         processed_message = self._enrich_and_clean_prompt(message)
 
-        return self._run_chat_loop(processed_message)
+        response = self._run_chat_loop(processed_message)
+
+        # Notify session plugin that turn completed
+        self._notify_session_turn_complete()
+
+        return response
 
     def _enrich_and_clean_prompt(self, prompt: str) -> str:
         """Run prompt through enrichment pipeline and strip @references.
@@ -921,6 +931,209 @@ class JaatoClient:
             return result
 
         return None
+
+    # ==================== Session Persistence ====================
+
+    def set_session_plugin(
+        self,
+        plugin: SessionPlugin,
+        config: Optional[SessionConfig] = None
+    ) -> None:
+        """Set the session plugin for persistence.
+
+        The session plugin handles saving and loading conversation history,
+        allowing users to resume sessions across client restarts.
+
+        Args:
+            plugin: A plugin implementing the SessionPlugin protocol.
+            config: Optional session configuration. Uses defaults if not provided.
+
+        Example:
+            from shared.plugins.session import create_plugin, SessionConfig
+
+            session_plugin = create_plugin()
+            session_plugin.initialize({'storage_path': '.jaato/sessions'})
+            client.set_session_plugin(session_plugin, SessionConfig())
+        """
+        self._session_plugin = plugin
+        self._session_config = config or SessionConfig()
+
+        # Give plugin a reference to this client for user command execution
+        if hasattr(plugin, 'set_client'):
+            plugin.set_client(self)
+
+        # Register session plugin's user commands and executors
+        if hasattr(plugin, 'get_user_commands'):
+            for cmd in plugin.get_user_commands():
+                self._user_commands[cmd.name] = cmd
+
+        if hasattr(plugin, 'get_executors') and self._executor:
+            for name, fn in plugin.get_executors().items():
+                self._executor.register(name, fn)
+
+        # Check for auto-resume
+        if self._session_config.auto_resume_last:
+            state = self._session_plugin.on_session_start(self._session_config)
+            if state:
+                self._restore_session_state(state)
+
+    def remove_session_plugin(self) -> None:
+        """Remove the session plugin, disabling session persistence."""
+        if self._session_plugin:
+            self._session_plugin.shutdown()
+        self._session_plugin = None
+        self._session_config = None
+
+    def save_session(self, session_id: Optional[str] = None) -> str:
+        """Save the current session.
+
+        Args:
+            session_id: Optional session ID. If not provided, generates one
+                       from the current timestamp.
+
+        Returns:
+            The session ID that was saved.
+
+        Raises:
+            RuntimeError: If no session plugin is configured.
+        """
+        if not self._session_plugin:
+            raise RuntimeError("No session plugin configured. Call set_session_plugin() first.")
+
+        state = self._get_session_state(session_id)
+        self._session_plugin.save(state)
+
+        # Update the plugin's current session tracking
+        if hasattr(self._session_plugin, 'set_current_session_id'):
+            self._session_plugin.set_current_session_id(state.session_id)
+
+        return state.session_id
+
+    def resume_session(self, session_id: str) -> SessionState:
+        """Resume a previously saved session.
+
+        Loads the session's history and restores it to the current client.
+
+        Args:
+            session_id: The session ID to resume.
+
+        Returns:
+            The loaded SessionState.
+
+        Raises:
+            RuntimeError: If no session plugin is configured.
+            FileNotFoundError: If the session doesn't exist.
+        """
+        if not self._session_plugin:
+            raise RuntimeError("No session plugin configured. Call set_session_plugin() first.")
+
+        state = self._session_plugin.load(session_id)
+        self._restore_session_state(state)
+        return state
+
+    def list_sessions(self) -> List[SessionInfo]:
+        """List all available sessions.
+
+        Returns:
+            List of SessionInfo objects, sorted by updated_at descending.
+
+        Raises:
+            RuntimeError: If no session plugin is configured.
+        """
+        if not self._session_plugin:
+            raise RuntimeError("No session plugin configured. Call set_session_plugin() first.")
+
+        return self._session_plugin.list_sessions()
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a saved session.
+
+        Args:
+            session_id: The session ID to delete.
+
+        Returns:
+            True if deleted, False if session didn't exist.
+
+        Raises:
+            RuntimeError: If no session plugin is configured.
+        """
+        if not self._session_plugin:
+            raise RuntimeError("No session plugin configured. Call set_session_plugin() first.")
+
+        return self._session_plugin.delete(session_id)
+
+    def _get_session_state(self, session_id: Optional[str] = None) -> SessionState:
+        """Build a SessionState from the current client state.
+
+        Args:
+            session_id: Optional session ID. Generates one if not provided.
+
+        Returns:
+            SessionState with current history and metadata.
+        """
+        from datetime import datetime
+
+        # Generate session ID if not provided
+        if not session_id:
+            # Check if plugin has a current session ID
+            if (self._session_plugin and
+                    hasattr(self._session_plugin, 'get_current_session_id')):
+                session_id = self._session_plugin.get_current_session_id()
+            if not session_id:
+                session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        now = datetime.now()
+        turn_accounting = self.get_turn_accounting()
+
+        return SessionState(
+            session_id=session_id,
+            history=self.get_history(),
+            created_at=now,  # Will be overwritten if loading existing
+            updated_at=now,
+            turn_count=len(turn_accounting),
+            turn_accounting=turn_accounting,
+            project=self._project,
+            location=self._location,
+            model=self._model_name,
+        )
+
+    def _restore_session_state(self, state: SessionState) -> None:
+        """Restore client state from a SessionState.
+
+        Args:
+            state: The SessionState to restore.
+        """
+        # Restore history
+        self.reset_session(state.history)
+
+        # Restore turn accounting
+        self._turn_accounting = list(state.turn_accounting)
+
+    def _notify_session_turn_complete(self) -> None:
+        """Notify session plugin that a turn completed.
+
+        Called after each send_message() completes.
+        """
+        if not self._session_plugin or not self._session_config:
+            return
+
+        state = self._get_session_state()
+
+        # Increment turn count in plugin for prompt enrichment tracking
+        if hasattr(self._session_plugin, 'increment_turn_count'):
+            self._session_plugin.increment_turn_count()
+
+        # Call plugin hook
+        self._session_plugin.on_turn_complete(state, self._session_config)
+
+    def close_session(self) -> None:
+        """Close the current session, triggering auto-save if configured.
+
+        Call this before exiting to ensure session is saved.
+        """
+        if self._session_plugin and self._session_config:
+            state = self._get_session_state()
+            self._session_plugin.on_session_end(state, self._session_config)
 
 
 __all__ = ['JaatoClient', 'MODEL_CONTEXT_LIMITS', 'DEFAULT_CONTEXT_LIMIT']

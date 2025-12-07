@@ -17,6 +17,7 @@ from prompt_toolkit.document import Document
 
 
 # Default commands available in the interactive client
+# Note: Session commands (save, resume, sessions) are contributed by the session plugin
 DEFAULT_COMMANDS = [
     ("help", "Show help message and available commands"),
     ("tools", "List available tools"),
