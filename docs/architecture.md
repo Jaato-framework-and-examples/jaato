@@ -22,6 +22,8 @@ This document describes the architecture of the jaato framework and how a generi
 │  │  • get_context_usage()                                              │    │
 │  │  • get_user_commands() → Dict[str, UserCommand]                     │    │
 │  │  • execute_user_command(name, args) → (result, shared)              │    │
+│  │  • set_session_plugin(plugin, config)                               │    │
+│  │  • save_session() / resume_session(id) / list_sessions()            │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                              │                               │
 │              ┌───────────────────────────────┼───────────────────────────┐   │
@@ -77,6 +79,8 @@ flowchart TB
                 SUB[SubagentPlugin<br/>plugins/subagent/]
                 FEDIT[FileEditPlugin<br/>plugins/file_edit/]
                 SLASH[SlashCommandPlugin<br/>plugins/slash_command/]
+                CLAR[ClarificationPlugin<br/>plugins/clarification/]
+                SESS[SessionPlugin<br/>plugins/session/]
             end
         end
 
@@ -101,6 +105,7 @@ flowchart TB
     PR --> SUB
     PR --> FEDIT
     PR --> SLASH
+    PR --> CLAR
     TE --> PERM
     MCP --> MCM
     MCM --> MCPS
@@ -152,11 +157,15 @@ PLUGIN_KIND = "tool"
 
 # GC plugins (for context garbage collection)
 PLUGIN_KIND = "gc"
+
+# Session plugins (for conversation persistence)
+PLUGIN_KIND = "session"
 ```
 
 Entry point groups are mapped by plugin kind:
 - `"tool"` → `jaato.plugins`
 - `"gc"` → `jaato.gc_plugins`
+- `"session"` → `jaato.session_plugins`
 
 ### Tool Plugins (PluginRegistry)
 
@@ -191,6 +200,42 @@ client.set_gc_plugin(gc_plugin, GCConfig(threshold_percent=75.0))
 GC plugins have a completely different interface focused on history management:
 - **should_collect()** - Check if garbage collection should trigger
 - **collect()** - Perform collection on conversation history
+
+### Session Plugins (Separate System)
+
+Session plugins implement the `SessionPlugin` protocol and manage conversation persistence. Like GC plugins, they are **not** managed by `PluginRegistry` - they connect directly to JaatoClient:
+
+```python
+from shared.plugins.session import create_plugin, SessionConfig, load_session_config
+
+# Load config from .jaato/.sessions.json (or use defaults)
+config = load_session_config()
+
+# Create and configure plugin
+session_plugin = create_plugin()
+session_plugin.initialize({'storage_path': config.storage_path})
+
+# Connect to client
+client.set_session_plugin(session_plugin, config)
+```
+
+Session plugins provide:
+- **save(state)** / **load(session_id)** - Core persistence operations
+- **list_sessions()** - List available sessions
+- **Lifecycle hooks** - `on_turn_complete()`, `on_session_start()`, `on_session_end()`
+- **User commands** - `save`, `resume`, `sessions`, `delete-session`
+- **Prompt enrichment** - Request model-generated session descriptions after N turns
+
+Configuration is stored in `.jaato/.sessions.json`:
+```json
+{
+  "storage_path": ".jaato/sessions",
+  "auto_save_on_exit": true,
+  "checkpoint_after_turns": 10,
+  "request_description_after_turns": 3,
+  "max_sessions": 20
+}
+```
 
 ### Prompt Enrichment Pipeline
 
@@ -231,6 +276,48 @@ class MultimodalPlugin:
         # Add "viewImage(path) tool available" instructions
         return PromptEnrichmentResult(prompt=enriched, metadata={...})
 ```
+
+### Manual Plugin Registration
+
+Some plugins are not discovered via entry points (like session and GC plugins). These can be manually registered with the registry using `register_plugin()`:
+
+```python
+# Full registration - exposes tools and participates in enrichment
+registry.register_plugin(my_plugin, expose=True)
+
+# Enrichment-only registration - only prompt enrichment, no tool exposure
+registry.register_plugin(session_plugin, enrichment_only=True)
+```
+
+The `enrichment_only` mode is used when:
+1. The plugin's tools are already registered elsewhere (e.g., via `set_session_plugin()`)
+2. You want to avoid duplicate tool declarations in `get_exposed_declarations()`
+3. The plugin only needs prompt enrichment, not full exposure
+
+```mermaid
+flowchart LR
+    subgraph Registry["PluginRegistry"]
+        Exposed["_exposed set"]
+        EnrichOnly["_enrichment_only set"]
+    end
+
+    subgraph Methods["Registry Methods"]
+        Decls["get_exposed_declarations()"]
+        Execs["get_exposed_executors()"]
+        Enrich["get_prompt_enrichment_subscribers()"]
+    end
+
+    Exposed --> Decls
+    Exposed --> Execs
+    Exposed --> Enrich
+    EnrichOnly --> Enrich
+
+    style EnrichOnly fill:#f9f,stroke:#333
+```
+
+This allows the session plugin to:
+- Have its tools (`session_describe`) managed by JaatoClient
+- Participate in the registry's prompt enrichment pipeline for session descriptions
 
 ### Model Requirements
 
@@ -281,6 +368,22 @@ classDiagram
         +shutdown()
         +should_collect(context_usage, config) Tuple
         +collect(history, context_usage, config, reason) Tuple
+    }
+
+    class SessionPlugin {
+        <<Protocol>>
+        +name: str
+        +initialize(config)
+        +shutdown()
+        +save(state: SessionState)
+        +load(session_id) SessionState
+        +list_sessions() List~SessionInfo~
+        +delete(session_id) bool
+        +on_turn_complete(state, config)
+        +on_session_start(config) SessionState
+        +on_session_end(state, config)
+        +set_description(session_id, description)
+        +needs_description(state, config) bool
     }
 
     class PluginRegistry {
@@ -367,6 +470,26 @@ classDiagram
         +subscribes_to_prompt_enrichment() bool
         +enrich_prompt(prompt) PromptEnrichmentResult
         +get_model_requirements() List~str~
+    class ClarificationPlugin {
+        +name = "clarification"
+        -actor: ClarificationActor
+        +request_clarification(context, questions)
+    }
+
+    class FileSessionPlugin {
+        +name = "session"
+        -_storage_path: Path
+        -_current_session_id: str
+        +save(state)
+        +load(session_id)
+        +list_sessions()
+        +on_turn_complete(state, config)
+        +save user command
+        +resume user command
+        +sessions user command
+        +session_describe model tool
+        +subscribes_to_prompt_enrichment() bool
+        +enrich_prompt(prompt) PromptEnrichmentResult
     }
 
     ToolPlugin <|.. CLIToolPlugin
@@ -378,6 +501,8 @@ classDiagram
     ToolPlugin <|.. FileEditPlugin
     ToolPlugin <|.. SlashCommandPlugin
     ToolPlugin <|.. MultimodalPlugin
+    ToolPlugin <|.. ClarificationPlugin
+    SessionPlugin <|.. FileSessionPlugin
     PluginRegistry o-- ToolPlugin
     ToolPlugin ..> UserCommand : returns
 ```
@@ -483,6 +608,14 @@ shared/
     ├── subagent/            # SubagentPlugin (model tools + user commands)
     ├── file_edit/           # FileEditPlugin (file operations with diff approval)
     ├── slash_command/       # SlashCommandPlugin (process /command references)
+    ├── clarification/       # ClarificationPlugin (request user input)
+    │
+    │   # Session Plugins (PLUGIN_KIND = "session") - NOT managed by PluginRegistry
+    ├── session/             # Base types + FileSessionPlugin
+    │   ├── base.py          # SessionPlugin protocol, SessionState, SessionConfig
+    │   ├── serializer.py    # History serialization/deserialization
+    │   ├── file_session.py  # FileSessionPlugin - file-based persistence
+    │   └── config_loader.py # Load config from .jaato/.sessions.json
     │
     │   # GC Plugins (PLUGIN_KIND = "gc") - NOT managed by PluginRegistry
     ├── gc/                  # Base types: GCPlugin protocol, GCConfig, GCResult

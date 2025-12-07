@@ -4,6 +4,8 @@ The CLI plugin provides the `cli_based_tool` function for executing local shell 
 
 ## Demo
 
+The demo below shows the CLI plugin executing shell commands: first listing Python files in the current directory, then showing git status. Each command requires permission approval before execution.
+
 ![CLI Plugin Demo](demo.svg)
 
 ## Overview

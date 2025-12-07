@@ -52,6 +52,10 @@ ANSI = r'(?:\x1b\[[0-9;]*m)*'
 # Pattern indices for expect
 PATTERN_PROMPT = 0
 PATTERN_PERMISSION = 1
+PATTERN_CLARIFY_SINGLE = 2
+PATTERN_CLARIFY_MULTI = 3
+PATTERN_CLARIFY_FREE = 4
+PATTERN_REFERENCE_SELECT = 5
 
 
 def wait_for_prompt(child, timeout=60):
@@ -60,24 +64,57 @@ def wait_for_prompt(child, timeout=60):
 
 
 def wait_for_permission_or_prompt(child, response='y', timeout=60):
-    """Wait for either permission prompt or next You> prompt.
+    """Wait for either permission prompt, clarification prompt, or next You> prompt.
 
-    If permission is requested, send the response and wait for prompt.
-    If prompt appears directly (permission already granted), just return.
+    Handles:
+    - Permission prompts (Options:) - responds with the given response
+    - Clarification prompts - auto-responds with first choice or default text
+    - You> prompt - returns when ready for next input
     """
     # First wait for the client to acknowledge the command
     child.expect(r'\[client\]', timeout=timeout)
 
-    # Now wait for either permission prompt or next You> prompt
-    patterns = [rf'{ANSI}You>{ANSI}', r'Options:']
-    index = child.expect(patterns, timeout=timeout)
+    # Now wait for various prompts in a loop until we get back to You>
+    patterns = [
+        rf'{ANSI}You>{ANSI}',           # 0: Ready for next input
+        r'Options:',                     # 1: Permission prompt
+        r'Enter choice \[[\d-]+\]:',     # 2: Single choice clarification
+        r'Enter choices:',               # 3: Multiple choice clarification
+        r'  > ',                          # 4: Free text clarification
+        r"'none' or empty to skip",      # 5: Reference selection prompt
+    ]
 
-    if index == PATTERN_PERMISSION:
-        # Permission was requested, send response
-        time.sleep(0.3)
-        child.send(f'{response}\n')
-        # Now wait for the prompt after permission
-        wait_for_prompt(child, timeout=timeout)
+    while True:
+        index = child.expect(patterns, timeout=timeout)
+
+        if index == PATTERN_PROMPT:
+            # Back to You> prompt, we're done
+            return
+
+        elif index == PATTERN_PERMISSION:
+            # Permission was requested, send response
+            time.sleep(0.3)
+            child.send(f'{response}\n')
+
+        elif index == PATTERN_CLARIFY_SINGLE:
+            # Single choice - send "1" (first option)
+            time.sleep(0.3)
+            child.send('1\n')
+
+        elif index == PATTERN_CLARIFY_MULTI:
+            # Multiple choice - send "1" (first option)
+            time.sleep(0.3)
+            child.send('1\n')
+
+        elif index == PATTERN_CLARIFY_FREE:
+            # Free text - send auto response
+            time.sleep(0.3)
+            child.send('auto-response\n')
+
+        elif index == PATTERN_REFERENCE_SELECT:
+            # Reference selection - select all available
+            time.sleep(0.3)
+            child.send('all\n')
 
 
 def run_demo(script_path: Path):
@@ -165,6 +202,8 @@ Script format (YAML):
         permission: "y"
       - type: "Show git status"
         permission: "a"
+      - type: "plan"
+        local: true       # Plugin commands that don't go to model
       - "quit"
         """
     )

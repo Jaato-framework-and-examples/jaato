@@ -1,0 +1,8 @@
+name: Session Export [2025-12-07 21:23]
+timeout: 120
+steps:
+- type: just for the sake of demoing, trigger a clarification reques with several
+    questions and choices
+  permission: y
+- type: quit
+  delay: 0.08
