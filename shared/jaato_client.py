@@ -1001,6 +1001,21 @@ class JaatoClient:
             for name, fn in plugin.get_executors().items():
                 self._executor.register(name, fn)
 
+        # Add session plugin's function declarations to chat tools
+        if hasattr(plugin, 'get_function_declarations'):
+            session_decls = plugin.get_function_declarations()
+            if session_decls:
+                # Rebuild tool declarations including session plugin's
+                current_decls = []
+                if self._tool_decl and self._tool_decl.function_declarations:
+                    current_decls = list(self._tool_decl.function_declarations)
+                current_decls.extend(session_decls)
+                self._tool_decl = types.Tool(function_declarations=current_decls)
+
+                # Recreate chat with updated tools
+                history = self.get_history() if self._chat else None
+                self._create_chat(history)
+
         # Check for auto-resume
         if self._session_config.auto_resume_last:
             state = self._session_plugin.on_session_start(self._session_config)
