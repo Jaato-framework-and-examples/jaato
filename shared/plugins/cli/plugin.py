@@ -9,9 +9,48 @@ from typing import Dict, List, Any, Callable, Optional
 from google.genai import types
 
 from ..base import UserCommand
+from ..background import BackgroundCapableMixin
 
 
 DEFAULT_MAX_OUTPUT_CHARS = 50000  # ~12k tokens at 4 chars/token
+
+# Default auto-background threshold in seconds
+# Commands exceeding this will be automatically backgrounded
+DEFAULT_AUTO_BACKGROUND_THRESHOLD = 10.0
+
+# Command patterns that are known to be slow
+# Maps pattern to estimated duration in seconds
+SLOW_COMMAND_PATTERNS = {
+    # Package managers
+    'npm install': 30.0,
+    'npm ci': 30.0,
+    'yarn install': 30.0,
+    'pip install': 20.0,
+    'pip3 install': 20.0,
+    'poetry install': 25.0,
+    'cargo build': 60.0,
+    'cargo install': 45.0,
+    'go build': 30.0,
+    'mvn install': 60.0,
+    'gradle build': 45.0,
+    # Build commands
+    'make': 30.0,
+    'cmake': 20.0,
+    'ninja': 30.0,
+    # Test commands
+    'pytest': 30.0,
+    'npm test': 30.0,
+    'yarn test': 30.0,
+    'go test': 20.0,
+    'cargo test': 30.0,
+    'mvn test': 45.0,
+    # Other slow operations
+    'docker build': 60.0,
+    'docker pull': 30.0,
+    'git clone': 20.0,
+    'wget': 15.0,
+    'curl': 10.0,
+}
 
 # Shell metacharacters that require shell interpretation
 # These cannot be handled by subprocess with shell=False
@@ -25,17 +64,27 @@ SHELL_METACHAR_PATTERN = re.compile(
 )
 
 
-class CLIToolPlugin:
+class CLIToolPlugin(BackgroundCapableMixin):
     """Plugin that provides CLI command execution capability.
+
+    Supports background execution via BackgroundCapableMixin. Commands that
+    exceed the auto-background threshold (default: 10 seconds) will be
+    automatically converted to background tasks.
 
     Configuration:
         extra_paths: List of additional paths to add to PATH when executing commands.
         max_output_chars: Maximum characters to return from stdout/stderr (default: 50000).
+        auto_background_threshold: Seconds before auto-backgrounding (default: 10.0).
+        background_max_workers: Max concurrent background tasks (default: 4).
     """
 
     def __init__(self):
+        # Initialize BackgroundCapableMixin first
+        super().__init__(max_workers=4)
+
         self._extra_paths: List[str] = []
         self._max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS
+        self._auto_background_threshold: float = DEFAULT_AUTO_BACKGROUND_THRESHOLD
         self._initialized = False
 
     @property
@@ -49,6 +98,8 @@ class CLIToolPlugin:
             config: Optional dict with:
                 - extra_paths: Additional PATH entries
                 - max_output_chars: Max characters to return (default: 50000)
+                - auto_background_threshold: Seconds before auto-backgrounding (default: 10.0)
+                - background_max_workers: Max concurrent background tasks (default: 4)
         """
         if config:
             if 'extra_paths' in config:
@@ -57,12 +108,18 @@ class CLIToolPlugin:
                     self._extra_paths = paths if isinstance(paths, list) else [paths]
             if 'max_output_chars' in config:
                 self._max_output_chars = config['max_output_chars']
+            if 'auto_background_threshold' in config:
+                self._auto_background_threshold = config['auto_background_threshold']
+            if 'background_max_workers' in config:
+                self._bg_max_workers = config['background_max_workers']
         self._initialized = True
 
     def shutdown(self) -> None:
         """Shutdown the CLI plugin."""
         self._extra_paths = []
         self._initialized = False
+        # Cleanup background executor
+        self._shutdown_bg_executor()
 
     def get_function_declarations(self) -> List[types.FunctionDeclaration]:
         """Return the FunctionDeclaration for the CLI tool."""
@@ -154,6 +211,71 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
     def get_user_commands(self) -> List[UserCommand]:
         """CLI plugin provides model tools only, no user commands."""
         return []
+
+    # --- BackgroundCapable implementation ---
+
+    def supports_background(self, tool_name: str) -> bool:
+        """Check if a tool supports background execution.
+
+        Args:
+            tool_name: Name of the tool to check.
+
+        Returns:
+            True if the tool can be executed in background.
+        """
+        # CLI tool supports background execution
+        return tool_name == 'cli_based_tool'
+
+    def get_auto_background_threshold(self, tool_name: str) -> Optional[float]:
+        """Return timeout threshold for automatic backgrounding.
+
+        When a CLI command exceeds this threshold, it's automatically
+        converted to a background task and a handle is returned.
+
+        Args:
+            tool_name: Name of the tool to check.
+
+        Returns:
+            Threshold in seconds, or None to disable auto-background.
+        """
+        if tool_name == 'cli_based_tool':
+            return self._auto_background_threshold
+        return None
+
+    def estimate_duration(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any]
+    ) -> Optional[float]:
+        """Estimate execution duration based on command patterns.
+
+        Analyzes the command to provide duration hints for known slow operations
+        like package installations, builds, and tests.
+
+        Args:
+            tool_name: Name of the tool.
+            arguments: Arguments containing the command.
+
+        Returns:
+            Estimated duration in seconds, or None if unknown.
+        """
+        if tool_name != 'cli_based_tool':
+            return None
+
+        command = arguments.get('command', '')
+        if not command:
+            return None
+
+        # Check against known slow patterns
+        command_lower = command.lower()
+        for pattern, duration in SLOW_COMMAND_PATTERNS.items():
+            if pattern in command_lower:
+                return duration
+
+        # Default: unknown duration
+        return None
+
+    # --- End BackgroundCapable implementation ---
 
     def _requires_shell(self, command: str) -> bool:
         """Check if a command requires shell interpretation.
