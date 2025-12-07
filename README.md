@@ -41,6 +41,7 @@ jaato is a future-proof framework for building agentic AI applications, featurin
 
 | Plugin | Description |
 |--------|-------------|
+| [**clarification**](shared/plugins/clarification/README.md) | Request user clarification with multiple-choice or free-text questions |
 | [**cli**](shared/plugins/cli/README.md) | Execute local command-line tools via subprocess |
 | [**file_edit**](shared/plugins/file_edit/README.md) | Read, update, create, and delete files with diff-based approval and automatic backups |
 | [**gc**](shared/plugins/gc/README.md) | Context garbage collection to prevent context window overflow (truncate, summarize, or hybrid strategies) |
