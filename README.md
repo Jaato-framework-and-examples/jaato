@@ -45,6 +45,7 @@ jaato is a future-proof framework for building agentic AI applications, featurin
 | [**file_edit**](shared/plugins/file_edit/README.md) | Read, update, create, and delete files with diff-based approval and automatic backups |
 | [**gc**](shared/plugins/gc/README.md) | Context garbage collection to prevent context window overflow (truncate, summarize, or hybrid strategies) |
 | [**mcp**](shared/plugins/mcp/README.md) | Connect to MCP (Model Context Protocol) servers and auto-discover their tools |
+| [**multimodal**](shared/plugins/multimodal/README.md) | Image viewing via @file references with model-driven decision to load visual content (Gemini 3+) |
 | [**permission**](shared/plugins/permission/README.md) | Control tool execution with blacklist/whitelist policies and interactive approval |
 | [**references**](shared/plugins/references/README.md) | Manage documentation source injection with auto-load and user-selectable references |
 | [**slash_command**](shared/plugins/slash_command/README.md) | Process /command references from .jaato/commands/ directory |

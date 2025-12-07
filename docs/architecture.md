@@ -173,6 +173,8 @@ Tool plugins can provide:
 - **Executors** that run when the model invokes tools
 - **System instructions** to guide model behavior
 - **User commands** for direct user invocation (bypassing the model)
+- **Prompt enrichment** (optional) - Modify/enrich prompts before sending to model
+- **Model requirements** (optional) - Declare required model patterns (e.g., `gemini-3-pro*`)
 
 ### GC Plugins (Separate System)
 
@@ -189,6 +191,64 @@ client.set_gc_plugin(gc_plugin, GCConfig(threshold_percent=75.0))
 GC plugins have a completely different interface focused on history management:
 - **should_collect()** - Check if garbage collection should trigger
 - **collect()** - Perform collection on conversation history
+
+### Prompt Enrichment Pipeline
+
+Plugins can subscribe to enrich user prompts before they are sent to the model:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant JC as JaatoClient
+    participant PR as PluginRegistry
+    participant Plugin as EnrichmentPlugin
+    participant Model
+
+    User->>JC: send_message("What's in @photo.jpg?")
+    JC->>PR: enrich_prompt(message)
+    PR->>Plugin: enrich_prompt(message)
+    Note over Plugin: Detect @photo.jpg<br/>Add viewImage tool info
+    Plugin-->>PR: enriched prompt + metadata
+    PR-->>JC: final enriched prompt
+    JC->>JC: strip @references
+    JC->>Model: "What's in photo.jpg? [System: viewImage available]"
+```
+
+This enables:
+- **@file references** - Detect and process file references
+- **Lazy loading** - Model decides when to load heavy content (images, documents)
+- **Context injection** - Add relevant information based on prompt content
+
+Example plugin implementing enrichment:
+
+```python
+class MultimodalPlugin:
+    def subscribes_to_prompt_enrichment(self) -> bool:
+        return True
+
+    def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
+        # Detect @image.png references
+        # Add "viewImage(path) tool available" instructions
+        return PromptEnrichmentResult(prompt=enriched, metadata={...})
+```
+
+### Model Requirements
+
+Plugins can declare model compatibility using glob patterns:
+
+```python
+class MultimodalPlugin:
+    def get_model_requirements(self) -> List[str]:
+        return ["gemini-3-pro*", "gemini-3.5-*"]  # Requires Gemini 3+
+```
+
+When exposing a plugin, the registry checks if the current model matches:
+
+```python
+registry = PluginRegistry(model_name="gemini-2.5-flash")
+registry.expose_tool('multimodal')  # Skipped! Model doesn't match
+# Warning: Plugin 'multimodal' skipped: model 'gemini-2.5-flash' not in ['gemini-3-pro*', ...]
+```
 
 ```mermaid
 classDiagram
@@ -209,6 +269,9 @@ classDiagram
         +get_system_instructions() str
         +get_auto_approved_tools() List
         +get_user_commands() List~UserCommand~
+        +get_model_requirements() List~str~ [optional]
+        +subscribes_to_prompt_enrichment() bool [optional]
+        +enrich_prompt(prompt) PromptEnrichmentResult [optional]
     }
 
     class GCPlugin {
@@ -297,6 +360,15 @@ classDiagram
         +processCommand(command_name, args)
     }
 
+    class MultimodalPlugin {
+        +name = "multimodal"
+        +MODEL_REQUIREMENTS: List~str~
+        +viewImage(path)
+        +subscribes_to_prompt_enrichment() bool
+        +enrich_prompt(prompt) PromptEnrichmentResult
+        +get_model_requirements() List~str~
+    }
+
     ToolPlugin <|.. CLIToolPlugin
     ToolPlugin <|.. MCPToolPlugin
     ToolPlugin <|.. PermissionPlugin
@@ -305,6 +377,7 @@ classDiagram
     ToolPlugin <|.. SubagentPlugin
     ToolPlugin <|.. FileEditPlugin
     ToolPlugin <|.. SlashCommandPlugin
+    ToolPlugin <|.. MultimodalPlugin
     PluginRegistry o-- ToolPlugin
     ToolPlugin ..> UserCommand : returns
 ```
@@ -393,6 +466,7 @@ shared/
     │   # Tool Plugins (PLUGIN_KIND = "tool")
     ├── cli/                 # CLIToolPlugin (model tools only)
     ├── mcp/                 # MCPToolPlugin (model tools only)
+    ├── multimodal/          # MultimodalPlugin (prompt enrichment + model requirements)
     ├── permission/          # PermissionPlugin (model tools only)
     ├── todo/                # TodoPlugin (model tools + user commands)
     ├── references/          # ReferencesPlugin (model tools + user commands)
