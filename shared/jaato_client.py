@@ -450,15 +450,16 @@ class JaatoClient:
     ) -> List[types.Part]:
         """Build a multimodal function response with image data.
 
-        For Gemini 3 Pro+, this creates a function response that includes
-        inline image data that the model can "see".
+        Creates a function response that includes inline image data using
+        the FunctionResponsePart/FunctionResponseBlob structure with displayName
+        to link the $ref in the response to the actual image data.
 
         Args:
             name: The function name.
             result: Dict with '_multimodal': True and image data.
 
         Returns:
-            List of Part objects including function response and image data.
+            List containing a single Part with nested multimodal data.
         """
         multimodal_type = result.get('_multimodal_type', 'image')
 
@@ -474,9 +475,10 @@ class JaatoClient:
                     response={'error': 'No image data available'}
                 )]
 
-            # Build multimodal response
-            # The function response references the image by display_name
-            # and the image is included as a separate inline data part
+            # Build multimodal response using the correct structure:
+            # - response dict contains {'$ref': display_name} to reference the image
+            # - parts contains FunctionResponsePart with FunctionResponseBlob
+            # - FunctionResponseBlob has displayName that matches the $ref
             try:
                 # Create the structured response with reference to image
                 response_dict = {
@@ -486,23 +488,22 @@ class JaatoClient:
                     'size_bytes': result.get('size_bytes', len(image_data)),
                 }
 
-                # For Gemini 3+, we can include multimodal parts in the function response
-                # The SDK's FunctionResponsePart supports file_data for multimodal content
-                # However, the exact API may vary - try the standard approach first
-
-                # Approach 1: Include image as inline_data Part alongside function response
-                # This is a workaround that may work with Gemini 2.x as well
-                parts = [
-                    types.Part.from_function_response(
-                        name=name,
-                        response=response_dict
-                    ),
-                    types.Part.from_bytes(
-                        data=image_data,
-                        mime_type=mime_type
-                    )
-                ]
-                return parts
+                # Build the function response with nested multimodal parts
+                # The displayName in FunctionResponseBlob must match the $ref above
+                part = types.Part.from_function_response(
+                    name=name,
+                    response=response_dict,
+                    parts=[
+                        types.FunctionResponsePart(
+                            inlineData=types.FunctionResponseBlob(
+                                mimeType=mime_type,
+                                data=image_data,
+                                displayName=display_name  # Links to {'$ref': display_name}
+                            )
+                        )
+                    ]
+                )
+                return [part]
 
             except Exception as e:
                 # Fallback: return text description if multimodal fails
