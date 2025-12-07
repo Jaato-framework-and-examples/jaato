@@ -277,6 +277,48 @@ class MultimodalPlugin:
         return PromptEnrichmentResult(prompt=enriched, metadata={...})
 ```
 
+### Manual Plugin Registration
+
+Some plugins are not discovered via entry points (like session and GC plugins). These can be manually registered with the registry using `register_plugin()`:
+
+```python
+# Full registration - exposes tools and participates in enrichment
+registry.register_plugin(my_plugin, expose=True)
+
+# Enrichment-only registration - only prompt enrichment, no tool exposure
+registry.register_plugin(session_plugin, enrichment_only=True)
+```
+
+The `enrichment_only` mode is used when:
+1. The plugin's tools are already registered elsewhere (e.g., via `set_session_plugin()`)
+2. You want to avoid duplicate tool declarations in `get_exposed_declarations()`
+3. The plugin only needs prompt enrichment, not full exposure
+
+```mermaid
+flowchart LR
+    subgraph Registry["PluginRegistry"]
+        Exposed["_exposed set"]
+        EnrichOnly["_enrichment_only set"]
+    end
+
+    subgraph Methods["Registry Methods"]
+        Decls["get_exposed_declarations()"]
+        Execs["get_exposed_executors()"]
+        Enrich["get_prompt_enrichment_subscribers()"]
+    end
+
+    Exposed --> Decls
+    Exposed --> Execs
+    Exposed --> Enrich
+    EnrichOnly --> Enrich
+
+    style EnrichOnly fill:#f9f,stroke:#333
+```
+
+This allows the session plugin to:
+- Have its tools (`session_describe`) managed by JaatoClient
+- Participate in the registry's prompt enrichment pipeline for session descriptions
+
 ### Model Requirements
 
 Plugins can declare model compatibility using glob patterns:

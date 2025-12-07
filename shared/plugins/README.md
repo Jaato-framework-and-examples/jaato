@@ -713,3 +713,98 @@ registry.discover()
 # Discover via entry points only (installed packages)
 registry.discover(include_directory=False)
 ```
+
+---
+
+## Manual Plugin Registration
+
+Some plugins are not discovered via entry points or directory scanning. These "special" plugins (like the session persistence plugin) are configured separately but may still need to participate in registry-managed features like prompt enrichment.
+
+### register_plugin()
+
+Use `register_plugin()` to manually add a plugin to the registry:
+
+```python
+from shared.plugins.session import create_plugin as create_session_plugin
+
+# Create and initialize the plugin
+session_plugin = create_session_plugin()
+session_plugin.initialize({'storage_path': '.jaato/sessions'})
+
+# Register with the registry
+registry.register_plugin(session_plugin, expose=True)
+```
+
+Parameters:
+- `plugin`: The plugin instance to register
+- `expose`: If `True`, also expose the plugin's tools (equivalent to calling `expose_tool()`)
+- `enrichment_only`: If `True`, only participate in prompt enrichment (see below)
+- `config`: Optional configuration dict if exposing
+
+### Enrichment-Only Mode
+
+Some plugins only need to participate in prompt enrichment without exposing their tools to the model. This is useful when:
+
+1. The plugin's tools are already registered elsewhere (e.g., via `JaatoClient.set_session_plugin()`)
+2. You want to avoid duplicate tool declarations
+3. The plugin only provides prompt enrichment, not model tools
+
+```python
+# Register for prompt enrichment only - no tools exposed
+registry.register_plugin(session_plugin, enrichment_only=True)
+```
+
+When `enrichment_only=True`:
+- The plugin IS included in `get_prompt_enrichment_subscribers()`
+- The plugin is NOT included in `get_exposed_declarations()`
+- The plugin is NOT included in `get_exposed_executors()`
+- The plugin is NOT included in `get_exposed_user_commands()`
+
+This is how the session plugin integrates with the registry:
+
+```python
+# Session plugin is set on JaatoClient for tools/commands
+jaato.set_session_plugin(session_plugin, config)
+
+# And registered with registry for prompt enrichment only
+registry.register_plugin(session_plugin, enrichment_only=True)
+```
+
+The session plugin's `enrich_prompt()` is called by the registry's prompt enrichment pipeline, but its tools (like `session_describe`) are managed separately by JaatoClient.
+
+### Prompt Enrichment Pipeline
+
+Plugins can subscribe to enrich user prompts before they are sent to the model. This enables features like:
+
+- **@file references**: Detect and process `@filename.png` patterns
+- **Lazy loading**: Model decides when to load heavy content
+- **Context injection**: Add relevant information based on prompt content
+- **Session descriptions**: Request model-generated descriptions after N turns
+
+To participate in prompt enrichment, implement these methods:
+
+```python
+from shared.plugins.base import PromptEnrichmentResult
+
+class MyPlugin:
+    def subscribes_to_prompt_enrichment(self) -> bool:
+        """Return True to receive prompts for enrichment."""
+        return True
+
+    def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
+        """Inspect and optionally modify the prompt.
+
+        Args:
+            prompt: The user's prompt text.
+
+        Returns:
+            PromptEnrichmentResult with enriched prompt and optional metadata.
+        """
+        enriched = prompt + "\n[Injected context from MyPlugin]"
+        return PromptEnrichmentResult(
+            prompt=enriched,
+            metadata={'injected': True}
+        )
+```
+
+The registry calls `enrich_prompt()` on all subscribed plugins in order, passing the result of each to the next.
