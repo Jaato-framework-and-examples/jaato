@@ -12,6 +12,9 @@ import pathlib
 import json
 import readline  # Enables arrow key history navigation (fallback)
 from typing import Optional, Dict, Any, List
+import shutil
+import textwrap
+from typing import Optional, Dict, Any
 
 # Try to import prompt_toolkit for enhanced completion
 try:
@@ -22,7 +25,6 @@ try:
     from prompt_toolkit.formatted_text import ANSI
     from prompt_toolkit.output.vt100 import Vt100_Output
     from prompt_toolkit.data_structures import Size
-    import shutil
     HAS_PROMPT_TOOLKIT = True
 except ImportError:
     HAS_PROMPT_TOOLKIT = False
@@ -44,6 +46,7 @@ from shared import (
     TodoPlugin,
     active_cert_bundle,
 )
+from shared.plugins.session import create_plugin as create_session_plugin, SessionConfig, load_session_config
 
 # Import file and command completion (local module)
 try:
@@ -98,12 +101,63 @@ class InteractiveClient:
         }
 
         # Track original user inputs for export (before file reference expansion)
-        self._original_inputs: list[str] = []
+        # Each entry is {"text": str, "local": bool} where local=True for commands
+        # that don't go to the model (plugin commands like "plan")
+        self._original_inputs: list[dict] = []
 
     def _c(self, text: str, color: str) -> str:
         """Apply ANSI color to text."""
         code = self._colors.get(color, '')
         return f"{code}{text}{self._colors['reset']}" if code else text
+
+    def _wrap_text(self, text: str, prefix: str = "", initial_prefix: str = None) -> str:
+        """Wrap text to fit terminal width with word boundaries.
+
+        Args:
+            text: The text to wrap
+            prefix: Prefix for continuation lines (e.g., spaces for indentation)
+            initial_prefix: Prefix for first line (defaults to prefix if not specified)
+
+        Returns:
+            Word-wrapped text that fits the terminal width
+        """
+        terminal_width = shutil.get_terminal_size().columns
+        # Leave some margin for safety
+        width = max(40, terminal_width - 2)
+
+        if initial_prefix is None:
+            initial_prefix = prefix
+
+        # Handle multi-paragraph text by wrapping each paragraph separately
+        paragraphs = text.split('\n')
+        wrapped_paragraphs = []
+
+        for i, para in enumerate(paragraphs):
+            if not para.strip():
+                # Preserve empty lines
+                wrapped_paragraphs.append('')
+                continue
+
+            # Use initial_prefix only for the very first paragraph
+            if i == 0:
+                wrapper = textwrap.TextWrapper(
+                    width=width,
+                    initial_indent=initial_prefix,
+                    subsequent_indent=prefix,
+                    break_long_words=True,
+                    break_on_hyphens=True,
+                )
+            else:
+                wrapper = textwrap.TextWrapper(
+                    width=width,
+                    initial_indent=prefix,
+                    subsequent_indent=prefix,
+                    break_long_words=True,
+                    break_on_hyphens=True,
+                )
+            wrapped_paragraphs.append(wrapper.fill(para))
+
+        return '\n'.join(wrapped_paragraphs)
 
     def log(self, msg: str) -> None:
         """Print message if verbose mode is enabled, with colorized [client] tag."""
@@ -170,6 +224,11 @@ class InteractiveClient:
         via JaatoClient. If share_with_model is True, the result is automatically
         added to conversation history by JaatoClient.
 
+        Supports commands with arguments:
+        - "backtoturn 2" → backtoturn(turn_id="2")
+        - "resume session123" → resume(session_id="session123")
+        - "delete-session xyz" → delete-session(session_id="xyz")
+
         Args:
             user_input: The user's input string
 
@@ -184,29 +243,126 @@ class InteractiveClient:
         if not user_commands:
             return None
 
+        # Parse input into command and arguments
+        parts = user_input.strip().split(maxsplit=1)
+        input_cmd = parts[0].lower() if parts else ""
+        arg_value = parts[1] if len(parts) > 1 else None
+
         # Check if input matches a command (case-insensitive)
-        input_lower = user_input.lower().strip()
         command_name = None
         for cmd_name in user_commands:
-            if input_lower == cmd_name.lower():
+            if input_cmd == cmd_name.lower():
                 command_name = cmd_name
                 break
 
         if not command_name:
             return None
 
+        # Map command arguments to expected parameter names
+        args = {}
+        if arg_value:
+            # Command-specific argument mapping
+            arg_mapping = {
+                "backtoturn": "turn_id",
+                "resume": "session_id",
+                "delete-session": "session_id",
+            }
+            param_name = arg_mapping.get(command_name.lower(), "arg")
+            args[param_name] = arg_value
+
+        # For save command, include user inputs for prompt history restoration
+        if command_name.lower() == "save":
+            args["user_inputs"] = self._original_inputs.copy()
+
         # Execute the command via JaatoClient
         try:
-            result, shared = self._jaato.execute_user_command(command_name, {})
+            result, shared = self._jaato.execute_user_command(command_name, args)
 
             # Display the result to the user
             self._display_command_result(command_name, result, shared)
+
+            # For resume command, restore user inputs to prompt history
+            if command_name.lower() == "resume" and isinstance(result, dict):
+                user_inputs = result.get("user_inputs", [])
+                if user_inputs:
+                    self._restore_user_inputs(user_inputs)
 
             return result
 
         except Exception as e:
             print(f"\nError executing {command_name}: {e}")
             return {"error": str(e)}
+
+    def _parse_command_args(self, command_name: str, raw_args: str) -> Dict[str, Any]:
+        """Parse raw argument string into named arguments dict.
+
+        Maps positional arguments to named parameters based on command.
+
+        Args:
+            command_name: The command being executed
+            raw_args: Raw argument string from user input
+
+        Returns:
+            Dictionary of named arguments
+        """
+        args: Dict[str, Any] = {}
+        raw_args = raw_args.strip()
+
+        if not raw_args:
+            return args
+
+        # Define argument mappings for commands that take positional args
+        # Format: command_name -> list of positional arg names
+        arg_mappings = {
+            "delete-session": ["session_id"],
+            "resume": ["session_id"],
+            "save": ["description"],  # Optional description for save
+        }
+
+        if command_name in arg_mappings:
+            param_names = arg_mappings[command_name]
+
+            # Special handling for commands that take a single string argument
+            # (e.g., "save My session description" should capture entire string)
+            if command_name == "save" and raw_args:
+                args["description"] = raw_args
+            else:
+                # Split args by whitespace for other commands
+                arg_parts = raw_args.split()
+                for i, param_name in enumerate(param_names):
+                    if i < len(arg_parts):
+                        val = arg_parts[i]
+                        # Only convert to int if it's purely numeric (no underscores)
+                        # Python allows underscores in int() which would corrupt session IDs
+                        if val.isdigit():
+                            args[param_name] = int(val)
+                        else:
+                            args[param_name] = val
+        else:
+            # For unknown commands, pass the raw args as 'args'
+            args["args"] = raw_args
+
+        return args
+
+    def _restore_user_inputs(self, user_inputs: List[str]) -> None:
+        """Restore user inputs to prompt history after session resume.
+
+        Updates both the internal _original_inputs list and the
+        prompt_toolkit history for arrow-key navigation.
+
+        Args:
+            user_inputs: List of user input strings from the resumed session.
+        """
+        # Restore to internal tracking
+        self._original_inputs = list(user_inputs)
+
+        # Restore to prompt_toolkit history
+        if HAS_PROMPT_TOOLKIT and self._pt_history:
+            # Clear existing history and add restored inputs
+            self._pt_history = InMemoryHistory()
+            for user_input in user_inputs:
+                self._pt_history.append_string(user_input)
+            self.log(f"[client] Restored {len(user_inputs)} inputs to prompt history")
 
     def _display_command_result(self, command_name: str, result: Any, shared: bool) -> None:
         """Display the result of a plugin command to the user.
@@ -376,6 +532,12 @@ class InteractiveClient:
             self._jaato = JaatoClient()
             self._jaato.connect(project_id, location, model_name)
             self.log(f"[client] Using model: {model_name}")
+            # List available models
+            try:
+                available_models = self._jaato.list_available_models()
+                self.log(f"[client] Available models: {', '.join(available_models)}")
+            except Exception as list_err:
+                self.log(f"[client] Could not list available models: {list_err}")
         except Exception as e:
             print(f"Error: Failed to initialize Vertex AI client: {e}")
             return False
@@ -416,16 +578,67 @@ class InteractiveClient:
         # Configure tools on JaatoClient
         self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
-        # Log available tools
+        # Set up session persistence plugin
+        self._setup_session_plugin()
+
+        # Log available tools (including session plugin)
         all_decls = self.registry.get_exposed_declarations()
         if self.permission_plugin:
             all_decls.extend(self.permission_plugin.get_function_declarations())
+        # Session plugin tools are already added to jaato's tool config
+        if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
+            if hasattr(self._jaato._session_plugin, 'get_function_declarations'):
+                all_decls.extend(self._jaato._session_plugin.get_function_declarations())
         self.log(f"[client] Available tools: {[d.name for d in all_decls]}")
 
         # Register plugin-contributed tools as completable commands
         self._register_plugin_commands()
 
         return True
+
+    def _setup_session_plugin(self) -> None:
+        """Set up the session persistence plugin.
+
+        Loads configuration from .jaato/.sessions.json if it exists,
+        creates and configures the session plugin, and sets it on JaatoClient.
+        """
+        if not self._jaato:
+            return
+
+        try:
+            # Load session config (uses defaults if no config file)
+            session_config = load_session_config()
+
+            # Create and initialize plugin
+            session_plugin = create_session_plugin()
+            session_plugin.initialize({'storage_path': session_config.storage_path})
+
+            # Set on JaatoClient (this also registers user commands and tools)
+            self._jaato.set_session_plugin(session_plugin, session_config)
+
+            # Register session plugin with registry for prompt enrichment
+            # (enrichment_only=True means it won't duplicate in get_exposed_declarations)
+            if self.registry:
+                self.registry.register_plugin(session_plugin, enrichment_only=True)
+
+            # Add session plugin's auto-approved tools to permission whitelist
+            if self.permission_plugin and hasattr(session_plugin, 'get_auto_approved_tools'):
+                auto_approved = session_plugin.get_auto_approved_tools()
+                if auto_approved:
+                    self.permission_plugin.add_whitelist_tools(auto_approved)
+
+            self.log(f"[client] Session plugin ready (storage: {session_config.storage_path})")
+
+        except Exception as e:
+            self.log(f"[client] Warning: Failed to initialize session plugin: {e}")
+
+    def _close_session(self) -> None:
+        """Close the current session, triggering auto-save if configured."""
+        if self._jaato:
+            try:
+                self._jaato.close_session()
+            except Exception as e:
+                self.log(f"[client] Warning: Error closing session: {e}")
 
     def _register_plugin_commands(self) -> None:
         """Register plugin-contributed user commands for autocompletion.
@@ -447,6 +660,12 @@ class InteractiveClient:
         # Add to completer for autocompletion (need (name, description) tuples)
         completer_cmds = [(cmd.name, cmd.description) for cmd in user_commands.values()]
         self._completer.add_commands(completer_cmds)
+
+        # Set up session ID completion if session plugin is available
+        if hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
+            session_plugin = self._jaato._session_plugin
+            if hasattr(session_plugin, 'list_sessions'):
+                self._completer.set_session_provider(session_plugin.list_sessions)
 
         self.log(f"[client] Registered {len(user_commands)} plugin command(s) for completion")
 
@@ -516,6 +735,7 @@ class InteractiveClient:
                 user_input = self._get_user_input()
             except (EOFError, KeyboardInterrupt):
                 print("\nGoodbye!")
+                self._close_session()
                 break
 
             if not user_input:
@@ -523,6 +743,7 @@ class InteractiveClient:
 
             if user_input.lower() in ('quit', 'exit', 'q'):
                 print("Goodbye!")
+                self._close_session()
                 break
 
             if user_input.lower() == 'help':
@@ -561,17 +782,24 @@ class InteractiveClient:
             plugin_result = self._try_execute_plugin_command(user_input)
             if plugin_result is not None:
                 # Plugin command was executed, result already displayed
+                # Track for export as a local command (doesn't go to model directly)
+                self._original_inputs.append({"text": user_input, "local": True})
                 continue
 
             # Track original input for export (before expansion)
-            self._original_inputs.append(user_input)
+            self._original_inputs.append({"text": user_input, "local": False})
 
             # Expand @file references to include file contents
             expanded_prompt = self._expand_file_references(user_input)
 
             # Execute the prompt
             response = self.run_prompt(expanded_prompt)
-            print(f"\n{self._c('Model>', 'bold')} {response}")
+            # Word-wrap the response to fit terminal width
+            model_prefix = self._c('Model>', 'bold') + ' '
+            # Use spaces for continuation lines to align with the text after "Model> "
+            continuation_indent = "       "  # 7 spaces to match "Model> " width
+            wrapped = self._wrap_text(response, prefix=continuation_indent, initial_prefix="")
+            print(f"\n{model_prefix}{wrapped}")
 
     def _print_help(self) -> None:
         """Print help information."""
@@ -636,23 +864,42 @@ Keyboard shortcuts:
     def _print_tools(self) -> None:
         """Print available tools."""
         print("\nAvailable tools:")
+        # Tools from registry
         for decl in self.registry.get_exposed_declarations():
             print(f"  - {decl.name}: {decl.description}")
+        # Tools from permission plugin
+        if self.permission_plugin:
+            for decl in self.permission_plugin.get_function_declarations():
+                print(f"  - {decl.name}: {decl.description}")
+        # Tools from session plugin (if configured)
+        if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
+            if hasattr(self._jaato._session_plugin, 'get_function_declarations'):
+                for decl in self._jaato._session_plugin.get_function_declarations():
+                    print(f"  - {decl.name}: {decl.description}")
         print()
 
     def _print_plugin_commands(self) -> None:
         """Print plugin-contributed user commands grouped by plugin."""
-        if not self.registry:
-            return
-
         # Collect commands by plugin
         commands_by_plugin: Dict[str, list] = {}
-        for plugin_name in self.registry.list_exposed():
-            plugin = self.registry.get_plugin(plugin_name)
-            if plugin and hasattr(plugin, 'get_user_commands'):
-                commands = plugin.get_user_commands()
-                if commands:
-                    commands_by_plugin[plugin_name] = commands
+
+        # Get commands from registry plugins
+        if self.registry:
+            for plugin_name in self.registry.list_exposed():
+                plugin = self.registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'get_user_commands'):
+                    commands = plugin.get_user_commands()
+                    if commands:
+                        commands_by_plugin[plugin_name] = commands
+
+        # Also get commands from session plugin (not in registry)
+        if self._jaato:
+            user_commands = self._jaato.get_user_commands()
+            # Filter to session commands
+            session_cmds = [cmd for name, cmd in user_commands.items()
+                           if name in ('save', 'resume', 'sessions', 'delete-session', 'backtoturn')]
+            if session_cmds:
+                commands_by_plugin['session'] = session_cmds
 
         if not commands_by_plugin:
             return
@@ -697,14 +944,20 @@ Keyboard shortcuts:
         print()
 
     def _print_history(self) -> None:
-        """Print full conversation history with token accounting."""
+        """Print full conversation history with token accounting and turn numbers.
+
+        Turn numbers are shown prominently to support the 'backtoturn' command.
+        """
         history = self._jaato.get_history() if self._jaato else []
         turn_accounting = self._jaato.get_turn_accounting() if self._jaato else []
+        turn_boundaries = self._jaato.get_turn_boundaries() if self._jaato else []
         count = len(history)
+        total_turns = len(turn_boundaries)
 
-        print(f"\n{'=' * 50}")
-        print(f"  Conversation History: {count} message(s)")
-        print(f"{'=' * 50}")
+        print(f"\n{'=' * 60}")
+        print(f"  Conversation History: {count} message(s), {total_turns} turn(s)")
+        print(f"  Tip: Use 'backtoturn <turn_id>' to revert to a specific turn")
+        print(f"{'=' * 60}")
 
         if count == 0:
             print("  (empty)")
@@ -712,6 +965,7 @@ Keyboard shortcuts:
             return
 
         # Track which turn we're in (user text messages start a new turn)
+        current_turn = 0
         turn_index = 0
 
         for i, content in enumerate(history):
@@ -722,11 +976,22 @@ Keyboard shortcuts:
             is_user_text = (role == 'user' and parts and
                            hasattr(parts[0], 'text') and parts[0].text)
 
-            print(f"\n[{i+1}] {role.upper()}")
-            print("-" * 40)
+            # Print turn header if this starts a new turn
+            if is_user_text:
+                current_turn += 1
+                print(f"\n{'─' * 60}")
+                print(f"  ▶ TURN {current_turn}")
+                print(f"{'─' * 60}")
 
-            for part in parts:
-                self._print_part(part)
+            # Print the message
+            role_label = "USER" if role == 'user' else "MODEL" if role == 'model' else role.upper()
+            print(f"\n  [{role_label}]")
+
+            if not parts:
+                print("  (no content)")
+            else:
+                for part in parts:
+                    self._print_part(part)
 
             # Show token accounting at end of turn (after final model text response)
             # A turn ends when the next message is a user text message or at end of history
@@ -749,9 +1014,9 @@ Keyboard shortcuts:
             total_prompt = sum(t['prompt'] for t in turn_accounting)
             total_output = sum(t['output'] for t in turn_accounting)
             total_all = sum(t['total'] for t in turn_accounting)
-            print(f"\n{'=' * 50}")
-            print(f"  Total: {total_prompt} in / {total_output} out / {total_all} total ({len(turn_accounting)} turns)")
-            print(f"{'=' * 50}")
+            print(f"\n{'=' * 60}")
+            print(f"  Total: {total_prompt} in / {total_output} out / {total_all} total ({total_turns} turns)")
+            print(f"{'=' * 60}")
 
         print()
 
@@ -877,28 +1142,40 @@ Keyboard shortcuts:
 
         # Build steps from original inputs with matched permissions
         final_steps = []
-        for i, user_input in enumerate(self._original_inputs):
-            # Get permissions for this turn (if available)
-            perms = turn_permissions[i] if i < len(turn_permissions) else []
+        model_turn_index = 0  # Track index for model-bound prompts only
+        for input_entry in self._original_inputs:
+            user_input = input_entry["text"]
+            is_local = input_entry["local"]
 
-            # Determine permission value
-            permission = 'y'  # Default
-            if perms:
-                # Use the most permissive permission granted
-                # Priority: 'a' (always) > 'y' (yes) > 'n' (no)
-                if 'a' in perms:
-                    permission = 'a'
-                elif 'y' in perms or 'once' in perms:
-                    permission = 'y'
-                elif 'n' in perms:
-                    permission = 'n'
-                elif 'never' in perms:
-                    permission = 'never'
+            if is_local:
+                # Local commands (plugin commands like "plan") don't need permissions
+                final_steps.append({
+                    'type': user_input,
+                    'local': True,
+                })
+            else:
+                # Model-bound prompts may have permissions
+                perms = turn_permissions[model_turn_index] if model_turn_index < len(turn_permissions) else []
+                model_turn_index += 1
 
-            final_steps.append({
-                'type': user_input,
-                'permission': permission,
-            })
+                # Determine permission value
+                permission = 'y'  # Default
+                if perms:
+                    # Use the most permissive permission granted
+                    # Priority: 'a' (always) > 'y' (yes) > 'n' (no)
+                    if 'a' in perms:
+                        permission = 'a'
+                    elif 'y' in perms or 'once' in perms:
+                        permission = 'y'
+                    elif 'n' in perms:
+                        permission = 'n'
+                    elif 'never' in perms:
+                        permission = 'never'
+
+                final_steps.append({
+                    'type': user_input,
+                    'permission': permission,
+                })
 
         # Add quit step
         final_steps.append({'type': 'quit', 'delay': 0.08})
@@ -995,13 +1272,19 @@ def main():
         if args.prompt:
             # Single prompt mode - run and exit
             response = client.run_prompt(args.prompt)
-            print(f"\n{ANSI_BOLD}Model>{ANSI_RESET} {response}")
+            # Word-wrap the response to fit terminal width
+            continuation_indent = "       "  # 7 spaces to match "Model> " width
+            wrapped = client._wrap_text(response, prefix=continuation_indent, initial_prefix="")
+            print(f"\n{ANSI_BOLD}Model>{ANSI_RESET} {wrapped}")
         elif args.initial_prompt:
             # Initial prompt mode - show banner first, run prompt, then continue interactively
             client._print_banner()
             readline.add_history(args.initial_prompt)  # Add to history for ↑ recall
             response = client.run_prompt(args.initial_prompt)
-            print(f"\n{ANSI_BOLD}Model>{ANSI_RESET} {response}")
+            # Word-wrap the response to fit terminal width
+            continuation_indent = "       "  # 7 spaces to match "Model> " width
+            wrapped = client._wrap_text(response, prefix=continuation_indent, initial_prefix="")
+            print(f"\n{ANSI_BOLD}Model>{ANSI_RESET} {wrapped}")
             client.run_interactive(clear_history=False, show_banner=False)
         else:
             # Interactive mode

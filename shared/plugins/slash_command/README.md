@@ -4,6 +4,8 @@ The slash command plugin enables users to invoke commands from `.jaato/commands/
 
 ## Demo
 
+The demo below shows creating a custom slash command: first creating the `.jaato/commands` folder, adding an "overview" command with a template parameter, using `/overview` without arguments and then with a file argument, editing the command to change the phrasing, and running it again to see the updated behavior.
+
 ![Slash Command Plugin Demo](demo.svg)
 
 ## How It Works

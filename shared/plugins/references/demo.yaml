@@ -1,9 +1,9 @@
-name: References Plugin Demo
+name: Session Export [2025-12-07 21:50]
 timeout: 120
-
 steps:
-  - type: "I need to add a new API endpoint. What standards should I follow?"
-    permission: "y"
-
-  - type: "quit"
-    delay: 0.08
+- type: listReferences
+  local: true
+- type: what do you know about 4-eyes?
+  permission: y
+- type: quit
+  delay: 0.08

@@ -476,6 +476,16 @@ Domain parameters (passed via --domain-params JSON):
     print_config(args, domain_params, project_id, location, model_name,
                  scenarios, all_scenarios, cli_extra_paths, submission_timestamp)
 
+    # List available models
+    if args.verbose:
+        try:
+            available_models = jaato.list_available_models()
+            print(f"  Available models: {', '.join(available_models)}")
+            print()
+        except Exception as e:
+            print(f"  Could not list available models: {e}")
+            print()
+
     # Base directories for traces and output
     trace_base_dir = pathlib.Path(args.trace_dir)
     out_dir = pathlib.Path(args.output).parent
