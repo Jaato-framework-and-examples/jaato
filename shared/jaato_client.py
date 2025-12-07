@@ -5,6 +5,7 @@ with support for tool execution via plugins or custom declarations.
 Uses the SDK chat API for multi-turn conversation management.
 """
 
+import re
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from google import genai
@@ -12,8 +13,13 @@ from google.genai import types
 
 from .ai_tool_runner import ToolExecutor
 from .token_accounting import TokenLedger
-from .plugins.base import UserCommand
+from .plugins.base import UserCommand, PromptEnrichmentResult
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
+from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
+
+# Pattern to match @references in prompts (e.g., @file.png, @path/to/file.txt)
+# Matches @ followed by a path-like string (no spaces, common file chars)
+AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
 
 # Context window limits for known Gemini models (total tokens)
 # These are approximate limits; actual limits may vary by API version
@@ -101,6 +107,13 @@ class JaatoClient:
         self._gc_config: Optional[GCConfig] = None
         self._gc_history: List[GCResult] = []
 
+        # Session persistence
+        self._session_plugin: Optional[SessionPlugin] = None
+        self._session_config: Optional[SessionConfig] = None
+
+        # Plugin registry for prompt enrichment
+        self._registry: Optional['PluginRegistry'] = None
+
     @property
     def is_connected(self) -> bool:
         """Check if client is connected to Vertex AI."""
@@ -169,6 +182,7 @@ class JaatoClient:
         """
         self._ledger = ledger
         self._executor = ToolExecutor(ledger=ledger)
+        self._registry = registry  # Store for prompt enrichment
 
         # Pass connection info and permission plugin to subagent plugin if it's exposed
         self._configure_subagent_plugin(registry, permission_plugin)
@@ -322,6 +336,10 @@ class JaatoClient:
         automatically check and perform garbage collection if needed before
         sending the message.
 
+        If plugins are configured that subscribe to prompt enrichment, the
+        message will be passed through them before sending. After enrichment,
+        any @references are stripped from the message.
+
         Args:
             message: The user's message text.
 
@@ -340,7 +358,50 @@ class JaatoClient:
         if self._gc_plugin and self._gc_config and self._gc_config.check_before_send:
             self._maybe_collect_before_send()
 
-        return self._run_chat_loop(message)
+        # Run prompt enrichment pipeline if registry is configured
+        processed_message = self._enrich_and_clean_prompt(message)
+
+        response = self._run_chat_loop(processed_message)
+
+        # Notify session plugin that turn completed
+        self._notify_session_turn_complete()
+
+        return response
+
+    def _enrich_and_clean_prompt(self, prompt: str) -> str:
+        """Run prompt through enrichment pipeline and strip @references.
+
+        Args:
+            prompt: The user's original prompt text.
+
+        Returns:
+            The processed prompt ready to send to the model.
+        """
+        enriched_prompt = prompt
+
+        # Run through plugin enrichment pipeline
+        if self._registry:
+            result = self._registry.enrich_prompt(prompt)
+            enriched_prompt = result.prompt
+            # Metadata is available in result.metadata if needed for debugging
+
+        # Strip @references from the prompt (framework responsibility)
+        cleaned_prompt = self._strip_at_references(enriched_prompt)
+
+        return cleaned_prompt
+
+    def _strip_at_references(self, prompt: str) -> str:
+        """Remove @ prefix from references in the prompt.
+
+        Converts @filename.png to filename.png, preserving the rest of the text.
+
+        Args:
+            prompt: Prompt text possibly containing @references.
+
+        Returns:
+            Prompt with @ prefixes removed from references.
+        """
+        return AT_REFERENCE_PATTERN.sub(r'\1', prompt)
 
     def _run_chat_loop(self, message: str) -> str:
         """Internal function calling loop using chat.send_message().
@@ -374,11 +435,9 @@ class JaatoClient:
                     else:
                         result = {"error": f"No executor registered for {name}"}
 
-                    # Build function response part
-                    func_responses.append(types.Part.from_function_response(
-                        name=name,
-                        response=result if isinstance(result, dict) else {"result": result}
-                    ))
+                    # Build function response part(s)
+                    parts = self._build_function_response_parts(name, result)
+                    func_responses.extend(parts)
 
                 # Send function responses back to model
                 # Chat API accepts Parts directly (not Content objects)
@@ -392,6 +451,114 @@ class JaatoClient:
             # Always store turn accounting, even on errors
             if turn_tokens['total'] > 0:
                 self._turn_accounting.append(turn_tokens)
+
+    def _build_function_response_parts(
+        self,
+        name: str,
+        result: Any
+    ) -> List[types.Part]:
+        """Build function response parts, handling multimodal content.
+
+        If the result contains multimodal data (indicated by '_multimodal': True),
+        this builds a multimodal function response with image data.
+
+        Args:
+            name: The function name.
+            result: The function result (tuple from executor: (ok, result_dict)).
+
+        Returns:
+            List of Part objects for the function response.
+        """
+        # Executor returns (ok, result_dict) tuple
+        if isinstance(result, tuple) and len(result) == 2:
+            _ok, result_data = result
+        else:
+            result_data = result
+
+        # Check for multimodal result
+        if isinstance(result_data, dict) and result_data.get('_multimodal'):
+            return self._build_multimodal_function_response(name, result_data)
+
+        # Standard text/JSON response
+        response_dict = result_data if isinstance(result_data, dict) else {"result": result_data}
+        return [types.Part.from_function_response(name=name, response=response_dict)]
+
+    def _build_multimodal_function_response(
+        self,
+        name: str,
+        result: Dict[str, Any]
+    ) -> List[types.Part]:
+        """Build a multimodal function response with image data.
+
+        For Gemini 3 Pro+, this creates a function response that includes
+        inline image data that the model can "see".
+
+        Args:
+            name: The function name.
+            result: Dict with '_multimodal': True and image data.
+
+        Returns:
+            List of Part objects including function response and image data.
+        """
+        multimodal_type = result.get('_multimodal_type', 'image')
+
+        if multimodal_type == 'image':
+            image_data = result.get('image_data')
+            mime_type = result.get('mime_type', 'image/png')
+            display_name = result.get('display_name', 'image')
+
+            if not image_data:
+                # Fallback to text response if no image data
+                return [types.Part.from_function_response(
+                    name=name,
+                    response={'error': 'No image data available'}
+                )]
+
+            # Build multimodal response
+            # The function response references the image by display_name
+            # and the image is included as a separate inline data part
+            try:
+                # Create the structured response with reference to image
+                response_dict = {
+                    'status': 'success',
+                    'image': {'$ref': display_name},
+                    'file_path': result.get('file_path', ''),
+                    'size_bytes': result.get('size_bytes', len(image_data)),
+                }
+
+                # For Gemini 3+, we can include multimodal parts in the function response
+                # The SDK's FunctionResponsePart supports file_data for multimodal content
+                # However, the exact API may vary - try the standard approach first
+
+                # Approach 1: Include image as inline_data Part alongside function response
+                # This is a workaround that may work with Gemini 2.x as well
+                parts = [
+                    types.Part.from_function_response(
+                        name=name,
+                        response=response_dict
+                    ),
+                    types.Part.from_bytes(
+                        data=image_data,
+                        mime_type=mime_type
+                    )
+                ]
+                return parts
+
+            except Exception as e:
+                # Fallback: return text description if multimodal fails
+                return [types.Part.from_function_response(
+                    name=name,
+                    response={
+                        'error': f'Failed to build multimodal response: {e}',
+                        'file_path': result.get('file_path', ''),
+                    }
+                )]
+
+        # Unknown multimodal type
+        return [types.Part.from_function_response(
+            name=name,
+            response={'error': f'Unknown multimodal type: {multimodal_type}'}
+        )]
 
     def _accumulate_turn_tokens(self, response, turn_tokens: Dict[str, int]) -> None:
         """Accumulate token counts from response into turn totals."""
@@ -680,10 +847,9 @@ class JaatoClient:
                 else:
                     result = {"error": f"No executor registered for {name}"}
 
-                func_responses.append(types.Part.from_function_response(
-                    name=name,
-                    response=result if isinstance(result, dict) else {"result": result}
-                ))
+                # Build function response part(s), handling multimodal
+                response_parts = self._build_function_response_parts(name, result)
+                func_responses.extend(response_parts)
 
             # Chat API accepts Parts directly (not Content objects)
             response = self._chat.send_message(func_responses)
@@ -795,6 +961,209 @@ class JaatoClient:
             return result
 
         return None
+
+    # ==================== Session Persistence ====================
+
+    def set_session_plugin(
+        self,
+        plugin: SessionPlugin,
+        config: Optional[SessionConfig] = None
+    ) -> None:
+        """Set the session plugin for persistence.
+
+        The session plugin handles saving and loading conversation history,
+        allowing users to resume sessions across client restarts.
+
+        Args:
+            plugin: A plugin implementing the SessionPlugin protocol.
+            config: Optional session configuration. Uses defaults if not provided.
+
+        Example:
+            from shared.plugins.session import create_plugin, SessionConfig
+
+            session_plugin = create_plugin()
+            session_plugin.initialize({'storage_path': '.jaato/sessions'})
+            client.set_session_plugin(session_plugin, SessionConfig())
+        """
+        self._session_plugin = plugin
+        self._session_config = config or SessionConfig()
+
+        # Give plugin a reference to this client for user command execution
+        if hasattr(plugin, 'set_client'):
+            plugin.set_client(self)
+
+        # Register session plugin's user commands and executors
+        if hasattr(plugin, 'get_user_commands'):
+            for cmd in plugin.get_user_commands():
+                self._user_commands[cmd.name] = cmd
+
+        if hasattr(plugin, 'get_executors') and self._executor:
+            for name, fn in plugin.get_executors().items():
+                self._executor.register(name, fn)
+
+        # Check for auto-resume
+        if self._session_config.auto_resume_last:
+            state = self._session_plugin.on_session_start(self._session_config)
+            if state:
+                self._restore_session_state(state)
+
+    def remove_session_plugin(self) -> None:
+        """Remove the session plugin, disabling session persistence."""
+        if self._session_plugin:
+            self._session_plugin.shutdown()
+        self._session_plugin = None
+        self._session_config = None
+
+    def save_session(self, session_id: Optional[str] = None) -> str:
+        """Save the current session.
+
+        Args:
+            session_id: Optional session ID. If not provided, generates one
+                       from the current timestamp.
+
+        Returns:
+            The session ID that was saved.
+
+        Raises:
+            RuntimeError: If no session plugin is configured.
+        """
+        if not self._session_plugin:
+            raise RuntimeError("No session plugin configured. Call set_session_plugin() first.")
+
+        state = self._get_session_state(session_id)
+        self._session_plugin.save(state)
+
+        # Update the plugin's current session tracking
+        if hasattr(self._session_plugin, 'set_current_session_id'):
+            self._session_plugin.set_current_session_id(state.session_id)
+
+        return state.session_id
+
+    def resume_session(self, session_id: str) -> SessionState:
+        """Resume a previously saved session.
+
+        Loads the session's history and restores it to the current client.
+
+        Args:
+            session_id: The session ID to resume.
+
+        Returns:
+            The loaded SessionState.
+
+        Raises:
+            RuntimeError: If no session plugin is configured.
+            FileNotFoundError: If the session doesn't exist.
+        """
+        if not self._session_plugin:
+            raise RuntimeError("No session plugin configured. Call set_session_plugin() first.")
+
+        state = self._session_plugin.load(session_id)
+        self._restore_session_state(state)
+        return state
+
+    def list_sessions(self) -> List[SessionInfo]:
+        """List all available sessions.
+
+        Returns:
+            List of SessionInfo objects, sorted by updated_at descending.
+
+        Raises:
+            RuntimeError: If no session plugin is configured.
+        """
+        if not self._session_plugin:
+            raise RuntimeError("No session plugin configured. Call set_session_plugin() first.")
+
+        return self._session_plugin.list_sessions()
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a saved session.
+
+        Args:
+            session_id: The session ID to delete.
+
+        Returns:
+            True if deleted, False if session didn't exist.
+
+        Raises:
+            RuntimeError: If no session plugin is configured.
+        """
+        if not self._session_plugin:
+            raise RuntimeError("No session plugin configured. Call set_session_plugin() first.")
+
+        return self._session_plugin.delete(session_id)
+
+    def _get_session_state(self, session_id: Optional[str] = None) -> SessionState:
+        """Build a SessionState from the current client state.
+
+        Args:
+            session_id: Optional session ID. Generates one if not provided.
+
+        Returns:
+            SessionState with current history and metadata.
+        """
+        from datetime import datetime
+
+        # Generate session ID if not provided
+        if not session_id:
+            # Check if plugin has a current session ID
+            if (self._session_plugin and
+                    hasattr(self._session_plugin, 'get_current_session_id')):
+                session_id = self._session_plugin.get_current_session_id()
+            if not session_id:
+                session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        now = datetime.now()
+        turn_accounting = self.get_turn_accounting()
+
+        return SessionState(
+            session_id=session_id,
+            history=self.get_history(),
+            created_at=now,  # Will be overwritten if loading existing
+            updated_at=now,
+            turn_count=len(turn_accounting),
+            turn_accounting=turn_accounting,
+            project=self._project,
+            location=self._location,
+            model=self._model_name,
+        )
+
+    def _restore_session_state(self, state: SessionState) -> None:
+        """Restore client state from a SessionState.
+
+        Args:
+            state: The SessionState to restore.
+        """
+        # Restore history
+        self.reset_session(state.history)
+
+        # Restore turn accounting
+        self._turn_accounting = list(state.turn_accounting)
+
+    def _notify_session_turn_complete(self) -> None:
+        """Notify session plugin that a turn completed.
+
+        Called after each send_message() completes.
+        """
+        if not self._session_plugin or not self._session_config:
+            return
+
+        state = self._get_session_state()
+
+        # Increment turn count in plugin for prompt enrichment tracking
+        if hasattr(self._session_plugin, 'increment_turn_count'):
+            self._session_plugin.increment_turn_count()
+
+        # Call plugin hook
+        self._session_plugin.on_turn_complete(state, self._session_config)
+
+    def close_session(self) -> None:
+        """Close the current session, triggering auto-save if configured.
+
+        Call this before exiting to ensure session is saved.
+        """
+        if self._session_plugin and self._session_config:
+            state = self._get_session_state()
+            self._session_plugin.on_session_end(state, self._session_config)
 
 
 __all__ = ['JaatoClient', 'MODEL_CONTEXT_LIMITS', 'DEFAULT_CONTEXT_LIMIT']
