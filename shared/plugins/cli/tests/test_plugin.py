@@ -3,8 +3,15 @@
 import os
 import sys
 import pytest
+from typing import Optional
 
-from ..plugin import CLIToolPlugin, create_plugin
+from ..plugin import (
+    CLIToolPlugin,
+    create_plugin,
+    DEFAULT_AUTO_BACKGROUND_THRESHOLD,
+    SLOW_COMMAND_PATTERNS,
+)
+from ...background.protocol import BackgroundCapable
 
 
 class TestCLIPluginInitialization:
@@ -259,3 +266,109 @@ class TestCLIPluginShellExecution:
         assert "error" not in result
         assert result["returncode"] == 0
         assert "nested" in result["stdout"]
+
+
+class TestCLIPluginBackgroundCapability:
+    """Tests for background capability support."""
+
+    def test_plugin_implements_background_capable_protocol(self):
+        """Test that CLIToolPlugin implements BackgroundCapable protocol."""
+        plugin = CLIToolPlugin()
+        assert isinstance(plugin, BackgroundCapable)
+
+    def test_supports_background_cli_tool(self):
+        """Test that cli_based_tool supports background execution."""
+        plugin = CLIToolPlugin()
+        assert plugin.supports_background("cli_based_tool") is True
+
+    def test_supports_background_other_tool(self):
+        """Test that non-existent tools do not support background."""
+        plugin = CLIToolPlugin()
+        assert plugin.supports_background("other_tool") is False
+        assert plugin.supports_background("") is False
+
+    def test_get_auto_background_threshold_default(self):
+        """Test default auto-background threshold."""
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+
+        threshold = plugin.get_auto_background_threshold("cli_based_tool")
+        assert threshold == DEFAULT_AUTO_BACKGROUND_THRESHOLD
+
+    def test_get_auto_background_threshold_configured(self):
+        """Test configured auto-background threshold."""
+        plugin = CLIToolPlugin()
+        plugin.initialize({"auto_background_threshold": 30.0})
+
+        threshold = plugin.get_auto_background_threshold("cli_based_tool")
+        assert threshold == 30.0
+
+    def test_get_auto_background_threshold_other_tool(self):
+        """Test threshold returns None for unsupported tools."""
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+
+        threshold = plugin.get_auto_background_threshold("other_tool")
+        assert threshold is None
+
+    def test_estimate_duration_known_patterns(self):
+        """Test duration estimation for known slow command patterns."""
+        plugin = CLIToolPlugin()
+
+        # Test a few known patterns
+        assert plugin.estimate_duration("cli_based_tool", {"command": "npm install"}) == 30.0
+        assert plugin.estimate_duration("cli_based_tool", {"command": "pip install requests"}) == 20.0
+        assert plugin.estimate_duration("cli_based_tool", {"command": "cargo build --release"}) == 60.0
+        assert plugin.estimate_duration("cli_based_tool", {"command": "pytest tests/"}) == 30.0
+        assert plugin.estimate_duration("cli_based_tool", {"command": "docker build ."}) == 60.0
+
+    def test_estimate_duration_unknown_command(self):
+        """Test duration estimation returns None for unknown commands."""
+        plugin = CLIToolPlugin()
+
+        assert plugin.estimate_duration("cli_based_tool", {"command": "echo hello"}) is None
+        assert plugin.estimate_duration("cli_based_tool", {"command": "ls -la"}) is None
+        assert plugin.estimate_duration("cli_based_tool", {"command": "cat file.txt"}) is None
+
+    def test_estimate_duration_empty_command(self):
+        """Test duration estimation handles empty command."""
+        plugin = CLIToolPlugin()
+
+        assert plugin.estimate_duration("cli_based_tool", {"command": ""}) is None
+        assert plugin.estimate_duration("cli_based_tool", {}) is None
+
+    def test_estimate_duration_other_tool(self):
+        """Test duration estimation returns None for other tools."""
+        plugin = CLIToolPlugin()
+
+        assert plugin.estimate_duration("other_tool", {"command": "npm install"}) is None
+
+    def test_slow_command_patterns_exist(self):
+        """Test that slow command patterns are defined."""
+        assert len(SLOW_COMMAND_PATTERNS) > 0
+
+        # Check some expected patterns exist
+        assert "npm install" in SLOW_COMMAND_PATTERNS
+        assert "pip install" in SLOW_COMMAND_PATTERNS
+        assert "make" in SLOW_COMMAND_PATTERNS
+        assert "pytest" in SLOW_COMMAND_PATTERNS
+
+    def test_initialize_with_background_max_workers(self):
+        """Test initialization with custom max workers."""
+        plugin = CLIToolPlugin()
+        plugin.initialize({"background_max_workers": 8})
+
+        # Should configure the background executor
+        assert plugin._bg_max_workers == 8
+
+    def test_shutdown_cleans_up_background_executor(self):
+        """Test that shutdown properly cleans up background resources."""
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+
+        # Start a background execution to initialize the executor
+        # Note: We don't actually need to do this since the mixin
+        # handles lazy initialization
+
+        plugin.shutdown()
+        assert plugin._initialized is False
