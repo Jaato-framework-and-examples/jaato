@@ -71,6 +71,7 @@ flowchart TB
             PR[PluginRegistry<br/>plugins/registry.py]
 
             subgraph Available["Available Plugins"]
+                BG[BackgroundPlugin<br/>plugins/background/]
                 CLI[CLIToolPlugin<br/>plugins/cli/]
                 MCP[MCPToolPlugin<br/>plugins/mcp/]
                 PERM[PermissionPlugin<br/>plugins/permission/]
@@ -97,6 +98,7 @@ flowchart TB
     JC --> TE
     JC --> TL
     JC --> PR
+    PR --> BG
     PR --> CLI
     PR --> MCP
     PR --> PERM
@@ -107,6 +109,9 @@ flowchart TB
     PR --> SLASH
     PR --> CLAR
     TE --> PERM
+    TE --> BG
+    BG --> CLI
+    BG --> MCP
     MCP --> MCM
     MCM --> MCPS
     CLI --> Shell
@@ -141,6 +146,45 @@ sequenceDiagram
     SDK-->>JC: final text response
     JC->>TL: record token usage
     JC-->>App: "Here are the files: ..."
+```
+
+## Background Task Flow
+
+When a tool supports background execution and exceeds its configured threshold, the ToolExecutor automatically converts it to a background task:
+
+```mermaid
+sequenceDiagram
+    participant JC as JaatoClient
+    participant TE as ToolExecutor
+    participant Plugin as BackgroundCapable Plugin
+    participant BG as BackgroundPlugin
+
+    JC->>TE: execute("slow_tool", args)
+    TE->>Plugin: get_auto_background_threshold()
+    Plugin-->>TE: 10.0 seconds
+
+    Note over TE: Execute in thread pool<br/>with timeout
+
+    alt Completes within threshold
+        TE-->>JC: Normal result
+    else Exceeds threshold
+        TE->>Plugin: register_running_task(future)
+        Plugin-->>TE: TaskHandle
+        TE-->>JC: {auto_backgrounded: true, task_id: "xyz"}
+
+        Note over JC: Model can continue<br/>with other work
+
+        JC->>BG: getBackgroundTaskStatus(task_id)
+        BG->>Plugin: get_status(task_id)
+        Plugin-->>BG: RUNNING
+
+        Note over Plugin: Task completes<br/>in background
+
+        JC->>BG: getBackgroundTaskResult(task_id)
+        BG->>Plugin: get_result(task_id)
+        Plugin-->>BG: {result: ...}
+        BG-->>JC: Final result
+    end
 ```
 
 ## Plugin System Architecture
@@ -463,6 +507,28 @@ classDiagram
         +processCommand(command_name, args)
     }
 
+    class BackgroundPlugin {
+        +name = "background"
+        -registry: PluginRegistry
+        -capable_plugins: Dict
+        +startBackgroundTask(plugin, tool, args)
+        +getBackgroundTaskStatus(task_id)
+        +getBackgroundTaskResult(task_id)
+        +cancelBackgroundTask(task_id)
+        +listBackgroundTasks()
+        +tasks user command
+    }
+
+    class BackgroundCapable {
+        <<Protocol>>
+        +supports_background(tool_name) bool
+        +get_auto_background_threshold(tool_name) float
+        +start_background(tool_name, args) TaskHandle
+        +get_status(task_id) TaskStatus
+        +get_result(task_id) TaskResult
+        +cancel(task_id) bool
+    }
+
     class MultimodalPlugin {
         +name = "multimodal"
         +MODEL_REQUIREMENTS: List~str~
@@ -470,6 +536,8 @@ classDiagram
         +subscribes_to_prompt_enrichment() bool
         +enrich_prompt(prompt) PromptEnrichmentResult
         +get_model_requirements() List~str~
+    }
+
     class ClarificationPlugin {
         +name = "clarification"
         -actor: ClarificationActor
@@ -492,6 +560,7 @@ classDiagram
         +enrich_prompt(prompt) PromptEnrichmentResult
     }
 
+    ToolPlugin <|.. BackgroundPlugin
     ToolPlugin <|.. CLIToolPlugin
     ToolPlugin <|.. MCPToolPlugin
     ToolPlugin <|.. PermissionPlugin
@@ -599,6 +668,10 @@ shared/
     ├── registry.py          # PluginRegistry (for tool plugins)
     │
     │   # Tool Plugins (PLUGIN_KIND = "tool")
+    ├── background/          # BackgroundPlugin (orchestrator + protocol)
+    │   ├── protocol.py      # BackgroundCapable protocol, TaskHandle, TaskResult
+    │   ├── mixin.py         # BackgroundCapableMixin for easy implementation
+    │   └── plugin.py        # BackgroundPlugin orchestrator
     ├── cli/                 # CLIToolPlugin (model tools only)
     ├── mcp/                 # MCPToolPlugin (model tools only)
     ├── multimodal/          # MultimodalPlugin (prompt enrichment + model requirements)
