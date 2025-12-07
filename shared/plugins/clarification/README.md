@@ -2,6 +2,12 @@
 
 The clarification plugin allows the AI model to request clarification from users when it needs more information to proceed with a task.
 
+## Demo
+
+The demo below shows the model triggering a clarification request with multiple questions of different types (single choice, multiple choice, free text) and the interactive console prompts for user responses.
+
+![Clarification Plugin Demo](demo.svg)
+
 ## Features
 
 - **Multiple questions per request** - Ask several questions in one clarification call
