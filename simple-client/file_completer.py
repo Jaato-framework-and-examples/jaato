@@ -607,20 +607,22 @@ class SessionIdCompleter(Completer):
         self, document: Document, complete_event
     ) -> Iterable[Completion]:
         """Get session ID completions for session commands."""
-        text = document.text_before_cursor.strip()
+        # Don't strip - we need to detect the space after the command
+        text = document.text_before_cursor
 
         # Check if input starts with a session command followed by space
         command_match = None
+        text_lower = text.lower()
         for cmd in self.SESSION_COMMANDS:
-            if text.lower().startswith(cmd + ' '):
+            if text_lower.startswith(cmd + ' '):
                 command_match = cmd
                 break
 
         if not command_match:
             return
 
-        # Extract the argument portion after the command
-        arg_text = text[len(command_match):].strip()
+        # Extract the argument portion after the command (may have leading space)
+        arg_text = text[len(command_match) + 1:]  # +1 for the space
 
         # Get available sessions
         if not self._session_provider:
