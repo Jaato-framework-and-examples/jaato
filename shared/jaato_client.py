@@ -112,10 +112,7 @@ class JaatoClient:
         return self._model_name
 
     def list_available_models(self, prefix: Optional[str] = None) -> List[str]:
-        """List models from Vertex AI that support text generation.
-
-        Filters for models that support 'generateContent' action and optionally
-        by name prefix.
+        """List models from Vertex AI.
 
         Note: This returns the model catalog, not region-specific availability.
         Some models may not be available in all regions. Use location='global'
@@ -124,10 +121,10 @@ class JaatoClient:
 
         Args:
             prefix: Optional name prefix to filter by (e.g., "gemini").
-                    Defaults to None (all models that support generateContent).
+                    Defaults to None (all models).
 
         Returns:
-            List of model names that support generateContent.
+            List of model names from the catalog.
 
         Raises:
             RuntimeError: If client is not connected.
@@ -137,11 +134,6 @@ class JaatoClient:
 
         models = []
         for model in self._client.models.list():
-            # Filter for models that support generateContent
-            if not hasattr(model, 'supported_actions') or not model.supported_actions:
-                continue
-            if 'generateContent' not in model.supported_actions:
-                continue
             # Filter by prefix if specified
             if prefix and not model.name.startswith(prefix):
                 continue
