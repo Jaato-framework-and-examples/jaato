@@ -44,6 +44,7 @@ from shared import (
     TodoPlugin,
     active_cert_bundle,
 )
+from shared.plugins.session import create_plugin as create_session_plugin, SessionConfig, load_session_config
 
 # Import file and command completion (local module)
 try:
@@ -422,6 +423,9 @@ class InteractiveClient:
         # Configure tools on JaatoClient
         self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
+        # Set up session persistence plugin
+        self._setup_session_plugin()
+
         # Log available tools
         all_decls = self.registry.get_exposed_declarations()
         if self.permission_plugin:
@@ -432,6 +436,39 @@ class InteractiveClient:
         self._register_plugin_commands()
 
         return True
+
+    def _setup_session_plugin(self) -> None:
+        """Set up the session persistence plugin.
+
+        Loads configuration from .jaato/.sessions.json if it exists,
+        creates and configures the session plugin, and sets it on JaatoClient.
+        """
+        if not self._jaato:
+            return
+
+        try:
+            # Load session config (uses defaults if no config file)
+            session_config = load_session_config()
+
+            # Create and initialize plugin
+            session_plugin = create_session_plugin()
+            session_plugin.initialize({'storage_path': session_config.storage_path})
+
+            # Set on JaatoClient (this also registers user commands)
+            self._jaato.set_session_plugin(session_plugin, session_config)
+
+            self.log(f"[client] Session plugin ready (storage: {session_config.storage_path})")
+
+        except Exception as e:
+            self.log(f"[client] Warning: Failed to initialize session plugin: {e}")
+
+    def _close_session(self) -> None:
+        """Close the current session, triggering auto-save if configured."""
+        if self._jaato:
+            try:
+                self._jaato.close_session()
+            except Exception as e:
+                self.log(f"[client] Warning: Error closing session: {e}")
 
     def _register_plugin_commands(self) -> None:
         """Register plugin-contributed user commands for autocompletion.
@@ -522,6 +559,7 @@ class InteractiveClient:
                 user_input = self._get_user_input()
             except (EOFError, KeyboardInterrupt):
                 print("\nGoodbye!")
+                self._close_session()
                 break
 
             if not user_input:
@@ -529,6 +567,7 @@ class InteractiveClient:
 
             if user_input.lower() in ('quit', 'exit', 'q'):
                 print("Goodbye!")
+                self._close_session()
                 break
 
             if user_input.lower() == 'help':
