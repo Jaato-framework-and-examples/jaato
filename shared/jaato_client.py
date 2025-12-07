@@ -671,6 +671,99 @@ class JaatoClient:
         self._turn_accounting = []
         self._create_chat(history)
 
+    def get_turn_boundaries(self) -> List[int]:
+        """Get indices where each turn starts in the history.
+
+        A turn starts with a user text message (not a function response).
+        Returns 1-based turn numbers mapped to 0-based history indices.
+
+        Returns:
+            List of history indices where each turn starts.
+            Index i contains the history index where turn (i+1) starts.
+        """
+        history = self.get_history()
+        boundaries = []
+
+        for i, content in enumerate(history):
+            role = getattr(content, 'role', None)
+            parts = getattr(content, 'parts', None) or []
+
+            # A turn starts with a user message that has text (not function response)
+            if role == 'user' and parts:
+                first_part = parts[0]
+                # Check if it's a text part (not function response)
+                if hasattr(first_part, 'text') and first_part.text:
+                    boundaries.append(i)
+
+        return boundaries
+
+    def revert_to_turn(self, turn_id: int) -> Dict[str, Any]:
+        """Revert the conversation to a specific turn.
+
+        Removes all history after the specified turn, keeping the turn
+        and everything before it.
+
+        Args:
+            turn_id: 1-based turn number to revert to.
+
+        Returns:
+            Dict with:
+            - success: True if reverted successfully
+            - turns_removed: Number of turns removed
+            - new_turn_count: Current turn count after reversion
+            - message: Human-readable status message
+
+        Raises:
+            ValueError: If turn_id is invalid.
+        """
+        boundaries = self.get_turn_boundaries()
+        total_turns = len(boundaries)
+
+        if turn_id < 1:
+            raise ValueError(f"Turn ID must be >= 1, got {turn_id}")
+
+        if turn_id > total_turns:
+            raise ValueError(f"Turn {turn_id} does not exist. Current session has {total_turns} turn(s).")
+
+        if turn_id == total_turns:
+            # Already at the requested turn, nothing to do
+            return {
+                'success': True,
+                'turns_removed': 0,
+                'new_turn_count': total_turns,
+                'message': f"Already at turn {turn_id}, no changes made."
+            }
+
+        # Find where to truncate: keep everything up to (but not including) the next turn
+        history = self.get_history()
+
+        if turn_id < total_turns:
+            # Truncate at the start of the next turn
+            truncate_at = boundaries[turn_id]  # boundaries[turn_id] is where turn (turn_id+1) starts
+        else:
+            truncate_at = len(history)
+
+        truncated_history = list(history[:truncate_at])
+        turns_removed = total_turns - turn_id
+
+        # Truncate turn accounting to match
+        if turn_id <= len(self._turn_accounting):
+            self._turn_accounting = self._turn_accounting[:turn_id]
+
+        # Reset session with truncated history
+        self._create_chat(truncated_history)
+
+        # Reset session plugin's turn count if it has one
+        if self._session_plugin and hasattr(self._session_plugin, 'set_turn_count'):
+            self._session_plugin.set_turn_count(turn_id)
+
+        return {
+            'success': True,
+            'turns_removed': turns_removed,
+            'new_turn_count': turn_id,
+            'message': f"Reverted to turn {turn_id} (removed {turns_removed} turn(s))."
+        }
+
     def get_user_commands(self) -> Dict[str, UserCommand]:
         """Get available user commands.
 

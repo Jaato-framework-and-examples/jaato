@@ -362,6 +362,7 @@ class FileSessionPlugin:
             "resume": self._execute_resume,
             "sessions": self._execute_sessions,
             "delete-session": self._execute_delete_session,
+            "backtoturn": self._execute_backtoturn,
         }
 
     def _execute_save(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -509,6 +510,48 @@ class FileSessionPlugin:
         except Exception as e:
             return {"status": "error", "message": f"Error deleting session: {e}"}
 
+    def _execute_backtoturn(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the backtoturn user command.
+
+        Reverts the conversation to a specific turn.
+        """
+        if not self._client:
+            return {"status": "error", "message": "Session plugin not properly configured"}
+
+        turn_id = args.get("turn_id")
+        if turn_id is None:
+            # Show current turn count and usage
+            try:
+                boundaries = self._client.get_turn_boundaries()
+                total_turns = len(boundaries)
+                return {
+                    "status": "info",
+                    "message": (
+                        f"Current session has {total_turns} turn(s).\n"
+                        "Usage: backtoturn <turn_id>\n\n"
+                        "Use 'history' to see turn IDs, then specify which turn to revert to.\n"
+                        "All turns after the specified turn will be removed."
+                    )
+                }
+            except Exception as e:
+                return {"status": "error", "message": f"Error: {e}"}
+
+        try:
+            turn_id = int(turn_id)
+        except (ValueError, TypeError):
+            return {"status": "error", "message": f"Invalid turn ID: {turn_id}. Must be a number."}
+
+        try:
+            result = self._client.revert_to_turn(turn_id)
+            return {
+                "status": "ok",
+                "message": result.get("message", f"Reverted to turn {turn_id}")
+            }
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
+        except Exception as e:
+            return {"status": "error", "message": f"Error reverting: {e}"}
+
     def _execute_describe(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the session_describe tool.
 
@@ -562,6 +605,7 @@ class FileSessionPlugin:
             UserCommand("resume", "Resume a saved session", share_with_model=False),
             UserCommand("sessions", "List available sessions", share_with_model=False),
             UserCommand("delete-session", "Delete a saved session", share_with_model=False),
+            UserCommand("backtoturn", "Revert to a specific turn (use 'history' to see turn IDs)", share_with_model=False),
         ]
 
     # ==================== ToolPlugin: Prompt Enrichment ====================
@@ -650,3 +694,13 @@ class FileSessionPlugin:
     def increment_turn_count(self) -> None:
         """Increment the internal turn count for prompt enrichment tracking."""
         self._turn_count += 1
+
+    def set_turn_count(self, count: int) -> None:
+        """Set the internal turn count.
+
+        Used when reverting to a previous turn to keep the count in sync.
+
+        Args:
+            count: The new turn count.
+        """
+        self._turn_count = count

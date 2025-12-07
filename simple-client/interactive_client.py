@@ -795,9 +795,9 @@ Keyboard shortcuts:
         # Also get commands from session plugin (not in registry)
         if self._jaato:
             user_commands = self._jaato.get_user_commands()
-            # Filter to session commands (save, resume, sessions, delete-session)
+            # Filter to session commands
             session_cmds = [cmd for name, cmd in user_commands.items()
-                           if name in ('save', 'resume', 'sessions', 'delete-session')]
+                           if name in ('save', 'resume', 'sessions', 'delete-session', 'backtoturn')]
             if session_cmds:
                 commands_by_plugin['session'] = session_cmds
 
@@ -844,14 +844,20 @@ Keyboard shortcuts:
         print()
 
     def _print_history(self) -> None:
-        """Print full conversation history with token accounting."""
+        """Print full conversation history with token accounting and turn numbers.
+
+        Turn numbers are shown prominently to support the 'backtoturn' command.
+        """
         history = self._jaato.get_history() if self._jaato else []
         turn_accounting = self._jaato.get_turn_accounting() if self._jaato else []
+        turn_boundaries = self._jaato.get_turn_boundaries() if self._jaato else []
         count = len(history)
+        total_turns = len(turn_boundaries)
 
-        print(f"\n{'=' * 50}")
-        print(f"  Conversation History: {count} message(s)")
-        print(f"{'=' * 50}")
+        print(f"\n{'=' * 60}")
+        print(f"  Conversation History: {count} message(s), {total_turns} turn(s)")
+        print(f"  Tip: Use 'backtoturn <turn_id>' to revert to a specific turn")
+        print(f"{'=' * 60}")
 
         if count == 0:
             print("  (empty)")
@@ -859,6 +865,7 @@ Keyboard shortcuts:
             return
 
         # Track which turn we're in (user text messages start a new turn)
+        current_turn = 0
         turn_index = 0
 
         for i, content in enumerate(history):
@@ -869,8 +876,16 @@ Keyboard shortcuts:
             is_user_text = (role == 'user' and parts and
                            hasattr(parts[0], 'text') and parts[0].text)
 
-            print(f"\n[{i+1}] {role.upper()}")
-            print("-" * 40)
+            # Print turn header if this starts a new turn
+            if is_user_text:
+                current_turn += 1
+                print(f"\n{'─' * 60}")
+                print(f"  ▶ TURN {current_turn}")
+                print(f"{'─' * 60}")
+
+            # Print the message
+            role_label = "USER" if role == 'user' else "MODEL" if role == 'model' else role.upper()
+            print(f"\n  [{role_label}]")
 
             for part in parts:
                 self._print_part(part)
@@ -896,9 +911,9 @@ Keyboard shortcuts:
             total_prompt = sum(t['prompt'] for t in turn_accounting)
             total_output = sum(t['output'] for t in turn_accounting)
             total_all = sum(t['total'] for t in turn_accounting)
-            print(f"\n{'=' * 50}")
-            print(f"  Total: {total_prompt} in / {total_output} out / {total_all} total ({len(turn_accounting)} turns)")
-            print(f"{'=' * 50}")
+            print(f"\n{'=' * 60}")
+            print(f"  Total: {total_prompt} in / {total_output} out / {total_all} total ({total_turns} turns)")
+            print(f"{'=' * 60}")
 
         print()
 
