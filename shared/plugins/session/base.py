@@ -42,6 +42,9 @@ class SessionState:
     turn_accounting: List[Dict[str, int]] = field(default_factory=list)
     """Token usage per turn: [{'prompt': N, 'output': M, 'total': O}, ...]."""
 
+    user_inputs: List[str] = field(default_factory=list)
+    """Original user inputs for readline/prompt history restoration."""
+
     metadata: Dict[str, Any] = field(default_factory=dict)
     """Additional plugin-specific metadata."""
 

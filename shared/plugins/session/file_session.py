@@ -373,12 +373,16 @@ class FileSessionPlugin:
         """Execute the save user command.
 
         Saves the current session for later resumption.
+
+        Args:
+            args: May include 'user_inputs' list for prompt history restoration.
         """
         if not self._client:
             return {"status": "error", "message": "Session plugin not properly configured"}
 
         try:
-            session_id = self._client.save_session()
+            user_inputs = args.get("user_inputs", [])
+            session_id = self._client.save_session(user_inputs=user_inputs)
             return {
                 "status": "ok",
                 "message": f"Session saved: {session_id}\nUse 'resume' to restore this session later."
@@ -420,6 +424,9 @@ class FileSessionPlugin:
         """Execute the resume user command.
 
         Resumes a previously saved session.
+
+        Returns:
+            Result dict including 'user_inputs' for prompt history restoration.
         """
         if not self._client:
             return {"status": "error", "message": "Session plugin not properly configured"}
@@ -438,7 +445,8 @@ class FileSessionPlugin:
                 desc = f' - "{state.description}"' if state.description else ''
                 return {
                     "status": "ok",
-                    "message": f"Session resumed: {state.session_id}{desc}\nRestored {state.turn_count} turns."
+                    "message": f"Session resumed: {state.session_id}{desc}\nRestored {state.turn_count} turns.",
+                    "user_inputs": state.user_inputs,  # For prompt history restoration
                 }
             else:
                 # List sessions for user to choose
