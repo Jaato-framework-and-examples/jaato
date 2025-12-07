@@ -10,7 +10,9 @@ This document describes a design for allowing the model to delegate long-running
 
 1. A **capability protocol** (`BackgroundCapable`) that plugins can implement to declare background execution support
 2. A **background orchestrator plugin** that manages lifecycle and exposes tools to the model
-3. **Model-driven triggering** where the model can proactively start tasks in background
+3. **Two triggering modes**:
+   - **Explicit**: Model proactively starts tasks in background
+   - **Auto-background**: Tasks exceeding a plugin-defined threshold are automatically backgrounded
 
 ## Motivation
 
@@ -133,6 +135,27 @@ class BackgroundCapable(Protocol):
         """
         ...
 
+    def get_auto_background_threshold(self, tool_name: str) -> Optional[float]:
+        """Return timeout threshold for automatic backgrounding.
+
+        When a tool execution exceeds this threshold, the ToolExecutor
+        automatically converts it to a background task and returns a handle.
+        This allows reactive backgrounding without model intervention.
+
+        The plugin controls its own thresholds because:
+        - Different tools have different expected durations
+        - Plugin authors know their tools' performance characteristics
+        - Some tools should never auto-background (return None)
+
+        Args:
+            tool_name: Name of the tool to check.
+
+        Returns:
+            Threshold in seconds after which to auto-background,
+            or None to disable auto-background for this tool.
+        """
+        ...
+
     def estimate_duration(
         self,
         tool_name: str,
@@ -237,6 +260,31 @@ class BackgroundCapable(Protocol):
             Number of tasks cleaned up.
         """
         ...
+
+    def register_running_task(
+        self,
+        future: 'Future',
+        tool_name: str,
+        arguments: Dict[str, Any]
+    ) -> TaskHandle:
+        """Register an already-running Future as a background task.
+
+        Called by ToolExecutor when auto-backgrounding a task that
+        exceeded its threshold. The Future is already executing.
+
+        This enables the auto-background flow where the executor starts
+        a task, waits up to a threshold, then registers it as background
+        if it's still running.
+
+        Args:
+            future: The concurrent.futures.Future already executing.
+            tool_name: Name of the tool.
+            arguments: Arguments passed to the tool.
+
+        Returns:
+            TaskHandle for tracking the task.
+        """
+        ...
 ```
 
 ### Implementation Pattern
@@ -262,6 +310,12 @@ class CLIPluginWithBackground:
     def supports_background(self, tool_name: str) -> bool:
         # CLI commands can generally run in background
         return tool_name == "runCommand"
+
+    def get_auto_background_threshold(self, tool_name: str) -> Optional[float]:
+        # Auto-background CLI commands after 10 seconds
+        if tool_name == "runCommand":
+            return 10.0
+        return None  # Other tools stay synchronous
 
     def estimate_duration(self, tool_name: str, arguments: Dict[str, Any]) -> Optional[float]:
         # Could analyze command to estimate (e.g., "npm install" → ~30s)
@@ -811,20 +865,186 @@ I'll check their status..."
 Model calls: listBackgroundTasks()
 ```
 
+### Pattern 4: Auto-Backgrounded Task (Reactive)
+
+The model calls a tool normally, but it exceeds the plugin's threshold and is
+automatically converted to a background task:
+
+```
+User: "Run the full test suite"
+
+Model calls: runCommand(command="npm test -- --coverage")
+
+[10 seconds pass - threshold exceeded]
+
+Tool returns: {
+    "auto_backgrounded": true,
+    "task_id": "xyz-789",
+    "threshold_seconds": 10.0,
+    "message": "Task exceeded 10.0s threshold, continuing in background..."
+}
+
+Model: "The test suite is taking longer than expected and has been moved
+to background processing. I'll monitor its progress..."
+
+Model calls: getBackgroundTaskStatus(task_id="xyz-789")
+
+[... polling until complete ...]
+
+Model calls: getBackgroundTaskResult(task_id="xyz-789")
+
+Model: "Tests completed! Here are the results: ..."
+```
+
+This pattern requires no proactive decision from the model - the system
+automatically handles long-running tasks.
+
 ---
 
-## Alternative: Reactive Migration (Not Recommended for v1)
+## Component 4: Auto-Background via ToolExecutor
 
-The original discussion mentioned "migrating a running task to background mid-execution." This is significantly more complex because it requires:
+The auto-background mechanism is implemented at the `ToolExecutor` level, allowing tasks
+that exceed a plugin-defined threshold to be automatically converted to background tasks.
 
-1. **State serialization**: Capture the current execution state
-2. **Interruption handling**: Safely pause the blocking call
-3. **Continuation support**: Resume from serialized state
+### Key Insight
 
-For v1, I recommend **not** implementing reactive migration. Instead:
-- Model should use `estimate_duration()` to make proactive decisions
-- If a task is taking longer than expected, model can note this for future similar requests
-- The simpler approach of "retry with background=true" is cleaner
+We're not "pausing and resuming" a task - we're simply **deciding to stop waiting** for it.
+The task continues running in its thread; we just return a handle instead of blocking.
+
+### ToolExecutor Integration
+
+```python
+# In shared/ai_tool_runner.py
+
+class ToolExecutor:
+    """Executor with auto-background support."""
+
+    def execute(self, name: str, args: Dict[str, Any]) -> Any:
+        """Execute a tool, potentially auto-backgrounding if threshold exceeded."""
+
+        # Get the plugin that owns this tool
+        plugin = self._get_plugin_for_tool(name)
+
+        # Check if plugin supports background and has auto threshold
+        if isinstance(plugin, BackgroundCapable):
+            threshold = plugin.get_auto_background_threshold(name)
+            if threshold is not None:
+                return self._execute_with_auto_background(
+                    plugin, name, args, threshold
+                )
+
+        # Standard synchronous execution
+        return self._execute_sync(name, args)
+
+    def _execute_with_auto_background(
+        self,
+        plugin: BackgroundCapable,
+        name: str,
+        args: Dict[str, Any],
+        threshold: float
+    ) -> Any:
+        """Execute with timeout-based auto-backgrounding."""
+
+        # Start execution in thread pool
+        future = self._thread_pool.submit(self._execute_sync, name, args)
+
+        try:
+            # Wait up to threshold seconds for completion
+            return future.result(timeout=threshold)
+
+        except TimeoutError:
+            # Task still running - convert to background
+            handle = plugin.register_running_task(future, name, args)
+
+            return {
+                "auto_backgrounded": True,
+                "task_id": handle.task_id,
+                "threshold_seconds": threshold,
+                "message": f"Task exceeded {threshold}s threshold, continuing in background. "
+                           f"Use task_id '{handle.task_id}' to check status."
+            }
+```
+
+### Execution Flow
+
+```
+ToolExecutor.execute(name, args)
+    │
+    ├─ Find plugin for tool
+    │
+    ├─ Is plugin BackgroundCapable?
+    │   │
+    │   ├─ No → execute synchronously (blocking)
+    │   │
+    │   └─ Yes → get_auto_background_threshold(name)
+    │             │
+    │             ├─ None → execute synchronously (blocking)
+    │             │
+    │             └─ threshold seconds →
+    │                  │
+    │                  ├─ Start in thread pool
+    │                  ├─ Wait up to threshold
+    │                  │
+    │                  ├─ Completes in time? → return result
+    │                  │
+    │                  └─ Exceeds threshold? →
+    │                       ├─ Register as background task
+    │                       └─ Return handle immediately
+```
+
+### Plugin Method for Registering Running Tasks
+
+```python
+# Addition to BackgroundCapable protocol
+
+def register_running_task(
+    self,
+    future: Future,
+    tool_name: str,
+    arguments: Dict[str, Any]
+) -> TaskHandle:
+    """Register an already-running Future as a background task.
+
+    Called by ToolExecutor when auto-backgrounding a task that
+    exceeded its threshold. The Future is already running.
+
+    Args:
+        future: The concurrent.futures.Future already executing.
+        tool_name: Name of the tool.
+        arguments: Arguments passed to the tool.
+
+    Returns:
+        TaskHandle for tracking the task.
+    """
+    ...
+```
+
+### Model Handling of Auto-Backgrounded Results
+
+The model receives a response indicating the task was auto-backgrounded:
+
+```
+Model calls: runCommand(command="npm install && npm run build")
+
+Tool returns: {
+    "auto_backgrounded": true,
+    "task_id": "abc-123",
+    "threshold_seconds": 10.0,
+    "message": "Task exceeded 10.0s threshold, continuing in background..."
+}
+
+Model: "The build is taking longer than expected and is now running in
+background. I'll check on its progress..."
+
+Model calls: getBackgroundTaskStatus(task_id="abc-123")
+```
+
+### Why This Works
+
+1. **No state serialization needed** - The task keeps running in the same thread
+2. **Plugin controls thresholds** - Each plugin knows its tools' expected durations
+3. **Transparent to plugin internals** - Existing executor logic doesn't change
+4. **Model adapts naturally** - Receives a different response shape and reacts
 
 ---
 
@@ -862,24 +1082,31 @@ class BackgroundConfig:
 
 ## Implementation Plan
 
-### Phase 1: Protocol & Orchestrator
+### Phase 1: Protocol & Core Infrastructure
 1. Define `BackgroundCapable` protocol in `shared/plugins/background/protocol.py`
 2. Implement `BackgroundPlugin` orchestrator in `shared/plugins/background/plugin.py`
 3. Add integration hooks in `JaatoClient`
+4. Extend `ToolExecutor` with auto-background support:
+   - Add thread pool for tool execution
+   - Implement timeout-based auto-backgrounding
+   - Query plugins for thresholds via `get_auto_background_threshold()`
 
 ### Phase 2: CLI Plugin Support
 1. Add `BackgroundCapable` implementation to CLI plugin
-2. Add thread pool management
-3. Add duration estimation heuristics
+2. Implement `register_running_task()` for auto-background handoff
+3. Configure per-command thresholds (builds, installs, tests)
+4. Add duration estimation heuristics
 
 ### Phase 3: MCP Plugin Support
 1. Add `BackgroundCapable` wrapper for MCP calls
 2. Handle connection management for async calls
+3. Configure thresholds based on MCP server characteristics
 
 ### Phase 4: Refinements
-1. Add configuration options
+1. Add configuration options (max concurrent, global timeout overrides)
 2. Add user commands for task visibility (`/tasks`, `/cancel`)
 3. Add persistence for task state (survive restarts)
+4. System instructions updates for model to understand auto-backgrounded responses
 
 ---
 
