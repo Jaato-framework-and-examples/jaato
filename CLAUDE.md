@@ -74,9 +74,15 @@ python3 -m venv .venv
 
 1. Create `JaatoClient` and connect: `jaato.connect(project, location, model)`
 2. Configure tools from plugin registry: `jaato.configure_tools(registry, permission_plugin)`
-3. Send message: `response = jaato.send_message(prompt)`
+3. Send message with callback for intermediate responses:
+   ```python
+   response = jaato.send_message(prompt, on_intermediate_response=lambda text: print(text))
+   ```
+   The callback receives each intermediate text response during the function-calling loop
+   (for real-time display). Returns only the final response text.
 4. Internally, SDK chat API handles function calling loop:
    - Model returns function calls → executor runs them → results fed back
+   - Intermediate text responses trigger the callback
    - Loop continues until model returns text without function calls
 5. Access history when needed: `history = jaato.get_history()`
 6. Reset session: `jaato.reset_session()` or `jaato.reset_session(modified_history)`

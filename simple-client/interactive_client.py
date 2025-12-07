@@ -11,7 +11,7 @@ import sys
 import pathlib
 import json
 import readline  # Enables arrow key history navigation (fallback)
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 import shutil
 import textwrap
 
@@ -668,11 +668,22 @@ class InteractiveClient:
 
         self.log(f"[client] Registered {len(user_commands)} plugin command(s) for completion")
 
-    def run_prompt(self, prompt: str) -> str:
+    def run_prompt(
+        self,
+        prompt: str,
+        on_intermediate_response: 'Callable[[str], None] | None' = None
+    ) -> str:
         """Execute a prompt and return the model's response.
 
         Tool calls will trigger interactive permission prompts.
         Uses SDK-managed conversation history for multi-turn context.
+
+        Args:
+            prompt: The user's prompt text.
+            on_intermediate_response: Optional callback invoked with each
+                intermediate text response from the model during the
+                function-calling loop. Useful for real-time display.
+                When provided, only the final response is returned.
         """
         if not self._jaato:
             return "Error: Client not initialized"
@@ -680,7 +691,7 @@ class InteractiveClient:
         self.log(f"\n[client] Sending prompt to model...")
 
         try:
-            response = self._jaato.send_message(prompt)
+            response = self._jaato.send_message(prompt, on_intermediate_response)
 
             history_len = len(self._jaato.get_history())
             self.log(f"\n[client] Completed (history: {history_len} messages)")
@@ -791,14 +802,22 @@ class InteractiveClient:
             # Expand @file references to include file contents
             expanded_prompt = self._expand_file_references(user_input)
 
-            # Execute the prompt
-            response = self.run_prompt(expanded_prompt)
-            # Word-wrap the response to fit terminal width
+            # Define callback for real-time display of intermediate responses
             model_prefix = self._c('Model>', 'bold') + ' '
-            # Use spaces for continuation lines to align with the text after "Model> "
             continuation_indent = "       "  # 7 spaces to match "Model> " width
-            wrapped = self._wrap_text(response, prefix=continuation_indent, initial_prefix="")
-            print(f"\n{model_prefix}{wrapped}")
+
+            def display_intermediate(text: str) -> None:
+                """Display intermediate model response in real-time."""
+                wrapped = self._wrap_text(text, prefix=continuation_indent, initial_prefix="")
+                print(f"\n{model_prefix}{wrapped}")
+
+            # Execute the prompt with real-time intermediate response display
+            response = self.run_prompt(expanded_prompt, on_intermediate_response=display_intermediate)
+
+            # Display the final response (if any)
+            if response and response != '(No response text)':
+                wrapped = self._wrap_text(response, prefix=continuation_indent, initial_prefix="")
+                print(f"\n{model_prefix}{wrapped}")
 
     def _print_help(self) -> None:
         """Print help information."""

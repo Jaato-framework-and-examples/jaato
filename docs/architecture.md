@@ -610,8 +610,12 @@ ledger = TokenLedger()
 client.configure_tools(registry, ledger=ledger)
 
 # 4. Have a conversation (history managed automatically)
-response1 = client.send_message("What's in my current directory?")
-response2 = client.send_message("Show me the git log")
+# The callback receives intermediate model text during function-calling loops
+def on_response(text):
+    print(f"[Model]: {text}")
+
+response1 = client.send_message("What's in my current directory?", on_intermediate_response=on_response)
+response2 = client.send_message("Show me the git log", on_intermediate_response=on_response)
 
 # 5. Check usage
 usage = client.get_context_usage()
