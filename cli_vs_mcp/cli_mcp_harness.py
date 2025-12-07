@@ -452,8 +452,8 @@ Domain parameters (passed via --domain-params JSON):
     # CLI extra path from argument
     cli_extra_paths = [args.cli_path] if args.cli_path else []
 
-    # Create and discover plugins
-    registry = PluginRegistry()
+    # Create and discover plugins (pass model_name for requirements checking)
+    registry = PluginRegistry(model_name=model_name)
     registry.discover()
     if args.verbose:
         print(f"[Plugins] Available: {registry.list_available()}")
