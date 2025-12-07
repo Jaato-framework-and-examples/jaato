@@ -269,12 +269,22 @@ class InteractiveClient:
             param_name = arg_mapping.get(command_name.lower(), "arg")
             args[param_name] = arg_value
 
+        # For save command, include user inputs for prompt history restoration
+        if command_name.lower() == "save":
+            args["user_inputs"] = self._original_inputs.copy()
+
         # Execute the command via JaatoClient
         try:
             result, shared = self._jaato.execute_user_command(command_name, args)
 
             # Display the result to the user
             self._display_command_result(command_name, result, shared)
+
+            # For resume command, restore user inputs to prompt history
+            if command_name.lower() == "resume" and isinstance(result, dict):
+                user_inputs = result.get("user_inputs", [])
+                if user_inputs:
+                    self._restore_user_inputs(user_inputs)
 
             return result
 
@@ -332,6 +342,26 @@ class InteractiveClient:
             args["args"] = raw_args
 
         return args
+
+    def _restore_user_inputs(self, user_inputs: List[str]) -> None:
+        """Restore user inputs to prompt history after session resume.
+
+        Updates both the internal _original_inputs list and the
+        prompt_toolkit history for arrow-key navigation.
+
+        Args:
+            user_inputs: List of user input strings from the resumed session.
+        """
+        # Restore to internal tracking
+        self._original_inputs = list(user_inputs)
+
+        # Restore to prompt_toolkit history
+        if HAS_PROMPT_TOOLKIT and self._pt_history:
+            # Clear existing history and add restored inputs
+            self._pt_history = InMemoryHistory()
+            for user_input in user_inputs:
+                self._pt_history.append_string(user_input)
+            self.log(f"[client] Restored {len(user_inputs)} inputs to prompt history")
 
     def _display_command_result(self, command_name: str, result: Any, shared: bool) -> None:
         """Display the result of a plugin command to the user.

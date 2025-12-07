@@ -1123,12 +1123,18 @@ class JaatoClient:
         self._session_plugin = None
         self._session_config = None
 
-    def save_session(self, session_id: Optional[str] = None) -> str:
+    def save_session(
+        self,
+        session_id: Optional[str] = None,
+        user_inputs: Optional[List[str]] = None
+    ) -> str:
         """Save the current session.
 
         Args:
             session_id: Optional session ID. If not provided, generates one
                        from the current timestamp.
+            user_inputs: Optional list of user input strings for readline
+                        history restoration on resume.
 
         Returns:
             The session ID that was saved.
@@ -1139,7 +1145,7 @@ class JaatoClient:
         if not self._session_plugin:
             raise RuntimeError("No session plugin configured. Call set_session_plugin() first.")
 
-        state = self._get_session_state(session_id)
+        state = self._get_session_state(session_id, user_inputs)
         self._session_plugin.save(state)
 
         # Update the plugin's current session tracking
@@ -1201,11 +1207,16 @@ class JaatoClient:
 
         return self._session_plugin.delete(session_id)
 
-    def _get_session_state(self, session_id: Optional[str] = None) -> SessionState:
+    def _get_session_state(
+        self,
+        session_id: Optional[str] = None,
+        user_inputs: Optional[List[str]] = None
+    ) -> SessionState:
         """Build a SessionState from the current client state.
 
         Args:
             session_id: Optional session ID. Generates one if not provided.
+            user_inputs: Optional list of user input strings for history.
 
         Returns:
             SessionState with current history and metadata.
@@ -1236,6 +1247,7 @@ class JaatoClient:
             updated_at=now,
             turn_count=len(turn_accounting),
             turn_accounting=turn_accounting,
+            user_inputs=user_inputs or [],
             project=self._project,
             location=self._location,
             model=self._model_name,
