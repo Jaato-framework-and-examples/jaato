@@ -433,11 +433,14 @@ class JaatoClient:
             message: The user's message text.
 
         Returns:
-            The final response text after all function calls are resolved.
+            All response text from the model, including intermediate responses
+            during the function-calling loop (concatenated with newlines).
         """
         # Track tokens for this turn
         turn_tokens = {'prompt': 0, 'output': 0, 'total': 0}
         response = None
+        # Collect all text responses (intermediate + final)
+        all_responses: List[str] = []
 
         try:
             response = self._chat.send_message(message)
@@ -446,6 +449,10 @@ class JaatoClient:
 
             # Handle function calling loop
             while response.function_calls:
+                # Capture any text the model produced alongside function calls
+                if response.text:
+                    all_responses.append(response.text)
+
                 func_responses = []
 
                 for fc in response.function_calls:
@@ -468,7 +475,12 @@ class JaatoClient:
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_tokens)
 
-            return response.text if response.text else ''
+            # Add the final response text
+            if response.text:
+                all_responses.append(response.text)
+
+            # Return all responses concatenated
+            return '\n\n'.join(all_responses) if all_responses else ''
 
         finally:
             # Always store turn accounting, even on errors
@@ -940,10 +952,13 @@ class JaatoClient:
             parts: List of Part objects forming the user's message.
 
         Returns:
-            The final response text after all function calls are resolved.
+            All response text from the model, including intermediate responses
+            during the function-calling loop (concatenated with newlines).
         """
         # Track tokens for this turn
         turn_tokens = {'prompt': 0, 'output': 0, 'total': 0}
+        # Collect all text responses (intermediate + final)
+        all_responses: List[str] = []
 
         # Send parts as Content object
         user_content = types.Content(role='user', parts=parts)
@@ -953,6 +968,10 @@ class JaatoClient:
 
         # Handle function calling loop (same as _run_chat_loop)
         while response.function_calls:
+            # Capture any text the model produced alongside function calls
+            if response.text:
+                all_responses.append(response.text)
+
             func_responses = []
 
             for fc in response.function_calls:
@@ -973,10 +992,15 @@ class JaatoClient:
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_tokens)
 
+        # Add the final response text
+        if response.text:
+            all_responses.append(response.text)
+
         # Store turn accounting
         self._turn_accounting.append(turn_tokens)
 
-        return response.text if response.text else ''
+        # Return all responses concatenated
+        return '\n\n'.join(all_responses) if all_responses else ''
 
     # ==================== Context Garbage Collection ====================
 
