@@ -258,11 +258,12 @@ class InteractiveClient:
                 arg_parts = raw_args.split()
                 for i, param_name in enumerate(param_names):
                     if i < len(arg_parts):
-                        # Try to convert numeric strings to int
                         val = arg_parts[i]
-                        try:
+                        # Only convert to int if it's purely numeric (no underscores)
+                        # Python allows underscores in int() which would corrupt session IDs
+                        if val.isdigit():
                             args[param_name] = int(val)
-                        except ValueError:
+                        else:
                             args[param_name] = val
         else:
             # For unknown commands, pass the raw args as 'args'
@@ -561,6 +562,12 @@ class InteractiveClient:
         # Add to completer for autocompletion (need (name, description) tuples)
         completer_cmds = [(cmd.name, cmd.description) for cmd in user_commands.values()]
         self._completer.add_commands(completer_cmds)
+
+        # Set up session ID completion if session plugin is available
+        if hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
+            session_plugin = self._jaato._session_plugin
+            if hasattr(session_plugin, 'list_sessions'):
+                self._completer.set_session_provider(session_plugin.list_sessions)
 
         self.log(f"[client] Registered {len(user_commands)} plugin command(s) for completion")
 
