@@ -636,28 +636,45 @@ class SessionIdCompleter(Completer):
         if not sessions:
             return
 
-        # Provide completions for both numeric indexes and session IDs
+        # Provide completions - prefer numeric indexes, show session IDs only when typed
         for i, session in enumerate(sessions, 1):
             session_id = getattr(session, 'session_id', str(session))
             description = getattr(session, 'description', None) or '(unnamed)'
-
-            # Check if input matches the beginning of index or session_id
             index_str = str(i)
-            if index_str.startswith(arg_text) or not arg_text:
+
+            if not arg_text:
+                # No input yet - show only numeric indexes (cleaner UX)
                 yield Completion(
                     index_str,
-                    start_position=-len(arg_text),
+                    start_position=0,
                     display=f"{index_str}",
                     display_meta=f"{session_id} - {description}",
                 )
-
-            if session_id.startswith(arg_text):
-                yield Completion(
-                    session_id,
-                    start_position=-len(arg_text),
-                    display=session_id,
-                    display_meta=description,
-                )
+            elif arg_text.isdigit():
+                # User typing a number - could be index or start of session_id
+                if index_str.startswith(arg_text):
+                    yield Completion(
+                        index_str,
+                        start_position=-len(arg_text),
+                        display=f"{index_str}",
+                        display_meta=f"{session_id} - {description}",
+                    )
+                if session_id.startswith(arg_text):
+                    yield Completion(
+                        session_id,
+                        start_position=-len(arg_text),
+                        display=session_id,
+                        display_meta=description,
+                    )
+            else:
+                # User typing non-numeric - must be session_id
+                if session_id.startswith(arg_text):
+                    yield Completion(
+                        session_id,
+                        start_position=-len(arg_text),
+                        display=session_id,
+                        display_meta=description,
+                    )
 
 
 class CombinedCompleter(Completer):
