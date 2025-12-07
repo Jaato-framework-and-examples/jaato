@@ -379,18 +379,11 @@ class JaatoClient:
         """
         enriched_prompt = prompt
 
-        # Run through plugin enrichment pipeline (registry plugins)
+        # Run through plugin enrichment pipeline (all registered plugins)
         if self._registry:
             result = self._registry.enrich_prompt(prompt)
             enriched_prompt = result.prompt
             # Metadata is available in result.metadata if needed for debugging
-
-        # Also run through session plugin's enrichment (not in registry)
-        if self._session_plugin and hasattr(self._session_plugin, 'subscribes_to_prompt_enrichment'):
-            if self._session_plugin.subscribes_to_prompt_enrichment():
-                if hasattr(self._session_plugin, 'enrich_prompt'):
-                    result = self._session_plugin.enrich_prompt(enriched_prompt)
-                    enriched_prompt = result.prompt
 
         # Strip @references from the prompt (framework responsibility)
         cleaned_prompt = self._strip_at_references(enriched_prompt)

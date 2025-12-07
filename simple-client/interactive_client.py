@@ -461,6 +461,11 @@ class InteractiveClient:
             # Set on JaatoClient (this also registers user commands and tools)
             self._jaato.set_session_plugin(session_plugin, session_config)
 
+            # Register session plugin with registry for prompt enrichment
+            # (enrichment_only=True means it won't duplicate in get_exposed_declarations)
+            if self.registry:
+                self.registry.register_plugin(session_plugin, enrichment_only=True)
+
             # Add session plugin's auto-approved tools to permission whitelist
             if self.permission_plugin and hasattr(session_plugin, 'get_auto_approved_tools'):
                 auto_approved = session_plugin.get_auto_approved_tools()
