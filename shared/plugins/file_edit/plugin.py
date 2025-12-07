@@ -124,7 +124,12 @@ class FileEditPlugin:
                         },
                         "new_content": {
                             "type": "string",
-                            "description": "The new content to write to the file"
+                            "description": (
+                                "The complete new content to write to the file. "
+                                "Provide the raw file content directly - do NOT wrap in quotes, "
+                                "triple-quotes, or treat as a string literal. The content is "
+                                "written verbatim to the file."
+                            )
                         }
                     },
                     "required": ["path", "new_content"]
@@ -143,7 +148,14 @@ class FileEditPlugin:
                         },
                         "content": {
                             "type": "string",
-                            "description": "Content to write to the new file"
+                            "description": (
+                                "The content to write to the new file. "
+                                "Provide the raw file content directly - do NOT wrap in quotes, "
+                                "triple-quotes, or treat as a string literal. For example, for a "
+                                "Python file, start directly with 'import ...' or code, not with "
+                                "'''...''' or quotes around the code. The content is written "
+                                "verbatim to the file."
+                            )
                         }
                     },
                     "required": ["path", "content"]
@@ -200,6 +212,11 @@ class FileEditPlugin:
 - `writeNewFile(path, content)`: Create a new file. Shows content for approval. Fails if file exists.
 - `removeFile(path)`: Delete a file. Creates backup before deletion.
 - `undoFileChange(path)`: Restore a file from its most recent backup.
+
+IMPORTANT: When using updateFile or writeNewFile, provide the raw file content directly.
+Do NOT wrap the content in quotes, triple-quotes (''' or \"\"\"), or treat it as a string literal.
+For example, to create a Python file, the content should start with 'import ...' or actual code,
+NOT with ''' or quotes around the code. The content parameter value is written verbatim to the file.
 
 File modifications (updateFile, writeNewFile, removeFile) will show you a preview
 and require approval before execution. Backups are automatically created for
