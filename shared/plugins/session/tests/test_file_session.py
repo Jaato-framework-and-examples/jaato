@@ -333,3 +333,95 @@ class TestFileSessionPluginWithClient:
 
         assert result["status"] == "error"
         assert "Turn 10 does not exist" in result["message"]
+
+
+class TestSessionLifecycle:
+    """Tests for session lifecycle hooks."""
+
+    @pytest.fixture
+    def temp_dir(self):
+        """Create a temporary directory for session storage."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            yield tmpdir
+
+    @pytest.fixture
+    def plugin(self, temp_dir):
+        """Create a configured FileSessionPlugin."""
+        plugin = FileSessionPlugin()
+        plugin.initialize({"storage_path": temp_dir})
+        return plugin
+
+    def test_on_session_end_skips_empty_session(self, plugin, temp_dir):
+        """Test that on_session_end doesn't save empty sessions."""
+        # Create an empty session state (0 turns)
+        state = SessionState(
+            session_id="empty_session",
+            history=[],
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            turn_count=0,  # Empty session
+        )
+
+        config = SessionConfig(auto_save_on_exit=True)
+
+        # Call on_session_end
+        plugin.on_session_end(state, config)
+
+        # Verify no file was created
+        session_file = Path(temp_dir) / "empty_session.json"
+        assert not session_file.exists()
+
+    def test_on_session_end_saves_non_empty_session(self, plugin, temp_dir):
+        """Test that on_session_end saves sessions with content."""
+        # Create a session state with content
+        state = SessionState(
+            session_id="real_session",
+            history=[
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text="Hello")]
+                )
+            ],
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            turn_count=1,  # Has content
+        )
+
+        config = SessionConfig(auto_save_on_exit=True)
+
+        # Call on_session_end
+        plugin.on_session_end(state, config)
+
+        # Verify file was created
+        session_file = Path(temp_dir) / "real_session.json"
+        assert session_file.exists()
+
+        # Verify content
+        with open(session_file) as f:
+            data = json.load(f)
+        assert data["session_id"] == "real_session"
+        assert data["turn_count"] == 1
+
+    def test_on_session_end_respects_auto_save_config(self, plugin, temp_dir):
+        """Test that on_session_end respects auto_save_on_exit=False."""
+        state = SessionState(
+            session_id="no_save_session",
+            history=[
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text="Hello")]
+                )
+            ],
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            turn_count=1,
+        )
+
+        config = SessionConfig(auto_save_on_exit=False)
+
+        # Call on_session_end
+        plugin.on_session_end(state, config)
+
+        # Verify no file was created (auto_save_on_exit=False)
+        session_file = Path(temp_dir) / "no_save_session.json"
+        assert not session_file.exists()

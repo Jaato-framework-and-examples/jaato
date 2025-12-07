@@ -264,13 +264,17 @@ class FileSessionPlugin:
     ) -> None:
         """Called when the client session ends cleanly.
 
-        Saves the session if auto_save_on_exit is enabled.
+        Saves the session if auto_save_on_exit is enabled and there's
+        actual content to save (at least one turn).
 
         Args:
             state: Current session state.
             config: Session configuration.
         """
         if config.auto_save_on_exit:
+            # Don't save empty sessions (no turns = nothing worth saving)
+            if state.turn_count == 0:
+                return
             # Generate session ID if not set
             if not state.session_id:
                 state.session_id = generate_session_id()
