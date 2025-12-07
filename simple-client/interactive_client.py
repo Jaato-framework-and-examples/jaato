@@ -380,9 +380,9 @@ class InteractiveClient:
             print(f"Error: Failed to initialize Vertex AI client: {e}")
             return False
 
-        # Initialize plugin registry
+        # Initialize plugin registry with model name for requirements checking
         self.log("[client] Discovering plugins...")
-        self.registry = PluginRegistry()
+        self.registry = PluginRegistry(model_name=model_name)
         discovered = self.registry.discover()
         self.log(f"[client] Found plugins: {discovered}")
 
