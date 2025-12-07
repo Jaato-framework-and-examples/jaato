@@ -512,18 +512,28 @@ classDiagram
 ```python
 from shared import JaatoClient, PluginRegistry, TokenLedger
 
-# 1. Create and configure registry
-registry = PluginRegistry()
+model_name = 'gemini-2.5-flash'
+
+# 1. Create model-aware registry
+# Passing model_name enables automatic compatibility checking.
+# Plugins that require specific model features (like multimodal
+# function responses) will be skipped if the model doesn't support them.
+registry = PluginRegistry(model_name=model_name)
 registry.discover()
 registry.expose_tool('cli')
 registry.expose_tool('mcp')
+
+# Check if any plugins were skipped due to model requirements
+skipped = registry.list_skipped_plugins()
+if skipped:
+    print(f"Skipped plugins: {skipped}")
 
 # 2. Create client and connect
 client = JaatoClient()
 client.connect(
     project_id='my-gcp-project',
     location='us-central1',
-    model='gemini-2.0-flash'
+    model=model_name
 )
 
 # 3. Configure tools
