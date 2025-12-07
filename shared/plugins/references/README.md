@@ -4,7 +4,7 @@ The References plugin manages documentation and reference source injection into 
 
 ## Demo
 
-The demo below shows the references plugin in action: when the user asks about standards for adding a new API endpoint, the model triggers reference selection to pull in relevant documentation.
+The demo below shows the model using tags to locate relevant documentation. When the user asks about "4-eyes", the model identifies matching reference sources by their associated tags and triggers selection to pull in the appropriate documentation.
 
 ![References Plugin Demo](demo.svg)
 
