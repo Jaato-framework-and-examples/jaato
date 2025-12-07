@@ -55,6 +55,7 @@ PATTERN_PERMISSION = 1
 PATTERN_CLARIFY_SINGLE = 2
 PATTERN_CLARIFY_MULTI = 3
 PATTERN_CLARIFY_FREE = 4
+PATTERN_REFERENCE_SELECT = 5
 
 
 def wait_for_prompt(child, timeout=60):
@@ -80,6 +81,7 @@ def wait_for_permission_or_prompt(child, response='y', timeout=60):
         r'Enter choice \[[\d-]+\]:',     # 2: Single choice clarification
         r'Enter choices:',               # 3: Multiple choice clarification
         r'  > ',                          # 4: Free text clarification
+        r"'none' or empty to skip",      # 5: Reference selection prompt
     ]
 
     while True:
@@ -108,6 +110,11 @@ def wait_for_permission_or_prompt(child, response='y', timeout=60):
             # Free text - send auto response
             time.sleep(0.3)
             child.send('auto-response\n')
+
+        elif index == PATTERN_REFERENCE_SELECT:
+            # Reference selection - select all available
+            time.sleep(0.3)
+            child.send('all\n')
 
 
 def run_demo(script_path: Path):
