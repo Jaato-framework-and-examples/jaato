@@ -66,9 +66,10 @@ class InteractiveClient:
     Uses JaatoClient with SDK-managed conversation history.
     """
 
-    def __init__(self, env_file: str = ".env", verbose: bool = True):
+    def __init__(self, env_file: str = ".env", verbose: bool = True, auto_clarify: bool = False):
         self.verbose = verbose
         self.env_file = env_file
+        self.auto_clarify = auto_clarify
         self._jaato: Optional[JaatoClient] = None
         self.registry: Optional[PluginRegistry] = None
         self.permission_plugin: Optional[PermissionPlugin] = None
@@ -393,6 +394,8 @@ class InteractiveClient:
         self.log(f"[client] Found plugins: {discovered}")
 
         # Expose all discovered plugins with specific configs where needed
+        # Use auto actor for clarification when auto_clarify is enabled (for replay/automation)
+        clarification_actor = "auto" if self.auto_clarify else "console"
         plugin_configs = {
             "todo": {
                 "reporter_type": "console",
@@ -400,6 +403,9 @@ class InteractiveClient:
             },
             "references": {
                 "actor_type": "console",
+            },
+            "clarification": {
+                "actor_type": clarification_actor,
             },
         }
         self.registry.expose_all(plugin_configs)
@@ -987,11 +993,17 @@ def main():
         type=str,
         help="Start with this prompt, then continue interactively"
     )
+    parser.add_argument(
+        "--auto-clarify",
+        action="store_true",
+        help="Auto-answer clarification questions using defaults (for replay/automation)"
+    )
     args = parser.parse_args()
 
     client = InteractiveClient(
         env_file=args.env_file,
-        verbose=not args.quiet
+        verbose=not args.quiet,
+        auto_clarify=args.auto_clarify,
     )
 
     if not client.initialize():
