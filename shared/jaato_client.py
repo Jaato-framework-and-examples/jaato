@@ -111,11 +111,11 @@ class JaatoClient:
         """Get the configured model name."""
         return self._model_name
 
-    def list_available_models(self, prefix: Optional[str] = "gemini") -> List[str]:
+    def list_available_models(self, prefix: Optional[str] = None) -> List[str]:
         """List models from Vertex AI that support text generation.
 
         Filters for models that support 'generateContent' action and optionally
-        by name prefix. By default, only lists Gemini models.
+        by name prefix.
 
         Note: This returns the model catalog, not region-specific availability.
         Some models may not be available in all regions. Use location='global'
@@ -123,8 +123,8 @@ class JaatoClient:
         for region-specific availability.
 
         Args:
-            prefix: Optional name prefix to filter by (default: "gemini").
-                    Pass None to list all models that support generateContent.
+            prefix: Optional name prefix to filter by (e.g., "gemini").
+                    Defaults to None (all models that support generateContent).
 
         Returns:
             List of model names that support generateContent.
