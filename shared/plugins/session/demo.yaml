@@ -1,0 +1,23 @@
+name: Session Export [2025-12-07 20:51]
+timeout: 120
+steps:
+- type: what can you tell me about model fine-tuning in the context of Google's genAI
+    SDK? Just with a few words
+  permission: y
+- type: And what infrastructure do I need for doing that? Again in a few lines?
+  permission: y
+- type: what kind of training data?
+  permission: y
+- type: I have this python script @shared/modlog_training_pipeline.py under construction
+    which tries to produce these kind of training data, which I think are usually
+    refered as "pairs"? Ain't that right?
+  permission: y
+- type: do you see any optimization opportunity in that script? Just a rough overview,
+    please?
+  permission: y
+- type: how many questions and which questions have I asked you during this session?
+  permission: y
+- type: how many questions and which questions have I asked you during this session?
+  permission: y
+- type: quit
+  delay: 0.08
