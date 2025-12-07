@@ -391,7 +391,7 @@ class FileSessionPlugin:
 
         Users can specify sessions by:
         - Full session ID (e.g., "20251207_185349")
-        - Numeric index (e.g., 1, 2, 3) matching the `sessions` list order
+        - Numeric index (e.g., 1, 2, 3 or "1", "2", "3") matching the `sessions` list order
 
         Args:
             session_id: Either a session ID string or a numeric index (1-based)
@@ -402,14 +402,18 @@ class FileSessionPlugin:
         if session_id is None:
             return None
 
-        # If it's a numeric index, look up the actual session ID
-        if isinstance(session_id, int):
-            sessions = self._client.list_sessions()
-            if 1 <= session_id <= len(sessions):
-                return sessions[session_id - 1].session_id
-            return None
+        # Try to parse as numeric index (handles both int and string "1", "2", etc.)
+        try:
+            index = int(session_id)
+            if index >= 1:
+                sessions = self._client.list_sessions()
+                if 1 <= index <= len(sessions):
+                    return sessions[index - 1].session_id
+                return None  # Index out of range
+        except (ValueError, TypeError):
+            pass  # Not a number, treat as session_id string
 
-        # Otherwise, treat as a direct session ID string
+        # Treat as a direct session ID string
         return str(session_id)
 
     def _execute_resume(self, args: Dict[str, Any]) -> Dict[str, Any]:
