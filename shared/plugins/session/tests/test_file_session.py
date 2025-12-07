@@ -270,6 +270,28 @@ class TestFileSessionPluginWithClient:
         assert "20251207_143022" in result["message"]
         mock_client.save_session.assert_called_once()
 
+    def test_execute_describe_auto_saves_on_first_description(self, plugin_with_client):
+        """Test that session_describe auto-saves on first description."""
+        plugin, mock_client = plugin_with_client
+        mock_client.save_session.return_value = "20251207_150000"
+        plugin._session_description = None  # No description yet
+
+        result = plugin._execute_describe({"description": "Test session"})
+
+        assert result["status"] == "ok"
+        mock_client.save_session.assert_called_once()
+        assert plugin._current_session_id == "20251207_150000"
+
+    def test_execute_describe_no_save_on_update(self, plugin_with_client):
+        """Test that session_describe doesn't save when updating description."""
+        plugin, mock_client = plugin_with_client
+        plugin._session_description = "Old description"  # Already has one
+
+        result = plugin._execute_describe({"description": "New description"})
+
+        assert result["status"] == "ok"
+        mock_client.save_session.assert_not_called()
+
     def test_execute_sessions_empty(self, plugin_with_client):
         """Test executing sessions command when empty."""
         plugin, mock_client = plugin_with_client
