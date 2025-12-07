@@ -185,20 +185,31 @@ class InteractiveClient:
         if not user_commands:
             return None
 
-        # Check if input matches a command (case-insensitive)
-        input_lower = user_input.lower().strip()
+        # Parse input into command and arguments
+        parts = user_input.strip().split(maxsplit=1)
+        if not parts:
+            return None
+
+        input_cmd = parts[0].lower()
+        raw_args = parts[1] if len(parts) > 1 else ""
+
+        # Check if first word matches a command (case-insensitive)
         command_name = None
         for cmd_name in user_commands:
-            if input_lower == cmd_name.lower():
+            if input_cmd == cmd_name.lower():
                 command_name = cmd_name
                 break
 
         if not command_name:
             return None
 
+        # Parse arguments based on command
+        # For commands that take positional arguments, map them to named args
+        args = self._parse_command_args(command_name, raw_args)
+
         # Execute the command via JaatoClient
         try:
-            result, shared = self._jaato.execute_user_command(command_name, {})
+            result, shared = self._jaato.execute_user_command(command_name, args)
 
             # Display the result to the user
             self._display_command_result(command_name, result, shared)
@@ -208,6 +219,56 @@ class InteractiveClient:
         except Exception as e:
             print(f"\nError executing {command_name}: {e}")
             return {"error": str(e)}
+
+    def _parse_command_args(self, command_name: str, raw_args: str) -> Dict[str, Any]:
+        """Parse raw argument string into named arguments dict.
+
+        Maps positional arguments to named parameters based on command.
+
+        Args:
+            command_name: The command being executed
+            raw_args: Raw argument string from user input
+
+        Returns:
+            Dictionary of named arguments
+        """
+        args: Dict[str, Any] = {}
+        raw_args = raw_args.strip()
+
+        if not raw_args:
+            return args
+
+        # Define argument mappings for commands that take positional args
+        # Format: command_name -> list of positional arg names
+        arg_mappings = {
+            "delete-session": ["session_id"],
+            "resume": ["session_id"],
+            "save": ["description"],  # Optional description for save
+        }
+
+        if command_name in arg_mappings:
+            param_names = arg_mappings[command_name]
+
+            # Special handling for commands that take a single string argument
+            # (e.g., "save My session description" should capture entire string)
+            if command_name == "save" and raw_args:
+                args["description"] = raw_args
+            else:
+                # Split args by whitespace for other commands
+                arg_parts = raw_args.split()
+                for i, param_name in enumerate(param_names):
+                    if i < len(arg_parts):
+                        # Try to convert numeric strings to int
+                        val = arg_parts[i]
+                        try:
+                            args[param_name] = int(val)
+                        except ValueError:
+                            args[param_name] = val
+        else:
+            # For unknown commands, pass the raw args as 'args'
+            args["args"] = raw_args
+
+        return args
 
     def _display_command_result(self, command_name: str, result: Any, shared: bool) -> None:
         """Display the result of a plugin command to the user.
