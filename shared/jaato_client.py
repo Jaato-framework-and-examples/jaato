@@ -1223,6 +1223,11 @@ class JaatoClient:
         now = datetime.now()
         turn_accounting = self.get_turn_accounting()
 
+        # Get description from session plugin if available
+        description = None
+        if self._session_plugin and hasattr(self._session_plugin, '_session_description'):
+            description = self._session_plugin._session_description
+
         return SessionState(
             session_id=session_id,
             history=self.get_history(),
@@ -1233,6 +1238,7 @@ class JaatoClient:
             project=self._project,
             location=self._location,
             model=self._model_name,
+            description=description,
         )
 
     def _restore_session_state(self, state: SessionState) -> None:
