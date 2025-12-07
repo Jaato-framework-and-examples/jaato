@@ -11,6 +11,7 @@ import sys
 import pathlib
 import json
 import readline  # Enables arrow key history navigation (fallback)
+from typing import Optional, Dict, Any, List
 import shutil
 import textwrap
 from typing import Optional, Dict, Any
