@@ -426,10 +426,14 @@ class InteractiveClient:
         # Set up session persistence plugin
         self._setup_session_plugin()
 
-        # Log available tools
+        # Log available tools (including session plugin)
         all_decls = self.registry.get_exposed_declarations()
         if self.permission_plugin:
             all_decls.extend(self.permission_plugin.get_function_declarations())
+        # Session plugin tools are already added to jaato's tool config
+        if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
+            if hasattr(self._jaato._session_plugin, 'get_function_declarations'):
+                all_decls.extend(self._jaato._session_plugin.get_function_declarations())
         self.log(f"[client] Available tools: {[d.name for d in all_decls]}")
 
         # Register plugin-contributed tools as completable commands
@@ -454,8 +458,14 @@ class InteractiveClient:
             session_plugin = create_session_plugin()
             session_plugin.initialize({'storage_path': session_config.storage_path})
 
-            # Set on JaatoClient (this also registers user commands)
+            # Set on JaatoClient (this also registers user commands and tools)
             self._jaato.set_session_plugin(session_plugin, session_config)
+
+            # Add session plugin's auto-approved tools to permission whitelist
+            if self.permission_plugin and hasattr(session_plugin, 'get_auto_approved_tools'):
+                auto_approved = session_plugin.get_auto_approved_tools()
+                if auto_approved:
+                    self.permission_plugin.add_whitelist_tools(auto_approved)
 
             self.log(f"[client] Session plugin ready (storage: {session_config.storage_path})")
 
@@ -681,23 +691,42 @@ Keyboard shortcuts:
     def _print_tools(self) -> None:
         """Print available tools."""
         print("\nAvailable tools:")
+        # Tools from registry
         for decl in self.registry.get_exposed_declarations():
             print(f"  - {decl.name}: {decl.description}")
+        # Tools from permission plugin
+        if self.permission_plugin:
+            for decl in self.permission_plugin.get_function_declarations():
+                print(f"  - {decl.name}: {decl.description}")
+        # Tools from session plugin (if configured)
+        if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
+            if hasattr(self._jaato._session_plugin, 'get_function_declarations'):
+                for decl in self._jaato._session_plugin.get_function_declarations():
+                    print(f"  - {decl.name}: {decl.description}")
         print()
 
     def _print_plugin_commands(self) -> None:
         """Print plugin-contributed user commands grouped by plugin."""
-        if not self.registry:
-            return
-
         # Collect commands by plugin
         commands_by_plugin: Dict[str, list] = {}
-        for plugin_name in self.registry.list_exposed():
-            plugin = self.registry.get_plugin(plugin_name)
-            if plugin and hasattr(plugin, 'get_user_commands'):
-                commands = plugin.get_user_commands()
-                if commands:
-                    commands_by_plugin[plugin_name] = commands
+
+        # Get commands from registry plugins
+        if self.registry:
+            for plugin_name in self.registry.list_exposed():
+                plugin = self.registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'get_user_commands'):
+                    commands = plugin.get_user_commands()
+                    if commands:
+                        commands_by_plugin[plugin_name] = commands
+
+        # Also get commands from session plugin (not in registry)
+        if self._jaato:
+            user_commands = self._jaato.get_user_commands()
+            # Filter to session commands (save, resume, sessions, delete-session)
+            session_cmds = [cmd for name, cmd in user_commands.items()
+                           if name in ('save', 'resume', 'sessions', 'delete-session')]
+            if session_cmds:
+                commands_by_plugin['session'] = session_cmds
 
         if not commands_by_plugin:
             return
