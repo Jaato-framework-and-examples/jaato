@@ -171,6 +171,11 @@ class InteractiveClient:
         via JaatoClient. If share_with_model is True, the result is automatically
         added to conversation history by JaatoClient.
 
+        Supports commands with arguments:
+        - "backtoturn 2" → backtoturn(turn_id="2")
+        - "resume session123" → resume(session_id="session123")
+        - "delete-session xyz" → delete-session(session_id="xyz")
+
         Args:
             user_input: The user's input string
 
@@ -187,13 +192,10 @@ class InteractiveClient:
 
         # Parse input into command and arguments
         parts = user_input.strip().split(maxsplit=1)
-        if not parts:
-            return None
+        input_cmd = parts[0].lower() if parts else ""
+        arg_value = parts[1] if len(parts) > 1 else None
 
-        input_cmd = parts[0].lower()
-        raw_args = parts[1] if len(parts) > 1 else ""
-
-        # Check if first word matches a command (case-insensitive)
+        # Check if input matches a command (case-insensitive)
         command_name = None
         for cmd_name in user_commands:
             if input_cmd == cmd_name.lower():
@@ -203,9 +205,17 @@ class InteractiveClient:
         if not command_name:
             return None
 
-        # Parse arguments based on command
-        # For commands that take positional arguments, map them to named args
-        args = self._parse_command_args(command_name, raw_args)
+        # Map command arguments to expected parameter names
+        args = {}
+        if arg_value:
+            # Command-specific argument mapping
+            arg_mapping = {
+                "backtoturn": "turn_id",
+                "resume": "session_id",
+                "delete-session": "session_id",
+            }
+            param_name = arg_mapping.get(command_name.lower(), "arg")
+            args[param_name] = arg_value
 
         # Execute the command via JaatoClient
         try:
