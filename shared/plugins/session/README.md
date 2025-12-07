@@ -13,7 +13,7 @@ The session plugin provides conversation persistence, allowing users to save and
 
 ## User Commands
 
-The plugin contributes four user commands to the interactive client:
+The plugin contributes five user commands to the interactive client:
 
 | Command | Description |
 |---------|-------------|
@@ -21,6 +21,43 @@ The plugin contributes four user commands to the interactive client:
 | `resume` | Resume a previously saved session (lists available if no ID given) |
 | `sessions` | List all available saved sessions with metadata |
 | `delete-session <id>` | Delete a saved session by ID |
+| `backtoturn <id>` | Revert conversation to a specific turn (use `history` to see turn IDs) |
+
+### Reverting to a Previous Turn
+
+The `backtoturn` command allows you to undo recent conversation turns and go back to a specific point:
+
+```
+> history
+============================================================
+  Conversation History: 8 message(s), 3 turn(s)
+  Tip: Use 'backtoturn <turn_id>' to revert to a specific turn
+============================================================
+
+────────────────────────────────────────────────────────────
+  ▶ TURN 1
+────────────────────────────────────────────────────────────
+  [USER]
+  Help me debug the auth issue
+
+  [MODEL]
+  I'll help you investigate...
+
+────────────────────────────────────────────────────────────
+  ▶ TURN 2
+────────────────────────────────────────────────────────────
+  [USER]
+  Check the token refresh
+  ...
+
+> backtoturn 2
+Reverted to turn 2 (removed 1 turn(s)).
+```
+
+This is useful when:
+- The model went in a wrong direction and you want to try a different approach
+- You want to undo accidental tool executions
+- You need to replay from a specific point with different input
 
 ## Model Tool
 

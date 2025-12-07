@@ -178,6 +178,7 @@ class TestFileSessionPlugin:
         assert "resume" in command_names
         assert "sessions" in command_names
         assert "delete-session" in command_names
+        assert "backtoturn" in command_names
 
     def test_get_function_declarations(self, plugin):
         """Test that plugin provides function declarations."""
@@ -195,6 +196,13 @@ class TestFileSessionPlugin:
         assert "resume" in executors
         assert "sessions" in executors
         assert "delete-session" in executors
+        assert "backtoturn" in executors
+
+    def test_set_turn_count(self, plugin):
+        """Test setting the turn count."""
+        plugin._turn_count = 5
+        plugin.set_turn_count(3)
+        assert plugin._turn_count == 3
 
     def test_subscribes_to_prompt_enrichment(self, plugin):
         """Test that plugin subscribes to prompt enrichment."""
@@ -279,3 +287,49 @@ class TestFileSessionPluginWithClient:
 
         assert result["status"] == "error"
         assert "Usage" in result["message"]
+
+    def test_execute_backtoturn_no_turn_id(self, plugin_with_client):
+        """Test backtoturn without turn ID shows info."""
+        plugin, mock_client = plugin_with_client
+        mock_client.get_turn_boundaries.return_value = [0, 5, 10]  # 3 turns
+
+        result = plugin._execute_backtoturn({})
+
+        assert result["status"] == "info"
+        assert "3 turn(s)" in result["message"]
+        assert "Usage" in result["message"]
+
+    def test_execute_backtoturn_invalid_turn_id(self, plugin_with_client):
+        """Test backtoturn with non-numeric turn ID."""
+        plugin, _ = plugin_with_client
+
+        result = plugin._execute_backtoturn({"turn_id": "abc"})
+
+        assert result["status"] == "error"
+        assert "Invalid turn ID" in result["message"]
+
+    def test_execute_backtoturn_success(self, plugin_with_client):
+        """Test successful backtoturn execution."""
+        plugin, mock_client = plugin_with_client
+        mock_client.revert_to_turn.return_value = {
+            "success": True,
+            "turns_removed": 2,
+            "new_turn_count": 3,
+            "message": "Reverted to turn 3 (removed 2 turn(s))."
+        }
+
+        result = plugin._execute_backtoturn({"turn_id": "3"})
+
+        assert result["status"] == "ok"
+        assert "Reverted to turn 3" in result["message"]
+        mock_client.revert_to_turn.assert_called_once_with(3)
+
+    def test_execute_backtoturn_invalid_turn(self, plugin_with_client):
+        """Test backtoturn with invalid turn ID raises error."""
+        plugin, mock_client = plugin_with_client
+        mock_client.revert_to_turn.side_effect = ValueError("Turn 10 does not exist.")
+
+        result = plugin._execute_backtoturn({"turn_id": "10"})
+
+        assert result["status"] == "error"
+        assert "Turn 10 does not exist" in result["message"]
