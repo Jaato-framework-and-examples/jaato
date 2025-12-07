@@ -52,6 +52,7 @@ jaato is a future-proof framework for building agentic AI applications, featurin
 | [**slash_command**](shared/plugins/slash_command/README.md) | Process /command references from .jaato/commands/ directory |
 | [**subagent**](shared/plugins/subagent/README.md) | Delegate tasks to specialized subagents with custom tool configurations |
 | [**todo**](shared/plugins/todo/README.md) | Plan tracking with workflow enforcement for complex multi-step tasks |
+| [**session**](shared/plugins/session/README.md) | Session persistence for saving/resuming conversations across restarts |
 | [**web_search**](shared/plugins/web_search/README.md) | Search the web using DuckDuckGo for current information |
 
 See [shared/plugins/README.md](shared/plugins/README.md) for plugin development documentation.
@@ -127,6 +128,7 @@ The primary way to use jaato is through the **Interactive Client**, which provid
 - **Multi-turn conversations** with full context preservation
 - **Permission prompts** for tool execution approval (approve, deny, or allow-all)
 - **Plan tracking** with the TODO plugin for complex multi-step tasks
+- **Session persistence** for saving and resuming conversations across restarts
 - **Readline history** with ↑/↓ navigation and persistent history
 - **Subagent delegation** for specialized task handling
 - **Web search** integration for current information
@@ -142,6 +144,9 @@ The primary way to use jaato is through the **Interactive Client**, which provid
 | `context` | Show context window usage |
 | `export [file]` | Export session to YAML for replay |
 | `plan` | Show current task plan (TODO plugin) |
+| `save` | Save current session for later resumption |
+| `resume` | Resume a previously saved session |
+| `sessions` | List all saved sessions |
 | `quit` | Exit the session |
 
 ### Session Export for Replay
