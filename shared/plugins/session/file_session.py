@@ -522,6 +522,9 @@ class FileSessionPlugin:
     def _execute_describe(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the session_describe tool.
 
+        When a description is first set, automatically save the session.
+        This creates a natural "commitment" point for persistence.
+
         Args:
             args: Tool arguments with 'description' key.
 
@@ -533,12 +536,21 @@ class FileSessionPlugin:
         if not description:
             return {"status": "error", "message": "Description cannot be empty"}
 
+        is_first_description = self._session_description is None
         self._session_description = description
         self._description_requested = True
 
         # Update file if we have a current session
         if self._current_session_id:
             self.set_description(self._current_session_id, description)
+
+        # Auto-save when first description is set (natural commitment point)
+        if is_first_description and self._client:
+            try:
+                session_id = self._client.save_session()
+                self._current_session_id = session_id
+            except Exception:
+                pass  # Don't fail the describe call if save fails
 
         return {
             "status": "ok",
