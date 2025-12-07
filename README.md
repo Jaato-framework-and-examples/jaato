@@ -147,6 +147,7 @@ The primary way to use jaato is through the **Interactive Client**, which provid
 | `save` | Save current session for later resumption |
 | `resume` | Resume a previously saved session |
 | `sessions` | List all saved sessions |
+| `backtoturn <id>` | Revert conversation to a specific turn |
 | `quit` | Exit the session |
 
 ### Session Export for Replay
