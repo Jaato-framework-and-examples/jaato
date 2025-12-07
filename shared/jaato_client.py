@@ -111,18 +111,43 @@ class JaatoClient:
         """Get the configured model name."""
         return self._model_name
 
-    def list_available_models(self) -> List[str]:
-        """List available models from Vertex AI.
+    def list_available_models(self, prefix: Optional[str] = "gemini") -> List[str]:
+        """List models from Vertex AI that support text generation.
+
+        Filters for models that support 'generateContent' action and optionally
+        by name prefix. By default, only lists Gemini models.
+
+        Note: This returns the model catalog, not region-specific availability.
+        Some models may not be available in all regions. Use location='global'
+        when connecting for widest model access, or check Google's documentation
+        for region-specific availability.
+
+        Args:
+            prefix: Optional name prefix to filter by (default: "gemini").
+                    Pass None to list all models that support generateContent.
 
         Returns:
-            List of model names available in the configured project/location.
+            List of model names that support generateContent.
 
         Raises:
             RuntimeError: If client is not connected.
         """
         if not self._client:
             raise RuntimeError("Client not connected. Call connect() first.")
-        return [model.name for model in self._client.models.list()]
+
+        models = []
+        for model in self._client.models.list():
+            # Filter for models that support generateContent
+            if not hasattr(model, 'supported_actions') or not model.supported_actions:
+                continue
+            if 'generateContent' not in model.supported_actions:
+                continue
+            # Filter by prefix if specified
+            if prefix and not model.name.startswith(prefix):
+                continue
+            models.append(model.name)
+
+        return models
 
     def connect(self, project: str, location: str, model: str) -> None:
         """Connect to Vertex AI.
