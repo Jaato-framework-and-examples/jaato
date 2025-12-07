@@ -4,6 +4,8 @@ The Subagent plugin (`spawn_subagent`, `list_subagent_profiles`) enables the par
 
 ## Demo
 
+The demo below shows spawning a code-review subagent to analyze the CLI plugin source file for potential improvements. The subagent runs autonomously and returns its analysis to the parent agent.
+
 ![Subagent Plugin Demo](demo.svg)
 
 ## Architecture Overview

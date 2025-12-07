@@ -4,6 +4,8 @@ The References plugin manages documentation and reference source injection into 
 
 ## Demo
 
+The demo below shows the references plugin in action: when the user asks about standards for adding a new API endpoint, the model triggers reference selection to pull in relevant documentation.
+
 ![References Plugin Demo](demo.svg)
 
 ## Overview
