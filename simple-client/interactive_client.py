@@ -887,8 +887,11 @@ Keyboard shortcuts:
             role_label = "USER" if role == 'user' else "MODEL" if role == 'model' else role.upper()
             print(f"\n  [{role_label}]")
 
-            for part in parts:
-                self._print_part(part)
+            if not parts:
+                print("  (no content)")
+            else:
+                for part in parts:
+                    self._print_part(part)
 
             # Show token accounting at end of turn (after final model text response)
             # A turn ends when the next message is a user text message or at end of history
