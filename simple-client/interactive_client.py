@@ -98,7 +98,9 @@ class InteractiveClient:
         }
 
         # Track original user inputs for export (before file reference expansion)
-        self._original_inputs: list[str] = []
+        # Each entry is {"text": str, "local": bool} where local=True for commands
+        # that don't go to the model (plugin commands like "plan")
+        self._original_inputs: list[dict] = []
 
     def _c(self, text: str, color: str) -> str:
         """Apply ANSI color to text."""
@@ -567,10 +569,12 @@ class InteractiveClient:
             plugin_result = self._try_execute_plugin_command(user_input)
             if plugin_result is not None:
                 # Plugin command was executed, result already displayed
+                # Track for export as a local command (doesn't go to model directly)
+                self._original_inputs.append({"text": user_input, "local": True})
                 continue
 
             # Track original input for export (before expansion)
-            self._original_inputs.append(user_input)
+            self._original_inputs.append({"text": user_input, "local": False})
 
             # Expand @file references to include file contents
             expanded_prompt = self._expand_file_references(user_input)
@@ -883,28 +887,40 @@ Keyboard shortcuts:
 
         # Build steps from original inputs with matched permissions
         final_steps = []
-        for i, user_input in enumerate(self._original_inputs):
-            # Get permissions for this turn (if available)
-            perms = turn_permissions[i] if i < len(turn_permissions) else []
+        model_turn_index = 0  # Track index for model-bound prompts only
+        for input_entry in self._original_inputs:
+            user_input = input_entry["text"]
+            is_local = input_entry["local"]
 
-            # Determine permission value
-            permission = 'y'  # Default
-            if perms:
-                # Use the most permissive permission granted
-                # Priority: 'a' (always) > 'y' (yes) > 'n' (no)
-                if 'a' in perms:
-                    permission = 'a'
-                elif 'y' in perms or 'once' in perms:
-                    permission = 'y'
-                elif 'n' in perms:
-                    permission = 'n'
-                elif 'never' in perms:
-                    permission = 'never'
+            if is_local:
+                # Local commands (plugin commands like "plan") don't need permissions
+                final_steps.append({
+                    'type': user_input,
+                    'local': True,
+                })
+            else:
+                # Model-bound prompts may have permissions
+                perms = turn_permissions[model_turn_index] if model_turn_index < len(turn_permissions) else []
+                model_turn_index += 1
 
-            final_steps.append({
-                'type': user_input,
-                'permission': permission,
-            })
+                # Determine permission value
+                permission = 'y'  # Default
+                if perms:
+                    # Use the most permissive permission granted
+                    # Priority: 'a' (always) > 'y' (yes) > 'n' (no)
+                    if 'a' in perms:
+                        permission = 'a'
+                    elif 'y' in perms or 'once' in perms:
+                        permission = 'y'
+                    elif 'n' in perms:
+                        permission = 'n'
+                    elif 'never' in perms:
+                        permission = 'never'
+
+                final_steps.append({
+                    'type': user_input,
+                    'permission': permission,
+                })
 
         # Add quit step
         final_steps.append({'type': 'quit', 'delay': 0.08})
