@@ -1,8 +1,37 @@
 """Base protocol for tool plugins."""
 
-from dataclasses import dataclass
+import fnmatch
+from dataclasses import dataclass, field
 from typing import Protocol, List, Dict, Any, Callable, Optional, NamedTuple, runtime_checkable
 from google.genai import types
+
+
+@dataclass
+class PromptEnrichmentResult:
+    """Result of prompt enrichment by a plugin.
+
+    Plugins that subscribe to prompt enrichment can inspect and optionally
+    modify user prompts before they are sent to the model.
+
+    Attributes:
+        prompt: The (possibly modified) prompt text.
+        metadata: Optional metadata about the enrichment (e.g., detected references).
+    """
+    prompt: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+def model_matches_requirements(model_name: str, patterns: List[str]) -> bool:
+    """Check if a model name matches any of the required patterns.
+
+    Args:
+        model_name: The model name to check (e.g., 'gemini-3-pro-preview').
+        patterns: List of glob patterns (e.g., ['gemini-3-pro*', 'gemini-3.5-*']).
+
+    Returns:
+        True if model_name matches at least one pattern, False otherwise.
+    """
+    return any(fnmatch.fnmatch(model_name, pattern) for pattern in patterns)
 
 
 @dataclass
@@ -134,6 +163,65 @@ class ToolPlugin(Protocol):
             Return empty list if no user-facing commands are provided.
         """
         ...
+
+    # ==================== Optional Protocol Extensions ====================
+    #
+    # The following methods are optional extensions to the base protocol.
+    # Plugins can implement these for additional functionality.
+    #
+    # Model Requirements:
+    #
+    # def get_model_requirements(self) -> Optional[List[str]]:
+    #     """Return glob patterns for models this plugin requires.
+    #
+    #     If the current model doesn't match any pattern, the plugin will
+    #     not be loaded (graceful failure with warning).
+    #
+    #     Examples:
+    #         ["gemini-3-pro*", "gemini-3.5-*"]  # Requires Gemini 3+
+    #         ["gemini-2.5-*", "gemini-3-*"]     # Requires 2.5 or 3.x
+    #         None                               # Works with any model (default)
+    #
+    #     Returns:
+    #         List of glob patterns, or None if plugin works with any model.
+    #     """
+    #     ...
+    #
+    # Prompt Enrichment:
+    #
+    # def subscribes_to_prompt_enrichment(self) -> bool:
+    #     """Return True if this plugin wants to enrich prompts before sending.
+    #
+    #     Plugins that subscribe will have their enrich_prompt() method called
+    #     with the user's prompt before it is sent to the model. This allows
+    #     plugins to:
+    #     - Detect and process @references (e.g., @file.png, @url)
+    #     - Add context or instructions based on prompt content
+    #     - Track referenced resources for later tool calls
+    #
+    #     Returns:
+    #         True to subscribe, False otherwise (default).
+    #     """
+    #     ...
+    #
+    # def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
+    #     """Enrich a user prompt before sending to the model.
+    #
+    #     Called only if subscribes_to_prompt_enrichment() returns True.
+    #     The plugin can inspect and modify the prompt, returning the
+    #     (possibly modified) prompt along with metadata about what was found.
+    #
+    #     IMPORTANT: Plugins should NOT remove @references from the prompt.
+    #     The framework handles @reference cleanup after all plugins have
+    #     processed the prompt.
+    #
+    #     Args:
+    #         prompt: The user's original prompt text.
+    #
+    #     Returns:
+    #         PromptEnrichmentResult with the enriched prompt and metadata.
+    #     """
+    #     ...
 
     # Optional method - not part of the required protocol, but recognized by
     # the permission system if implemented:

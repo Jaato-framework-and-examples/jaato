@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Set, Callable, Any, Optional, Protocol, runtime_checkable
 from google.genai import types
 
-from .base import ToolPlugin, UserCommand
+from .base import ToolPlugin, UserCommand, PromptEnrichmentResult, model_matches_requirements
 
 # Entry point group names by plugin kind
 PLUGIN_ENTRY_POINT_GROUPS = {
@@ -38,10 +38,19 @@ class PluginRegistry:
         registry.unexpose_all()
     """
 
-    def __init__(self):
+    def __init__(self, model_name: Optional[str] = None):
+        """Initialize the plugin registry.
+
+        Args:
+            model_name: Optional model name for checking plugin requirements.
+                       If provided, plugins with model_requirements that don't
+                       match will be skipped during expose_tool().
+        """
         self._plugins: Dict[str, ToolPlugin] = {}
         self._exposed: Set[str] = set()
         self._configs: Dict[str, Dict[str, Any]] = {}
+        self._model_name: Optional[str] = model_name
+        self._skipped_plugins: Dict[str, List[str]] = {}  # name -> required patterns
 
     def discover(
         self,
@@ -187,6 +196,20 @@ class PluginRegistry:
 
         return discovered
 
+    def set_model_name(self, model_name: str) -> None:
+        """Set the model name for checking plugin requirements.
+
+        Args:
+            model_name: The model name (e.g., 'gemini-3-pro-preview').
+        """
+        self._model_name = model_name
+        # Clear skipped plugins as model changed
+        self._skipped_plugins.clear()
+
+    def get_model_name(self) -> Optional[str]:
+        """Get the currently configured model name."""
+        return self._model_name
+
     def list_available(self) -> List[str]:
         """List all discovered plugin names."""
         return list(self._plugins.keys())
@@ -203,15 +226,21 @@ class PluginRegistry:
         """Get a plugin by name, or None if not found."""
         return self._plugins.get(name)
 
-    def expose_tool(self, name: str, config: Optional[Dict[str, Any]] = None) -> None:
+    def expose_tool(self, name: str, config: Optional[Dict[str, Any]] = None) -> bool:
         """Expose a plugin's tools to the model.
 
         Calls the plugin's initialize() method if this is the first time
         exposing it, or if a new config is provided.
 
+        If a model_name is set and the plugin has model_requirements that
+        don't match, the plugin is skipped with a warning.
+
         Args:
             name: Plugin name to expose.
             config: Optional configuration dict for the plugin.
+
+        Returns:
+            True if the plugin was exposed, False if skipped due to model requirements.
 
         Raises:
             ValueError: If the plugin is not found.
@@ -220,6 +249,15 @@ class PluginRegistry:
             raise ValueError(f"Plugin '{name}' not found. Available: {self.list_available()}")
 
         plugin = self._plugins[name]
+
+        # Check model requirements if model_name is set
+        if self._model_name and hasattr(plugin, 'get_model_requirements'):
+            requirements = plugin.get_model_requirements()
+            if requirements and not model_matches_requirements(self._model_name, requirements):
+                self._skipped_plugins[name] = requirements
+                print(f"[PluginRegistry] Plugin '{name}' skipped: "
+                      f"model '{self._model_name}' not in {requirements}")
+                return False
 
         # Initialize if not already exposed, or if new config provided
         if name not in self._exposed:
@@ -232,6 +270,8 @@ class PluginRegistry:
             plugin.shutdown()
             plugin.initialize(config)
             self._configs[name] = config
+
+        return True
 
     def unexpose_tool(self, name: str) -> None:
         """Stop exposing a plugin's tools to the model.
@@ -364,3 +404,58 @@ class PluginRegistry:
             except Exception:
                 pass
         return None
+
+    def list_skipped_plugins(self) -> Dict[str, List[str]]:
+        """List plugins that were skipped due to model requirements.
+
+        Returns:
+            Dict mapping plugin names to their required model patterns.
+        """
+        return dict(self._skipped_plugins)
+
+    # ==================== Prompt Enrichment ====================
+
+    def get_prompt_enrichment_subscribers(self) -> List[ToolPlugin]:
+        """Get exposed plugins that subscribe to prompt enrichment.
+
+        Returns:
+            List of plugins that have subscribed to prompt enrichment.
+        """
+        subscribers = []
+        for name in self._exposed:
+            try:
+                plugin = self._plugins[name]
+                if (hasattr(plugin, 'subscribes_to_prompt_enrichment') and
+                        plugin.subscribes_to_prompt_enrichment()):
+                    subscribers.append(plugin)
+            except Exception as exc:
+                print(f"[PluginRegistry] Error checking enrichment subscription for '{name}': {exc}")
+        return subscribers
+
+    def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
+        """Run prompt through all subscribed enrichment plugins.
+
+        Each subscribed plugin gets to inspect and optionally modify the prompt.
+        Plugins are called in exposure order.
+
+        Args:
+            prompt: The user's original prompt text.
+
+        Returns:
+            PromptEnrichmentResult with the enriched prompt and combined metadata.
+        """
+        current_prompt = prompt
+        combined_metadata: Dict[str, Any] = {}
+
+        for plugin in self.get_prompt_enrichment_subscribers():
+            try:
+                if hasattr(plugin, 'enrich_prompt'):
+                    result = plugin.enrich_prompt(current_prompt)
+                    current_prompt = result.prompt
+                    # Merge metadata, using plugin name as namespace
+                    if result.metadata:
+                        combined_metadata[plugin.name] = result.metadata
+            except Exception as exc:
+                print(f"[PluginRegistry] Error in prompt enrichment for '{plugin.name}': {exc}")
+
+        return PromptEnrichmentResult(prompt=current_prompt, metadata=combined_metadata)

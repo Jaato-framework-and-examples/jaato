@@ -5,6 +5,7 @@ with support for tool execution via plugins or custom declarations.
 Uses the SDK chat API for multi-turn conversation management.
 """
 
+import re
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from google import genai
@@ -12,8 +13,12 @@ from google.genai import types
 
 from .ai_tool_runner import ToolExecutor
 from .token_accounting import TokenLedger
-from .plugins.base import UserCommand
+from .plugins.base import UserCommand, PromptEnrichmentResult
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
+
+# Pattern to match @references in prompts (e.g., @file.png, @path/to/file.txt)
+# Matches @ followed by a path-like string (no spaces, common file chars)
+AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
 
 # Context window limits for known Gemini models (total tokens)
 # These are approximate limits; actual limits may vary by API version
@@ -101,6 +106,9 @@ class JaatoClient:
         self._gc_config: Optional[GCConfig] = None
         self._gc_history: List[GCResult] = []
 
+        # Plugin registry for prompt enrichment
+        self._registry: Optional['PluginRegistry'] = None
+
     @property
     def is_connected(self) -> bool:
         """Check if client is connected to Vertex AI."""
@@ -139,6 +147,7 @@ class JaatoClient:
         """
         self._ledger = ledger
         self._executor = ToolExecutor(ledger=ledger)
+        self._registry = registry  # Store for prompt enrichment
 
         # Pass connection info and permission plugin to subagent plugin if it's exposed
         self._configure_subagent_plugin(registry, permission_plugin)
@@ -292,6 +301,10 @@ class JaatoClient:
         automatically check and perform garbage collection if needed before
         sending the message.
 
+        If plugins are configured that subscribe to prompt enrichment, the
+        message will be passed through them before sending. After enrichment,
+        any @references are stripped from the message.
+
         Args:
             message: The user's message text.
 
@@ -310,7 +323,45 @@ class JaatoClient:
         if self._gc_plugin and self._gc_config and self._gc_config.check_before_send:
             self._maybe_collect_before_send()
 
-        return self._run_chat_loop(message)
+        # Run prompt enrichment pipeline if registry is configured
+        processed_message = self._enrich_and_clean_prompt(message)
+
+        return self._run_chat_loop(processed_message)
+
+    def _enrich_and_clean_prompt(self, prompt: str) -> str:
+        """Run prompt through enrichment pipeline and strip @references.
+
+        Args:
+            prompt: The user's original prompt text.
+
+        Returns:
+            The processed prompt ready to send to the model.
+        """
+        enriched_prompt = prompt
+
+        # Run through plugin enrichment pipeline
+        if self._registry:
+            result = self._registry.enrich_prompt(prompt)
+            enriched_prompt = result.prompt
+            # Metadata is available in result.metadata if needed for debugging
+
+        # Strip @references from the prompt (framework responsibility)
+        cleaned_prompt = self._strip_at_references(enriched_prompt)
+
+        return cleaned_prompt
+
+    def _strip_at_references(self, prompt: str) -> str:
+        """Remove @ prefix from references in the prompt.
+
+        Converts @filename.png to filename.png, preserving the rest of the text.
+
+        Args:
+            prompt: Prompt text possibly containing @references.
+
+        Returns:
+            Prompt with @ prefixes removed from references.
+        """
+        return AT_REFERENCE_PATTERN.sub(r'\1', prompt)
 
     def _run_chat_loop(self, message: str) -> str:
         """Internal function calling loop using chat.send_message().
@@ -344,11 +395,9 @@ class JaatoClient:
                     else:
                         result = {"error": f"No executor registered for {name}"}
 
-                    # Build function response part
-                    func_responses.append(types.Part.from_function_response(
-                        name=name,
-                        response=result if isinstance(result, dict) else {"result": result}
-                    ))
+                    # Build function response part(s)
+                    parts = self._build_function_response_parts(name, result)
+                    func_responses.extend(parts)
 
                 # Send function responses back to model
                 # Chat API accepts Parts directly (not Content objects)
@@ -362,6 +411,114 @@ class JaatoClient:
             # Always store turn accounting, even on errors
             if turn_tokens['total'] > 0:
                 self._turn_accounting.append(turn_tokens)
+
+    def _build_function_response_parts(
+        self,
+        name: str,
+        result: Any
+    ) -> List[types.Part]:
+        """Build function response parts, handling multimodal content.
+
+        If the result contains multimodal data (indicated by '_multimodal': True),
+        this builds a multimodal function response with image data.
+
+        Args:
+            name: The function name.
+            result: The function result (tuple from executor: (ok, result_dict)).
+
+        Returns:
+            List of Part objects for the function response.
+        """
+        # Executor returns (ok, result_dict) tuple
+        if isinstance(result, tuple) and len(result) == 2:
+            _ok, result_data = result
+        else:
+            result_data = result
+
+        # Check for multimodal result
+        if isinstance(result_data, dict) and result_data.get('_multimodal'):
+            return self._build_multimodal_function_response(name, result_data)
+
+        # Standard text/JSON response
+        response_dict = result_data if isinstance(result_data, dict) else {"result": result_data}
+        return [types.Part.from_function_response(name=name, response=response_dict)]
+
+    def _build_multimodal_function_response(
+        self,
+        name: str,
+        result: Dict[str, Any]
+    ) -> List[types.Part]:
+        """Build a multimodal function response with image data.
+
+        For Gemini 3 Pro+, this creates a function response that includes
+        inline image data that the model can "see".
+
+        Args:
+            name: The function name.
+            result: Dict with '_multimodal': True and image data.
+
+        Returns:
+            List of Part objects including function response and image data.
+        """
+        multimodal_type = result.get('_multimodal_type', 'image')
+
+        if multimodal_type == 'image':
+            image_data = result.get('image_data')
+            mime_type = result.get('mime_type', 'image/png')
+            display_name = result.get('display_name', 'image')
+
+            if not image_data:
+                # Fallback to text response if no image data
+                return [types.Part.from_function_response(
+                    name=name,
+                    response={'error': 'No image data available'}
+                )]
+
+            # Build multimodal response
+            # The function response references the image by display_name
+            # and the image is included as a separate inline data part
+            try:
+                # Create the structured response with reference to image
+                response_dict = {
+                    'status': 'success',
+                    'image': {'$ref': display_name},
+                    'file_path': result.get('file_path', ''),
+                    'size_bytes': result.get('size_bytes', len(image_data)),
+                }
+
+                # For Gemini 3+, we can include multimodal parts in the function response
+                # The SDK's FunctionResponsePart supports file_data for multimodal content
+                # However, the exact API may vary - try the standard approach first
+
+                # Approach 1: Include image as inline_data Part alongside function response
+                # This is a workaround that may work with Gemini 2.x as well
+                parts = [
+                    types.Part.from_function_response(
+                        name=name,
+                        response=response_dict
+                    ),
+                    types.Part.from_bytes(
+                        data=image_data,
+                        mime_type=mime_type
+                    )
+                ]
+                return parts
+
+            except Exception as e:
+                # Fallback: return text description if multimodal fails
+                return [types.Part.from_function_response(
+                    name=name,
+                    response={
+                        'error': f'Failed to build multimodal response: {e}',
+                        'file_path': result.get('file_path', ''),
+                    }
+                )]
+
+        # Unknown multimodal type
+        return [types.Part.from_function_response(
+            name=name,
+            response={'error': f'Unknown multimodal type: {multimodal_type}'}
+        )]
 
     def _accumulate_turn_tokens(self, response, turn_tokens: Dict[str, int]) -> None:
         """Accumulate token counts from response into turn totals."""
@@ -650,10 +807,9 @@ class JaatoClient:
                 else:
                     result = {"error": f"No executor registered for {name}"}
 
-                func_responses.append(types.Part.from_function_response(
-                    name=name,
-                    response=result if isinstance(result, dict) else {"result": result}
-                ))
+                # Build function response part(s), handling multimodal
+                response_parts = self._build_function_response_parts(name, result)
+                func_responses.extend(response_parts)
 
             # Chat API accepts Parts directly (not Content objects)
             response = self._chat.send_message(func_responses)
