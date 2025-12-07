@@ -376,6 +376,12 @@ class InteractiveClient:
             self._jaato = JaatoClient()
             self._jaato.connect(project_id, location, model_name)
             self.log(f"[client] Using model: {model_name}")
+            # List available models
+            try:
+                available_models = self._jaato.list_available_models()
+                self.log(f"[client] Available models: {', '.join(available_models)}")
+            except Exception as list_err:
+                self.log(f"[client] Could not list available models: {list_err}")
         except Exception as e:
             print(f"Error: Failed to initialize Vertex AI client: {e}")
             return False
