@@ -261,13 +261,21 @@ class InteractiveClient:
         args = {}
         if arg_value:
             # Command-specific argument mapping
+            # Some commands expect a single arg, others expect a list
             arg_mapping = {
                 "backtoturn": "turn_id",
                 "resume": "session_id",
                 "delete-session": "session_id",
             }
-            param_name = arg_mapping.get(command_name.lower(), "arg")
-            args[param_name] = arg_value
+            # Commands that expect args as a list (for subcommands)
+            list_arg_commands = {"permissions"}
+
+            if command_name.lower() in list_arg_commands:
+                # Split into list of arguments
+                args["args"] = arg_value.split()
+            else:
+                param_name = arg_mapping.get(command_name.lower(), "arg")
+                args[param_name] = arg_value
 
         # For save command, include user inputs for prompt history restoration
         if command_name.lower() == "save":
