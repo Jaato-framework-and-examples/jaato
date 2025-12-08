@@ -671,7 +671,7 @@ class InteractiveClient:
     def run_prompt(
         self,
         prompt: str,
-        on_intermediate_response: 'Callable[[str], None] | None' = None
+        on_output: 'Callable[[str, str, str], None]'
     ) -> str:
         """Execute a prompt and return the model's response.
 
@@ -680,10 +680,8 @@ class InteractiveClient:
 
         Args:
             prompt: The user's prompt text.
-            on_intermediate_response: Optional callback invoked with each
-                intermediate text response from the model during the
-                function-calling loop. Useful for real-time display.
-                When provided, only the final response is returned.
+            on_output: Callback for real-time output from model and plugins.
+                Signature: (source: str, text: str, mode: str) -> None
         """
         if not self._jaato:
             return "Error: Client not initialized"
@@ -691,7 +689,7 @@ class InteractiveClient:
         self.log(f"\n[client] Sending prompt to model...")
 
         try:
-            response = self._jaato.send_message(prompt, on_intermediate_response)
+            response = self._jaato.send_message(prompt, on_output)
 
             history_len = len(self._jaato.get_history())
             self.log(f"\n[client] Completed (history: {history_len} messages)")
@@ -802,17 +800,19 @@ class InteractiveClient:
             # Expand @file references to include file contents
             expanded_prompt = self._expand_file_references(user_input)
 
-            # Define callback for real-time display of intermediate responses
+            # Define callback for real-time output display
             model_prefix = self._c('Model>', 'bold') + ' '
             continuation_indent = "       "  # 7 spaces to match "Model> " width
 
-            def display_intermediate(text: str) -> None:
-                """Display intermediate model response in real-time."""
+            def display_output(source: str, text: str, mode: str) -> None:
+                """Display output from model or plugins in real-time."""
+                # For now, display all sources with model prefix
+                # TODO: Different formatting per source when plugins emit output
                 wrapped = self._wrap_text(text, prefix=continuation_indent, initial_prefix="")
                 print(f"\n{model_prefix}{wrapped}")
 
-            # Execute the prompt with real-time intermediate response display
-            response = self.run_prompt(expanded_prompt, on_intermediate_response=display_intermediate)
+            # Execute the prompt with real-time output display
+            response = self.run_prompt(expanded_prompt, on_output=display_output)
 
             # Display the final response (if any)
             if response and response != '(No response text)':

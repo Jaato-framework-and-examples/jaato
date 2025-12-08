@@ -13,7 +13,7 @@ from google.genai import types
 
 from .ai_tool_runner import ToolExecutor
 from .token_accounting import TokenLedger
-from .plugins.base import UserCommand, PromptEnrichmentResult
+from .plugins.base import UserCommand, PromptEnrichmentResult, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
 
@@ -70,12 +70,12 @@ class JaatoClient:
         client.configure_tools(registry, permission_plugin, ledger)
 
         # Multi-turn conversation (SDK manages history)
-        # Callback receives intermediate model text during function-calling loops
-        def on_response(text):
-            print(f"[Model]: {text}")
+        # Output callback receives (source, text, mode) for real-time display
+        def on_output(source: str, text: str, mode: str):
+            print(f"[{source}]: {text}")
 
-        response = client.send_message("Hello!", on_intermediate_response=on_response)
-        response = client.send_message("Tell me more", on_intermediate_response=on_response)
+        response = client.send_message("Hello!", on_output=on_output)
+        response = client.send_message("Tell me more", on_output=on_output)
 
         # Access or reset history when needed
         history = client.get_history()
@@ -356,7 +356,7 @@ class JaatoClient:
     def send_message(
         self,
         message: str,
-        on_intermediate_response: Callable[[str], None]
+        on_output: OutputCallback
     ) -> str:
         """Send a message to the model.
 
@@ -373,10 +373,11 @@ class JaatoClient:
 
         Args:
             message: The user's message text.
-            on_intermediate_response: Callback invoked with each intermediate
-                text response from the model during the function-calling loop.
-                Called for real-time display of model reasoning/progress.
-                The caller can accumulate responses if needed.
+            on_output: Callback for real-time output from model and plugins.
+                Signature: (source: str, text: str, mode: str) -> None
+                - source: "model" for model responses, plugin name for plugins
+                - text: The output text
+                - mode: "write" for new block, "append" to continue
 
         Returns:
             The final model response text (after all function calls resolved).
@@ -396,7 +397,7 @@ class JaatoClient:
         # Run prompt enrichment pipeline if registry is configured
         processed_message = self._enrich_and_clean_prompt(message)
 
-        response = self._run_chat_loop(processed_message, on_intermediate_response)
+        response = self._run_chat_loop(processed_message, on_output)
 
         # Notify session plugin that turn completed
         self._notify_session_turn_complete()
@@ -441,15 +442,15 @@ class JaatoClient:
     def _run_chat_loop(
         self,
         message: str,
-        on_intermediate_response: Callable[[str], None]
+        on_output: OutputCallback
     ) -> str:
         """Internal function calling loop using chat.send_message().
 
         Args:
             message: The user's message text.
-            on_intermediate_response: Callback for intermediate text responses.
-                Invoked each time the model produces text during the function
-                calling loop. The caller can accumulate these if needed.
+            on_output: Callback for real-time output.
+                Invoked with (source, text, mode) each time the model produces
+                text during the function calling loop.
 
         Returns:
             The final response text (after all function calls resolved).
@@ -465,9 +466,9 @@ class JaatoClient:
 
             # Handle function calling loop
             while response.function_calls:
-                # Notify callback of any text produced alongside function calls
+                # Emit any text produced alongside function calls
                 if response.text:
-                    on_intermediate_response(response.text)
+                    on_output("model", response.text, "write")
 
                 func_responses = []
 
@@ -938,7 +939,7 @@ class JaatoClient:
     def send_message_with_parts(
         self,
         parts: List[types.Part],
-        on_intermediate_response: Callable[[str], None]
+        on_output: OutputCallback
     ) -> str:
         """Send a message with custom Part objects.
 
@@ -947,10 +948,8 @@ class JaatoClient:
 
         Args:
             parts: List of Part objects forming the user's message.
-            on_intermediate_response: Callback invoked with each intermediate
-                text response from the model during the function-calling loop.
-                Called for real-time display of model reasoning/progress.
-                The caller can accumulate responses if needed.
+            on_output: Callback for real-time output from model and plugins.
+                Signature: (source: str, text: str, mode: str) -> None
 
         Returns:
             The final model response text (after all function calls resolved).
@@ -963,20 +962,20 @@ class JaatoClient:
         if not self._chat:
             raise RuntimeError("Tools not configured. Call configure_tools() first.")
 
-        return self._run_chat_loop_with_parts(parts, on_intermediate_response)
+        return self._run_chat_loop_with_parts(parts, on_output)
 
     def _run_chat_loop_with_parts(
         self,
         parts: List[types.Part],
-        on_intermediate_response: Callable[[str], None]
+        on_output: OutputCallback
     ) -> str:
         """Internal function calling loop for multi-part messages.
 
         Args:
             parts: List of Part objects forming the user's message.
-            on_intermediate_response: Callback for intermediate text responses.
-                Invoked each time the model produces text during the function
-                calling loop. The caller can accumulate these if needed.
+            on_output: Callback for real-time output.
+                Invoked with (source, text, mode) each time the model produces
+                text during the function calling loop.
 
         Returns:
             The final response text (after all function calls resolved).
@@ -992,9 +991,9 @@ class JaatoClient:
 
         # Handle function calling loop (same as _run_chat_loop)
         while response.function_calls:
-            # Notify callback of any text produced alongside function calls
+            # Emit any text produced alongside function calls
             if response.text:
-                on_intermediate_response(response.text)
+                on_output("model", response.text, "write")
 
             func_responses = []
 

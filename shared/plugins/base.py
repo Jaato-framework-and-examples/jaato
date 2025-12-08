@@ -6,6 +6,20 @@ from typing import Protocol, List, Dict, Any, Callable, Optional, NamedTuple, ru
 from google.genai import types
 
 
+# Output callback type for real-time output from model and plugins
+#
+# Parameters:
+#   source: Origin of the output ("model", plugin name, "system", etc.)
+#   text: The output text content
+#   mode: How to handle the output:
+#         - "write": Start a new output block
+#         - "append": Add to the current block from the same source
+#
+# The frontend/client decides how to render (terminal, web UI, logging).
+# Interleaving of outputs from different sources is a frontend concern.
+OutputCallback = Callable[[str, str, str], None]
+
+
 @dataclass
 class PromptEnrichmentResult:
     """Result of prompt enrichment by a plugin.

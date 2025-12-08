@@ -120,14 +120,14 @@ jaato.connect('my-project', 'us-central1', model_name)
 jaato.configure_tools(registry, ledger=TokenLedger())
 
 # Run prompts (SDK manages history internally)
-# The callback receives intermediate model text during function-calling loops
-def on_response(text):
-    print(f"[Model]: {text}")
+# The callback receives (source, text, mode) for real-time output
+def on_output(source: str, text: str, mode: str):
+    print(f"[{source}]: {text}")
 
-response = jaato.send_message('List files in current directory', on_intermediate_response=on_response)
+response = jaato.send_message('List files in current directory', on_output=on_output)
 
 # Multi-turn conversations work automatically
-response2 = jaato.send_message('Now show hidden files too', on_intermediate_response=on_response)
+response2 = jaato.send_message('Now show hidden files too', on_output=on_output)
 
 # Access history when needed
 history = jaato.get_history()
@@ -157,13 +157,13 @@ jaato.connect('my-project', 'us-central1', model_name)
 # First session: All plugins
 registry.expose_all()
 jaato.configure_tools(registry)
-response1 = jaato.send_message('List files', on_intermediate_response=lambda _: None)
+response1 = jaato.send_message('List files', on_output=lambda s, t, m: None)
 
 # Second session: Only specific plugins (new chat session)
 registry.unexpose_all()
 registry.expose_tool('mcp')
 jaato.configure_tools(registry)
-response2 = jaato.send_message('Search GitHub issues', on_intermediate_response=lambda _: None)
+response2 = jaato.send_message('Search GitHub issues', on_output=lambda s, t, m: None)
 
 # Cleanup
 registry.unexpose_all()
