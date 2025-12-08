@@ -948,7 +948,13 @@ Keyboard shortcuts:
                     if commands:
                         commands_by_plugin[plugin_name] = commands
 
-        # Also get commands from session plugin (not in registry)
+        # Get commands from permission plugin (not in registry)
+        if self.permission_plugin and hasattr(self.permission_plugin, 'get_user_commands'):
+            commands = self.permission_plugin.get_user_commands()
+            if commands:
+                commands_by_plugin[self.permission_plugin.name] = commands
+
+        # Get commands from session plugin (not in registry)
         if self._jaato:
             user_commands = self._jaato.get_user_commands()
             # Filter to session commands
@@ -962,11 +968,12 @@ Keyboard shortcuts:
 
         print("\nPlugin-provided user commands:")
         for plugin_name, commands in sorted(commands_by_plugin.items()):
+            print(f"  [{plugin_name}]")
             for cmd in commands:
                 # Calculate padding for alignment
-                padding = max(2, 18 - len(cmd.name))
-                shared_marker = " [also available to the model as a tool]" if cmd.share_with_model else ""
-                print(f"  {cmd.name}{' ' * padding}- {cmd.description} ({plugin_name}){shared_marker}")
+                padding = max(2, 16 - len(cmd.name))
+                shared_marker = " [shared with model]" if cmd.share_with_model else ""
+                print(f"    {cmd.name}{' ' * padding}- {cmd.description}{shared_marker}")
 
     def _print_context(self) -> None:
         """Print context window usage statistics."""
