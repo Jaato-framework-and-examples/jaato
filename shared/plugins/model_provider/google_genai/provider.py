@@ -5,6 +5,7 @@ including Vertex AI authentication, chat session management, and
 function calling.
 """
 
+import json
 from typing import Any, Dict, List, Optional
 
 from google import genai
@@ -221,11 +222,17 @@ class GoogleGenAIProvider:
 
     # ==================== Messaging ====================
 
-    def send_message(self, message: str) -> ProviderResponse:
+    def send_message(
+        self,
+        message: str,
+        response_schema: Optional[Dict[str, Any]] = None
+    ) -> ProviderResponse:
         """Send a user message and get a response.
 
         Args:
             message: The user's message text.
+            response_schema: Optional JSON Schema to constrain the response.
+                When provided, the model returns JSON matching this schema.
 
         Returns:
             ProviderResponse with text and/or function calls.
@@ -233,17 +240,38 @@ class GoogleGenAIProvider:
         if not self._chat:
             raise RuntimeError("No chat session. Call create_session() first.")
 
-        response = self._chat.send_message(message)
+        # Build config override for structured output
+        config = None
+        if response_schema:
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=response_schema
+            )
+
+        response = self._chat.send_message(message, config=config)
         provider_response = response_from_sdk(response)
         self._last_usage = provider_response.usage
 
+        # Parse structured output if schema was requested
+        if response_schema and provider_response.text:
+            try:
+                provider_response.structured_output = json.loads(provider_response.text)
+            except json.JSONDecodeError:
+                # Model returned invalid JSON despite schema constraint
+                pass
+
         return provider_response
 
-    def send_tool_results(self, results: List[ToolResult]) -> ProviderResponse:
+    def send_tool_results(
+        self,
+        results: List[ToolResult],
+        response_schema: Optional[Dict[str, Any]] = None
+    ) -> ProviderResponse:
         """Send tool execution results back to the model.
 
         Args:
             results: List of tool execution results.
+            response_schema: Optional JSON Schema to constrain the response.
 
         Returns:
             ProviderResponse with the model's next response.
@@ -254,10 +282,25 @@ class GoogleGenAIProvider:
         # Convert results to SDK parts
         sdk_parts = tool_results_to_sdk_parts(results)
 
+        # Build config override for structured output
+        config = None
+        if response_schema:
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=response_schema
+            )
+
         # Send to model
-        response = self._chat.send_message(sdk_parts)
+        response = self._chat.send_message(sdk_parts, config=config)
         provider_response = response_from_sdk(response)
         self._last_usage = provider_response.usage
+
+        # Parse structured output if schema was requested
+        if response_schema and provider_response.text:
+            try:
+                provider_response.structured_output = json.loads(provider_response.text)
+            except json.JSONDecodeError:
+                pass
 
         return provider_response
 
@@ -312,6 +355,18 @@ class GoogleGenAIProvider:
             TokenUsage with prompt/output/total counts.
         """
         return self._last_usage
+
+    # ==================== Capabilities ====================
+
+    def supports_structured_output(self) -> bool:
+        """Check if structured output is supported.
+
+        Gemini models support structured output via response_schema.
+
+        Returns:
+            True - Gemini supports structured output.
+        """
+        return True
 
     # ==================== Serialization ====================
 
