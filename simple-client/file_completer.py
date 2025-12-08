@@ -172,8 +172,6 @@ class AtFileCompleter(Completer):
 
         # Get completions from PathCompleter
         for completion in self._path_completer.get_completions(path_doc, complete_event):
-            # Calculate display text
-            display = completion.display or completion.text
             text = completion.text
 
             # Add metadata for directories and append / to directory completions
@@ -185,8 +183,6 @@ class AtFileCompleter(Completer):
                 # Append / to directory completions for easier navigation
                 if not text.endswith('/'):
                     text = text + '/'
-                if not display.endswith('/'):
-                    display = display + '/'
                 if not display_meta:
                     display_meta = "directory"
             elif not display_meta:
@@ -196,7 +192,7 @@ class AtFileCompleter(Completer):
             yield Completion(
                 text,
                 start_position=completion.start_position,
-                display=display,
+                display=text,  # Use text as display (includes / for dirs)
                 display_meta=display_meta,
             )
 
