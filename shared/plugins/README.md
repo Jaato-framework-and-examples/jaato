@@ -248,10 +248,17 @@ class ToolPlugin(Protocol):
         ...
 
     def get_auto_approved_tools(self) -> List[str]:
-        """Return tool names that should be auto-approved without permission prompts.
+        """Return tool/command names that should be auto-approved without permission prompts.
 
         Tools listed here will be automatically whitelisted when used with
-        the permission plugin. Return empty list if all tools require permission.
+        the permission plugin. Use this for:
+        - Read-only tools with no security implications
+        - User commands (since they are invoked directly by the user, not the model)
+
+        IMPORTANT: User commands from get_user_commands() should typically be
+        listed here. Otherwise they will trigger unexpected permission prompts.
+
+        Return empty list if all tools/commands require permission.
         """
         ...
 
@@ -533,6 +540,11 @@ class SearchPlugin:
 
     def get_executors(self) -> Dict[str, Callable]:
         return {'search_index': self._execute_search}
+
+    def get_auto_approved_tools(self) -> List[str]:
+        # IMPORTANT: Include user commands here so they don't trigger
+        # permission prompts. Users invoke these directly, not the model.
+        return ["search", "reindex", "stats"]
 
     def get_user_commands(self) -> List[UserCommand]:
         # User commands - invoked directly by user (human or agent)
