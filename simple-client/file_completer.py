@@ -741,13 +741,22 @@ class PluginCommandCompleter(Completer):
         arg_text = text[len(command_match) + 1:]  # +1 for space
         args = arg_text.split() if arg_text.strip() else []
 
-        # If there's trailing text being typed (no trailing space), it's a partial arg
-        if arg_text and not arg_text.endswith(' ') and args:
-            partial = args[-1]
-            args_for_query = args  # Include partial in query
-        else:
+        # Determine partial text and args to query
+        # - Trailing space means we want completions for NEXT argument
+        # - No trailing space means we're completing the CURRENT argument
+        if arg_text.endswith(' '):
+            # Finished current arg, want next arg completions
+            # Append empty string to signal "give me options for next position"
             partial = ""
+            args_for_query = args + [""]
+        elif args:
+            # Currently typing an argument
+            partial = args[-1]
             args_for_query = args
+        else:
+            # No args yet
+            partial = ""
+            args_for_query = []
 
         # Query plugin for completions
         try:
