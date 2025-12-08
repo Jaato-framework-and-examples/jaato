@@ -226,6 +226,8 @@ permission_config = {
 | `use_colors` | `bool` | `True` | Enable ANSI colorized output for prompts and diffs |
 | `skip_readline_history` | `bool` | `True` | Avoid polluting readline history with y/n responses |
 
+**Output Callback Support**: The console actor supports real-time output via the `OutputCallback` mechanism. When a callback is set (via `set_output_callback()`), permission prompts are emitted through the callback with `source="permission"` instead of being printed directly to the console. This enables clients to integrate permission prompts into their own output handling.
+
 **Webhook Actor** (`actor_type: "webhook"`):
 
 | Key | Type | Default | Description |
