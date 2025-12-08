@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from google import genai
 from google.genai import types
 
-from .ai_tool_runner import ToolExecutor
+from .ai_tool_runner import ToolExecutor, extract_text_from_parts
 from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, PromptEnrichmentResult, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
@@ -469,14 +469,19 @@ class JaatoClient:
             self._accumulate_turn_tokens(response, turn_tokens)
 
             # Handle function calling loop
-            while response.function_calls:
+            # Cache function_calls to avoid potential issues with property access
+            # (some SDK versions may return generators that get exhausted)
+            function_calls = list(response.function_calls) if response.function_calls else []
+            while function_calls:
                 # Emit any text produced alongside function calls
-                if response.text:
-                    on_output("model", response.text, "write")
+                # Use extract_text_from_parts to avoid SDK warning about non-text parts
+                text = extract_text_from_parts(response)
+                if text:
+                    on_output("model", text, "write")
 
                 func_responses = []
 
-                for fc in response.function_calls:
+                for fc in function_calls:
                     # Execute the function
                     name = fc.name
                     args = dict(fc.args) if fc.args else {}
@@ -495,9 +500,12 @@ class JaatoClient:
                 response = self._chat.send_message(func_responses)
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_tokens)
+                # Re-cache function_calls for next iteration
+                function_calls = list(response.function_calls) if response.function_calls else []
 
             # Return the final response text
-            return response.text if response.text else ''
+            # Use extract_text_from_parts to avoid SDK warning about non-text parts
+            return extract_text_from_parts(response) or ''
 
         finally:
             # Always store turn accounting, even on errors
@@ -998,14 +1006,19 @@ class JaatoClient:
         self._accumulate_turn_tokens(response, turn_tokens)
 
         # Handle function calling loop (same as _run_chat_loop)
-        while response.function_calls:
+        # Cache function_calls to avoid potential issues with property access
+        # (some SDK versions may return generators that get exhausted)
+        function_calls = list(response.function_calls) if response.function_calls else []
+        while function_calls:
             # Emit any text produced alongside function calls
-            if response.text:
-                on_output("model", response.text, "write")
+            # Use extract_text_from_parts to avoid SDK warning about non-text parts
+            text = extract_text_from_parts(response)
+            if text:
+                on_output("model", text, "write")
 
             func_responses = []
 
-            for fc in response.function_calls:
+            for fc in function_calls:
                 name = fc.name
                 args = dict(fc.args) if fc.args else {}
 
@@ -1022,12 +1035,15 @@ class JaatoClient:
             response = self._chat.send_message(func_responses)
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_tokens)
+            # Re-cache function_calls for next iteration
+            function_calls = list(response.function_calls) if response.function_calls else []
 
         # Store turn accounting
         self._turn_accounting.append(turn_tokens)
 
         # Return the final response text
-        return response.text if response.text else ''
+        # Use extract_text_from_parts to avoid SDK warning about non-text parts
+        return extract_text_from_parts(response) or ''
 
     # ==================== Context Garbage Collection ====================
 
