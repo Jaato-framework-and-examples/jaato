@@ -407,6 +407,35 @@ def extract_function_calls(response) -> List[Dict[str, Any]]:
     return out
 
 
+def extract_finish_reason(response) -> str:
+    """Extract finish_reason from a genai response object.
+
+    The finish_reason indicates why the model stopped generating. Possible values:
+    - STOP: Normal completion
+    - MAX_TOKENS: Hit token limit
+    - SAFETY: Blocked by safety filters
+    - RECITATION: Blocked for copyright reasons
+    - MALFORMED_FUNCTION_CALL: Invalid function call generated
+    - OTHER: Unknown/unspecified reason
+    - BLOCKLIST, PROHIBITED_CONTENT, SPII, LANGUAGE: Various content filters
+
+    Returns:
+        The finish_reason as a string, or 'UNKNOWN' if not found.
+    """
+    try:
+        candidates = getattr(response, 'candidates', None)
+        if candidates and len(candidates) > 0:
+            finish_reason = getattr(candidates[0], 'finish_reason', None)
+            if finish_reason is not None:
+                # Handle both enum and string representations
+                if hasattr(finish_reason, 'name'):
+                    return finish_reason.name
+                return str(finish_reason)
+    except Exception:
+        pass
+    return 'UNKNOWN'
+
+
 def make_function_response_part(name: str, response_obj: Any) -> types.Part:
     """Create a Part object representing a function response to feed back to the model.
 

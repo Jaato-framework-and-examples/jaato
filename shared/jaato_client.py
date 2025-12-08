@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from google import genai
 from google.genai import types
 
-from .ai_tool_runner import ToolExecutor, extract_text_from_parts
+from .ai_tool_runner import ToolExecutor, extract_text_from_parts, extract_finish_reason
 from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, PromptEnrichmentResult, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
@@ -500,6 +500,20 @@ class JaatoClient:
                 response = self._chat.send_message(func_responses)
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_tokens)
+
+                # Check finish_reason for abnormal termination
+                finish_reason = extract_finish_reason(response)
+                if finish_reason not in ('STOP', 'UNKNOWN'):
+                    # Non-normal finish reason - model stopped unexpectedly
+                    # Log warning and include in response
+                    import sys
+                    print(f"[warning] Model stopped with finish_reason={finish_reason}", file=sys.stderr)
+                    text = extract_text_from_parts(response)
+                    if text:
+                        return f"{text}\n\n[Model stopped: {finish_reason}]"
+                    else:
+                        return f"[Model stopped unexpectedly: {finish_reason}]"
+
                 # Re-cache function_calls for next iteration
                 function_calls = list(response.function_calls) if response.function_calls else []
 
@@ -1035,6 +1049,20 @@ class JaatoClient:
             response = self._chat.send_message(func_responses)
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_tokens)
+
+            # Check finish_reason for abnormal termination
+            finish_reason = extract_finish_reason(response)
+            if finish_reason not in ('STOP', 'UNKNOWN'):
+                # Non-normal finish reason - model stopped unexpectedly
+                import sys
+                print(f"[warning] Model stopped with finish_reason={finish_reason}", file=sys.stderr)
+                self._turn_accounting.append(turn_tokens)
+                text = extract_text_from_parts(response)
+                if text:
+                    return f"{text}\n\n[Model stopped: {finish_reason}]"
+                else:
+                    return f"[Model stopped unexpectedly: {finish_reason}]"
+
             # Re-cache function_calls for next iteration
             function_calls = list(response.function_calls) if response.function_calls else []
 
