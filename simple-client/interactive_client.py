@@ -691,6 +691,17 @@ class InteractiveClient:
                     for cmd in session_plugin.get_user_commands():
                         command_to_plugin[cmd.name] = session_plugin
 
+        # Register permission plugin for command completions.
+        # Unlike other plugins, the permission plugin is not exposed through the
+        # registry because it acts as middleware (wrapping tool executors) rather
+        # than providing tools directly. However, it still provides user commands
+        # like "permissions allow/deny" that need completion support, so we
+        # register it explicitly here.
+        if self.permission_plugin and hasattr(self.permission_plugin, 'get_command_completions'):
+            if hasattr(self.permission_plugin, 'get_user_commands'):
+                for cmd in self.permission_plugin.get_user_commands():
+                    command_to_plugin[cmd.name] = self.permission_plugin
+
         if not command_to_plugin:
             return
 
