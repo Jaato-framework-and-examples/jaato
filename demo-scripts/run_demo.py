@@ -38,12 +38,20 @@ except ImportError:
     sys.exit(1)
 
 
-def type_slowly(child, text, delay=0.05):
-    """Type text character by character for visual effect."""
-    for char in text:
-        child.send(char)
-        time.sleep(delay)
-    child.send('\n')
+def type_slowly(child, text, delay=0):
+    """Type text to the child process.
+
+    Args:
+        child: pexpect child process
+        text: Text to send
+        delay: Per-character delay in seconds. If > 0, waits (delay * len(text))
+               before sending the text all at once. Default 0 = instant.
+    """
+    if delay and delay > 0:
+        # Wait proportional to text length, then send all at once
+        total_delay = delay * len(text)
+        time.sleep(total_delay)
+    child.send(text + '\n')
 
 
 # Regex to match optional ANSI escape codes
@@ -119,12 +127,12 @@ def run_demo(script_path: Path):
             text = step
             is_local = False
             permission = 'y'
-            delay = 0.05
+            delay = 0  # Send instantly by default
         else:
             # Dict with type and optional settings
             text = step.get('type', '')
             permission = step.get('permission', 'y')
-            delay = step.get('delay', 0.05)
+            delay = step.get('delay', 0)  # Send instantly by default
             is_local = step.get('local', False)
 
         type_slowly(child, text, delay=delay)
