@@ -548,8 +548,8 @@ class SubagentPlugin:
             else:
                 client.configure_tools(registry)
 
-            # Run the conversation
-            response = client.send_message(prompt)
+            # Run the conversation (subagent output is not streamed)
+            response = client.send_message(prompt, on_output=lambda src, txt, mode: None)
 
             # Get token usage
             usage = client.get_context_usage()
