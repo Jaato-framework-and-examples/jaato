@@ -270,12 +270,12 @@ class HybridGCPlugin:
 
                 if content.parts:
                     for part in content.parts:
-                        if hasattr(part, 'text') and part.text:
+                        if part.text:
                             lines.append(f"{role}: {part.text}")
-                        elif hasattr(part, 'function_call') and part.function_call:
+                        elif part.function_call:
                             fc = part.function_call
                             lines.append(f"{role}: [Called {fc.name}]")
-                        elif hasattr(part, 'function_response') and part.function_response:
+                        elif part.function_response:
                             fr = part.function_response
                             lines.append(f"{role}: [Response from {fr.name}]")
 
