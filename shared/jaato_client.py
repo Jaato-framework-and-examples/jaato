@@ -6,6 +6,7 @@ Uses the SDK chat API for multi-turn conversation management.
 """
 
 import re
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from google import genai
@@ -459,14 +460,23 @@ class JaatoClient:
         if self._executor:
             self._executor.set_output_callback(on_output)
 
-        # Track tokens for this turn
-        turn_tokens = {'prompt': 0, 'output': 0, 'total': 0}
+        # Track tokens and timing for this turn
+        turn_start = datetime.now()
+        turn_data = {
+            'prompt': 0,
+            'output': 0,
+            'total': 0,
+            'start_time': turn_start.isoformat(),
+            'end_time': None,
+            'duration_seconds': None,
+            'function_calls': [],
+        }
         response = None
 
         try:
             response = self._chat.send_message(message)
             self._record_token_usage(response)
-            self._accumulate_turn_tokens(response, turn_tokens)
+            self._accumulate_turn_tokens(response, turn_data)
 
             # Handle function calling loop
             # Cache function_calls to avoid potential issues with property access
@@ -482,14 +492,24 @@ class JaatoClient:
                 func_responses = []
 
                 for fc in function_calls:
-                    # Execute the function
+                    # Execute the function with timing
                     name = fc.name
                     args = dict(fc.args) if fc.args else {}
 
+                    fc_start = datetime.now()
                     if self._executor:
                         result = self._executor.execute(name, args)
                     else:
                         result = {"error": f"No executor registered for {name}"}
+                    fc_end = datetime.now()
+
+                    # Record function call timing
+                    turn_data['function_calls'].append({
+                        'name': name,
+                        'start_time': fc_start.isoformat(),
+                        'end_time': fc_end.isoformat(),
+                        'duration_seconds': (fc_end - fc_start).total_seconds(),
+                    })
 
                     # Build function response part(s)
                     parts = self._build_function_response_parts(name, result)
@@ -499,7 +519,7 @@ class JaatoClient:
                 # Chat API accepts Parts directly (not Content objects)
                 response = self._chat.send_message(func_responses)
                 self._record_token_usage(response)
-                self._accumulate_turn_tokens(response, turn_tokens)
+                self._accumulate_turn_tokens(response, turn_data)
 
                 # Check finish_reason for abnormal termination
                 finish_reason = extract_finish_reason(response)
@@ -522,9 +542,14 @@ class JaatoClient:
             return extract_text_from_parts(response) or ''
 
         finally:
+            # Record turn end time and duration
+            turn_end = datetime.now()
+            turn_data['end_time'] = turn_end.isoformat()
+            turn_data['duration_seconds'] = (turn_end - turn_start).total_seconds()
+
             # Always store turn accounting, even on errors
-            if turn_tokens['total'] > 0:
-                self._turn_accounting.append(turn_tokens)
+            if turn_data['total'] > 0:
+                self._turn_accounting.append(turn_data)
 
     def _build_function_response_parts(
         self,
@@ -666,15 +691,26 @@ class JaatoClient:
             return []
         return list(self._chat.get_history())
 
-    def get_turn_accounting(self) -> List[Dict[str, int]]:
-        """Get token usage per turn.
+    def get_turn_accounting(self) -> List[Dict[str, Any]]:
+        """Get token usage and timing per turn.
 
         Each entry corresponds to one send_message() call and contains
         aggregated tokens across all API calls in that turn (including
-        function calling loops).
+        function calling loops), plus timing information.
 
         Returns:
-            List of dicts with 'prompt', 'output', 'total' token counts.
+            List of dicts with:
+            - 'prompt': Prompt token count
+            - 'output': Output token count
+            - 'total': Total token count
+            - 'start_time': ISO format timestamp when turn started
+            - 'end_time': ISO format timestamp when turn ended
+            - 'duration_seconds': Total turn duration in seconds
+            - 'function_calls': List of function call timing dicts, each with:
+                - 'name': Function name
+                - 'start_time': ISO format timestamp
+                - 'end_time': ISO format timestamp
+                - 'duration_seconds': Duration in seconds
         """
         return list(self._turn_accounting)
 
@@ -1010,45 +1046,24 @@ class JaatoClient:
         if self._executor:
             self._executor.set_output_callback(on_output)
 
-        # Track tokens for this turn
-        turn_tokens = {'prompt': 0, 'output': 0, 'total': 0}
+        # Track tokens and timing for this turn
+        turn_start = datetime.now()
+        turn_data = {
+            'prompt': 0,
+            'output': 0,
+            'total': 0,
+            'start_time': turn_start.isoformat(),
+            'end_time': None,
+            'duration_seconds': None,
+            'function_calls': [],
+        }
 
-        # Send parts as Content object
-        user_content = types.Content(role='user', parts=parts)
-        response = self._chat.send_message(user_content)
-        self._record_token_usage(response)
-        self._accumulate_turn_tokens(response, turn_tokens)
-
-        # Handle function calling loop (same as _run_chat_loop)
-        # Cache function_calls to avoid potential issues with property access
-        # (some SDK versions may return generators that get exhausted)
-        function_calls = list(response.function_calls) if response.function_calls else []
-        while function_calls:
-            # Emit any text produced alongside function calls
-            # Use extract_text_from_parts to avoid SDK warning about non-text parts
-            text = extract_text_from_parts(response)
-            if text:
-                on_output("model", text, "write")
-
-            func_responses = []
-
-            for fc in function_calls:
-                name = fc.name
-                args = dict(fc.args) if fc.args else {}
-
-                if self._executor:
-                    result = self._executor.execute(name, args)
-                else:
-                    result = {"error": f"No executor registered for {name}"}
-
-                # Build function response part(s), handling multimodal
-                response_parts = self._build_function_response_parts(name, result)
-                func_responses.extend(response_parts)
-
-            # Chat API accepts Parts directly (not Content objects)
-            response = self._chat.send_message(func_responses)
+        try:
+            # Send parts as Content object
+            user_content = types.Content(role='user', parts=parts)
+            response = self._chat.send_message(user_content)
             self._record_token_usage(response)
-            self._accumulate_turn_tokens(response, turn_tokens)
+            self._accumulate_turn_tokens(response, turn_data)
 
             # Check finish_reason for abnormal termination
             finish_reason = extract_finish_reason(response)
@@ -1056,22 +1071,68 @@ class JaatoClient:
                 # Non-normal finish reason - model stopped unexpectedly
                 import sys
                 print(f"[warning] Model stopped with finish_reason={finish_reason}", file=sys.stderr)
-                self._turn_accounting.append(turn_tokens)
                 text = extract_text_from_parts(response)
                 if text:
                     return f"{text}\n\n[Model stopped: {finish_reason}]"
                 else:
                     return f"[Model stopped unexpectedly: {finish_reason}]"
 
-            # Re-cache function_calls for next iteration
+            # Handle function calling loop (same as _run_chat_loop)
+            # Cache function_calls to avoid potential issues with property access
+            # (some SDK versions may return generators that get exhausted)
             function_calls = list(response.function_calls) if response.function_calls else []
+            while function_calls:
+                # Emit any text produced alongside function calls
+                # Use extract_text_from_parts to avoid SDK warning about non-text parts
+                text = extract_text_from_parts(response)
+                if text:
+                    on_output("model", text, "write")
 
-        # Store turn accounting
-        self._turn_accounting.append(turn_tokens)
+                func_responses = []
 
-        # Return the final response text
-        # Use extract_text_from_parts to avoid SDK warning about non-text parts
-        return extract_text_from_parts(response) or ''
+                for fc in function_calls:
+                    name = fc.name
+                    args = dict(fc.args) if fc.args else {}
+
+                    fc_start = datetime.now()
+                    if self._executor:
+                        result = self._executor.execute(name, args)
+                    else:
+                        result = {"error": f"No executor registered for {name}"}
+                    fc_end = datetime.now()
+
+                    # Record function call timing
+                    turn_data['function_calls'].append({
+                        'name': name,
+                        'start_time': fc_start.isoformat(),
+                        'end_time': fc_end.isoformat(),
+                        'duration_seconds': (fc_end - fc_start).total_seconds(),
+                    })
+
+                    # Build function response part(s), handling multimodal
+                    response_parts = self._build_function_response_parts(name, result)
+                    func_responses.extend(response_parts)
+
+                # Chat API accepts Parts directly (not Content objects)
+                response = self._chat.send_message(func_responses)
+                self._record_token_usage(response)
+                self._accumulate_turn_tokens(response, turn_data)
+                # Re-cache function_calls for next iteration
+                function_calls = list(response.function_calls) if response.function_calls else []
+
+            # Return the final response text
+            # Use extract_text_from_parts to avoid SDK warning about non-text parts
+            return extract_text_from_parts(response) or ''
+
+        finally:
+            # Record turn end time and duration
+            turn_end = datetime.now()
+            turn_data['end_time'] = turn_end.isoformat()
+            turn_data['duration_seconds'] = (turn_end - turn_start).total_seconds()
+
+            # Store turn accounting
+            if turn_data['total'] > 0:
+                self._turn_accounting.append(turn_data)
 
     # ==================== Context Garbage Collection ====================
 
@@ -1339,8 +1400,6 @@ class JaatoClient:
         Returns:
             SessionState with current history and metadata.
         """
-        from datetime import datetime
-
         # Generate session ID if not provided
         if not session_id:
             # Check if plugin has a current session ID
