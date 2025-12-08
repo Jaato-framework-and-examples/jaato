@@ -16,7 +16,7 @@ from google.genai import types
 from .models import ReferenceSource, InjectionMode
 from .actors import SelectionActor, ConsoleSelectionActor, create_actor
 from .config_loader import load_config, ReferencesConfig
-from ..base import UserCommand
+from ..base import UserCommand, CommandCompletion
 
 
 class ReferencesPlugin:
@@ -402,6 +402,15 @@ class ReferencesPlugin:
             UserCommand("listReferences", "List available reference sources", share_with_model=True),
             UserCommand("selectReferences", "Select reference sources to include", share_with_model=True),
         ]
+
+    def get_command_completions(
+        self, command: str, args: List[str]
+    ) -> List[CommandCompletion]:
+        """Return completion options for reference command arguments.
+
+        These commands take no arguments, so no completions needed.
+        """
+        return []
 
     # Public API for programmatic access
 

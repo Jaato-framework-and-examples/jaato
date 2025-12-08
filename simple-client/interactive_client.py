@@ -666,7 +666,54 @@ class InteractiveClient:
             if hasattr(session_plugin, 'list_sessions'):
                 self._completer.set_session_provider(session_plugin.list_sessions)
 
+        # Set up plugin command argument completion
+        self._setup_command_completion_provider()
+
         self.log(f"[client] Registered {len(user_commands)} plugin command(s) for completion")
+
+    def _setup_command_completion_provider(self) -> None:
+        """Set up the provider for plugin command argument completions.
+
+        Collects plugins that implement get_command_completions() and creates
+        a provider that routes completion requests to the appropriate plugin.
+        """
+        if not self.registry or not self._completer:
+            return
+
+        # Map command names to plugins that can provide completions
+        command_to_plugin: dict = {}
+
+        # Check registry plugins
+        for plugin_name in self.registry.list_exposed():
+            plugin = self.registry.get_plugin(plugin_name)
+            if plugin and hasattr(plugin, 'get_command_completions'):
+                # Get this plugin's commands
+                if hasattr(plugin, 'get_user_commands'):
+                    for cmd in plugin.get_user_commands():
+                        command_to_plugin[cmd.name] = plugin
+
+        # Also check session plugin
+        if hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
+            session_plugin = self._jaato._session_plugin
+            if hasattr(session_plugin, 'get_command_completions'):
+                if hasattr(session_plugin, 'get_user_commands'):
+                    for cmd in session_plugin.get_user_commands():
+                        command_to_plugin[cmd.name] = session_plugin
+
+        if not command_to_plugin:
+            return
+
+        def completion_provider(command: str, args: list) -> list:
+            """Query the appropriate plugin for command completions."""
+            plugin = command_to_plugin.get(command)
+            if plugin and hasattr(plugin, 'get_command_completions'):
+                return plugin.get_command_completions(command, args)
+            return []
+
+        self._completer.set_command_completion_provider(
+            completion_provider,
+            set(command_to_plugin.keys())
+        )
 
     def run_prompt(
         self,

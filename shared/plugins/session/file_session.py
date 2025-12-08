@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from google.genai import types
 
-from ..base import ToolPlugin, UserCommand, PromptEnrichmentResult
+from ..base import ToolPlugin, UserCommand, CommandCompletion, PromptEnrichmentResult
 from .base import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .serializer import (
     serialize_session_state,
@@ -635,6 +635,19 @@ class FileSessionPlugin:
             UserCommand("delete-session", "Delete a saved session", share_with_model=False),
             UserCommand("backtoturn", "Revert to a specific turn (use 'history' to see turn IDs)", share_with_model=False),
         ]
+
+    def get_command_completions(
+        self, command: str, args: List[str]
+    ) -> List[CommandCompletion]:
+        """Return completion options for session command arguments.
+
+        Session commands don't have subcommands - their argument completion
+        (session IDs) is handled by the client's SessionIdCompleter which
+        queries the plugin's list() method directly.
+        """
+        # Session commands take session IDs or turn IDs as arguments,
+        # not subcommands. Argument completion is handled separately.
+        return []
 
     # ==================== ToolPlugin: Prompt Enrichment ====================
 

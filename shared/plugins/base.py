@@ -71,6 +71,19 @@ class PermissionDisplayInfo:
     original_lines: Optional[int] = None
 
 
+class CommandCompletion(NamedTuple):
+    """A completion option for command arguments.
+
+    Used by plugins to provide autocompletion hints for their user commands.
+
+    Attributes:
+        value: The completion value to insert.
+        description: Brief description shown in completion menu.
+    """
+    value: str
+    description: str = ""
+
+
 class UserCommand(NamedTuple):
     """Declaration of a user-facing command.
 
@@ -267,5 +280,38 @@ class ToolPlugin(Protocol):
     #
     #     Returns:
     #         PermissionDisplayInfo with formatted content, or None to use default.
+    #     """
+    #     ...
+    #
+    # Command Completions:
+    #
+    # def get_command_completions(
+    #     self,
+    #     command: str,
+    #     args: List[str]
+    # ) -> List[CommandCompletion]:
+    #     """Return completion options for a user command's arguments.
+    #
+    #     This optional method allows plugins to provide autocompletion for
+    #     their user commands. The client calls this when the user is typing
+    #     a command and requests completion (e.g., pressing Tab).
+    #
+    #     Args:
+    #         command: The command name (e.g., "permissions")
+    #         args: Arguments typed so far (may be empty or contain partial input)
+    #               For "permissions default al", args would be ["default", "al"]
+    #
+    #     Returns:
+    #         List of CommandCompletion options matching the current input.
+    #         Return empty list if no completions available.
+    #
+    #     Example:
+    #         # For "permissions " (no args yet)
+    #         get_command_completions("permissions", [])
+    #         -> [CommandCompletion("show", "Display policy"), ...]
+    #
+    #         # For "permissions default a"
+    #         get_command_completions("permissions", ["default", "a"])
+    #         -> [CommandCompletion("allow", "Auto-approve"), CommandCompletion("ask", "Prompt")]
     #     """
     #     ...
