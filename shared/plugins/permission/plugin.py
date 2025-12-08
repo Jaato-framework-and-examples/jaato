@@ -232,8 +232,12 @@ It returns whether the tool is allowed and the reason for the decision.
 If a tool is denied, do not attempt to execute it."""
 
     def get_auto_approved_tools(self) -> List[str]:
-        """Permission tools require permission - return empty list."""
-        return []
+        """Return tools that should be auto-approved.
+
+        The 'permissions' user command is auto-approved since it's
+        invoked directly by the user for session management.
+        """
+        return ["permissions"]
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for on-the-fly permission management."""
