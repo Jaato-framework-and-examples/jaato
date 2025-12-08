@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from ..base import ToolPlugin, UserCommand, CommandCompletion, PromptEnrichmentResult
+from ..base import ToolPlugin, UserCommand, CommandParameter, CommandCompletion, PromptEnrichmentResult
 from ..model_provider.types import ToolSchema
 from .base import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .serializer import (
@@ -634,11 +634,39 @@ class FileSessionPlugin:
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for session management."""
         return [
-            UserCommand("save", "Save the current session", share_with_model=False),
-            UserCommand("resume", "Resume a saved session", share_with_model=False),
+            UserCommand(
+                "save",
+                "Save the current session",
+                share_with_model=False,
+                parameters=[
+                    CommandParameter("description", "Optional session description", capture_rest=True),
+                ],
+            ),
+            UserCommand(
+                "resume",
+                "Resume a saved session",
+                share_with_model=False,
+                parameters=[
+                    CommandParameter("session_id", "Session ID to resume", required=True),
+                ],
+            ),
             UserCommand("sessions", "List available sessions", share_with_model=False),
-            UserCommand("delete-session", "Delete a saved session", share_with_model=False),
-            UserCommand("backtoturn", "Revert to a specific turn (use 'history' to see turn IDs)", share_with_model=False),
+            UserCommand(
+                "delete-session",
+                "Delete a saved session",
+                share_with_model=False,
+                parameters=[
+                    CommandParameter("session_id", "Session ID to delete", required=True),
+                ],
+            ),
+            UserCommand(
+                "backtoturn",
+                "Revert to a specific turn (use 'history' to see turn IDs)",
+                share_with_model=False,
+                parameters=[
+                    CommandParameter("turn_id", "Turn number to revert to", required=True),
+                ],
+            ),
         ]
 
     def get_command_completions(
