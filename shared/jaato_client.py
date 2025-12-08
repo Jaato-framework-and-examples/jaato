@@ -455,6 +455,10 @@ class JaatoClient:
         Returns:
             The final response text (after all function calls resolved).
         """
+        # Set output callback on executor so plugins can emit output
+        if self._executor:
+            self._executor.set_output_callback(on_output)
+
         # Track tokens for this turn
         turn_tokens = {'prompt': 0, 'output': 0, 'total': 0}
         response = None
@@ -980,6 +984,10 @@ class JaatoClient:
         Returns:
             The final response text (after all function calls resolved).
         """
+        # Set output callback on executor so plugins can emit output
+        if self._executor:
+            self._executor.set_output_callback(on_output)
+
         # Track tokens for this turn
         turn_tokens = {'prompt': 0, 'output': 0, 'total': 0}
 

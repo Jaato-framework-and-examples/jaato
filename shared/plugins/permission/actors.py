@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..base import PermissionDisplayInfo
+    from ..base import PermissionDisplayInfo, OutputCallback
 
 try:
     import requests
@@ -158,6 +158,17 @@ class Actor(ABC):
         """Clean up any resources used by the actor."""
         pass
 
+    def set_output_callback(self, callback: Optional['OutputCallback']) -> None:
+        """Set the output callback for real-time output.
+
+        Actors that support interactive output (like ConsoleActor) can override
+        this to use the callback instead of direct print().
+
+        Args:
+            callback: OutputCallback function, or None to use default output.
+        """
+        pass  # Default implementation does nothing
+
 
 class ConsoleActor(Actor):
     """Actor that prompts the user in the console for approval.
@@ -178,6 +189,8 @@ class ConsoleActor(Actor):
     def __init__(self):
         self._input_func: Callable[[], str] = input
         self._output_func: Callable[[str], None] = print
+        self._default_output_func: Callable[[str], None] = print
+        self._output_callback: Optional['OutputCallback'] = None
         self._skip_readline_history: bool = True
         self._use_colors: bool = True  # Can be disabled for non-terminal output
 
@@ -231,10 +244,30 @@ class ConsoleActor(Actor):
                 self._input_func = config["input_func"]
             if "output_func" in config:
                 self._output_func = config["output_func"]
+                self._default_output_func = config["output_func"]
             if "skip_readline_history" in config:
                 self._skip_readline_history = config["skip_readline_history"]
             if "use_colors" in config:
                 self._use_colors = config["use_colors"]
+
+    def set_output_callback(self, callback: Optional['OutputCallback']) -> None:
+        """Set the output callback for permission prompts.
+
+        When a callback is set, permission prompts are emitted via the callback
+        with source="permission" instead of being printed directly.
+
+        Args:
+            callback: OutputCallback function, or None to use default print.
+        """
+        self._output_callback = callback
+        if callback:
+            # Wrap callback to match output_func signature
+            def callback_wrapper(text: str) -> None:
+                callback("permission", text, "append")
+            self._output_func = callback_wrapper
+        else:
+            # Restore default output function
+            self._output_func = self._default_output_func
 
     def _c(self, text: str, *codes: str) -> str:
         """Apply ANSI color codes to text if colors are enabled."""

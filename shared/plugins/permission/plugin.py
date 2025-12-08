@@ -18,7 +18,7 @@ from .actors import (
     ConsoleActor,
     create_actor,
 )
-from ..base import UserCommand, PermissionDisplayInfo
+from ..base import UserCommand, PermissionDisplayInfo, OutputCallback
 
 # Import TYPE_CHECKING to avoid circular imports
 from typing import TYPE_CHECKING
@@ -71,6 +71,19 @@ class PermissionPlugin:
             registry: The PluginRegistry instance.
         """
         self._registry = registry
+
+    def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
+        """Set the output callback for real-time permission prompts.
+
+        When set, permission prompts will be emitted via the callback
+        instead of being printed directly to the console.
+
+        Args:
+            callback: OutputCallback function, or None to use default output.
+        """
+        # Forward to actor if it supports callbacks
+        if self._actor and hasattr(self._actor, 'set_output_callback'):
+            self._actor.set_output_callback(callback)
 
     @property
     def name(self) -> str:

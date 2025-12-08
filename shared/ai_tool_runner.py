@@ -8,6 +8,7 @@ import pathlib
 from google import genai
 from google.genai import types
 from shared.token_accounting import TokenLedger
+from shared.plugins.base import OutputCallback
 
 if TYPE_CHECKING:
     from shared.plugins.registry import PluginRegistry
@@ -41,6 +42,9 @@ class ToolExecutor:
 
         # Registry reference for plugin lookups (set via set_registry)
         self._registry: Optional['PluginRegistry'] = None
+
+        # Output callback for real-time output from plugins
+        self._output_callback: Optional[OutputCallback] = None
 
         # Auto-background support
         self._auto_background_enabled = auto_background_enabled
@@ -77,6 +81,39 @@ class ToolExecutor:
             registry: PluginRegistry instance, or None to disable.
         """
         self._registry = registry
+
+    def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
+        """Set the output callback for real-time plugin output.
+
+        When set, plugins that support output callbacks will receive this
+        callback to emit real-time output during tool execution.
+
+        The callback is passed to plugins via their set_output_callback()
+        method if they implement it.
+
+        Args:
+            callback: OutputCallback function, or None to clear.
+        """
+        self._output_callback = callback
+
+        # Forward callback to exposed plugins that support it
+        if self._registry:
+            for plugin_name in self._registry.list_exposed():
+                plugin = self._registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'set_output_callback'):
+                    plugin.set_output_callback(callback)
+
+        # Also set on permission plugin if configured
+        if self._permission_plugin and hasattr(self._permission_plugin, 'set_output_callback'):
+            self._permission_plugin.set_output_callback(callback)
+
+    def get_output_callback(self) -> Optional[OutputCallback]:
+        """Get the current output callback.
+
+        Returns:
+            The current OutputCallback, or None if not set.
+        """
+        return self._output_callback
 
     def _get_auto_background_pool(self) -> ThreadPoolExecutor:
         """Get or create the thread pool for auto-background execution."""

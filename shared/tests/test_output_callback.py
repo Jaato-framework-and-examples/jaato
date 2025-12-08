@@ -230,3 +230,98 @@ class TestSendMessageCallback:
         client.send_message("test", on_output=my_callback)
 
         assert captured_callback is my_callback
+
+
+class TestToolExecutorCallback:
+    """Tests for ToolExecutor output callback support."""
+
+    def test_executor_stores_callback(self):
+        """ToolExecutor stores output callback via set_output_callback."""
+        from shared.ai_tool_runner import ToolExecutor
+
+        executor = ToolExecutor()
+        calls: List[Tuple[str, str, str]] = []
+
+        def callback(source: str, text: str, mode: str) -> None:
+            calls.append((source, text, mode))
+
+        executor.set_output_callback(callback)
+        assert executor.get_output_callback() is callback
+
+    def test_executor_clears_callback_with_none(self):
+        """ToolExecutor clears callback when set to None."""
+        from shared.ai_tool_runner import ToolExecutor
+
+        executor = ToolExecutor()
+
+        def callback(source: str, text: str, mode: str) -> None:
+            pass
+
+        executor.set_output_callback(callback)
+        assert executor.get_output_callback() is callback
+
+        executor.set_output_callback(None)
+        assert executor.get_output_callback() is None
+
+
+class TestPermissionPluginCallback:
+    """Tests for PermissionPlugin output callback support."""
+
+    def test_permission_plugin_forwards_callback_to_actor(self):
+        """PermissionPlugin forwards callback to its actor."""
+        from shared.plugins.permission import PermissionPlugin
+        from shared.plugins.permission.actors import ConsoleActor
+
+        plugin = PermissionPlugin()
+        mock_actor = MagicMock(spec=ConsoleActor)
+        mock_actor.set_output_callback = MagicMock()
+
+        plugin._actor = mock_actor
+
+        def callback(source: str, text: str, mode: str) -> None:
+            pass
+
+        plugin.set_output_callback(callback)
+        mock_actor.set_output_callback.assert_called_once_with(callback)
+
+
+class TestConsoleActorCallback:
+    """Tests for ConsoleActor output callback support."""
+
+    def test_console_actor_uses_callback_for_output(self):
+        """ConsoleActor uses callback when set."""
+        from shared.plugins.permission.actors import ConsoleActor
+
+        actor = ConsoleActor()
+        calls: List[Tuple[str, str, str]] = []
+
+        def callback(source: str, text: str, mode: str) -> None:
+            calls.append((source, text, mode))
+
+        actor.set_output_callback(callback)
+
+        # Use the output func to emit a message
+        actor._output_func("Test message")
+
+        assert len(calls) == 1
+        assert calls[0][0] == "permission"  # source
+        assert calls[0][1] == "Test message"  # text
+        assert calls[0][2] == "append"  # mode
+
+    def test_console_actor_restores_default_on_none(self):
+        """ConsoleActor restores default output when callback is None."""
+        from shared.plugins.permission.actors import ConsoleActor
+
+        actor = ConsoleActor()
+        original_output = actor._output_func
+
+        def callback(source: str, text: str, mode: str) -> None:
+            pass
+
+        actor.set_output_callback(callback)
+        # Output func should now be the wrapper
+        assert actor._output_func is not original_output
+
+        actor.set_output_callback(None)
+        # Should restore to default
+        assert actor._output_func is actor._default_output_func
