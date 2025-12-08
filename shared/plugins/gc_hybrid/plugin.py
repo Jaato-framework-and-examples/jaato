@@ -18,7 +18,7 @@ from ..gc import (
     GCResult,
     GCTriggerReason,
     Turn,
-    create_summary_content,
+    create_summary_message,
     estimate_history_tokens,
     flatten_turns,
     split_into_turns,
@@ -193,7 +193,7 @@ class HybridGCPlugin:
 
             try:
                 summary_text = self._summarizer(conversation_text)
-                summary_content = create_summary_content(summary_text)
+                summary_content = create_summary_message(summary_text)
                 new_history_parts.append(summary_content)
                 turns_summarized = len(turns_to_summarize)
                 turns_truncated = 0  # Everything was summarized, not truncated

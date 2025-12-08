@@ -17,7 +17,7 @@ from ..gc import (
     GCResult,
     GCTriggerReason,
     Turn,
-    create_gc_notification_content,
+    create_gc_notification_message,
     estimate_history_tokens,
     flatten_turns,
     get_preserved_indices,
@@ -200,7 +200,7 @@ class TruncateGCPlugin:
             result.notification = notification
 
             # Prepend notification to history
-            notification_content = create_gc_notification_content(notification)
+            notification_content = create_gc_notification_message(notification)
             new_history = [notification_content] + new_history
 
         return new_history, result

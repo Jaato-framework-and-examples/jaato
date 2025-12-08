@@ -457,7 +457,7 @@ class BackgroundPlugin:
             if plugin and isinstance(plugin, BackgroundCapable):
                 self._capable_plugins[plugin_name] = plugin
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
+    def get_tool_schemas(self) -> List[types.FunctionDeclaration]:
         return [
             types.FunctionDeclaration(
                 name="startBackgroundTask",

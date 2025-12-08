@@ -6,7 +6,6 @@ across all BackgroundCapable plugins in the registry.
 
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
-from google.genai import types
 from ..model_provider.types import ToolSchema
 
 from ..base import ToolPlugin, UserCommand
@@ -99,38 +98,38 @@ Use this when you anticipate a tool call will take significant time
 asynchronously and you can continue with other work.
 
 Returns a task_id you can use to check status or get results later.""",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "tool_name": types.Schema(
-                            type=types.Type.STRING,
-                            description="Name of the tool to execute"
-                        ),
-                        "arguments": types.Schema(
-                            type=types.Type.OBJECT,
-                            description="Arguments to pass to the tool"
-                        ),
-                        "timeout_seconds": types.Schema(
-                            type=types.Type.NUMBER,
-                            description="Optional timeout in seconds"
-                        ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {
+                            "type": "string",
+                            "description": "Name of the tool to execute"
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "Arguments to pass to the tool"
+                        },
+                        "timeout_seconds": {
+                            "type": "number",
+                            "description": "Optional timeout in seconds"
+                        },
                     },
-                    required=["tool_name", "arguments"]
-                )
+                    "required": ["tool_name", "arguments"]
+                }
             ),
             ToolSchema(
                 name="getBackgroundTaskStatus",
                 description="Check the current status of a background task.",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "task_id": types.Schema(
-                            type=types.Type.STRING,
-                            description="Task ID returned from startBackgroundTask"
-                        ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": "Task ID returned from startBackgroundTask"
+                        },
                     },
-                    required=["task_id"]
-                )
+                    "required": ["task_id"]
+                }
             ),
             ToolSchema(
                 name="getBackgroundTaskResult",
@@ -138,57 +137,57 @@ Returns a task_id you can use to check status or get results later.""",
 
 If the task is still running, returns current status without blocking.
 Use this after checking status shows COMPLETED or FAILED.""",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "task_id": types.Schema(
-                            type=types.Type.STRING,
-                            description="Task ID returned from startBackgroundTask"
-                        ),
-                        "wait": types.Schema(
-                            type=types.Type.BOOLEAN,
-                            description="If true, block until task completes (default: false)"
-                        ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": "Task ID returned from startBackgroundTask"
+                        },
+                        "wait": {
+                            "type": "boolean",
+                            "description": "If true, block until task completes (default: false)"
+                        },
                     },
-                    required=["task_id"]
-                )
+                    "required": ["task_id"]
+                }
             ),
             ToolSchema(
                 name="cancelBackgroundTask",
                 description="Cancel a running background task.",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "task_id": types.Schema(
-                            type=types.Type.STRING,
-                            description="Task ID to cancel"
-                        ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": "Task ID to cancel"
+                        },
                     },
-                    required=["task_id"]
-                )
+                    "required": ["task_id"]
+                }
             ),
             ToolSchema(
                 name="listBackgroundTasks",
                 description="List all active background tasks across all plugins.",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "plugin_name": types.Schema(
-                            type=types.Type.STRING,
-                            description="Optional: filter by plugin name"
-                        ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "plugin_name": {
+                            "type": "string",
+                            "description": "Optional: filter by plugin name"
+                        },
                     },
-                )
+                }
             ),
             ToolSchema(
                 name="listBackgroundCapableTools",
                 description="""List all tools that support background execution.
 
 Use this to discover which tools can be run in background mode.""",
-                parameters=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={},
-                )
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                }
             ),
         ]
 

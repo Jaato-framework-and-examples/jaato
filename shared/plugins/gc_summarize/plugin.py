@@ -18,7 +18,7 @@ from ..gc import (
     GCResult,
     GCTriggerReason,
     Turn,
-    create_summary_content,
+    create_summary_message,
     estimate_history_tokens,
     flatten_turns,
     get_preserved_indices,
@@ -222,8 +222,8 @@ class SummarizeGCPlugin:
                 error=f"Summarization failed: {str(e)}"
             )
 
-        # Create summary content
-        summary_content = create_summary_content(summary_text)
+        # Create summary message
+        summary_content = create_summary_message(summary_text)
 
         # Build new history: summary + preserved turns
         new_history = [summary_content] + flatten_turns(turns_to_preserve)

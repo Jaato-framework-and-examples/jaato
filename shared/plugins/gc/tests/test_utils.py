@@ -168,15 +168,15 @@ class TestTokenEstimation:
         assert tokens > 0
 
 
-class TestCreateSummaryContent:
-    def test_creates_user_role_content(self):
-        summary = create_summary_content("This is a summary")
+class TestCreateSummaryMessage:
+    def test_creates_user_role_message(self):
+        summary = create_summary_message("This is a summary")
 
-        assert summary.role == "user"
+        assert summary.role == Role.USER
         assert len(summary.parts) == 1
 
     def test_includes_markers(self):
-        summary = create_summary_content("This is a summary")
+        summary = create_summary_message("This is a summary")
         text = summary.parts[0].text
 
         assert "[Context Summary" in text
@@ -184,11 +184,11 @@ class TestCreateSummaryContent:
         assert "[End Context Summary]" in text
 
 
-class TestCreateGCNotificationContent:
+class TestCreateGCNotificationMessage:
     def test_creates_notification(self):
-        notification = create_gc_notification_content("GC happened")
+        notification = create_gc_notification_message("GC happened")
 
-        assert notification.role == "user"
+        assert notification.role == Role.USER
         assert "[System:" in notification.parts[0].text
         assert "GC happened" in notification.parts[0].text
 

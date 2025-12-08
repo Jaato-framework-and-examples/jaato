@@ -64,7 +64,7 @@ Once plugins are exposed, you can retrieve their tool declarations (for the AI m
 
 ```python
 # Get FunctionDeclarations for Vertex AI (model tools)
-declarations = registry.get_exposed_declarations()
+declarations = registry.get_exposed_tool_schemas()
 
 # Get executor callables
 executors = registry.get_exposed_executors()
@@ -224,10 +224,11 @@ class ToolPlugin(Protocol):
         """Unique identifier for this plugin."""
         ...
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
-        """Return google-genai FunctionDeclaration objects for model tools.
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Return provider-agnostic ToolSchema objects for model tools.
 
         These are functions the AI model can invoke via function calling.
+        ToolSchema is converted to the appropriate SDK type by the provider.
         """
         ...
 
@@ -388,11 +389,11 @@ class ExamplePlugin:
         # Cleanup resources here
         self._initialized = False
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
-        return [types.FunctionDeclaration(
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        return [ToolSchema(
             name='example_tool',
             description='An example tool that echoes input',
-            parameters_json_schema={
+            parameters={
                 "type": "object",
                 "properties": {
                     "message": {
@@ -434,12 +435,12 @@ def create_plugin() -> ExamplePlugin:
 
 2. **Unique Name**: The `name` property must return a unique identifier for your plugin.
 
-3. **FunctionDeclaration Format**: Tool declarations must follow the google-genai schema format:
+3. **ToolSchema Format**: Tool declarations use provider-agnostic ToolSchema:
    ```python
-   types.FunctionDeclaration(
+   ToolSchema(
        name='tool_name',
        description='What the tool does',
-       parameters_json_schema={
+       parameters={
            "type": "object",
            "properties": {
                "param_name": {
@@ -501,11 +502,11 @@ class MultiToolPlugin:
     def name(self) -> str:
         return "multi"
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
+    def get_tool_schemas(self) -> List[ToolSchema]:
         return [
-            types.FunctionDeclaration(name='tool_a', description='...', parameters_json_schema={...}),
-            types.FunctionDeclaration(name='tool_b', description='...', parameters_json_schema={...}),
-            types.FunctionDeclaration(name='tool_c', description='...', parameters_json_schema={...}),
+            ToolSchema(name='tool_a', description='...', parameters={...}),
+            ToolSchema(name='tool_b', description='...', parameters={...}),
+            ToolSchema(name='tool_c', description='...', parameters={...}),
         ]
 
     def get_executors(self) -> Dict[str, Callable]:
@@ -528,13 +529,13 @@ class SearchPlugin:
     def name(self) -> str:
         return "search"
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
+    def get_tool_schemas(self) -> List[ToolSchema]:
         # Model tools - invoked by the AI
         return [
-            types.FunctionDeclaration(
+            ToolSchema(
                 name='search_index',
                 description='Search the index',
-                parameters_json_schema={...}
+                parameters={...}
             )
         ]
 
@@ -916,7 +917,7 @@ registry.register_plugin(session_plugin, enrichment_only=True)
 
 When `enrichment_only=True`:
 - The plugin IS included in `get_prompt_enrichment_subscribers()`
-- The plugin is NOT included in `get_exposed_declarations()`
+- The plugin is NOT included in `get_exposed_tool_schemas()`
 - The plugin is NOT included in `get_exposed_executors()`
 - The plugin is NOT included in `get_exposed_user_commands()`
 
