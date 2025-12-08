@@ -234,7 +234,7 @@ def identify_code_changes(entry: Dict, full_source_text: str, jaato: JaatoClient
         prompt = prompt.replace(ph, str(val))
 
     # Send message with function calling
-    response_text = jaato.send_message(prompt)
+    response_text = jaato.send_message(prompt, on_output=lambda s, t, m: None)
 
     final_text = (response_text or '').strip()
     return {"explanation": final_text if final_text else "No explanation text returned."}

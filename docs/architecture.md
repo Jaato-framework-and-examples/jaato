@@ -610,8 +610,12 @@ ledger = TokenLedger()
 client.configure_tools(registry, ledger=ledger)
 
 # 4. Have a conversation (history managed automatically)
-response1 = client.send_message("What's in my current directory?")
-response2 = client.send_message("Show me the git log")
+# The callback receives (source, text, mode) for real-time output
+def on_output(source: str, text: str, mode: str):
+    print(f"[{source}]: {text}")
+
+response1 = client.send_message("What's in my current directory?", on_output=on_output)
+response2 = client.send_message("Show me the git log", on_output=on_output)
 
 # 5. Check usage
 usage = client.get_context_usage()

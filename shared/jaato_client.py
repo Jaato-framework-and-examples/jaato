@@ -13,7 +13,7 @@ from google.genai import types
 
 from .ai_tool_runner import ToolExecutor
 from .token_accounting import TokenLedger
-from .plugins.base import UserCommand, PromptEnrichmentResult
+from .plugins.base import UserCommand, PromptEnrichmentResult, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
 
@@ -70,8 +70,12 @@ class JaatoClient:
         client.configure_tools(registry, permission_plugin, ledger)
 
         # Multi-turn conversation (SDK manages history)
-        response = client.send_message("Hello!")
-        response = client.send_message("Tell me more")
+        # Output callback receives (source, text, mode) for real-time display
+        def on_output(source: str, text: str, mode: str):
+            print(f"[{source}]: {text}")
+
+        response = client.send_message("Hello!", on_output=on_output)
+        response = client.send_message("Tell me more", on_output=on_output)
 
         # Access or reset history when needed
         history = client.get_history()
@@ -349,7 +353,11 @@ class JaatoClient:
             history=history
         )
 
-    def send_message(self, message: str) -> str:
+    def send_message(
+        self,
+        message: str,
+        on_output: OutputCallback
+    ) -> str:
         """Send a message to the model.
 
         The SDK manages conversation history internally. Use get_history()
@@ -365,9 +373,14 @@ class JaatoClient:
 
         Args:
             message: The user's message text.
+            on_output: Callback for real-time output from model and plugins.
+                Signature: (source: str, text: str, mode: str) -> None
+                - source: "model" for model responses, plugin name for plugins
+                - text: The output text
+                - mode: "write" for new block, "append" to continue
 
         Returns:
-            The model's response text.
+            The final model response text (after all function calls resolved).
 
         Raises:
             RuntimeError: If client is not connected or not configured.
@@ -384,7 +397,7 @@ class JaatoClient:
         # Run prompt enrichment pipeline if registry is configured
         processed_message = self._enrich_and_clean_prompt(message)
 
-        response = self._run_chat_loop(processed_message)
+        response = self._run_chat_loop(processed_message, on_output)
 
         # Notify session plugin that turn completed
         self._notify_session_turn_complete()
@@ -426,15 +439,26 @@ class JaatoClient:
         """
         return AT_REFERENCE_PATTERN.sub(r'\1', prompt)
 
-    def _run_chat_loop(self, message: str) -> str:
+    def _run_chat_loop(
+        self,
+        message: str,
+        on_output: OutputCallback
+    ) -> str:
         """Internal function calling loop using chat.send_message().
 
         Args:
             message: The user's message text.
+            on_output: Callback for real-time output.
+                Invoked with (source, text, mode) each time the model produces
+                text during the function calling loop.
 
         Returns:
-            The final response text after all function calls are resolved.
+            The final response text (after all function calls resolved).
         """
+        # Set output callback on executor so plugins can emit output
+        if self._executor:
+            self._executor.set_output_callback(on_output)
+
         # Track tokens for this turn
         turn_tokens = {'prompt': 0, 'output': 0, 'total': 0}
         response = None
@@ -446,6 +470,10 @@ class JaatoClient:
 
             # Handle function calling loop
             while response.function_calls:
+                # Emit any text produced alongside function calls
+                if response.text:
+                    on_output("model", response.text, "write")
+
                 func_responses = []
 
                 for fc in response.function_calls:
@@ -468,6 +496,7 @@ class JaatoClient:
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_tokens)
 
+            # Return the final response text
             return response.text if response.text else ''
 
         finally:
@@ -911,7 +940,11 @@ class JaatoClient:
 
         return getattr(response, 'text', '') or ''
 
-    def send_message_with_parts(self, parts: List[types.Part]) -> str:
+    def send_message_with_parts(
+        self,
+        parts: List[types.Part],
+        on_output: OutputCallback
+    ) -> str:
         """Send a message with custom Part objects.
 
         Similar to send_message but allows sending multi-modal content
@@ -919,9 +952,11 @@ class JaatoClient:
 
         Args:
             parts: List of Part objects forming the user's message.
+            on_output: Callback for real-time output from model and plugins.
+                Signature: (source: str, text: str, mode: str) -> None
 
         Returns:
-            The model's response text.
+            The final model response text (after all function calls resolved).
 
         Raises:
             RuntimeError: If client is not connected or not configured.
@@ -931,17 +966,28 @@ class JaatoClient:
         if not self._chat:
             raise RuntimeError("Tools not configured. Call configure_tools() first.")
 
-        return self._run_chat_loop_with_parts(parts)
+        return self._run_chat_loop_with_parts(parts, on_output)
 
-    def _run_chat_loop_with_parts(self, parts: List[types.Part]) -> str:
+    def _run_chat_loop_with_parts(
+        self,
+        parts: List[types.Part],
+        on_output: OutputCallback
+    ) -> str:
         """Internal function calling loop for multi-part messages.
 
         Args:
             parts: List of Part objects forming the user's message.
+            on_output: Callback for real-time output.
+                Invoked with (source, text, mode) each time the model produces
+                text during the function calling loop.
 
         Returns:
-            The final response text after all function calls are resolved.
+            The final response text (after all function calls resolved).
         """
+        # Set output callback on executor so plugins can emit output
+        if self._executor:
+            self._executor.set_output_callback(on_output)
+
         # Track tokens for this turn
         turn_tokens = {'prompt': 0, 'output': 0, 'total': 0}
 
@@ -953,6 +999,10 @@ class JaatoClient:
 
         # Handle function calling loop (same as _run_chat_loop)
         while response.function_calls:
+            # Emit any text produced alongside function calls
+            if response.text:
+                on_output("model", response.text, "write")
+
             func_responses = []
 
             for fc in response.function_calls:
@@ -976,6 +1026,7 @@ class JaatoClient:
         # Store turn accounting
         self._turn_accounting.append(turn_tokens)
 
+        # Return the final response text
         return response.text if response.text else ''
 
     # ==================== Context Garbage Collection ====================

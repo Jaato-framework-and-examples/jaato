@@ -120,10 +120,14 @@ jaato.connect('my-project', 'us-central1', model_name)
 jaato.configure_tools(registry, ledger=TokenLedger())
 
 # Run prompts (SDK manages history internally)
-response = jaato.send_message('List files in current directory')
+# The callback receives (source, text, mode) for real-time output
+def on_output(source: str, text: str, mode: str):
+    print(f"[{source}]: {text}")
+
+response = jaato.send_message('List files in current directory', on_output=on_output)
 
 # Multi-turn conversations work automatically
-response2 = jaato.send_message('Now show hidden files too')
+response2 = jaato.send_message('Now show hidden files too', on_output=on_output)
 
 # Access history when needed
 history = jaato.get_history()
@@ -153,13 +157,13 @@ jaato.connect('my-project', 'us-central1', model_name)
 # First session: All plugins
 registry.expose_all()
 jaato.configure_tools(registry)
-response1 = jaato.send_message('List files')
+response1 = jaato.send_message('List files', on_output=lambda s, t, m: None)
 
 # Second session: Only specific plugins (new chat session)
 registry.unexpose_all()
 registry.expose_tool('mcp')
 jaato.configure_tools(registry)
-response2 = jaato.send_message('Search GitHub issues')
+response2 = jaato.send_message('Search GitHub issues', on_output=lambda s, t, m: None)
 
 # Cleanup
 registry.unexpose_all()
@@ -276,6 +280,26 @@ class ToolPlugin(Protocol):
     # ==================== Optional Methods ====================
     # The following methods are optional extensions to the protocol.
     # Implement them to enable model-specific or prompt enrichment features.
+
+    def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
+        """Set the output callback for real-time plugin output.
+
+        When set, the plugin can emit output via the callback during tool
+        execution. This enables real-time feedback during long-running
+        operations.
+
+        The callback signature is: (source: str, text: str, mode: str) -> None
+        - source: Plugin name (e.g., "permission", "cli")
+        - text: The output text
+        - mode: "write" for new output block, "append" to continue
+
+        Most plugins don't need this - implement only if your plugin has
+        user-facing output during tool execution.
+
+        Args:
+            callback: OutputCallback function, or None to disable.
+        """
+        ...
 
     def get_model_requirements(self) -> Optional[List[str]]:
         """Return glob patterns for models this plugin requires.
