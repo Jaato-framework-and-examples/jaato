@@ -8,9 +8,9 @@ import sys
 import threading
 import time
 from typing import Dict, List, Any, Callable, Optional
-from google.genai import types
 
 from ..base import UserCommand
+from ..model_provider.types import ToolSchema
 
 
 class MCPToolPlugin:
@@ -57,26 +57,26 @@ class MCPToolPlugin:
         self._response_queue = None
         self._initialized = False
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
-        """Return FunctionDeclarations for all discovered MCP tools."""
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Return ToolSchemas for all discovered MCP tools."""
         if not self._initialized:
             self.initialize()
 
-        tool_decls = []
+        schemas = []
         for server_name, tools in self._tool_cache.items():
             for tool in tools:
                 try:
                     cleaned_schema = self._clean_schema_for_vertex(tool.inputSchema)
-                    decl = types.FunctionDeclaration(
+                    schema = ToolSchema(
                         name=tool.name,
                         description=tool.description,
-                        parameters_json_schema=cleaned_schema
+                        parameters=cleaned_schema
                     )
-                    tool_decls.append(decl)
+                    schemas.append(schema)
                 except Exception as exc:
-                    print(f"[MCPToolPlugin] Error creating declaration for {tool.name}: {exc}", file=sys.stderr)
+                    print(f"[MCPToolPlugin] Error creating schema for {tool.name}: {exc}", file=sys.stderr)
 
-        return tool_decls
+        return schemas
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Return executor mappings for all discovered MCP tools."""

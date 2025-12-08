@@ -11,7 +11,7 @@ This plugin only manages the catalog and user interaction.
 
 from typing import Any, Callable, Dict, List, Optional
 
-from google.genai import types
+from ..model_provider.types import ToolSchema
 
 from .models import ReferenceSource, InjectionMode
 from .actors import SelectionActor, ConsoleSelectionActor, create_actor
@@ -112,17 +112,17 @@ class ReferencesPlugin:
         self._selected_source_ids = []
         self._initialized = False
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
+    def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool declarations for the references plugin."""
         return [
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="selectReferences",
                 description=(
                     "Trigger user selection of additional reference sources to incorporate. "
                     "Call this tool directly - it will inform you if no sources are available. "
                     "All parameters are optional."
                 ),
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "context": {
@@ -143,14 +143,14 @@ class ReferencesPlugin:
                     "required": []
                 }
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="listReferences",
                 description=(
                     "List all available reference sources in the catalog, "
                     "including their access methods, tags, and current selection status. "
                     "Use this to discover what references are available before selecting."
                 ),
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "filter_tags": {

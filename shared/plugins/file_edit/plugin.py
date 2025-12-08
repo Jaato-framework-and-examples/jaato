@@ -7,9 +7,8 @@ integrated permission approval (showing diffs) and automatic backups.
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from google.genai import types
-
 from ..base import UserCommand, PermissionDisplayInfo
+from ..model_provider.types import ToolSchema
 from .backup import BackupManager
 from .diff_utils import (
     generate_unified_diff,
@@ -94,13 +93,13 @@ class FileEditPlugin:
             # If we can't read/write gitignore, just skip
             pass
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
-        """Return function declarations for file editing tools."""
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Return tool schemas for file editing tools."""
         return [
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="readFile",
                 description="Read the contents of a file. Returns the file content as text.",
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "path": {
@@ -111,11 +110,11 @@ class FileEditPlugin:
                     "required": ["path"]
                 }
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="updateFile",
                 description="Update an existing file with new content. Shows a diff for approval "
                            "and creates a backup before modifying. Use this for modifying existing files.",
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "path": {
@@ -135,11 +134,11 @@ class FileEditPlugin:
                     "required": ["path", "new_content"]
                 }
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="writeNewFile",
                 description="Create a new file with the specified content. Shows the content for "
                            "approval before creating. Fails if the file already exists.",
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "path": {
@@ -161,11 +160,11 @@ class FileEditPlugin:
                     "required": ["path", "content"]
                 }
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="removeFile",
                 description="Delete a file. Creates a backup before deletion so it can be restored "
                            "with undoFileChange if needed.",
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "path": {
@@ -176,11 +175,11 @@ class FileEditPlugin:
                     "required": ["path"]
                 }
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="undoFileChange",
                 description="Restore a file from its most recent backup. Use this to undo a previous "
                            "updateFile or removeFile operation.",
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "path": {

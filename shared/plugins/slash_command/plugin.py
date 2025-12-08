@@ -14,7 +14,7 @@ import os
 import re
 from pathlib import Path
 from typing import Dict, List, Any, Callable, Optional
-from google.genai import types
+from ..model_provider.types import ToolSchema
 
 from ..base import UserCommand
 
@@ -86,14 +86,14 @@ class SlashCommandPlugin:
                 commands.append(item.name)
         return sorted(commands)
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
-        """Return the FunctionDeclaration for the processCommand tool."""
-        return [types.FunctionDeclaration(
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Return the ToolSchema for the processCommand tool."""
+        return [ToolSchema(
             name='processCommand',
             description='Process a slash command by reading its file from .jaato/commands/ directory. '
                        'Call this when the user types /command_name [args...] to retrieve and process '
                        'the command file contents with parameter substitution.',
-            parameters_json_schema={
+            parameters={
                 "type": "object",
                 "properties": {
                     "command_name": {

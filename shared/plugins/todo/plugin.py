@@ -12,9 +12,9 @@ Progress is reported through configurable transport protocols
 
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
-from google.genai import types
 
 from .models import PlanStatus, StepStatus, TodoPlan, TodoStep
+from ..model_provider.types import ToolSchema
 from .storage import TodoStorage, create_storage, InMemoryStorage
 from .actors import TodoReporter, ConsoleReporter, create_reporter
 from .config_loader import load_config, TodoConfig
@@ -107,16 +107,16 @@ class TodoPlugin:
         self._initialized = False
         self._current_plan_id = None
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
-        """Return function declarations for TODO tools."""
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Return tool schemas for TODO tools."""
         return [
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="createPlan",
                 description="Step 1: Register a new execution plan with ordered steps. "
                            "Think carefully before calling - only propose plans you can actually "
                            "achieve with available tools. Each step must be specific and actionable. "
                            "After calling this, you MUST call startPlan to get user approval.",
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "title": {
@@ -132,13 +132,13 @@ class TodoPlugin:
                     "required": ["title", "steps"]
                 }
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="startPlan",
                 description="Step 2: Request user approval to begin executing the plan. "
                            "This MUST be called after createPlan and BEFORE any updateStep calls. "
                            "If the user denies: call completePlan with status='cancelled', "
                            "do NOT create another plan and retry.",
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "message": {
@@ -149,11 +149,11 @@ class TodoPlugin:
                     "required": []
                 }
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="updateStep",
                 description="Step 3: Update the status of a step. Can only be called AFTER "
                            "startPlan has been approved. Use this to report progress as you work.",
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "step_id": {
@@ -177,10 +177,10 @@ class TodoPlugin:
                     "required": ["step_id", "status"]
                 }
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="getPlanStatus",
                 description="Query current plan state and progress. Can be called at any time.",
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "plan_id": {
@@ -191,11 +191,11 @@ class TodoPlugin:
                     "required": []
                 }
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="completePlan",
                 description="Step 4: Mark the plan as finished. Use 'completed' or 'failed' only "
                            "if the plan was started. Use 'cancelled' if the user rejected startPlan.",
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "status": {
@@ -212,11 +212,11 @@ class TodoPlugin:
                     "required": ["status"]
                 }
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="addStep",
                 description="Add a new step to the plan during execution. Can only be called "
                            "AFTER startPlan has been approved.",
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "description": {

@@ -2,7 +2,7 @@
 
 from typing import Any, Callable, Dict, List, Optional
 
-from google.genai import types
+from ..model_provider.types import ToolSchema
 
 from ..base import UserCommand
 from .actors import ClarificationActor, create_actor
@@ -56,10 +56,10 @@ class ClarificationPlugin:
         self._actor = None
         self._initialized = False
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
+    def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the tool declarations for Vertex AI."""
         return [
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="request_clarification",
                 description=(
                     "Request clarification from the user by asking one or more questions. "
@@ -69,7 +69,7 @@ class ClarificationPlugin:
                     "this information. Questions and choices are identified by their ordinal "
                     "position (1-based)."
                 ),
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "context": {

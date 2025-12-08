@@ -114,12 +114,12 @@ class TestBackgroundPlugin:
         assert "test_capable" in plugin._capable_plugins
         assert "mock_noncapable" not in plugin._capable_plugins
 
-    def test_get_function_declarations(self):
+    def test_get_tool_schemas(self):
         """Test that all expected tools are declared."""
         plugin = BackgroundPlugin()
-        declarations = plugin.get_function_declarations()
+        schemas = plugin.get_tool_schemas()
 
-        tool_names = [d.name for d in declarations]
+        tool_names = [s.name for s in schemas]
 
         expected_tools = [
             "startBackgroundTask",

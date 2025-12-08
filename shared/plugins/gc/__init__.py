@@ -38,9 +38,9 @@ from .base import (
 )
 from .utils import (
     Turn,
-    create_gc_notification_content,
-    create_summary_content,
-    estimate_content_tokens,
+    create_gc_notification_message,
+    create_summary_message,
+    estimate_message_tokens,
     estimate_history_tokens,
     estimate_turn_tokens,
     flatten_turns,
@@ -123,10 +123,10 @@ __all__ = [
     "Turn",
     "split_into_turns",
     "flatten_turns",
-    "estimate_content_tokens",
+    "estimate_message_tokens",
     "estimate_turn_tokens",
     "estimate_history_tokens",
-    "create_summary_content",
-    "create_gc_notification_content",
+    "create_summary_message",
+    "create_gc_notification_message",
     "get_preserved_indices",
 ]

@@ -9,6 +9,7 @@ from google import genai
 from google.genai import types
 from shared.token_accounting import TokenLedger
 from shared.plugins.base import OutputCallback
+from shared.plugins.model_provider.google_genai.converters import tool_schema_to_sdk
 
 if TYPE_CHECKING:
     from shared.plugins.registry import PluginRegistry
@@ -687,7 +688,9 @@ def run_single_prompt(
             if registry:
                 for name, fn in registry.get_exposed_executors().items():
                     executor.register(name, fn)
-                all_tool_decls = registry.get_exposed_declarations()
+                # Get ToolSchemas and convert to SDK declarations
+                all_schemas = registry.get_exposed_tool_schemas()
+                all_tool_decls = [tool_schema_to_sdk(s) for s in all_schemas]
 
             # Initialize permission plugin if provided
             perm_plugin = permission_plugin
@@ -698,7 +701,8 @@ def run_single_prompt(
                     # Register askPermission tool from permission plugin
                     for name, fn in perm_plugin.get_executors().items():
                         executor.register(name, fn)
-                    all_tool_decls.extend(perm_plugin.get_function_declarations())
+                    perm_schemas = perm_plugin.get_tool_schemas()
+                    all_tool_decls.extend([tool_schema_to_sdk(s) for s in perm_schemas])
                 except Exception as perm_err:
                     # Log warning but continue without permission plugin
                     if ledger:

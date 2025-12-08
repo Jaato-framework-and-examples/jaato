@@ -77,7 +77,7 @@ class TestRegistryFileEditToolDeclarations:
         registry = PluginRegistry()
         registry.discover()
 
-        declarations = registry.get_exposed_declarations()
+        declarations = registry.get_exposed_tool_schemas()
         tool_names = [d.name for d in declarations]
 
         assert "readFile" not in tool_names
@@ -93,7 +93,7 @@ class TestRegistryFileEditToolDeclarations:
 
         registry.expose_tool("file_edit", config={"backup_dir": str(tmp_path / "backups")})
 
-        declarations = registry.get_exposed_declarations()
+        declarations = registry.get_exposed_tool_schemas()
         tool_names = [d.name for d in declarations]
 
         assert "readFile" in tool_names
@@ -112,7 +112,7 @@ class TestRegistryFileEditToolDeclarations:
         registry.expose_tool("file_edit", config={"backup_dir": str(tmp_path / "backups")})
         registry.unexpose_tool("file_edit")
 
-        declarations = registry.get_exposed_declarations()
+        declarations = registry.get_exposed_tool_schemas()
         tool_names = [d.name for d in declarations]
 
         assert "readFile" not in tool_names

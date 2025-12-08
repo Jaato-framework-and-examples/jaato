@@ -17,6 +17,12 @@ from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, PromptEnrichmentResult, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
+from .plugins.model_provider.types import ToolSchema, Message
+from .plugins.model_provider.google_genai.converters import (
+    tool_schema_to_sdk,
+    history_to_sdk,
+    history_from_sdk,
+)
 
 # Pattern to match @references in prompts (e.g., @file.png, @path/to/file.txt)
 # Matches @ followed by a path-like string (no spaces, common file chars)
@@ -220,10 +226,12 @@ class JaatoClient:
             if auto_approved:
                 permission_plugin.add_whitelist_tools(auto_approved)
 
-        # Build tool declarations
-        all_decls = registry.get_exposed_declarations()
+        # Build tool declarations from ToolSchemas
+        all_schemas = registry.get_exposed_tool_schemas()
         if permission_plugin:
-            all_decls.extend(permission_plugin.get_function_declarations())
+            all_schemas.extend(permission_plugin.get_tool_schemas())
+        # Convert ToolSchemas to SDK FunctionDeclarations
+        all_decls = [tool_schema_to_sdk(s) for s in all_schemas]
         self._tool_decl = types.Tool(function_declarations=all_decls) if all_decls else None
 
         # Collect system instructions
@@ -1274,11 +1282,12 @@ class JaatoClient:
             for name, fn in plugin.get_executors().items():
                 self._executor.register(name, fn)
 
-        # Add session plugin's function declarations to chat tools
-        if hasattr(plugin, 'get_function_declarations'):
-            session_decls = plugin.get_function_declarations()
-            if session_decls:
-                # Rebuild tool declarations including session plugin's
+        # Add session plugin's tool schemas to chat tools
+        if hasattr(plugin, 'get_tool_schemas'):
+            session_schemas = plugin.get_tool_schemas()
+            if session_schemas:
+                # Convert schemas to SDK declarations and rebuild tools
+                session_decls = [tool_schema_to_sdk(s) for s in session_schemas]
                 current_decls = []
                 if self._tool_decl and self._tool_decl.function_declarations:
                     current_decls = list(self._tool_decl.function_declarations)

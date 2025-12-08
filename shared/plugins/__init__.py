@@ -16,7 +16,7 @@ Usage:
     registry.expose_tool('cli', config={'extra_paths': ['/usr/local/bin']})
 
     # Get tools for exposed plugins
-    declarations = registry.get_exposed_declarations()
+    tool_schemas = registry.get_exposed_tool_schemas()
     executors = registry.get_exposed_executors()
 
     # Unexpose when done

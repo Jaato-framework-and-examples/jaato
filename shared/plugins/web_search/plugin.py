@@ -1,9 +1,9 @@
 """Web search plugin for performing internet searches."""
 
 from typing import Dict, List, Any, Callable, Optional
-from google.genai import types
 
 from ..base import UserCommand
+from ..model_provider.types import ToolSchema
 
 
 DEFAULT_MAX_RESULTS = 10
@@ -58,12 +58,12 @@ class WebSearchPlugin:
         self._ddgs = None
         self._initialized = False
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
-        """Return the FunctionDeclaration for the web search tool."""
-        return [types.FunctionDeclaration(
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Return the ToolSchema for the web search tool."""
+        return [ToolSchema(
             name='web_search',
             description='Search the web for information on any topic',
-            parameters_json_schema={
+            parameters={
                 "type": "object",
                 "properties": {
                     "query": {

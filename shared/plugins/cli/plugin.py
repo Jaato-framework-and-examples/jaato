@@ -6,10 +6,10 @@ import shutil
 import shlex
 import subprocess
 from typing import Dict, List, Any, Callable, Optional
-from google.genai import types
 
 from ..base import UserCommand
 from ..background import BackgroundCapableMixin
+from ..model_provider.types import ToolSchema
 
 
 DEFAULT_MAX_OUTPUT_CHARS = 50000  # ~12k tokens at 4 chars/token
@@ -121,9 +121,9 @@ class CLIToolPlugin(BackgroundCapableMixin):
         # Cleanup background executor
         self._shutdown_bg_executor()
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
-        """Return the FunctionDeclaration for the CLI tool."""
-        return [types.FunctionDeclaration(
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Return the ToolSchema for the CLI tool."""
+        return [ToolSchema(
             name='cli_based_tool',
             description=(
                 'Execute any shell command on the local machine. This tool provides full access to '
@@ -132,7 +132,7 @@ class CLIToolPlugin(BackgroundCapableMixin):
                 'install packages, and perform any operation that a user could do in a terminal. '
                 'Supports shell features like pipes (|), redirections (>, >>), and command chaining (&&, ||).'
             ),
-            parameters_json_schema={
+            parameters={
                 "type": "object",
                 "properties": {
                     "command": {
@@ -198,6 +198,14 @@ RUNNING PROGRAMS:
 Shell features like pipes (|), redirections (>, >>), and command chaining (&&, ||) are fully supported.
 
 The tool returns stdout, stderr, and returncode from the executed command.
+
+ERROR HANDLING:
+- A non-zero returncode indicates the command failed - always check stderr for details
+- "File exists" or "Directory exists" errors mean the goal is already achieved - consider the step successful and continue
+- "Permission denied" - try an alternative approach (different path, sudo if appropriate) or report as a blocker
+- "Command not found" - check if the required tool is installed, or try an alternative command
+- "No such file or directory" - verify the path exists before operating on it
+- When a step fails, decide whether to: retry with a workaround, skip if goal is met, or report the blocker
 
 IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid truncation:
 - Use filters (grep, awk) to narrow results

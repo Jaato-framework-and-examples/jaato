@@ -10,7 +10,7 @@ a more efficient representation.
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from google.genai import types
+from ..model_provider.types import Message
 
 from ..gc import (
     GCConfig,
@@ -18,7 +18,7 @@ from ..gc import (
     GCResult,
     GCTriggerReason,
     Turn,
-    create_summary_content,
+    create_summary_message,
     estimate_history_tokens,
     flatten_turns,
     get_preserved_indices,
@@ -136,11 +136,11 @@ class SummarizeGCPlugin:
 
     def collect(
         self,
-        history: List[types.Content],
+        history: List[Message],
         context_usage: Dict[str, Any],
         config: GCConfig,
         reason: GCTriggerReason
-    ) -> Tuple[List[types.Content], GCResult]:
+    ) -> Tuple[List[Message], GCResult]:
         """Perform garbage collection by summarizing oldest turns.
 
         Args:
@@ -222,8 +222,8 @@ class SummarizeGCPlugin:
                 error=f"Summarization failed: {str(e)}"
             )
 
-        # Create summary content
-        summary_content = create_summary_content(summary_text)
+        # Create summary message
+        summary_content = create_summary_message(summary_text)
 
         # Build new history: summary + preserved turns
         new_history = [summary_content] + flatten_turns(turns_to_preserve)

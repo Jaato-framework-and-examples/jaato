@@ -6,7 +6,7 @@ through blacklist/whitelist rules and interactive actor approval.
 
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from google.genai import types
+from ..model_provider.types import ToolSchema
 
 from .policy import PermissionPolicy, PermissionDecision, PolicyMatch
 from .config_loader import load_config, PermissionConfig
@@ -167,7 +167,7 @@ class PermissionPlugin:
             for tool in tools:
                 self._policy.whitelist_tools.add(tool)
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
+    def get_tool_schemas(self) -> List[ToolSchema]:
         """Return function declarations for the askPermission tool.
 
         The askPermission tool allows the model to proactively check if a tool
@@ -181,11 +181,11 @@ class PermissionPlugin:
         - Enforcement + proactive checks: both set_permission_plugin() and expose_tool()
         """
         return [
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="askPermission",
                 description="Request permission to execute a tool. You MUST explain your intent - "
                            "what you are trying to achieve or discover with this tool execution.",
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "tool_name": {
