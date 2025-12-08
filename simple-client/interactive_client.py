@@ -1071,8 +1071,21 @@ Keyboard shortcuts:
                                     hasattr(next_parts[0], 'text') and next_parts[0].text)
 
             if (is_last or next_is_user_text) and turn_index < len(turn_accounting):
-                tokens = turn_accounting[turn_index]
-                print(f"  ─── tokens: {tokens['prompt']} in / {tokens['output']} out / {tokens['total']} total")
+                turn = turn_accounting[turn_index]
+                # Token counts
+                print(f"  ─── tokens: {turn['prompt']} in / {turn['output']} out / {turn['total']} total")
+                # Timing info (if available)
+                if 'duration_seconds' in turn and turn['duration_seconds'] is not None:
+                    duration = turn['duration_seconds']
+                    print(f"  ─── duration: {duration:.2f}s")
+                    # Show function call timing breakdown
+                    func_calls = turn.get('function_calls', [])
+                    if func_calls:
+                        fc_total = sum(fc['duration_seconds'] for fc in func_calls)
+                        model_time = duration - fc_total
+                        print(f"      model: {model_time:.2f}s, tools: {fc_total:.2f}s ({len(func_calls)} call(s))")
+                        for fc in func_calls:
+                            print(f"        - {fc['name']}: {fc['duration_seconds']:.2f}s")
                 turn_index += 1
 
         # Print totals
@@ -1080,8 +1093,16 @@ Keyboard shortcuts:
             total_prompt = sum(t['prompt'] for t in turn_accounting)
             total_output = sum(t['output'] for t in turn_accounting)
             total_all = sum(t['total'] for t in turn_accounting)
+            total_duration = sum(t.get('duration_seconds', 0) or 0 for t in turn_accounting)
+            total_fc_time = sum(
+                sum(fc['duration_seconds'] for fc in t.get('function_calls', []))
+                for t in turn_accounting
+            )
             print(f"\n{'=' * 60}")
             print(f"  Total: {total_prompt} in / {total_output} out / {total_all} total ({total_turns} turns)")
+            if total_duration > 0:
+                total_model_time = total_duration - total_fc_time
+                print(f"  Time:  {total_duration:.2f}s total (model: {total_model_time:.2f}s, tools: {total_fc_time:.2f}s)")
             print(f"{'=' * 60}")
 
         print()
