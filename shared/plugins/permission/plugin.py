@@ -309,7 +309,7 @@ If a tool is denied, do not attempt to execute it."""
 
         # Get tools from registry
         if self._registry:
-            for decl in self._registry.get_exposed_declarations():
+            for decl in self._registry.get_exposed_tool_schemas():
                 if decl.name.lower().startswith(partial):
                     desc = decl.description or ""
                     # Truncate long descriptions
@@ -318,7 +318,7 @@ If a tool is denied, do not attempt to execute it."""
                     completions.append(CommandCompletion(decl.name, desc))
 
         # Include our own tools (askPermission)
-        for decl in self.get_function_declarations():
+        for decl in self.get_tool_schemas():
             if decl.name.lower().startswith(partial):
                 desc = decl.description or ""
                 if len(desc) > 50:
