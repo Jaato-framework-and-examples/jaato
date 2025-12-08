@@ -7,6 +7,7 @@ across all BackgroundCapable plugins in the registry.
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from google.genai import types
+from ..model_provider.types import ToolSchema
 
 from ..base import ToolPlugin, UserCommand
 from .protocol import BackgroundCapable, TaskHandle, TaskResult, TaskStatus
@@ -86,10 +87,10 @@ class BackgroundPlugin:
                 pass
         self._initialized = False
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
-        """Return function declarations for background task management tools."""
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Return tool schemas for background task management tools."""
         return [
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="startBackgroundTask",
                 description="""Start a tool execution in the background.
 
@@ -117,7 +118,7 @@ Returns a task_id you can use to check status or get results later.""",
                     required=["tool_name", "arguments"]
                 )
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="getBackgroundTaskStatus",
                 description="Check the current status of a background task.",
                 parameters=types.Schema(
@@ -131,7 +132,7 @@ Returns a task_id you can use to check status or get results later.""",
                     required=["task_id"]
                 )
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="getBackgroundTaskResult",
                 description="""Get the result of a background task.
 
@@ -152,7 +153,7 @@ Use this after checking status shows COMPLETED or FAILED.""",
                     required=["task_id"]
                 )
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="cancelBackgroundTask",
                 description="Cancel a running background task.",
                 parameters=types.Schema(
@@ -166,7 +167,7 @@ Use this after checking status shows COMPLETED or FAILED.""",
                     required=["task_id"]
                 )
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="listBackgroundTasks",
                 description="List all active background tasks across all plugins.",
                 parameters=types.Schema(
@@ -179,7 +180,7 @@ Use this after checking status shows COMPLETED or FAILED.""",
                     },
                 )
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="listBackgroundCapableTools",
                 description="""List all tools that support background execution.
 

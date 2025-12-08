@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
-from google.genai import types
+from ..model_provider.types import Message
 
 
 class GCTriggerReason(Enum):
@@ -161,21 +161,21 @@ class GCPlugin(Protocol):
 
     def collect(
         self,
-        history: List[types.Content],
+        history: List[Message],
         context_usage: Dict[str, Any],
         config: GCConfig,
         reason: GCTriggerReason
-    ) -> Tuple[List[types.Content], GCResult]:
+    ) -> Tuple[List[Message], GCResult]:
         """Perform garbage collection on the conversation history.
 
         Args:
-            history: Current conversation history as list of Content objects.
+            history: Current conversation history as list of Message objects.
             context_usage: Current context window usage statistics.
             config: GC configuration with thresholds and preservation settings.
             reason: The reason this collection was triggered.
 
         Returns:
-            Tuple of (new_history: List[Content], result: GCResult).
+            Tuple of (new_history: List[Message], result: GCResult).
             The new_history should be a modified copy, not the original.
         """
         ...

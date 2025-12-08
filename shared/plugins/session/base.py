@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
-from google.genai import types
+from ..model_provider.types import Message
 
 
 @dataclass
@@ -24,8 +24,8 @@ class SessionState:
     session_id: str
     """Unique identifier for this session (timestamp-based)."""
 
-    history: List[types.Content]
-    """Conversation history as list of Content objects."""
+    history: List[Message]
+    """Conversation history as list of Message objects."""
 
     created_at: datetime
     """When the session was first created."""

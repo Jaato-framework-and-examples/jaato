@@ -10,7 +10,7 @@ This provides a balance between context preservation and token efficiency.
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from google.genai import types
+from ..model_provider.types import Message
 
 from ..gc import (
     GCConfig,
@@ -122,11 +122,11 @@ class HybridGCPlugin:
 
     def collect(
         self,
-        history: List[types.Content],
+        history: List[Message],
         context_usage: Dict[str, Any],
         config: GCConfig,
         reason: GCTriggerReason
-    ) -> Tuple[List[types.Content], GCResult]:
+    ) -> Tuple[List[Message], GCResult]:
         """Perform hybrid garbage collection.
 
         The history is divided into three regions:
@@ -181,7 +181,7 @@ class HybridGCPlugin:
         recent_turns = turns[recent_start:]
 
         # Process based on what we have
-        new_history_parts: List[types.Content] = []
+        new_history_parts: List[Message] = []
         turns_truncated = len(ancient_turns)
         turns_summarized = 0
         summary_text = ""

@@ -28,8 +28,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Any, Callable, Optional
 
-from google.genai import types
-
+from ..model_provider.types import ToolSchema
 from ..base import PromptEnrichmentResult, UserCommand
 
 
@@ -184,9 +183,9 @@ class MultimodalPlugin:
 
     # ==================== Function Declarations ====================
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
-        """Return the FunctionDeclaration for the viewImage tool."""
-        return [types.FunctionDeclaration(
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Return the ToolSchema for the viewImage tool."""
+        return [ToolSchema(
             name='viewImage',
             description=(
                 'View the visual content of an image file. Call this tool when you need to '
@@ -194,7 +193,7 @@ class MultimodalPlugin:
                 'Do NOT call this for tasks that don\'t require seeing the image '
                 '(e.g., moving, copying, or deleting image files).'
             ),
-            parameters_json_schema={
+            parameters={
                 "type": "object",
                 "properties": {
                     "path": {

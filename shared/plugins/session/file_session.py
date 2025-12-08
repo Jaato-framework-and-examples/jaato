@@ -10,9 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from google.genai import types
-
 from ..base import ToolPlugin, UserCommand, CommandCompletion, PromptEnrichmentResult
+from ..model_provider.types import ToolSchema
 from .base import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .serializer import (
     serialize_session_state,
@@ -328,20 +327,20 @@ class FileSessionPlugin:
 
     # ==================== ToolPlugin: Function Declarations ====================
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
+    def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool declarations for session management.
 
         Provides session_describe for the model to set session descriptions.
         """
         return [
-            types.FunctionDeclaration(
+            ToolSchema(
                 name="session_describe",
                 description=(
                     "Set a brief description for the current conversation session. "
                     "This helps identify the session later when resuming. "
                     "Call this when prompted to describe the session."
                 ),
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "description": {
