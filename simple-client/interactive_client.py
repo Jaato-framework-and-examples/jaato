@@ -1046,7 +1046,20 @@ Keyboard shortcuts:
             if is_user_text:
                 current_turn += 1
                 print(f"\n{'─' * 60}")
-                print(f"  ▶ TURN {current_turn}")
+                # Show timestamp in turn header if available
+                turn_idx = current_turn - 1  # 0-based index
+                if turn_idx < len(turn_accounting) and 'start_time' in turn_accounting[turn_idx]:
+                    start_time = turn_accounting[turn_idx]['start_time']
+                    # Parse ISO format and display nicely
+                    try:
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(start_time)
+                        time_str = dt.strftime('%H:%M:%S')
+                        print(f"  ▶ TURN {current_turn}  [{time_str}]")
+                    except (ValueError, TypeError):
+                        print(f"  ▶ TURN {current_turn}")
+                else:
+                    print(f"  ▶ TURN {current_turn}")
                 print(f"{'─' * 60}")
 
             # Print the message
