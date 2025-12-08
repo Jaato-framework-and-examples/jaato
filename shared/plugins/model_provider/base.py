@@ -160,7 +160,11 @@ class ModelProviderPlugin(Protocol):
 
     # ==================== Messaging ====================
 
-    def send_message(self, message: str) -> ProviderResponse:
+    def send_message(
+        self,
+        message: str,
+        response_schema: Optional[Dict[str, Any]] = None
+    ) -> ProviderResponse:
         """Send a user message and get a response.
 
         Does NOT automatically execute function calls - that's the
@@ -168,19 +172,30 @@ class ModelProviderPlugin(Protocol):
 
         Args:
             message: The user's message text.
+            response_schema: Optional JSON Schema to constrain the model's
+                response format. When provided, the model will return JSON
+                conforming to this schema, and the response's structured_output
+                field will contain the parsed result. Not all providers support
+                this - check supports_structured_output() first.
 
         Returns:
             ProviderResponse with text and/or function calls.
         """
         ...
 
-    def send_tool_results(self, results: List[ToolResult]) -> ProviderResponse:
+    def send_tool_results(
+        self,
+        results: List[ToolResult],
+        response_schema: Optional[Dict[str, Any]] = None
+    ) -> ProviderResponse:
         """Send tool execution results back to the model.
 
         Called after executing function calls to continue the conversation.
 
         Args:
             results: List of tool execution results.
+            response_schema: Optional JSON Schema to constrain the model's
+                response format. See send_message() for details.
 
         Returns:
             ProviderResponse with the model's next response.
@@ -241,6 +256,20 @@ class ModelProviderPlugin(Protocol):
 
         Returns:
             List of Message objects.
+        """
+        ...
+
+    # ==================== Capabilities ====================
+
+    def supports_structured_output(self) -> bool:
+        """Check if this provider supports structured output (response_schema).
+
+        When True, the provider can accept response_schema in send_message()
+        and send_tool_results() to constrain the model's output to valid JSON
+        matching the provided schema.
+
+        Returns:
+            True if structured output is supported.
         """
         ...
 

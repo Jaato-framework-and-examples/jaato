@@ -167,14 +167,23 @@ class ProviderResponse:
         usage: Token usage statistics.
         finish_reason: Why the model stopped generating.
         raw: The original provider-specific response object.
+        structured_output: Parsed JSON when response_schema was requested.
+            This is populated when the model returns structured JSON output
+            conforming to a requested schema.
     """
     text: Optional[str] = None
     function_calls: List[FunctionCall] = field(default_factory=list)
     usage: TokenUsage = field(default_factory=TokenUsage)
     finish_reason: FinishReason = FinishReason.UNKNOWN
     raw: Any = None
+    structured_output: Optional[Dict[str, Any]] = None
 
     @property
     def has_function_calls(self) -> bool:
         """Check if the response contains function calls."""
         return len(self.function_calls) > 0
+
+    @property
+    def has_structured_output(self) -> bool:
+        """Check if the response contains structured output."""
+        return self.structured_output is not None
