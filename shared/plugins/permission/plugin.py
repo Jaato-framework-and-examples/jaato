@@ -299,38 +299,17 @@ If a tool is denied, do not attempt to execute it."""
 
             if subcommand in ("allow", "deny"):
                 # "permissions allow/deny <partial>" - provide tool names
-                # Filter based on current status (don't show already allowed/denied)
-                return self._get_tool_completions(partial, exclude_mode=subcommand)
+                return self._get_tool_completions(partial)
 
         return []
 
-    def _get_tool_completions(
-        self, partial: str, exclude_mode: Optional[str] = None
-    ) -> List[CommandCompletion]:
-        """Get tool name completions matching the partial input.
-
-        Args:
-            partial: Partial tool name to match.
-            exclude_mode: If "allow", exclude tools already whitelisted.
-                         If "deny", exclude tools already blacklisted.
-        """
+    def _get_tool_completions(self, partial: str) -> List[CommandCompletion]:
+        """Get tool name completions matching the partial input."""
         completions = []
-
-        # Build exclusion set based on mode
-        excluded: set = set()
-        if self._policy and exclude_mode:
-            if exclude_mode == "allow":
-                # Don't show tools already allowed
-                excluded = self._policy.whitelist_tools | self._policy.session_whitelist
-            elif exclude_mode == "deny":
-                # Don't show tools already denied
-                excluded = self._policy.blacklist_tools | self._policy.session_blacklist
 
         # Get tools from registry
         if self._registry:
             for decl in self._registry.get_exposed_tool_schemas():
-                if decl.name in excluded:
-                    continue
                 if decl.name.lower().startswith(partial):
                     desc = decl.description or ""
                     # Truncate long descriptions
@@ -340,8 +319,6 @@ If a tool is denied, do not attempt to execute it."""
 
         # Include our own tools (askPermission)
         for decl in self.get_tool_schemas():
-            if decl.name in excluded:
-                continue
             if decl.name.lower().startswith(partial):
                 desc = decl.description or ""
                 if len(desc) > 50:

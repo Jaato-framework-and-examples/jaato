@@ -691,12 +691,6 @@ class InteractiveClient:
                     for cmd in session_plugin.get_user_commands():
                         command_to_plugin[cmd.name] = session_plugin
 
-        # Also check permission plugin (not in registry but provides completions)
-        if self.permission_plugin and hasattr(self.permission_plugin, 'get_command_completions'):
-            if hasattr(self.permission_plugin, 'get_user_commands'):
-                for cmd in self.permission_plugin.get_user_commands():
-                    command_to_plugin[cmd.name] = self.permission_plugin
-
         if not command_to_plugin:
             return
 
