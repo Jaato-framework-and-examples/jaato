@@ -199,6 +199,14 @@ Shell features like pipes (|), redirections (>, >>), and command chaining (&&, |
 
 The tool returns stdout, stderr, and returncode from the executed command.
 
+ERROR HANDLING:
+- A non-zero returncode indicates the command failed - always check stderr for details
+- "File exists" or "Directory exists" errors mean the goal is already achieved - consider the step successful and continue
+- "Permission denied" - try an alternative approach (different path, sudo if appropriate) or report as a blocker
+- "Command not found" - check if the required tool is installed, or try an alternative command
+- "No such file or directory" - verify the path exists before operating on it
+- When a step fails, decide whether to: retry with a workaround, skip if goal is met, or report the blocker
+
 IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid truncation:
 - Use filters (grep, awk) to narrow results
 - Use head/tail to limit output lines
