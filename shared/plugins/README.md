@@ -281,6 +281,26 @@ class ToolPlugin(Protocol):
     # The following methods are optional extensions to the protocol.
     # Implement them to enable model-specific or prompt enrichment features.
 
+    def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
+        """Set the output callback for real-time plugin output.
+
+        When set, the plugin can emit output via the callback during tool
+        execution. This enables real-time feedback during long-running
+        operations.
+
+        The callback signature is: (source: str, text: str, mode: str) -> None
+        - source: Plugin name (e.g., "permission", "cli")
+        - text: The output text
+        - mode: "write" for new output block, "append" to continue
+
+        Most plugins don't need this - implement only if your plugin has
+        user-facing output during tool execution.
+
+        Args:
+            callback: OutputCallback function, or None to disable.
+        """
+        ...
+
     def get_model_requirements(self) -> Optional[List[str]]:
         """Return glob patterns for models this plugin requires.
 
