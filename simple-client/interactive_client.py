@@ -9,26 +9,8 @@ Supports multi-turn conversation with history.
 import os
 import sys
 import pathlib
-import json
 import readline  # Enables arrow key history navigation (fallback)
 from typing import Optional, Dict, Any, List, Callable
-import shutil
-import textwrap
-
-# Try to import prompt_toolkit for enhanced completion
-try:
-    from prompt_toolkit import PromptSession
-    from prompt_toolkit.history import InMemoryHistory
-    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-    from prompt_toolkit.styles import Style
-    from prompt_toolkit.formatted_text import ANSI
-    from prompt_toolkit.output.vt100 import Vt100_Output
-    from prompt_toolkit.data_structures import Size
-    HAS_PROMPT_TOOLKIT = True
-except ImportError:
-    HAS_PROMPT_TOOLKIT = False
-    PromptSession = None
-    ANSI = None
 
 # Add project root to path for imports
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -45,27 +27,21 @@ from shared import (
     TodoPlugin,
     active_cert_bundle,
 )
-from shared.plugins.session import create_plugin as create_session_plugin, SessionConfig, load_session_config
+from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
+from shared.plugins.base import parse_command_args
 
-# Import file and command completion (local module)
-try:
-    from file_completer import CombinedCompleter, FileReferenceProcessor
-    HAS_FILE_COMPLETER = True
-except ImportError:
-    HAS_FILE_COMPLETER = False
-    CombinedCompleter = None
-    FileReferenceProcessor = None
-
-
-# ANSI color codes for terminal output (module-level for use in main())
-ANSI_RESET = '\033[0m'
-ANSI_BOLD = '\033[1m'
+# Import local presentation and input modules
+from terminal_ui import TerminalUI
+from console_presenter import ConsolePresenter
+from session_exporter import SessionExporter
+from input_handler import InputHandler
 
 
 class InteractiveClient:
     """Simple interactive console client with permission prompts and multi-turn history.
 
     Uses JaatoClient with SDK-managed conversation history.
+    Delegates presentation to ConsolePresenter and input to InputHandler.
     """
 
     def __init__(self, env_file: str = ".env", verbose: bool = True):
@@ -77,156 +53,29 @@ class InteractiveClient:
         self.todo_plugin: Optional[TodoPlugin] = None
         self.ledger = TokenLedger()
 
-        # Initialize prompt_toolkit components if available
-        self._pt_history = InMemoryHistory() if HAS_PROMPT_TOOLKIT else None
-        self._completer = CombinedCompleter() if (HAS_PROMPT_TOOLKIT and HAS_FILE_COMPLETER) else None
-        self._file_processor = FileReferenceProcessor() if HAS_FILE_COMPLETER else None
-
-        # Prompt style for completion menu
-        self._pt_style = Style.from_dict({
-            'completion-menu.completion': 'bg:#333333 #ffffff',
-            'completion-menu.completion.current': 'bg:#00aa00 #ffffff',
-            'completion-menu.meta.completion': 'bg:#333333 #888888',
-            'completion-menu.meta.completion.current': 'bg:#00aa00 #ffffff',
-        }) if HAS_PROMPT_TOOLKIT else None
-
-        # ANSI color codes for terminal output
-        self._colors = {
-            'reset': '\033[0m',
-            'bold': '\033[1m',
-            'dim': '\033[2m',
-            'green': '\033[32m',
-            'cyan': '\033[36m',
-        }
+        # Initialize presentation and input components
+        self._ui = TerminalUI()
+        self._presenter = ConsolePresenter(self._ui)
+        self._input_handler = InputHandler()
+        self._exporter = SessionExporter()
 
         # Track original user inputs for export (before file reference expansion)
         # Each entry is {"text": str, "local": bool} where local=True for commands
         # that don't go to the model (plugin commands like "plan")
         self._original_inputs: list[dict] = []
 
-    def _c(self, text: str, color: str) -> str:
-        """Apply ANSI color to text."""
-        code = self._colors.get(color, '')
-        return f"{code}{text}{self._colors['reset']}" if code else text
-
-    def _wrap_text(self, text: str, prefix: str = "", initial_prefix: str = None) -> str:
-        """Wrap text to fit terminal width with word boundaries.
-
-        Args:
-            text: The text to wrap
-            prefix: Prefix for continuation lines (e.g., spaces for indentation)
-            initial_prefix: Prefix for first line (defaults to prefix if not specified)
-
-        Returns:
-            Word-wrapped text that fits the terminal width
-        """
-        terminal_width = shutil.get_terminal_size().columns
-        # Leave some margin for safety
-        width = max(40, terminal_width - 2)
-
-        if initial_prefix is None:
-            initial_prefix = prefix
-
-        # Handle multi-paragraph text by wrapping each paragraph separately
-        paragraphs = text.split('\n')
-        wrapped_paragraphs = []
-
-        for i, para in enumerate(paragraphs):
-            if not para.strip():
-                # Preserve empty lines
-                wrapped_paragraphs.append('')
-                continue
-
-            # Use initial_prefix only for the very first paragraph
-            if i == 0:
-                wrapper = textwrap.TextWrapper(
-                    width=width,
-                    initial_indent=initial_prefix,
-                    subsequent_indent=prefix,
-                    break_long_words=True,
-                    break_on_hyphens=True,
-                )
-            else:
-                wrapper = textwrap.TextWrapper(
-                    width=width,
-                    initial_indent=prefix,
-                    subsequent_indent=prefix,
-                    break_long_words=True,
-                    break_on_hyphens=True,
-                )
-            wrapped_paragraphs.append(wrapper.fill(para))
-
-        return '\n'.join(wrapped_paragraphs)
-
     def log(self, msg: str) -> None:
         """Print message if verbose mode is enabled, with colorized [client] tag."""
         if self.verbose:
-            # Colorize [client] prefix
             if msg.startswith('[client]'):
-                msg = self._c('[client]', 'cyan') + msg[8:]
+                msg = self._ui.colorize('[client]', 'cyan') + msg[8:]
             print(msg)
-
-    def _get_user_input(self, prompt_str: str = None) -> str:
-        """Get user input with command and file completion support.
-
-        Uses prompt_toolkit if available for command and @file completion,
-        falls back to standard input otherwise.
-
-        Returns:
-            User input string, or raises EOFError/KeyboardInterrupt
-        """
-        if prompt_str is None:
-            prompt_str = f"\n{self._c('You>', 'green')} "
-
-        if HAS_PROMPT_TOOLKIT and self._completer:
-            # Use prompt_toolkit with ANSI-formatted prompt
-            # Create output with enable_cpr=False to avoid CPR queries in PTY environments
-            formatted_prompt = ANSI(prompt_str) if ANSI else prompt_str
-
-            def get_size():
-                cols, rows = shutil.get_terminal_size()
-                return Size(rows=rows, columns=cols)
-
-            output = Vt100_Output(sys.stdout, get_size=get_size, enable_cpr=False)
-            session = PromptSession(
-                completer=self._completer,
-                history=self._pt_history,
-                auto_suggest=AutoSuggestFromHistory(),
-                style=self._pt_style,
-                complete_while_typing=True,
-                complete_in_thread=True,  # More responsive completions
-                output=output,
-            )
-            return session.prompt(formatted_prompt).strip()
-        else:
-            # Fallback to standard input
-            return input(prompt_str).strip()
-
-    def _expand_file_references(self, text: str) -> str:
-        """Expand @file references to include file contents.
-
-        If text contains @path/to/file references, reads those files
-        and appends their contents to the prompt for model context.
-
-        Returns:
-            Original text with file contents appended, or original text if no references
-        """
-        if not self._file_processor:
-            return text
-
-        return self._file_processor.expand_references(text)
 
     def _try_execute_plugin_command(self, user_input: str) -> Optional[Any]:
         """Try to execute user input as a plugin-provided command.
 
         Checks if the input matches a registered user command and executes it
-        via JaatoClient. If share_with_model is True, the result is automatically
-        added to conversation history by JaatoClient.
-
-        Supports commands with arguments:
-        - "backtoturn 2" → backtoturn(turn_id="2")
-        - "resume session123" → resume(session_id="session123")
-        - "delete-session xyz" → delete-session(session_id="xyz")
+        via JaatoClient. Uses the command's parameter schema for argument parsing.
 
         Args:
             user_input: The user's input string
@@ -245,34 +94,34 @@ class InteractiveClient:
         # Parse input into command and arguments
         parts = user_input.strip().split(maxsplit=1)
         input_cmd = parts[0].lower() if parts else ""
-        arg_value = parts[1] if len(parts) > 1 else None
+        raw_args = parts[1] if len(parts) > 1 else ""
 
         # Check if input matches a command (case-insensitive)
-        command_name = None
-        for cmd_name in user_commands:
+        command = None
+        for cmd_name, cmd in user_commands.items():
             if input_cmd == cmd_name.lower():
-                command_name = cmd_name
+                command = cmd
                 break
 
-        if not command_name:
+        if not command:
             return None
 
-        # Always pass arguments as a list - plugins handle their own parsing
-        args = {"args": arg_value.split() if arg_value else []}
+        # Parse arguments using the command's parameter schema
+        args = parse_command_args(command, raw_args)
 
         # For save command, include user inputs for prompt history restoration
-        if command_name.lower() == "save":
+        if command.name.lower() == "save":
             args["user_inputs"] = self._original_inputs.copy()
 
         # Execute the command via JaatoClient
         try:
-            result, shared = self._jaato.execute_user_command(command_name, args)
+            result, shared = self._jaato.execute_user_command(command.name, args)
 
             # Display the result to the user
-            self._display_command_result(command_name, result, shared)
+            self._presenter.display_command_result(command.name, result, shared)
 
             # For resume command, restore user inputs to prompt history
-            if command_name.lower() == "resume" and isinstance(result, dict):
+            if command.name.lower() == "resume" and isinstance(result, dict):
                 user_inputs = result.get("user_inputs", [])
                 if user_inputs:
                     self._restore_user_inputs(user_inputs)
@@ -280,214 +129,21 @@ class InteractiveClient:
             return result
 
         except Exception as e:
-            print(f"\nError executing {command_name}: {e}")
+            print(f"\nError executing {command.name}: {e}")
             return {"error": str(e)}
-
-    def _parse_command_args(self, command_name: str, raw_args: str) -> Dict[str, Any]:
-        """Parse raw argument string into named arguments dict.
-
-        Maps positional arguments to named parameters based on command.
-
-        Args:
-            command_name: The command being executed
-            raw_args: Raw argument string from user input
-
-        Returns:
-            Dictionary of named arguments
-        """
-        args: Dict[str, Any] = {}
-        raw_args = raw_args.strip()
-
-        if not raw_args:
-            return args
-
-        # Define argument mappings for commands that take positional args
-        # Format: command_name -> list of positional arg names
-        arg_mappings = {
-            "delete-session": ["session_id"],
-            "resume": ["session_id"],
-            "save": ["description"],  # Optional description for save
-        }
-
-        if command_name in arg_mappings:
-            param_names = arg_mappings[command_name]
-
-            # Special handling for commands that take a single string argument
-            # (e.g., "save My session description" should capture entire string)
-            if command_name == "save" and raw_args:
-                args["description"] = raw_args
-            else:
-                # Split args by whitespace for other commands
-                arg_parts = raw_args.split()
-                for i, param_name in enumerate(param_names):
-                    if i < len(arg_parts):
-                        val = arg_parts[i]
-                        # Only convert to int if it's purely numeric (no underscores)
-                        # Python allows underscores in int() which would corrupt session IDs
-                        if val.isdigit():
-                            args[param_name] = int(val)
-                        else:
-                            args[param_name] = val
-        else:
-            # For unknown commands, pass the raw args as 'args'
-            args["args"] = raw_args
-
-        return args
 
     def _restore_user_inputs(self, user_inputs: List[str]) -> None:
         """Restore user inputs to prompt history after session resume.
 
-        Updates both the internal _original_inputs list and the
-        prompt_toolkit history for arrow-key navigation.
-
         Args:
             user_inputs: List of user input strings from the resumed session.
         """
-        # Restore to internal tracking
         self._original_inputs = list(user_inputs)
-
-        # Restore to prompt_toolkit history
-        if HAS_PROMPT_TOOLKIT and self._pt_history:
-            # Clear existing history and add restored inputs
-            self._pt_history = InMemoryHistory()
-            for user_input in user_inputs:
-                self._pt_history.append_string(user_input)
-            self.log(f"[client] Restored {len(user_inputs)} inputs to prompt history")
-
-    def _display_command_result(self, command_name: str, result: Any, shared: bool) -> None:
-        """Display the result of a plugin command to the user.
-
-        Args:
-            command_name: Name of the executed command
-            result: The command's return value
-            shared: Whether the result was shared with the model
-        """
-        # Special formatting for plan command
-        if command_name == "plan" and isinstance(result, dict):
-            self._display_plan_result(result)
-            if shared:
-                print("  [Result shared with model]")
-            return
-
-        print(f"\n[{command_name}]")
-
-        if isinstance(result, dict):
-            # Pretty-print dict results
-            for key, value in result.items():
-                if key.startswith('_'):
-                    continue  # Skip internal fields
-                if isinstance(value, (list, dict)):
-                    print(f"  {key}:")
-                    if isinstance(value, list):
-                        for item in value[:20]:  # Limit list display
-                            if isinstance(item, dict):
-                                # Format dict items compactly
-                                item_str = ", ".join(f"{k}: {v}" for k, v in item.items())
-                                print(f"    - {item_str}")
-                            else:
-                                print(f"    - {item}")
-                        if len(value) > 20:
-                            print(f"    ... and {len(value) - 20} more")
-                    else:
-                        print(f"    {json.dumps(value, indent=2)}")
-                else:
-                    print(f"  {key}: {value}")
-        else:
-            print(f"  {result}")
-
-        if shared:
-            print("  [Result shared with model]")
-
-    def _display_plan_result(self, result: Dict[str, Any]) -> None:
-        """Display plan status in a user-friendly format.
-
-        Args:
-            result: The plan status dict from getPlanStatus
-        """
-        # Check for error
-        if "error" in result:
-            print(f"\n[plan] {result['error']}")
-            return
-
-        # Header with status
-        status = result.get("status", "unknown")
-        title = result.get("title", "Untitled Plan")
-
-        # Status emoji and color hint
-        status_display = {
-            "pending": "📋 PENDING",
-            "in_progress": "🔄 IN PROGRESS",
-            "completed": "✅ COMPLETED",
-            "failed": "❌ FAILED",
-            "cancelled": "⚠️  CANCELLED",
-        }.get(status, status.upper())
-
-        print(f"\n{'=' * 60}")
-        print(f"  {status_display}: {title}")
-        print(f"{'=' * 60}")
-
-        # Progress bar
-        progress = result.get("progress", {})
-        total = progress.get("total", 0)
-        completed = progress.get("completed", 0)
-        failed = progress.get("failed", 0)
-        in_prog = progress.get("in_progress", 0)
-        pending = progress.get("pending", 0)
-        percent = progress.get("percent", 0)
-
-        if total > 0:
-            bar_width = 40
-            filled = int(bar_width * percent / 100)
-            bar = '█' * filled + '░' * (bar_width - filled)
-            print(f"\n  Progress: [{bar}] {percent:.0f}%")
-            print(f"  Steps: {completed} completed, {in_prog} in progress, {pending} pending, {failed} failed")
-
-        # Summary if available
-        summary = result.get("summary")
-        if summary:
-            print(f"\n  Summary: {summary}")
-
-        # Steps list
-        steps = result.get("steps", [])
-        if steps:
-            print(f"\n  Steps:")
-            print(f"  {'-' * 56}")
-
-            for step in sorted(steps, key=lambda s: s.get("sequence", 0)):
-                seq = step.get("sequence", "?")
-                desc = step.get("description", "")
-                step_status = step.get("status", "pending")
-
-                # Status indicator
-                indicator = {
-                    "pending": "○",
-                    "in_progress": "◐",
-                    "completed": "●",
-                    "failed": "✗",
-                    "skipped": "○",
-                }.get(step_status, "?")
-
-                # Truncate long descriptions
-                max_desc_len = 50
-                if len(desc) > max_desc_len:
-                    desc = desc[:max_desc_len - 3] + "..."
-
-                print(f"  {indicator} {seq}. {desc}")
-
-                # Show result or error for completed/failed steps
-                step_result = step.get("result")
-                step_error = step.get("error")
-                if step_result and step_status == "completed":
-                    # Truncate long results
-                    if len(step_result) > 60:
-                        step_result = step_result[:57] + "..."
-                    print(f"      └─ {step_result}")
-                elif step_error and step_status == "failed":
-                    if len(step_error) > 60:
-                        step_error = step_error[:57] + "..."
-                    print(f"      └─ Error: {step_error}")
-
-        print(f"\n{'=' * 60}")
+        count = self._input_handler.restore_history(
+            [entry["text"] if isinstance(entry, dict) else entry for entry in user_inputs]
+        )
+        if count:
+            self.log(f"[client] Restored {count} inputs to prompt history")
 
     def initialize(self) -> bool:
         """Initialize the client, loading config and connecting to Vertex AI."""
@@ -496,7 +152,6 @@ class InteractiveClient:
         if env_path.exists():
             load_dotenv(env_path)
         else:
-            # Try current directory
             load_dotenv(self.env_file)
 
         # Check for custom CA bundle
@@ -522,7 +177,6 @@ class InteractiveClient:
             self._jaato = JaatoClient()
             self._jaato.connect(project_id, location, model_name)
             self.log(f"[client] Using model: {model_name}")
-            # List available models
             try:
                 available_models = self._jaato.list_available_models()
                 self.log(f"[client] Available models: {', '.join(available_models)}")
@@ -558,7 +212,7 @@ class InteractiveClient:
         self.permission_plugin.initialize({
             "actor_type": "console",
             "policy": {
-                "defaultPolicy": "ask",  # Ask for everything by default
+                "defaultPolicy": "ask",
                 "whitelist": {"tools": [], "patterns": []},
                 "blacklist": {"tools": [], "patterns": []},
             }
@@ -575,7 +229,6 @@ class InteractiveClient:
         all_decls = self.registry.get_exposed_tool_schemas()
         if self.permission_plugin:
             all_decls.extend(self.permission_plugin.get_tool_schemas())
-        # Session plugin tools are already added to jaato's tool config
         if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
             if hasattr(self._jaato._session_plugin, 'get_tool_schemas'):
                 all_decls.extend(self._jaato._session_plugin.get_tool_schemas())
@@ -587,31 +240,19 @@ class InteractiveClient:
         return True
 
     def _setup_session_plugin(self) -> None:
-        """Set up the session persistence plugin.
-
-        Loads configuration from .jaato/.sessions.json if it exists,
-        creates and configures the session plugin, and sets it on JaatoClient.
-        """
+        """Set up the session persistence plugin."""
         if not self._jaato:
             return
 
         try:
-            # Load session config (uses defaults if no config file)
             session_config = load_session_config()
-
-            # Create and initialize plugin
             session_plugin = create_session_plugin()
             session_plugin.initialize({'storage_path': session_config.storage_path})
-
-            # Set on JaatoClient (this also registers user commands and tools)
             self._jaato.set_session_plugin(session_plugin, session_config)
 
-            # Register session plugin with registry for prompt enrichment
-            # (enrichment_only=True means it won't duplicate in get_exposed_tool_schemas)
             if self.registry:
                 self.registry.register_plugin(session_plugin, enrichment_only=True)
 
-            # Add session plugin's auto-approved tools to permission whitelist
             if self.permission_plugin and hasattr(session_plugin, 'get_auto_approved_tools'):
                 auto_approved = session_plugin.get_auto_approved_tools()
                 if auto_approved:
@@ -631,31 +272,23 @@ class InteractiveClient:
                 self.log(f"[client] Warning: Error closing session: {e}")
 
     def _register_plugin_commands(self) -> None:
-        """Register plugin-contributed user commands for autocompletion.
-
-        Collects user-facing commands from JaatoClient and adds them to the
-        completer for autocomplete support.
-
-        Note: Command execution and share_with_model handling is done by JaatoClient.
-        """
-        if not self._jaato or not self._completer:
+        """Register plugin-contributed user commands for autocompletion."""
+        if not self._jaato:
             return
 
-        # Get user commands from JaatoClient (which got them from registry)
         user_commands = self._jaato.get_user_commands()
-
         if not user_commands:
             return
 
-        # Add to completer for autocompletion (need (name, description) tuples)
+        # Add to input handler for autocompletion
         completer_cmds = [(cmd.name, cmd.description) for cmd in user_commands.values()]
-        self._completer.add_commands(completer_cmds)
+        self._input_handler.add_commands(completer_cmds)
 
         # Set up session ID completion if session plugin is available
         if hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
             session_plugin = self._jaato._session_plugin
             if hasattr(session_plugin, 'list_sessions'):
-                self._completer.set_session_provider(session_plugin.list_sessions)
+                self._input_handler.set_session_provider(session_plugin.list_sessions)
 
         # Set up plugin command argument completion
         self._setup_command_completion_provider()
@@ -663,27 +296,19 @@ class InteractiveClient:
         self.log(f"[client] Registered {len(user_commands)} plugin command(s) for completion")
 
     def _setup_command_completion_provider(self) -> None:
-        """Set up the provider for plugin command argument completions.
-
-        Collects plugins that implement get_command_completions() and creates
-        a provider that routes completion requests to the appropriate plugin.
-        """
-        if not self.registry or not self._completer:
+        """Set up the provider for plugin command argument completions."""
+        if not self.registry:
             return
 
-        # Map command names to plugins that can provide completions
         command_to_plugin: dict = {}
 
-        # Check registry plugins
         for plugin_name in self.registry.list_exposed():
             plugin = self.registry.get_plugin(plugin_name)
             if plugin and hasattr(plugin, 'get_command_completions'):
-                # Get this plugin's commands
                 if hasattr(plugin, 'get_user_commands'):
                     for cmd in plugin.get_user_commands():
                         command_to_plugin[cmd.name] = plugin
 
-        # Also check session plugin
         if hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
             session_plugin = self._jaato._session_plugin
             if hasattr(session_plugin, 'get_command_completions'):
@@ -706,13 +331,12 @@ class InteractiveClient:
             return
 
         def completion_provider(command: str, args: list) -> list:
-            """Query the appropriate plugin for command completions."""
             plugin = command_to_plugin.get(command)
             if plugin and hasattr(plugin, 'get_command_completions'):
                 return plugin.get_command_completions(command, args)
             return []
 
-        self._completer.set_command_completion_provider(
+        self._input_handler.set_command_completion_provider(
             completion_provider,
             set(command_to_plugin.keys())
         )
@@ -720,29 +344,23 @@ class InteractiveClient:
     def run_prompt(
         self,
         prompt: str,
-        on_output: 'Callable[[str, str, str], None]'
+        on_output: Optional[Callable[[str, str, str], None]] = None
     ) -> str:
         """Execute a prompt and return the model's response.
 
-        Tool calls will trigger interactive permission prompts.
-        Uses SDK-managed conversation history for multi-turn context.
-
         Args:
             prompt: The user's prompt text.
-            on_output: Callback for real-time output from model and plugins.
-                Signature: (source: str, text: str, mode: str) -> None
+            on_output: Optional callback for real-time output.
         """
         if not self._jaato:
             return "Error: Client not initialized"
 
-        self.log(f"\n[client] Sending prompt to model...")
+        self.log("\n[client] Sending prompt to model...")
 
         try:
             response = self._jaato.send_message(prompt, on_output)
-
             history_len = len(self._jaato.get_history())
             self.log(f"\n[client] Completed (history: {history_len} messages)")
-
             return response if response else '(No response text)'
 
         except KeyboardInterrupt:
@@ -757,39 +375,78 @@ class InteractiveClient:
         self._original_inputs = []
         self.log("[client] Conversation history cleared")
 
-    def _print_banner(self) -> None:
-        """Print the interactive client welcome banner."""
-        print("\n" + "=" * 60)
-        print("  Simple Interactive Client with Permission Prompts")
-        print("=" * 60)
-        print("\nEnter task descriptions for the model to execute.")
-        print("Tool calls will prompt for your approval.")
-        print("Use ↑/↓ arrows to navigate prompt history.")
-        if HAS_PROMPT_TOOLKIT and self._completer:
-            print("Commands auto-complete as you type (help, tools, reset, etc.).")
-            print("Use @path/to/file to reference files (completions appear as you type).")
-            print("Use /command to invoke slash commands (from .jaato/commands/).")
-        print("Type 'quit' or 'exit' to stop, 'help' for guidance.\n")
+    def _get_plugin_commands_by_plugin(self) -> Dict[str, list]:
+        """Collect plugin commands grouped by plugin name."""
+        commands_by_plugin: Dict[str, list] = {}
+
+        if self.registry:
+            for plugin_name in self.registry.list_exposed():
+                plugin = self.registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'get_user_commands'):
+                    commands = plugin.get_user_commands()
+                    if commands:
+                        commands_by_plugin[plugin_name] = commands
+
+        if self.permission_plugin and hasattr(self.permission_plugin, 'get_user_commands'):
+            commands = self.permission_plugin.get_user_commands()
+            if commands:
+                commands_by_plugin[self.permission_plugin.name] = commands
+
+        if self._jaato:
+            user_commands = self._jaato.get_user_commands()
+            session_cmds = [cmd for name, cmd in user_commands.items()
+                           if name in ('save', 'resume', 'sessions', 'delete-session', 'backtoturn')]
+            if session_cmds:
+                commands_by_plugin['session'] = session_cmds
+
+        return commands_by_plugin
+
+    def _get_all_tool_schemas(self) -> list:
+        """Get all tool schemas from registry and plugins."""
+        all_decls = []
+        if self.registry:
+            all_decls.extend(self.registry.get_exposed_tool_schemas())
+        if self.permission_plugin:
+            all_decls.extend(self.permission_plugin.get_tool_schemas())
+        if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
+            if hasattr(self._jaato._session_plugin, 'get_tool_schemas'):
+                all_decls.extend(self._jaato._session_plugin.get_tool_schemas())
+        return all_decls
+
+    def _export_session(self, filename: str) -> None:
+        """Export current session to a YAML file for replay."""
+        if not self._jaato:
+            print("\n[No session to export - client not initialized]")
+            return
+
+        history = self._jaato.get_history()
+        result = self._exporter.export_to_yaml(history, self._original_inputs, filename)
+
+        if result['success']:
+            print(f"\n[{result['message']}]")
+            print(f"  Steps: {result['step_count']} interaction(s) + quit")
+            print(f"  Replay with: python demo-scripts/run_demo.py {filename}")
+        else:
+            print(f"\n{result['error']}")
 
     def run_interactive(self, clear_history: bool = True, show_banner: bool = True) -> None:
         """Run the interactive prompt loop with multi-turn conversation.
 
         Args:
             clear_history: If True (default), clears conversation history at start.
-                          Set to False when continuing from an initial prompt.
             show_banner: If True (default), displays the welcome banner.
-                        Set to False if banner was already shown.
         """
         if show_banner:
-            self._print_banner()
+            self._presenter.print_banner(has_completion=self._input_handler.has_completion)
 
-        # Clear history at start of interactive session (unless continuing from initial prompt)
         if clear_history:
             self.clear_history()
 
+        prompt_str = self._presenter.format_prompt()
+
         while True:
             try:
-                user_input = self._get_user_input()
+                user_input = self._input_handler.get_input(prompt_str)
             except (EOFError, KeyboardInterrupt):
                 print("\nGoodbye!")
                 self._close_session()
@@ -804,11 +461,11 @@ class InteractiveClient:
                 break
 
             if user_input.lower() == 'help':
-                self._print_help()
+                self._presenter.print_help(self._get_plugin_commands_by_plugin())
                 continue
 
             if user_input.lower() == 'tools':
-                self._print_tools()
+                self._presenter.print_tools(self._get_all_tool_schemas())
                 continue
 
             if user_input.lower() == 'reset':
@@ -817,29 +474,31 @@ class InteractiveClient:
                 continue
 
             if user_input.lower() == 'history':
-                self._print_history()
+                history = self._jaato.get_history() if self._jaato else []
+                turn_accounting = self._jaato.get_turn_accounting() if self._jaato else []
+                turn_boundaries = self._jaato.get_turn_boundaries() if self._jaato else []
+                self._presenter.print_history(history, turn_accounting, turn_boundaries)
                 continue
 
             if user_input.lower() == 'context':
-                self._print_context()
+                if self._jaato:
+                    usage = self._jaato.get_context_usage()
+                    self._presenter.print_context(usage)
+                else:
+                    print("\n[Context tracking not available - client not initialized]")
                 continue
 
             if user_input.lower().startswith('export'):
-                # Parse optional filename: "export" or "export filename.yaml"
                 parts = user_input.split(maxsplit=1)
                 filename = parts[1] if len(parts) > 1 else "session_export.yaml"
-                # Strip @ prefix if user used file completion
                 if filename.startswith('@'):
                     filename = filename[1:]
                 self._export_session(filename)
                 continue
 
             # Check if input is a plugin-provided user command
-            # (includes 'plan' from todo plugin, 'listReferences', 'selectReferences' from references plugin)
             plugin_result = self._try_execute_plugin_command(user_input)
             if plugin_result is not None:
-                # Plugin command was executed, result already displayed
-                # Track for export as a local command (doesn't go to model directly)
                 self._original_inputs.append({"text": user_input, "local": True})
                 continue
 
@@ -847,20 +506,13 @@ class InteractiveClient:
             self._original_inputs.append({"text": user_input, "local": False})
 
             # Expand @file references to include file contents
-            expanded_prompt = self._expand_file_references(user_input)
+            expanded_prompt = self._input_handler.expand_file_references(user_input)
 
             # Define callback for real-time output display
-            model_prefix = self._c('Model>', 'bold') + ' '
-            continuation_indent = "       "  # 7 spaces to match "Model> " width
-
             def display_output(source: str, text: str, mode: str) -> None:
-                """Display output from model or plugins in real-time."""
                 if source == "model":
-                    # Model output gets the Model> prefix
-                    wrapped = self._wrap_text(text, prefix=continuation_indent, initial_prefix="")
-                    print(f"\n{model_prefix}{wrapped}")
+                    print(self._presenter.format_model_output(text))
                 else:
-                    # Plugin output is displayed as-is (no prefix)
                     print(text)
 
             # Execute the prompt with real-time output display
@@ -868,468 +520,7 @@ class InteractiveClient:
 
             # Display the final response (if any)
             if response and response != '(No response text)':
-                wrapped = self._wrap_text(response, prefix=continuation_indent, initial_prefix="")
-                print(f"\n{model_prefix}{wrapped}")
-
-    def _print_help(self) -> None:
-        """Print help information."""
-        print("""
-Commands (auto-complete as you type):
-  help          - Show this help message
-  tools         - List tools available to the model
-  reset         - Clear conversation history
-  history       - Show full conversation history
-  context       - Show context window usage
-  export [file] - Export session to YAML for replay (default: session_export.yaml)
-  quit          - Exit the client
-  exit          - Exit the client""")
-
-        # Dynamically list plugin-contributed commands
-        self._print_plugin_commands()
-
-        print("""
-When the model tries to use a tool, you'll see a permission prompt:
-  [y]es     - Allow this execution
-  [n]o      - Deny this execution
-  [a]lways  - Allow and remember for this session
-  [never]   - Deny and block for this session
-  [once]    - Allow just this once
-
-File references:
-  Use @path/to/file to include file contents in your prompt.
-  - @src/main.py      - Reference a file (contents included)
-  - @./config.json    - Reference with explicit relative path
-  - @~/documents/     - Reference with home directory
-  - @/absolute/path   - Absolute path reference
-  Completions appear automatically as you type after @.
-  Use ↑/↓ to navigate the dropdown, Enter or TAB to accept.
-
-Slash commands:
-  Use /command_name [args...] to invoke slash commands from .jaato/commands/.
-  - Type / to see available commands with descriptions
-  - Pass arguments after the command name: /review file.py
-  - Command files use {{$1}}, {{$2}} for parameter substitution
-  - Use {{$1:default}} for optional parameters with defaults
-  Example: "/summarize" or "/review src/main.py"
-
-Example prompts:
-  - "List files in the current directory"
-  - "Show me the git status"
-  - "Review @src/utils.py for issues"
-  - "Explain what @./README.md describes"
-  - "/review src/main.py" - Invoke slash command with argument
-
-Multi-turn conversation:
-  The model remembers previous exchanges in this session.
-  Use 'reset' to start a fresh conversation.
-
-Keyboard shortcuts:
-  ↑/↓       - Navigate prompt history (or completion menu)
-  ←/→       - Move cursor within line
-  Ctrl+A/E  - Jump to start/end of line
-  TAB/Enter - Accept selected completion
-  Escape    - Dismiss completion menu
-""")
-
-    def _print_tools(self) -> None:
-        """Print available tools."""
-        print("\nAvailable tools:")
-        # Tools from registry
-        for decl in self.registry.get_exposed_tool_schemas():
-            print(f"  - {decl.name}: {decl.description}")
-        # Tools from permission plugin
-        if self.permission_plugin:
-            for decl in self.permission_plugin.get_tool_schemas():
-                print(f"  - {decl.name}: {decl.description}")
-        # Tools from session plugin (if configured)
-        if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
-            if hasattr(self._jaato._session_plugin, 'get_tool_schemas'):
-                for decl in self._jaato._session_plugin.get_tool_schemas():
-                    print(f"  - {decl.name}: {decl.description}")
-        print()
-
-    def _print_plugin_commands(self) -> None:
-        """Print plugin-contributed user commands grouped by plugin."""
-        # Collect commands by plugin
-        commands_by_plugin: Dict[str, list] = {}
-
-        # Get commands from registry plugins
-        if self.registry:
-            for plugin_name in self.registry.list_exposed():
-                plugin = self.registry.get_plugin(plugin_name)
-                if plugin and hasattr(plugin, 'get_user_commands'):
-                    commands = plugin.get_user_commands()
-                    if commands:
-                        commands_by_plugin[plugin_name] = commands
-
-        # Get commands from permission plugin (not in registry)
-        if self.permission_plugin and hasattr(self.permission_plugin, 'get_user_commands'):
-            commands = self.permission_plugin.get_user_commands()
-            if commands:
-                commands_by_plugin[self.permission_plugin.name] = commands
-
-        # Get commands from session plugin (not in registry)
-        if self._jaato:
-            user_commands = self._jaato.get_user_commands()
-            # Filter to session commands
-            session_cmds = [cmd for name, cmd in user_commands.items()
-                           if name in ('save', 'resume', 'sessions', 'delete-session', 'backtoturn')]
-            if session_cmds:
-                commands_by_plugin['session'] = session_cmds
-
-        if not commands_by_plugin:
-            return
-
-        print("\nPlugin-provided user commands:")
-        for plugin_name, commands in sorted(commands_by_plugin.items()):
-            print(f"  [{plugin_name}]")
-            for cmd in commands:
-                # Calculate padding for alignment
-                padding = max(2, 16 - len(cmd.name))
-                shared_marker = " [shared with model]" if cmd.share_with_model else ""
-                print(f"    {cmd.name}{' ' * padding}- {cmd.description}{shared_marker}")
-
-    def _print_context(self) -> None:
-        """Print context window usage statistics."""
-        if not self._jaato:
-            print("\n[Context tracking not available - client not initialized]")
-            return
-
-        usage = self._jaato.get_context_usage()
-
-        print(f"\n{'=' * 50}")
-        print(f"  Context Window Usage")
-        print(f"{'=' * 50}")
-        print(f"  Model: {usage['model']}")
-        print(f"  Context limit: {usage['context_limit']:,} tokens")
-        print()
-
-        # Visual progress bar
-        bar_width = 40
-        filled = int(bar_width * usage['percent_used'] / 100)
-        bar = '█' * filled + '░' * (bar_width - filled)
-        print(f"  [{bar}] {usage['percent_used']:.2f}%")
-        print()
-
-        # Token breakdown
-        print(f"  Tokens used:     {usage['total_tokens']:,}")
-        print(f"    - Prompt:      {usage['prompt_tokens']:,}")
-        print(f"    - Output:      {usage['output_tokens']:,}")
-        print(f"  Tokens remaining: {usage['tokens_remaining']:,}")
-        print(f"  Turns: {usage['turns']}")
-        print(f"{'=' * 50}")
-        print()
-
-    def _print_history(self) -> None:
-        """Print full conversation history with token accounting and turn numbers.
-
-        Turn numbers are shown prominently to support the 'backtoturn' command.
-        """
-        history = self._jaato.get_history() if self._jaato else []
-        turn_accounting = self._jaato.get_turn_accounting() if self._jaato else []
-        turn_boundaries = self._jaato.get_turn_boundaries() if self._jaato else []
-        count = len(history)
-        total_turns = len(turn_boundaries)
-
-        print(f"\n{'=' * 60}")
-        print(f"  Conversation History: {count} message(s), {total_turns} turn(s)")
-        print(f"  Tip: Use 'backtoturn <turn_id>' to revert to a specific turn")
-        print(f"{'=' * 60}")
-
-        if count == 0:
-            print("  (empty)")
-            print()
-            return
-
-        # Track which turn we're in (user text messages start a new turn)
-        current_turn = 0
-        turn_index = 0
-
-        for i, msg in enumerate(history):
-            role = msg.role
-            parts = msg.parts
-
-            # Check if this is a new user turn (user message with text, not function response)
-            is_user_text = (role == 'user' and parts and parts[0].text)
-
-            # Print turn header if this starts a new turn
-            if is_user_text:
-                current_turn += 1
-                print(f"\n{'─' * 60}")
-                # Show timestamp in turn header if available
-                turn_idx = current_turn - 1  # 0-based index
-                if turn_idx < len(turn_accounting) and 'start_time' in turn_accounting[turn_idx]:
-                    start_time = turn_accounting[turn_idx]['start_time']
-                    # Parse ISO format and display nicely
-                    try:
-                        from datetime import datetime
-                        dt = datetime.fromisoformat(start_time)
-                        time_str = dt.strftime('%H:%M:%S')
-                        print(f"  ▶ TURN {current_turn}  [{time_str}]")
-                    except (ValueError, TypeError):
-                        print(f"  ▶ TURN {current_turn}")
-                else:
-                    print(f"  ▶ TURN {current_turn}")
-                print(f"{'─' * 60}")
-
-            # Print the message
-            role_label = "USER" if role == 'user' else "MODEL" if role == 'model' else role.upper()
-            print(f"\n  [{role_label}]")
-
-            if not parts:
-                print("  (no content)")
-            else:
-                for part in parts:
-                    self._print_part(part)
-
-            # Show token accounting at end of turn (after final model text response)
-            # A turn ends when the next message is a user text message or at end of history
-            is_last = (i == len(history) - 1)
-            next_is_user_text = False
-            if not is_last:
-                next_msg = history[i + 1]
-                next_is_user_text = (next_msg.role == 'user' and
-                                    next_msg.parts and next_msg.parts[0].text)
-
-            if (is_last or next_is_user_text) and turn_index < len(turn_accounting):
-                turn = turn_accounting[turn_index]
-                # Token counts
-                print(f"  ─── tokens: {turn['prompt']} in / {turn['output']} out / {turn['total']} total")
-                # Timing info (if available)
-                if 'duration_seconds' in turn and turn['duration_seconds'] is not None:
-                    duration = turn['duration_seconds']
-                    print(f"  ─── duration: {duration:.2f}s")
-                    # Show function call timing breakdown
-                    func_calls = turn.get('function_calls', [])
-                    if func_calls:
-                        fc_total = sum(fc['duration_seconds'] for fc in func_calls)
-                        model_time = duration - fc_total
-                        print(f"      model: {model_time:.2f}s, tools: {fc_total:.2f}s ({len(func_calls)} call(s))")
-                        for fc in func_calls:
-                            print(f"        - {fc['name']}: {fc['duration_seconds']:.2f}s")
-                turn_index += 1
-
-        # Print totals
-        if turn_accounting:
-            total_prompt = sum(t['prompt'] for t in turn_accounting)
-            total_output = sum(t['output'] for t in turn_accounting)
-            total_all = sum(t['total'] for t in turn_accounting)
-            total_duration = sum(t.get('duration_seconds', 0) or 0 for t in turn_accounting)
-            total_fc_time = sum(
-                sum(fc['duration_seconds'] for fc in t.get('function_calls', []))
-                for t in turn_accounting
-            )
-            print(f"\n{'=' * 60}")
-            print(f"  Total: {total_prompt} in / {total_output} out / {total_all} total ({total_turns} turns)")
-            if total_duration > 0:
-                total_model_time = total_duration - total_fc_time
-                print(f"  Time:  {total_duration:.2f}s total (model: {total_model_time:.2f}s, tools: {total_fc_time:.2f}s)")
-            print(f"{'=' * 60}")
-
-        print()
-
-    def _print_part(self, part) -> None:
-        """Print a single content part."""
-        # Text content
-        if part.text:
-            text = part.text
-            # Truncate very long text
-            if len(text) > 500:
-                text = text[:500] + f"... [{len(part.text)} chars total]"
-            print(f"  {text}")
-
-        # Function call
-        elif part.function_call:
-            fc = part.function_call
-            name = fc.name
-            args = fc.args
-            # Format args compactly
-            args_str = str(args)
-            if len(args_str) > 200:
-                args_str = args_str[:200] + "..."
-            print(f"  📤 CALL: {name}({args_str})")
-
-        # Function response
-        elif part.function_response:
-            fr = part.function_response
-            name = fr.name
-            response = fr.result
-
-            # Extract and display permission info first (on separate line)
-            if isinstance(response, dict):
-                perm = response.get('_permission')
-                if perm:
-                    decision = perm.get('decision', '?')
-                    reason = perm.get('reason', '')
-                    method = perm.get('method', '')
-                    icon = '✓' if decision == 'allowed' else '✗'
-                    print(f"  {icon} Permission: {decision} via {method}")
-                    if reason:
-                        print(f"    Reason: {reason}")
-
-            # Filter out _permission from display response
-            if isinstance(response, dict):
-                display_response = {k: v for k, v in response.items() if k != '_permission'}
-            else:
-                display_response = response
-
-            # Format response compactly
-            resp_str = str(display_response)
-            if len(resp_str) > 300:
-                resp_str = resp_str[:300] + "..."
-            print(f"  📥 RESULT: {name} → {resp_str}")
-
-        else:
-            # Unknown part type
-            print(f"  (unknown part: {type(part).__name__})")
-
-    def _export_session(self, filename: str) -> None:
-        """Export current session to a YAML file for replay.
-
-        Generates a YAML file in the format expected by demo-scripts/run_demo.py,
-        allowing the session to be replayed later. Uses original user inputs
-        (before file reference expansion) for cleaner, replayable output.
-
-        Args:
-            filename: Path to the output YAML file.
-        """
-        try:
-            import yaml
-        except ImportError:
-            print("\nError: PyYAML is required for export. Install with: pip install pyyaml")
-            return
-
-        if not self._jaato:
-            print("\n[No session to export - client not initialized]")
-            return
-
-        if not self._original_inputs:
-            print("\n[No conversation history to export]")
-            return
-
-        # Extract permission decisions from history, grouped by user turn
-        history = self._jaato.get_history()
-        turn_permissions: list[list[str]] = []
-        current_permissions: list[str] = []
-        in_user_turn = False
-
-        for msg in history:
-            role = msg.role
-            parts = msg.parts
-
-            if role == 'user':
-                # Check if this is a user text message (starts new turn)
-                for part in parts:
-                    if part.text:
-                        text = part.text.strip()
-                        if text.startswith('[User executed command:'):
-                            continue
-                        # Save previous turn's permissions and start new turn
-                        if in_user_turn:
-                            turn_permissions.append(current_permissions)
-                        current_permissions = []
-                        in_user_turn = True
-
-            elif role == 'model':
-                # Collect permission data from function responses
-                for part in parts:
-                    if part.function_response:
-                        fr = part.function_response
-                        response = fr.result
-                        if isinstance(response, dict):
-                            perm = response.get('_permission')
-                            if perm:
-                                decision = perm.get('decision', '')
-                                method = perm.get('method', '')
-                                perm_value = self._map_permission_to_yaml(decision, method)
-                                current_permissions.append(perm_value)
-
-        # Don't forget the last turn's permissions
-        if in_user_turn:
-            turn_permissions.append(current_permissions)
-
-        # Build steps from original inputs with matched permissions
-        final_steps = []
-        model_turn_index = 0  # Track index for model-bound prompts only
-        for input_entry in self._original_inputs:
-            user_input = input_entry["text"]
-            is_local = input_entry["local"]
-
-            if is_local:
-                # Local commands (plugin commands like "plan") don't need permissions
-                final_steps.append({
-                    'type': user_input,
-                    'local': True,
-                })
-            else:
-                # Model-bound prompts may have permissions
-                perms = turn_permissions[model_turn_index] if model_turn_index < len(turn_permissions) else []
-                model_turn_index += 1
-
-                # Determine permission value
-                permission = 'y'  # Default
-                if perms:
-                    # Use the most permissive permission granted
-                    # Priority: 'a' (always) > 'y' (yes) > 'n' (no)
-                    if 'a' in perms:
-                        permission = 'a'
-                    elif 'y' in perms or 'once' in perms:
-                        permission = 'y'
-                    elif 'n' in perms:
-                        permission = 'n'
-                    elif 'never' in perms:
-                        permission = 'never'
-
-                final_steps.append({
-                    'type': user_input,
-                    'permission': permission,
-                })
-
-        # Add quit step
-        final_steps.append({'type': 'quit', 'delay': 0.08})
-
-        # Build the YAML document
-        from datetime import datetime
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
-
-        export_data = {
-            'name': f'Session Export [{timestamp}]',
-            'timeout': 120,
-            'steps': final_steps,
-        }
-
-        # Write to file
-        try:
-            with open(filename, 'w') as f:
-                yaml.dump(export_data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
-            print(f"\n[Session exported to: {filename}]")
-            print(f"  Steps: {len(final_steps) - 1} interaction(s) + quit")
-            print(f"  Replay with: python demo-scripts/run_demo.py {filename}")
-        except IOError as e:
-            print(f"\nError writing file: {e}")
-
-    def _map_permission_to_yaml(self, decision: str, method: str) -> str:
-        """Map permission decision/method to YAML permission value.
-
-        Args:
-            decision: 'allowed' or 'denied'
-            method: 'user', 'remembered', 'whitelist', etc.
-
-        Returns:
-            YAML permission value: 'y', 'n', 'a', 'never', 'once'
-        """
-        if decision == 'allowed':
-            if method == 'remembered':
-                return 'a'  # Was 'always' - permission remembered
-            elif method == 'whitelist':
-                return 'a'  # Auto-approved, use 'always' for replay
-            else:
-                return 'y'  # User approved this one
-        else:  # denied
-            if method == 'remembered':
-                return 'never'  # Was 'never' - denial remembered
-            else:
-                return 'n'  # User denied this one
+                print(self._presenter.format_model_output(response))
 
     def shutdown(self) -> None:
         """Clean up resources."""
@@ -1337,7 +528,6 @@ Keyboard shortcuts:
             self.registry.unexpose_all()
         if self.permission_plugin:
             self.permission_plugin.shutdown()
-        # Note: todo_plugin is managed via registry.unexpose_all()
 
 
 def main():
@@ -1380,19 +570,13 @@ def main():
         if args.prompt:
             # Single prompt mode - run and exit
             response = client.run_prompt(args.prompt)
-            # Word-wrap the response to fit terminal width
-            continuation_indent = "       "  # 7 spaces to match "Model> " width
-            wrapped = client._wrap_text(response, prefix=continuation_indent, initial_prefix="")
-            print(f"\n{ANSI_BOLD}Model>{ANSI_RESET} {wrapped}")
+            print(client._presenter.format_model_output(response))
         elif args.initial_prompt:
             # Initial prompt mode - show banner first, run prompt, then continue interactively
-            client._print_banner()
-            readline.add_history(args.initial_prompt)  # Add to history for ↑ recall
+            client._presenter.print_banner(has_completion=client._input_handler.has_completion)
+            readline.add_history(args.initial_prompt)
             response = client.run_prompt(args.initial_prompt)
-            # Word-wrap the response to fit terminal width
-            continuation_indent = "       "  # 7 spaces to match "Model> " width
-            wrapped = client._wrap_text(response, prefix=continuation_indent, initial_prefix="")
-            print(f"\n{ANSI_BOLD}Model>{ANSI_RESET} {wrapped}")
+            print(client._presenter.format_model_output(response))
             client.run_interactive(clear_history=False, show_banner=False)
         else:
             # Interactive mode
