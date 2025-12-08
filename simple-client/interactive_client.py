@@ -194,7 +194,7 @@ class InteractiveClient:
                 auto_suggest=AutoSuggestFromHistory(),
                 style=self._pt_style,
                 complete_while_typing=True,
-                refresh_interval=0,
+                complete_in_thread=True,  # More responsive completions
                 output=output,
             )
             return session.prompt(formatted_prompt).strip()
