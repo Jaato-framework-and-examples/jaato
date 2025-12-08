@@ -521,7 +521,7 @@ class MultiToolPlugin:
 If your plugin provides commands that users can invoke directly (bypassing the model):
 
 ```python
-from shared.plugins.base import UserCommand
+from shared.plugins.base import UserCommand, CommandCompletion
 
 class SearchPlugin:
     @property
@@ -555,6 +555,11 @@ class SearchPlugin:
             UserCommand("stats", "Show index statistics", share_with_model=False),
         ]
 
+    def get_command_completions(self, command: str, args: List[str]) -> List[CommandCompletion]:
+        # Optional: provide autocompletion for command arguments
+        # Return empty list if no completions available
+        return []
+
     # ... other methods ...
 ```
 
@@ -567,6 +572,46 @@ This is useful for:
 
 - **Shared commands** (`share_with_model=True`): Search results, listing data, status that informs the model
 - **User-only commands** (`share_with_model=False`): Administrative tasks, health checks, cache operations
+
+### Command Argument Completions
+
+Plugins can optionally provide autocompletion for their user command arguments by implementing `get_command_completions()`:
+
+```python
+from shared.plugins.base import UserCommand, CommandCompletion
+
+class ConfigPlugin:
+    def get_user_commands(self) -> List[UserCommand]:
+        return [
+            UserCommand("config", "Manage configuration: get <key>, set <key> <value>"),
+        ]
+
+    def get_command_completions(self, command: str, args: List[str]) -> List[CommandCompletion]:
+        """Provide completions for config command arguments."""
+        if command != "config":
+            return []
+
+        subcommands = [
+            CommandCompletion("get", "Get a config value"),
+            CommandCompletion("set", "Set a config value"),
+        ]
+
+        if not args:
+            return subcommands
+
+        if len(args) == 1:
+            # Partial subcommand - filter matches
+            partial = args[0].lower()
+            return [c for c in subcommands if c.value.startswith(partial)]
+
+        return []
+```
+
+The client will call `get_command_completions()` when the user types a command and presses Tab:
+- `command`: The command name being typed (e.g., "config")
+- `args`: List of arguments typed so far (may include partial input)
+
+Return a list of `CommandCompletion(value, description)` tuples matching the current input.
 
 ### Plugin with Background Resources
 

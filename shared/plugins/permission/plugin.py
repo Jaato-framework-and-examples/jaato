@@ -18,7 +18,7 @@ from .actors import (
     ConsoleActor,
     create_actor,
 )
-from ..base import UserCommand, PermissionDisplayInfo, OutputCallback
+from ..base import UserCommand, CommandCompletion, PermissionDisplayInfo, OutputCallback
 
 # Import TYPE_CHECKING to avoid circular imports
 from typing import TYPE_CHECKING
@@ -250,6 +250,50 @@ If a tool is denied, do not attempt to execute it."""
                 share_with_model=False,
             )
         ]
+
+    def get_command_completions(
+        self, command: str, args: List[str]
+    ) -> List[CommandCompletion]:
+        """Return completion options for permissions command arguments.
+
+        Provides autocompletion for:
+        - Subcommands: show, allow, deny, default, clear
+        - Default policy options: allow, deny, ask
+        """
+        if command != "permissions":
+            return []
+
+        # Subcommand completions
+        subcommands = [
+            CommandCompletion("show", "Display current effective policy"),
+            CommandCompletion("allow", "Add tool/pattern to session whitelist"),
+            CommandCompletion("deny", "Add tool/pattern to session blacklist"),
+            CommandCompletion("default", "Set session default policy"),
+            CommandCompletion("clear", "Reset all session modifications"),
+        ]
+
+        # Policy options for "default" subcommand
+        default_options = [
+            CommandCompletion("allow", "Auto-approve all tools"),
+            CommandCompletion("deny", "Auto-deny all tools"),
+            CommandCompletion("ask", "Prompt for each tool"),
+        ]
+
+        if not args:
+            # No args yet - return all subcommands
+            return subcommands
+
+        if len(args) == 1:
+            # Partial subcommand - filter matching ones
+            partial = args[0].lower()
+            return [c for c in subcommands if c.value.startswith(partial)]
+
+        if len(args) == 2 and args[0].lower() == "default":
+            # "permissions default <partial>" - filter policy options
+            partial = args[1].lower()
+            return [c for c in default_options if c.value.startswith(partial)]
+
+        return []
 
     def execute_permissions(self, args: Dict[str, Any]) -> str:
         """Execute the permissions user command.

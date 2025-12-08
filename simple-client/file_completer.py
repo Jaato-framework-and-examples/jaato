@@ -677,80 +677,110 @@ class SessionIdCompleter(Completer):
                     )
 
 
-class PermissionsCompleter(Completer):
-    """Complete permissions command subcommands and options.
+class PluginCommandCompleter(Completer):
+    """Complete user command arguments by querying plugins.
 
-    Triggers completion for:
-    - "permissions " -> show, allow, deny, default, clear (subcommands)
-    - "permissions default " -> allow, deny, ask (policy options)
+    Dynamically fetches completion options from plugins that implement
+    the optional get_command_completions() method. This decouples the
+    client from plugin-specific completion logic.
 
     Example usage:
-        "permissions de" -> completes to "default" or "deny"
-        "permissions default a" -> completes to "allow" or "ask"
+        "permissions de" -> queries permission plugin for completions
+        "permissions default a" -> queries permission plugin for policy options
     """
 
-    # Subcommands for the permissions command
-    SUBCOMMANDS = [
-        ("show", "Display current effective policy"),
-        ("allow", "Add tool/pattern to session whitelist"),
-        ("deny", "Add tool/pattern to session blacklist"),
-        ("default", "Set session default policy"),
-        ("clear", "Reset all session modifications"),
-    ]
+    def __init__(self, completion_provider: Optional[Callable[[str, list], list]] = None):
+        """Initialize the plugin command completer.
 
-    # Options for "permissions default"
-    DEFAULT_OPTIONS = [
-        ("allow", "Auto-approve all tools"),
-        ("deny", "Auto-deny all tools"),
-        ("ask", "Prompt for each tool"),
-    ]
+        Args:
+            completion_provider: Callback that takes (command, args) and returns
+                                list of (value, description) tuples from plugins.
+        """
+        self._completion_provider = completion_provider
+        self._command_names: set[str] = set()
+
+    def set_completion_provider(
+        self, provider: Callable[[str, list], list]
+    ) -> None:
+        """Set the completion provider callback.
+
+        Args:
+            provider: Callback (command, args) -> [(value, description), ...]
+        """
+        self._completion_provider = provider
+
+    def set_command_names(self, names: set[str]) -> None:
+        """Set the set of command names that have completions.
+
+        Args:
+            names: Set of command names (e.g., {"permissions", "sessions"})
+        """
+        self._command_names = names
 
     def get_completions(
         self, document: Document, complete_event
     ) -> Iterable[Completion]:
-        """Get completions for permissions command."""
+        """Get completions for plugin commands."""
+        if not self._completion_provider:
+            return
+
         text = document.text_before_cursor
         text_lower = text.lower()
 
-        # Check for "permissions default " pattern first (more specific)
-        if text_lower.startswith('permissions default '):
-            arg_text = text[len('permissions default '):]
-            for option, description in self.DEFAULT_OPTIONS:
-                if option.startswith(arg_text.lower()):
-                    yield Completion(
-                        option,
-                        start_position=-len(arg_text),
-                        display=option,
-                        display_meta=description,
-                    )
+        # Check if input starts with a known command followed by space
+        command_match = None
+        for cmd in self._command_names:
+            if text_lower.startswith(cmd + ' '):
+                command_match = cmd
+                break
+
+        if not command_match:
             return
 
-        # Check for "permissions " pattern (subcommand completion)
-        if text_lower.startswith('permissions '):
-            arg_text = text[len('permissions '):]
-            # Don't complete if there's already a full subcommand with space
-            if ' ' in arg_text:
-                return
-            for subcommand, description in self.SUBCOMMANDS:
-                if subcommand.startswith(arg_text.lower()):
-                    yield Completion(
-                        subcommand,
-                        start_position=-len(arg_text),
-                        display=subcommand,
-                        display_meta=description,
-                    )
+        # Extract arguments after the command
+        arg_text = text[len(command_match) + 1:]  # +1 for space
+        args = arg_text.split() if arg_text.strip() else []
+
+        # If there's trailing text being typed (no trailing space), it's a partial arg
+        if arg_text and not arg_text.endswith(' ') and args:
+            partial = args[-1]
+            args_for_query = args  # Include partial in query
+        else:
+            partial = ""
+            args_for_query = args
+
+        # Query plugin for completions
+        try:
+            completions = self._completion_provider(command_match, args_for_query)
+        except Exception:
+            return
+
+        # Yield matching completions
+        for item in completions:
+            # Handle both tuple and object with value/description
+            if hasattr(item, 'value'):
+                value, description = item.value, item.description
+            else:
+                value, description = item[0], item[1] if len(item) > 1 else ""
+
+            yield Completion(
+                value,
+                start_position=-len(partial),
+                display=value,
+                display_meta=description,
+            )
 
 
 class CombinedCompleter(Completer):
-    """Combined completer for commands, file references, slash commands, and session IDs.
+    """Combined completer for commands, file references, slash commands, and plugin commands.
 
     Merges CommandCompleter, AtFileCompleter, SlashCommandCompleter,
-    SessionIdCompleter, and PermissionsCompleter to provide:
+    SessionIdCompleter, and PluginCommandCompleter to provide:
     - Command completion at line start (help, tools, reset, etc.)
     - File path completion after @ symbols
     - Slash command completion after / symbols (from .jaato/commands/)
     - Session ID completion after session commands (delete-session, resume)
-    - Permissions subcommand and option completion
+    - Plugin command argument completion (via get_command_completions protocol)
 
     This allows seamless autocompletion for all use cases.
     """
@@ -788,7 +818,21 @@ class CombinedCompleter(Completer):
             base_path=base_path,
         )
         self._session_completer = SessionIdCompleter(session_provider)
-        self._permissions_completer = PermissionsCompleter()
+        self._plugin_command_completer = PluginCommandCompleter()
+
+    def set_command_completion_provider(
+        self,
+        provider: Callable[[str, list], list],
+        command_names: set[str]
+    ) -> None:
+        """Set the plugin command completion provider.
+
+        Args:
+            provider: Callback (command, args) -> [(value, description), ...]
+            command_names: Set of command names that support completion.
+        """
+        self._plugin_command_completer.set_completion_provider(provider)
+        self._plugin_command_completer.set_command_names(command_names)
 
     def set_session_provider(self, provider: Callable[[], list]) -> None:
         """Set the session provider callback for session ID completion.
@@ -819,9 +863,9 @@ class CombinedCompleter(Completer):
         # AtFileCompleter will only yield if @ is present
         # SlashCommandCompleter will only yield if / is present at start of word
         # SessionIdCompleter will only yield after session commands (delete-session, resume)
-        # PermissionsCompleter will only yield for permissions command subcommands/options
+        # PluginCommandCompleter will yield for plugin commands with completions
         yield from self._command_completer.get_completions(document, complete_event)
         yield from self._file_completer.get_completions(document, complete_event)
         yield from self._slash_completer.get_completions(document, complete_event)
         yield from self._session_completer.get_completions(document, complete_event)
-        yield from self._permissions_completer.get_completions(document, complete_event)
+        yield from self._plugin_command_completer.get_completions(document, complete_event)

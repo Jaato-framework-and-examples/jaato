@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 from google.genai import types
 
 from .config import SubagentConfig, SubagentProfile, SubagentResult
-from ..base import UserCommand
+from ..base import UserCommand, CommandCompletion
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +275,15 @@ class SubagentPlugin:
                 share_with_model=True  # Model should know what profiles are available
             ),
         ]
+
+    def get_command_completions(
+        self, command: str, args: List[str]
+    ) -> List[CommandCompletion]:
+        """Return completion options for subagent command arguments.
+
+        The 'profiles' command takes no arguments, so no completions needed.
+        """
+        return []
 
     def add_profile(self, profile: SubagentProfile) -> None:
         """Add a subagent profile dynamically.
