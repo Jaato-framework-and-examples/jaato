@@ -257,25 +257,8 @@ class InteractiveClient:
         if not command_name:
             return None
 
-        # Map command arguments to expected parameter names
-        args = {}
-        if arg_value:
-            # Command-specific argument mapping
-            # Some commands expect a single arg, others expect a list
-            arg_mapping = {
-                "backtoturn": "turn_id",
-                "resume": "session_id",
-                "delete-session": "session_id",
-            }
-            # Commands that expect args as a list (for subcommands)
-            list_arg_commands = {"permissions"}
-
-            if command_name.lower() in list_arg_commands:
-                # Split into list of arguments
-                args["args"] = arg_value.split()
-            else:
-                param_name = arg_mapping.get(command_name.lower(), "arg")
-                args[param_name] = arg_value
+        # Always pass arguments as a list - plugins handle their own parsing
+        args = {"args": arg_value.split() if arg_value else []}
 
         # For save command, include user inputs for prompt history restoration
         if command_name.lower() == "save":

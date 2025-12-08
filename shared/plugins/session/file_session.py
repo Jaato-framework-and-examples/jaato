@@ -431,7 +431,9 @@ class FileSessionPlugin:
         if not self._client:
             return {"status": "error", "message": "Session plugin not properly configured"}
 
-        raw_session_id = args.get("session_id")
+        # Get session_id from standardized args list
+        cmd_args = args.get("args", [])
+        raw_session_id = cmd_args[0] if cmd_args else None
 
         try:
             if raw_session_id is not None:
@@ -509,7 +511,9 @@ class FileSessionPlugin:
         if not self._client:
             return {"status": "error", "message": "Session plugin not properly configured"}
 
-        raw_session_id = args.get("session_id")
+        # Get session_id from standardized args list
+        cmd_args = args.get("args", [])
+        raw_session_id = cmd_args[0] if cmd_args else None
         if raw_session_id is None:
             return {"status": "error", "message": "Usage: delete-session <session_id or index>"}
 
@@ -534,7 +538,9 @@ class FileSessionPlugin:
         if not self._client:
             return {"status": "error", "message": "Session plugin not properly configured"}
 
-        turn_id = args.get("turn_id")
+        # Get turn_id from standardized args list
+        cmd_args = args.get("args", [])
+        turn_id = cmd_args[0] if cmd_args else None
         if turn_id is None:
             # Show current turn count and usage
             try:
