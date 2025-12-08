@@ -234,7 +234,7 @@ def run_with_ledger(
     jaato.configure_tools(registry, ledger=ledger)
 
     try:
-        response = jaato.send_message(prompt, on_intermediate_response=lambda _: None)
+        response = jaato.send_message(prompt, on_output=lambda s, t, m: None)
         text = response
         error = None
     except Exception as exc:
