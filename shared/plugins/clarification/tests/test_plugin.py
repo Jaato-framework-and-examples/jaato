@@ -51,21 +51,21 @@ class TestClarificationPluginInitialization:
         assert plugin._actor is None
 
 
-class TestClarificationPluginFunctionDeclarations:
-    """Tests for function declarations."""
+class TestClarificationPluginToolSchemas:
+    """Tests for tool schemas."""
 
-    def test_get_function_declarations(self):
+    def test_get_tool_schemas(self):
         plugin = ClarificationPlugin()
-        declarations = plugin.get_function_declarations()
+        schemas = plugin.get_tool_schemas()
 
-        assert len(declarations) == 1
-        assert declarations[0].name == "request_clarification"
+        assert len(schemas) == 1
+        assert schemas[0].name == "request_clarification"
 
     def test_request_clarification_schema(self):
         plugin = ClarificationPlugin()
-        declarations = plugin.get_function_declarations()
-        decl = declarations[0]
-        schema = decl.parameters_json_schema
+        schemas = plugin.get_tool_schemas()
+        schema_obj = schemas[0]
+        schema = schema_obj.parameters
 
         assert schema["type"] == "object"
         assert "context" in schema["properties"]
@@ -75,8 +75,8 @@ class TestClarificationPluginFunctionDeclarations:
 
     def test_question_schema_structure(self):
         plugin = ClarificationPlugin()
-        declarations = plugin.get_function_declarations()
-        schema = declarations[0].parameters_json_schema
+        schemas = plugin.get_tool_schemas()
+        schema = schemas[0].parameters
 
         question_schema = schema["properties"]["questions"]["items"]
         assert "text" in question_schema["properties"]
@@ -87,8 +87,8 @@ class TestClarificationPluginFunctionDeclarations:
 
     def test_question_type_enum(self):
         plugin = ClarificationPlugin()
-        declarations = plugin.get_function_declarations()
-        schema = declarations[0].parameters_json_schema
+        schemas = plugin.get_tool_schemas()
+        schema = schemas[0].parameters
 
         question_type_schema = schema["properties"]["questions"]["items"]["properties"]["question_type"]
         assert "enum" in question_type_schema

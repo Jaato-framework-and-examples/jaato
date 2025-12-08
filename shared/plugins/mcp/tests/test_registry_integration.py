@@ -92,7 +92,7 @@ class TestRegistryMCPToolDeclarations:
 
         # Without .mcp.json or MCP servers, no dynamic tools are discovered
         # The plugin is exposed but has no tools from servers
-        declarations = registry.get_exposed_declarations()
+        schemas = registry.get_exposed_tool_schemas()
 
         # This verifies the registry integration works even with empty tools
         # The MCP plugin should be exposed even if it has no tools

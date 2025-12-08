@@ -58,21 +58,21 @@ class TestCLIPluginInitialization:
         assert plugin._extra_paths == []
 
 
-class TestCLIPluginFunctionDeclarations:
-    """Tests for function declarations."""
+class TestCLIPluginToolSchemas:
+    """Tests for tool schemas."""
 
-    def test_get_function_declarations(self):
+    def test_get_tool_schemas(self):
         plugin = CLIToolPlugin()
-        declarations = plugin.get_function_declarations()
+        schemas = plugin.get_tool_schemas()
 
-        assert len(declarations) == 1
-        assert declarations[0].name == "cli_based_tool"
+        assert len(schemas) == 1
+        assert schemas[0].name == "cli_based_tool"
 
     def test_cli_based_tool_schema(self):
         plugin = CLIToolPlugin()
-        declarations = plugin.get_function_declarations()
-        cli_tool = declarations[0]
-        schema = cli_tool.parameters_json_schema
+        schemas = plugin.get_tool_schemas()
+        cli_tool = schemas[0]
+        schema = cli_tool.parameters
 
         assert schema["type"] == "object"
         assert "command" in schema["properties"]
@@ -81,7 +81,7 @@ class TestCLIPluginFunctionDeclarations:
 
     def test_cli_based_tool_description(self):
         plugin = CLIToolPlugin()
-        declarations = plugin.get_function_declarations()
+        declarations = plugin.get_tool_schemas()
         cli_tool = declarations[0]
 
         assert cli_tool.description == "Execute a local CLI command"

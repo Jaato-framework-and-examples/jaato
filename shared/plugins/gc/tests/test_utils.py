@@ -1,32 +1,33 @@
 """Tests for GC utility functions."""
 
 import pytest
-from google.genai import types
 
 from shared.plugins.gc.utils import (
     Turn,
     split_into_turns,
     flatten_turns,
-    estimate_content_tokens,
+    estimate_message_tokens,
     estimate_turn_tokens,
     estimate_history_tokens,
-    create_summary_content,
-    create_gc_notification_content,
+    create_summary_message,
+    create_gc_notification_message,
     get_preserved_indices,
 )
+from shared.plugins.model_provider.types import Message, Part, Role, FunctionCall, ToolResult
 
 
-def make_content(role: str, text: str) -> types.Content:
-    """Helper to create Content objects."""
-    return types.Content(
-        role=role,
-        parts=[types.Part(text=text)]
+def make_message(role: str, text: str) -> Message:
+    """Helper to create Message objects."""
+    r = Role.USER if role == "user" else Role.MODEL
+    return Message(
+        role=r,
+        parts=[Part(text=text)]
     )
 
 
 class TestTurn:
     def test_turn_creation(self):
-        contents = [make_content("user", "Hello")]
+        contents = [make_message("user", "Hello")]
         turn = Turn(index=0, contents=contents, estimated_tokens=10)
 
         assert turn.index == 0
@@ -45,7 +46,7 @@ class TestSplitIntoTurns:
         assert turns == []
 
     def test_single_user_message(self):
-        history = [make_content("user", "Hello")]
+        history = [make_message("user", "Hello")]
         turns = split_into_turns(history)
 
         assert len(turns) == 1
@@ -54,8 +55,8 @@ class TestSplitIntoTurns:
 
     def test_user_model_pair(self):
         history = [
-            make_content("user", "Hello"),
-            make_content("model", "Hi there!"),
+            make_message("user", "Hello"),
+            make_message("model", "Hi there!"),
         ]
         turns = split_into_turns(history)
 
@@ -64,10 +65,10 @@ class TestSplitIntoTurns:
 
     def test_multiple_turns(self):
         history = [
-            make_content("user", "Hello"),
-            make_content("model", "Hi!"),
-            make_content("user", "How are you?"),
-            make_content("model", "I'm good!"),
+            make_message("user", "Hello"),
+            make_message("model", "Hi!"),
+            make_message("user", "How are you?"),
+            make_message("model", "I'm good!"),
         ]
         turns = split_into_turns(history)
 
@@ -77,20 +78,23 @@ class TestSplitIntoTurns:
 
     def test_function_response_grouped_with_turn(self):
         # Function responses have role='user' but should not start new turn
-        fc_part = types.Part.from_function_response(
+        fc_result = ToolResult(
+            call_id="test_id",
             name="test_func",
-            response={"result": "ok"}
+            result={"result": "ok"}
         )
+        fc_part = Part.from_function_response(fc_result)
         history = [
-            make_content("user", "Call the function"),
-            types.Content(role="model", parts=[
-                types.Part(function_call=types.FunctionCall(
+            make_message("user", "Call the function"),
+            Message(role=Role.MODEL, parts=[
+                Part(function_call=FunctionCall(
+                    id="test_id",
                     name="test_func",
                     args={}
                 ))
             ]),
-            types.Content(role="user", parts=[fc_part]),
-            make_content("model", "Function returned ok"),
+            Message(role=Role.USER, parts=[fc_part]),
+            make_message("model", "Function returned ok"),
         ]
         turns = split_into_turns(history)
 
@@ -104,8 +108,8 @@ class TestFlattenTurns:
 
     def test_flatten_single_turn(self):
         contents = [
-            make_content("user", "Hello"),
-            make_content("model", "Hi!"),
+            make_message("user", "Hello"),
+            make_message("model", "Hi!"),
         ]
         turns = [Turn(index=0, contents=contents)]
 
@@ -113,8 +117,8 @@ class TestFlattenTurns:
         assert len(result) == 2
 
     def test_flatten_multiple_turns(self):
-        turn1 = Turn(index=0, contents=[make_content("user", "A")])
-        turn2 = Turn(index=1, contents=[make_content("user", "B")])
+        turn1 = Turn(index=0, contents=[make_message("user", "A")])
+        turn2 = Turn(index=1, contents=[make_message("user", "B")])
 
         result = flatten_turns([turn1, turn2])
         assert len(result) == 2
@@ -122,10 +126,10 @@ class TestFlattenTurns:
     def test_roundtrip(self):
         """split -> flatten should preserve content."""
         history = [
-            make_content("user", "Hello"),
-            make_content("model", "Hi!"),
-            make_content("user", "How are you?"),
-            make_content("model", "Good!"),
+            make_message("user", "Hello"),
+            make_message("model", "Hi!"),
+            make_message("user", "How are you?"),
+            make_message("model", "Good!"),
         ]
 
         turns = split_into_turns(history)
@@ -135,30 +139,30 @@ class TestFlattenTurns:
 
 
 class TestTokenEstimation:
-    def test_estimate_content_tokens_text(self):
-        content = make_content("user", "Hello world")  # 11 chars
-        tokens = estimate_content_tokens(content)
+    def test_estimate_message_tokens_text(self):
+        content = make_message("user", "Hello world")  # 11 chars
+        tokens = estimate_message_tokens(content)
 
         # ~4 chars per token, minimum 1
         assert tokens >= 1
 
-    def test_estimate_content_tokens_empty(self):
-        content = types.Content(role="user", parts=[])
-        tokens = estimate_content_tokens(content)
+    def test_estimate_message_tokens_empty(self):
+        content = Message(role=Role.USER, parts=[])
+        tokens = estimate_message_tokens(content)
         assert tokens >= 1
 
     def test_estimate_turn_tokens(self):
         contents = [
-            make_content("user", "Hello"),
-            make_content("model", "Hi there!"),
+            make_message("user", "Hello"),
+            make_message("model", "Hi there!"),
         ]
         tokens = estimate_turn_tokens(contents)
         assert tokens > 0
 
     def test_estimate_history_tokens(self):
         history = [
-            make_content("user", "Hello world"),
-            make_content("model", "Hi there, how can I help?"),
+            make_message("user", "Hello world"),
+            make_message("model", "Hi there, how can I help?"),
         ]
         tokens = estimate_history_tokens(history)
         assert tokens > 0

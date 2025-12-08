@@ -92,7 +92,7 @@ class TestRegistryCLIToolDeclarations:
         registry = PluginRegistry()
         registry.discover()
 
-        declarations = registry.get_exposed_declarations()
+        declarations = registry.get_exposed_tool_schemas()
         tool_names = [d.name for d in declarations]
 
         assert "cli_based_tool" not in tool_names
@@ -104,7 +104,7 @@ class TestRegistryCLIToolDeclarations:
 
         registry.expose_tool("cli")
 
-        declarations = registry.get_exposed_declarations()
+        declarations = registry.get_exposed_tool_schemas()
         tool_names = [d.name for d in declarations]
 
         assert "cli_based_tool" in tool_names
@@ -119,7 +119,7 @@ class TestRegistryCLIToolDeclarations:
         registry.expose_tool("cli")
         registry.unexpose_tool("cli")
 
-        declarations = registry.get_exposed_declarations()
+        declarations = registry.get_exposed_tool_schemas()
         tool_names = [d.name for d in declarations]
 
         assert "cli_based_tool" not in tool_names

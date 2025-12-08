@@ -7,10 +7,9 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from google.genai import types
-
 from ..file_session import FileSessionPlugin, generate_session_id
 from ..base import SessionConfig, SessionState
+from ...model_provider.types import Message, Part, Role
 
 
 class TestGenerateSessionId:
@@ -50,9 +49,9 @@ class TestFileSessionPlugin:
     def test_save_and_load(self, plugin):
         """Test saving and loading a session."""
         history = [
-            types.Content(
-                role="user",
-                parts=[types.Part.from_text(text="Hello")]
+            Message(
+                role=Role.USER,
+                parts=[Part(text="Hello")]
             )
         ]
 
@@ -180,12 +179,12 @@ class TestFileSessionPlugin:
         assert "delete-session" in command_names
         assert "backtoturn" in command_names
 
-    def test_get_function_declarations(self, plugin):
-        """Test that plugin provides function declarations."""
-        declarations = plugin.get_function_declarations()
+    def test_get_tool_schemas(self, plugin):
+        """Test that plugin provides tool schemas."""
+        schemas = plugin.get_tool_schemas()
 
-        assert len(declarations) == 1
-        assert declarations[0].name == "session_describe"
+        assert len(schemas) == 1
+        assert schemas[0].name == "session_describe"
 
     def test_get_executors(self, plugin):
         """Test that plugin provides executors."""
@@ -399,9 +398,9 @@ class TestSessionLifecycle:
         state = SessionState(
             session_id="real_session",
             history=[
-                types.Content(
-                    role="user",
-                    parts=[types.Part.from_text(text="Hello")]
+                Message(
+                    role=Role.USER,
+                    parts=[Part(text="Hello")]
                 )
             ],
             created_at=datetime.now(),
@@ -429,9 +428,9 @@ class TestSessionLifecycle:
         state = SessionState(
             session_id="no_save_session",
             history=[
-                types.Content(
-                    role="user",
-                    parts=[types.Part.from_text(text="Hello")]
+                Message(
+                    role=Role.USER,
+                    parts=[Part(text="Hello")]
                 )
             ],
             created_at=datetime.now(),
