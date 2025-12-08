@@ -68,6 +68,7 @@ class PermissionPolicy:
     # Session-level dynamic rules (added via actor responses)
     session_blacklist: Set[str] = field(default_factory=set)
     session_whitelist: Set[str] = field(default_factory=set)
+    session_default_policy: Optional[str] = None  # Overrides default_policy when set
 
     # Sanitization configuration (None = disabled)
     sanitization_config: Optional[SanitizationConfig] = None
@@ -118,21 +119,22 @@ class PermissionPolicy:
         if whitelist_match:
             return whitelist_match
 
-        # 5. Apply default policy
-        if self.default_policy == "allow":
+        # 5. Apply default policy (session override takes priority)
+        effective_default = self.session_default_policy or self.default_policy
+        if effective_default == "allow":
             return PolicyMatch(
                 decision=PermissionDecision.ALLOW,
                 reason="Allowed by default policy",
                 rule_type="default"
             )
-        elif self.default_policy == "deny":
+        elif effective_default == "deny":
             return PolicyMatch(
                 decision=PermissionDecision.DENY,
                 reason="Denied by default policy",
                 rule_type="default"
             )
         else:
-            # default_policy == "ask" or unknown -> ask actor
+            # effective_default == "ask" or unknown -> ask actor
             return PolicyMatch(
                 decision=PermissionDecision.ASK_ACTOR,
                 reason="No matching rule, requires actor approval",
@@ -301,6 +303,21 @@ class PermissionPolicy:
         """Clear all session-level rules."""
         self.session_blacklist.clear()
         self.session_whitelist.clear()
+        self.session_default_policy = None
+
+    def set_session_default_policy(self, policy: Optional[str]) -> None:
+        """Set the session default policy override.
+
+        Args:
+            policy: "allow", "deny", "ask", or None to clear override
+        """
+        if policy is not None and policy not in ("allow", "deny", "ask"):
+            raise ValueError(f"Invalid policy: {policy}. Use: allow, deny, or ask")
+        self.session_default_policy = policy
+
+    def get_session_default_policy(self) -> Optional[str]:
+        """Get the session default policy override, or None if not set."""
+        return self.session_default_policy
 
     def set_sanitization(
         self,

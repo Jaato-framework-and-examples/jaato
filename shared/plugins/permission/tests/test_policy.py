@@ -217,6 +217,71 @@ class TestPermissionPolicySessionRules:
         match = policy.check("cli_based_tool", {"command": "git push origin main"})
         assert match.decision == PermissionDecision.DENY
 
+    def test_session_default_policy_allow(self):
+        """Session default policy should override base default."""
+        policy = PermissionPolicy(default_policy="deny")
+        policy.set_session_default_policy("allow")
+
+        match = policy.check("unknown_tool", {})
+        assert match.decision == PermissionDecision.ALLOW
+
+    def test_session_default_policy_deny(self):
+        """Session default policy deny should override base allow."""
+        policy = PermissionPolicy(default_policy="allow")
+        policy.set_session_default_policy("deny")
+
+        match = policy.check("unknown_tool", {})
+        assert match.decision == PermissionDecision.DENY
+
+    def test_session_default_policy_ask(self):
+        """Session default policy ask should override base."""
+        policy = PermissionPolicy(default_policy="allow")
+        policy.set_session_default_policy("ask")
+
+        match = policy.check("unknown_tool", {})
+        assert match.decision == PermissionDecision.ASK_ACTOR
+
+    def test_session_default_policy_cleared_on_clear(self):
+        """clear_session_rules should also clear session default policy."""
+        policy = PermissionPolicy(default_policy="deny")
+        policy.set_session_default_policy("allow")
+
+        match = policy.check("unknown_tool", {})
+        assert match.decision == PermissionDecision.ALLOW
+
+        policy.clear_session_rules()
+
+        match = policy.check("unknown_tool", {})
+        assert match.decision == PermissionDecision.DENY
+
+    def test_get_session_default_policy(self):
+        """get_session_default_policy should return current value."""
+        policy = PermissionPolicy(default_policy="deny")
+        assert policy.get_session_default_policy() is None
+
+        policy.set_session_default_policy("allow")
+        assert policy.get_session_default_policy() == "allow"
+
+    def test_set_session_default_policy_validation(self):
+        """set_session_default_policy should reject invalid values."""
+        policy = PermissionPolicy()
+
+        with pytest.raises(ValueError) as exc_info:
+            policy.set_session_default_policy("invalid")
+        assert "Invalid policy" in str(exc_info.value)
+
+    def test_set_session_default_policy_none_clears(self):
+        """Setting session default to None should clear it."""
+        policy = PermissionPolicy(default_policy="deny")
+        policy.set_session_default_policy("allow")
+        assert policy.session_default_policy == "allow"
+
+        policy.set_session_default_policy(None)
+        assert policy.session_default_policy is None
+
+        match = policy.check("unknown_tool", {})
+        assert match.decision == PermissionDecision.DENY
+
 
 class TestPermissionPolicyFromConfig:
     """Tests for creating policy from config dict."""

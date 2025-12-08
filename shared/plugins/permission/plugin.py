@@ -236,8 +236,161 @@ If a tool is denied, do not attempt to execute it."""
         return []
 
     def get_user_commands(self) -> List[UserCommand]:
-        """Permission plugin provides model tools only, no user commands."""
-        return []
+        """Return user-facing commands for on-the-fly permission management."""
+        return [
+            UserCommand(
+                name="permissions",
+                description="Manage session permissions: show, allow <pattern>, deny <pattern>, default <policy>, clear",
+                share_with_model=False,
+            )
+        ]
+
+    def execute_permissions(self, args: Dict[str, Any]) -> str:
+        """Execute the permissions user command.
+
+        Subcommands:
+            show              - Display current effective policy with diff from base
+            allow <pattern>   - Add tool/pattern to session whitelist
+            deny <pattern>    - Add tool/pattern to session blacklist
+            default <policy>  - Set session default policy (allow|deny|ask)
+            clear             - Reset all session modifications
+
+        Args:
+            args: Dict with 'args' key containing list of command arguments
+
+        Returns:
+            Formatted string output for display to user
+        """
+        cmd_args = args.get("args", [])
+
+        if not cmd_args:
+            return self._permissions_show()
+
+        subcommand = cmd_args[0].lower()
+
+        if subcommand == "show":
+            return self._permissions_show()
+        elif subcommand == "allow":
+            if len(cmd_args) < 2:
+                return "Usage: permissions allow <tool_or_pattern>"
+            pattern = " ".join(cmd_args[1:])
+            return self._permissions_allow(pattern)
+        elif subcommand == "deny":
+            if len(cmd_args) < 2:
+                return "Usage: permissions deny <tool_or_pattern>"
+            pattern = " ".join(cmd_args[1:])
+            return self._permissions_deny(pattern)
+        elif subcommand == "default":
+            if len(cmd_args) < 2:
+                return "Usage: permissions default <allow|deny|ask>"
+            policy = cmd_args[1].lower()
+            return self._permissions_default(policy)
+        elif subcommand == "clear":
+            return self._permissions_clear()
+        else:
+            return (
+                f"Unknown subcommand: {subcommand}\n"
+                "Usage: permissions <show|allow|deny|default|clear>\n"
+                "  show              - Display current effective policy\n"
+                "  allow <pattern>   - Add to session whitelist\n"
+                "  deny <pattern>    - Add to session blacklist\n"
+                "  default <policy>  - Set session default (allow|deny|ask)\n"
+                "  clear             - Reset session modifications"
+            )
+
+    def _permissions_show(self) -> str:
+        """Show current effective permission policy with diff from base."""
+        lines = []
+        lines.append("Effective Permission Policy")
+        lines.append("═" * 27)
+        lines.append("")
+
+        if not self._policy:
+            lines.append("Permission plugin not initialized.")
+            return "\n".join(lines)
+
+        # Effective default policy
+        session_default = self._policy.session_default_policy
+        base_default = self._policy.default_policy
+        if session_default:
+            lines.append(f"Default Policy: {session_default} (session override, was: {base_default})")
+        else:
+            lines.append(f"Default Policy: {base_default}")
+
+        lines.append("")
+
+        # Session rules
+        lines.append("Session Rules:")
+        session_whitelist = sorted(self._policy.session_whitelist)
+        session_blacklist = sorted(self._policy.session_blacklist)
+
+        if not session_whitelist and not session_blacklist and not session_default:
+            lines.append("  (none)")
+        else:
+            for pattern in session_whitelist:
+                lines.append(f"  + allow: {pattern}")
+            for pattern in session_blacklist:
+                lines.append(f"  - deny:  {pattern}")
+
+        lines.append("")
+
+        # Base config
+        lines.append("Base Config:")
+        whitelist_tools = sorted(self._policy.whitelist_tools)
+        whitelist_patterns = self._policy.whitelist_patterns
+        blacklist_tools = sorted(self._policy.blacklist_tools)
+        blacklist_patterns = self._policy.blacklist_patterns
+
+        all_whitelist = whitelist_tools + whitelist_patterns
+        all_blacklist = blacklist_tools + blacklist_patterns
+
+        if all_whitelist:
+            lines.append(f"  Whitelist: {', '.join(all_whitelist)}")
+        else:
+            lines.append("  Whitelist: (none)")
+
+        if all_blacklist:
+            lines.append(f"  Blacklist: {', '.join(all_blacklist)}")
+        else:
+            lines.append("  Blacklist: (none)")
+
+        return "\n".join(lines)
+
+    def _permissions_allow(self, pattern: str) -> str:
+        """Add a pattern to the session whitelist."""
+        if not self._policy:
+            return "Error: Permission plugin not initialized."
+
+        self._policy.add_session_whitelist(pattern)
+        return f"+ Added to session whitelist: {pattern}"
+
+    def _permissions_deny(self, pattern: str) -> str:
+        """Add a pattern to the session blacklist."""
+        if not self._policy:
+            return "Error: Permission plugin not initialized."
+
+        self._policy.add_session_blacklist(pattern)
+        return f"- Added to session blacklist: {pattern}"
+
+    def _permissions_default(self, policy: str) -> str:
+        """Set the session default policy."""
+        if not self._policy:
+            return "Error: Permission plugin not initialized."
+
+        if policy not in ("allow", "deny", "ask"):
+            return "Invalid policy. Use: allow, deny, or ask"
+
+        old_effective = self._policy.session_default_policy or self._policy.default_policy
+        self._policy.set_session_default_policy(policy)
+        return f"Session default policy: {policy} (was: {old_effective})"
+
+    def _permissions_clear(self) -> str:
+        """Clear all session permission modifications."""
+        if not self._policy:
+            return "Error: Permission plugin not initialized."
+
+        self._policy.clear_session_rules()
+        return "Session rules cleared.\nReverted to base config."
 
     def _execute_ask_permission(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the askPermission tool.
