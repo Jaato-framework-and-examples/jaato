@@ -109,6 +109,9 @@ class TestPermissionPluginExecutors:
 
         assert "askPermission" in executors
         assert callable(executors["askPermission"])
+        # User command executor
+        assert "permissions" in executors
+        assert callable(executors["permissions"])
 
     def test_execute_ask_permission_requires_tool_name(self):
         plugin = PermissionPlugin()

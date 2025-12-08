@@ -207,12 +207,14 @@ class PermissionPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return the executor for askPermission tool.
+        """Return executors for model tools and user commands.
 
         Exposure is controlled via the registry (expose_tool/unexpose_tool).
         """
         return {
-            "askPermission": self._execute_ask_permission
+            "askPermission": self._execute_ask_permission,
+            # User commands
+            "permissions": self.execute_permissions,
         }
 
     def get_system_instructions(self) -> Optional[str]:
