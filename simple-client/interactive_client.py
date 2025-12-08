@@ -194,7 +194,7 @@ class InteractiveClient:
                 auto_suggest=AutoSuggestFromHistory(),
                 style=self._pt_style,
                 complete_while_typing=True,
-                refresh_interval=0,
+                complete_in_thread=True,  # More responsive completions
                 output=output,
             )
             return session.prompt(formatted_prompt).strip()
@@ -257,17 +257,8 @@ class InteractiveClient:
         if not command_name:
             return None
 
-        # Map command arguments to expected parameter names
-        args = {}
-        if arg_value:
-            # Command-specific argument mapping
-            arg_mapping = {
-                "backtoturn": "turn_id",
-                "resume": "session_id",
-                "delete-session": "session_id",
-            }
-            param_name = arg_mapping.get(command_name.lower(), "arg")
-            args[param_name] = arg_value
+        # Always pass arguments as a list - plugins handle their own parsing
+        args = {"args": arg_value.split() if arg_value else []}
 
         # For save command, include user inputs for prompt history restoration
         if command_name.lower() == "save":
@@ -666,7 +657,54 @@ class InteractiveClient:
             if hasattr(session_plugin, 'list_sessions'):
                 self._completer.set_session_provider(session_plugin.list_sessions)
 
+        # Set up plugin command argument completion
+        self._setup_command_completion_provider()
+
         self.log(f"[client] Registered {len(user_commands)} plugin command(s) for completion")
+
+    def _setup_command_completion_provider(self) -> None:
+        """Set up the provider for plugin command argument completions.
+
+        Collects plugins that implement get_command_completions() and creates
+        a provider that routes completion requests to the appropriate plugin.
+        """
+        if not self.registry or not self._completer:
+            return
+
+        # Map command names to plugins that can provide completions
+        command_to_plugin: dict = {}
+
+        # Check registry plugins
+        for plugin_name in self.registry.list_exposed():
+            plugin = self.registry.get_plugin(plugin_name)
+            if plugin and hasattr(plugin, 'get_command_completions'):
+                # Get this plugin's commands
+                if hasattr(plugin, 'get_user_commands'):
+                    for cmd in plugin.get_user_commands():
+                        command_to_plugin[cmd.name] = plugin
+
+        # Also check session plugin
+        if hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
+            session_plugin = self._jaato._session_plugin
+            if hasattr(session_plugin, 'get_command_completions'):
+                if hasattr(session_plugin, 'get_user_commands'):
+                    for cmd in session_plugin.get_user_commands():
+                        command_to_plugin[cmd.name] = session_plugin
+
+        if not command_to_plugin:
+            return
+
+        def completion_provider(command: str, args: list) -> list:
+            """Query the appropriate plugin for command completions."""
+            plugin = command_to_plugin.get(command)
+            if plugin and hasattr(plugin, 'get_command_completions'):
+                return plugin.get_command_completions(command, args)
+            return []
+
+        self._completer.set_command_completion_provider(
+            completion_provider,
+            set(command_to_plugin.keys())
+        )
 
     def run_prompt(
         self,
@@ -910,7 +948,13 @@ Keyboard shortcuts:
                     if commands:
                         commands_by_plugin[plugin_name] = commands
 
-        # Also get commands from session plugin (not in registry)
+        # Get commands from permission plugin (not in registry)
+        if self.permission_plugin and hasattr(self.permission_plugin, 'get_user_commands'):
+            commands = self.permission_plugin.get_user_commands()
+            if commands:
+                commands_by_plugin[self.permission_plugin.name] = commands
+
+        # Get commands from session plugin (not in registry)
         if self._jaato:
             user_commands = self._jaato.get_user_commands()
             # Filter to session commands
@@ -924,11 +968,12 @@ Keyboard shortcuts:
 
         print("\nPlugin-provided user commands:")
         for plugin_name, commands in sorted(commands_by_plugin.items()):
+            print(f"  [{plugin_name}]")
             for cmd in commands:
                 # Calculate padding for alignment
-                padding = max(2, 18 - len(cmd.name))
-                shared_marker = " [also available to the model as a tool]" if cmd.share_with_model else ""
-                print(f"  {cmd.name}{' ' * padding}- {cmd.description} ({plugin_name}){shared_marker}")
+                padding = max(2, 16 - len(cmd.name))
+                shared_marker = " [shared with model]" if cmd.share_with_model else ""
+                print(f"    {cmd.name}{' ' * padding}- {cmd.description}{shared_marker}")
 
     def _print_context(self) -> None:
         """Print context window usage statistics."""

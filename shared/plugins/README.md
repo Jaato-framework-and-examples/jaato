@@ -248,10 +248,17 @@ class ToolPlugin(Protocol):
         ...
 
     def get_auto_approved_tools(self) -> List[str]:
-        """Return tool names that should be auto-approved without permission prompts.
+        """Return tool/command names that should be auto-approved without permission prompts.
 
         Tools listed here will be automatically whitelisted when used with
-        the permission plugin. Return empty list if all tools require permission.
+        the permission plugin. Use this for:
+        - Read-only tools with no security implications
+        - User commands (since they are invoked directly by the user, not the model)
+
+        IMPORTANT: User commands from get_user_commands() should typically be
+        listed here. Otherwise they will trigger unexpected permission prompts.
+
+        Return empty list if all tools/commands require permission.
         """
         ...
 
@@ -514,7 +521,7 @@ class MultiToolPlugin:
 If your plugin provides commands that users can invoke directly (bypassing the model):
 
 ```python
-from shared.plugins.base import UserCommand
+from shared.plugins.base import UserCommand, CommandCompletion
 
 class SearchPlugin:
     @property
@@ -534,6 +541,11 @@ class SearchPlugin:
     def get_executors(self) -> Dict[str, Callable]:
         return {'search_index': self._execute_search}
 
+    def get_auto_approved_tools(self) -> List[str]:
+        # IMPORTANT: Include user commands here so they don't trigger
+        # permission prompts. Users invoke these directly, not the model.
+        return ["search", "reindex", "stats"]
+
     def get_user_commands(self) -> List[UserCommand]:
         # User commands - invoked directly by user (human or agent)
         # share_with_model controls whether output is added to conversation history
@@ -542,6 +554,11 @@ class SearchPlugin:
             UserCommand("reindex", "Rebuild the search index", share_with_model=False),
             UserCommand("stats", "Show index statistics", share_with_model=False),
         ]
+
+    def get_command_completions(self, command: str, args: List[str]) -> List[CommandCompletion]:
+        # Optional: provide autocompletion for command arguments
+        # Return empty list if no completions available
+        return []
 
     # ... other methods ...
 ```
@@ -555,6 +572,46 @@ This is useful for:
 
 - **Shared commands** (`share_with_model=True`): Search results, listing data, status that informs the model
 - **User-only commands** (`share_with_model=False`): Administrative tasks, health checks, cache operations
+
+### Command Argument Completions
+
+Plugins can optionally provide autocompletion for their user command arguments by implementing `get_command_completions()`:
+
+```python
+from shared.plugins.base import UserCommand, CommandCompletion
+
+class ConfigPlugin:
+    def get_user_commands(self) -> List[UserCommand]:
+        return [
+            UserCommand("config", "Manage configuration: get <key>, set <key> <value>"),
+        ]
+
+    def get_command_completions(self, command: str, args: List[str]) -> List[CommandCompletion]:
+        """Provide completions for config command arguments."""
+        if command != "config":
+            return []
+
+        subcommands = [
+            CommandCompletion("get", "Get a config value"),
+            CommandCompletion("set", "Set a config value"),
+        ]
+
+        if not args:
+            return subcommands
+
+        if len(args) == 1:
+            # Partial subcommand - filter matches
+            partial = args[0].lower()
+            return [c for c in subcommands if c.value.startswith(partial)]
+
+        return []
+```
+
+The client will call `get_command_completions()` when the user types a command and presses Tab:
+- `command`: The command name being typed (e.g., "config")
+- `args`: List of arguments typed so far (may include partial input)
+
+Return a list of `CommandCompletion(value, description)` tuples matching the current input.
 
 ### Plugin with Background Resources
 

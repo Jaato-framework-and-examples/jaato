@@ -109,6 +109,9 @@ class TestPermissionPluginExecutors:
 
         assert "askPermission" in executors
         assert callable(executors["askPermission"])
+        # User command executor
+        assert "permissions" in executors
+        assert callable(executors["permissions"])
 
     def test_execute_ask_permission_requires_tool_name(self):
         plugin = PermissionPlugin()
@@ -876,3 +879,217 @@ class TestActorCommunication:
         assert captured_request[0] is not None
         assert captured_request[0].timestamp is not None
         assert len(captured_request[0].timestamp) > 0
+
+
+class TestPermissionPluginUserCommands:
+    """Tests for the permissions user command."""
+
+    def test_get_user_commands_returns_permissions(self):
+        plugin = PermissionPlugin()
+        commands = plugin.get_user_commands()
+
+        assert len(commands) == 1
+        assert commands[0].name == "permissions"
+        assert commands[0].share_with_model is False
+
+    def test_permissions_show_without_init(self):
+        plugin = PermissionPlugin()
+        result = plugin.execute_permissions({"args": ["show"]})
+
+        assert "not initialized" in result.lower()
+
+    def test_permissions_show_basic(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "ask",
+                "whitelist": {"tools": ["git"], "patterns": ["npm *"]},
+                "blacklist": {"patterns": ["rm -rf *"]}
+            }
+        })
+
+        result = plugin.execute_permissions({"args": ["show"]})
+
+        assert "Effective Permission Policy" in result
+        assert "Default Policy: ask" in result
+        assert "git" in result
+        assert "npm *" in result
+        assert "rm -rf *" in result
+
+    def test_permissions_show_no_args_defaults_to_show(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "allow"}})
+
+        result = plugin.execute_permissions({"args": []})
+
+        assert "Effective Permission Policy" in result
+
+    def test_permissions_allow(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        result = plugin.execute_permissions({"args": ["allow", "docker", "*"]})
+
+        assert "+ Added to session whitelist: docker *" in result
+        assert "docker *" in plugin._policy.session_whitelist
+
+    def test_permissions_allow_missing_pattern(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        result = plugin.execute_permissions({"args": ["allow"]})
+
+        assert "Usage:" in result
+
+    def test_permissions_deny(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "allow"}})
+
+        result = plugin.execute_permissions({"args": ["deny", "cli_based_tool"]})
+
+        assert "- Added to session blacklist: cli_based_tool" in result
+        assert "cli_based_tool" in plugin._policy.session_blacklist
+
+    def test_permissions_deny_missing_pattern(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "allow"}})
+
+        result = plugin.execute_permissions({"args": ["deny"]})
+
+        assert "Usage:" in result
+
+    def test_permissions_default_allow(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        result = plugin.execute_permissions({"args": ["default", "allow"]})
+
+        assert "Session default policy: allow" in result
+        assert "was: ask" in result
+        assert plugin._policy.session_default_policy == "allow"
+
+    def test_permissions_default_deny(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "allow"}})
+
+        result = plugin.execute_permissions({"args": ["default", "deny"]})
+
+        assert "Session default policy: deny" in result
+        assert plugin._policy.session_default_policy == "deny"
+
+    def test_permissions_default_ask(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        result = plugin.execute_permissions({"args": ["default", "ask"]})
+
+        assert "Session default policy: ask" in result
+        assert plugin._policy.session_default_policy == "ask"
+
+    def test_permissions_default_invalid(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        result = plugin.execute_permissions({"args": ["default", "invalid"]})
+
+        assert "Invalid policy" in result
+        assert plugin._policy.session_default_policy is None
+
+    def test_permissions_default_missing_policy(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        result = plugin.execute_permissions({"args": ["default"]})
+
+        assert "Usage:" in result
+
+    def test_permissions_clear(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        # Add some session rules
+        plugin._policy.add_session_whitelist("docker *")
+        plugin._policy.add_session_blacklist("dangerous_tool")
+        plugin._policy.set_session_default_policy("allow")
+
+        result = plugin.execute_permissions({"args": ["clear"]})
+
+        assert "Session rules cleared" in result
+        assert len(plugin._policy.session_whitelist) == 0
+        assert len(plugin._policy.session_blacklist) == 0
+        assert plugin._policy.session_default_policy is None
+
+    def test_permissions_unknown_subcommand(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        result = plugin.execute_permissions({"args": ["unknown"]})
+
+        assert "Unknown subcommand" in result
+        assert "show" in result
+        assert "allow" in result
+        assert "deny" in result
+        assert "default" in result
+        assert "clear" in result
+
+    def test_permissions_show_with_session_rules(self):
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "ask"}})
+
+        plugin._policy.add_session_whitelist("docker *")
+        plugin._policy.add_session_blacklist("dangerous_tool")
+        plugin._policy.set_session_default_policy("allow")
+
+        result = plugin.execute_permissions({"args": ["show"]})
+
+        assert "Default Policy: allow (session override, was: ask)" in result
+        assert "+ allow: docker *" in result
+        assert "- deny:  dangerous_tool" in result
+
+    def test_session_default_affects_permission_check(self):
+        """Verify session default policy actually affects permission checks."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        # Default deny - should be denied
+        allowed, _ = plugin.check_permission("unknown_tool", {})
+        assert allowed is False
+
+        # Set session default to allow
+        plugin.execute_permissions({"args": ["default", "allow"]})
+
+        # Now should be allowed
+        allowed, _ = plugin.check_permission("another_tool", {})
+        assert allowed is True
+
+    def test_session_allow_affects_permission_check(self):
+        """Verify session whitelist actually affects permission checks."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        # Should be denied by default
+        allowed, _ = plugin.check_permission("my_tool", {})
+        assert allowed is False
+
+        # Add to session whitelist
+        plugin.execute_permissions({"args": ["allow", "my_tool"]})
+
+        # Now should be allowed
+        allowed, _ = plugin.check_permission("my_tool", {})
+        assert allowed is True
+
+    def test_session_deny_affects_permission_check(self):
+        """Verify session blacklist actually affects permission checks."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "allow"}})
+
+        # Should be allowed by default
+        allowed, _ = plugin.check_permission("some_tool", {})
+        assert allowed is True
+
+        # Add to session blacklist
+        plugin.execute_permissions({"args": ["deny", "some_tool"]})
+
+        # Now should be denied
+        allowed, _ = plugin.check_permission("some_tool", {})
+        assert allowed is False

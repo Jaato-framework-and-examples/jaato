@@ -71,6 +71,19 @@ class PermissionDisplayInfo:
     original_lines: Optional[int] = None
 
 
+class CommandCompletion(NamedTuple):
+    """A completion option for command arguments.
+
+    Used by plugins to provide autocompletion hints for their user commands.
+
+    Attributes:
+        value: The completion value to insert.
+        description: Brief description shown in completion menu.
+    """
+    value: str
+    description: str = ""
+
+
 class UserCommand(NamedTuple):
     """Declaration of a user-facing command.
 
@@ -148,13 +161,21 @@ class ToolPlugin(Protocol):
         ...
 
     def get_auto_approved_tools(self) -> List[str]:
-        """Return list of tool names that should be auto-approved without permission prompts.
+        """Return list of tool/command names that should be auto-approved without permission prompts.
 
         Tools returned here will be added to the permission whitelist automatically.
-        Use this for tools that have no security implications (e.g., progress tracking).
+        Use this for:
+        - Read-only tools with no security implications (e.g., progress tracking)
+        - User commands that shouldn't trigger permission prompts (since they are
+          invoked directly by the user, not by the model)
+
+        IMPORTANT: User commands defined in get_user_commands() should typically
+        be listed here. Since users invoke these commands directly (not the model),
+        they shouldn't require permission approval. Forgetting to include user
+        commands here will cause unexpected permission prompts.
 
         Returns:
-            List of tool names, or empty list if all tools require permission.
+            List of tool/command names, or empty list if all require permission.
         """
         ...
 
@@ -259,5 +280,38 @@ class ToolPlugin(Protocol):
     #
     #     Returns:
     #         PermissionDisplayInfo with formatted content, or None to use default.
+    #     """
+    #     ...
+    #
+    # Command Completions:
+    #
+    # def get_command_completions(
+    #     self,
+    #     command: str,
+    #     args: List[str]
+    # ) -> List[CommandCompletion]:
+    #     """Return completion options for a user command's arguments.
+    #
+    #     This optional method allows plugins to provide autocompletion for
+    #     their user commands. The client calls this when the user is typing
+    #     a command and requests completion (e.g., pressing Tab).
+    #
+    #     Args:
+    #         command: The command name (e.g., "permissions")
+    #         args: Arguments typed so far (may be empty or contain partial input)
+    #               For "permissions default al", args would be ["default", "al"]
+    #
+    #     Returns:
+    #         List of CommandCompletion options matching the current input.
+    #         Return empty list if no completions available.
+    #
+    #     Example:
+    #         # For "permissions " (no args yet)
+    #         get_command_completions("permissions", [])
+    #         -> [CommandCompletion("show", "Display policy"), ...]
+    #
+    #         # For "permissions default a"
+    #         get_command_completions("permissions", ["default", "a"])
+    #         -> [CommandCompletion("allow", "Auto-approve"), CommandCompletion("ask", "Prompt")]
     #     """
     #     ...
