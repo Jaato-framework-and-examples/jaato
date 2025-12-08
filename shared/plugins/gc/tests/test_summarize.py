@@ -154,8 +154,8 @@ class TestFormatTurnsForSummary:
 
         from shared.plugins.gc.utils import split_into_turns
         history = [
-            make_content("user", "Hello"),
-            make_content("model", "Hi there!"),
+            make_message("user", "Hello"),
+            make_message("model", "Hi there!"),
         ]
         turns = split_into_turns(history)
 

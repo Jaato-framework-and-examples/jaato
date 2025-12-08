@@ -138,8 +138,8 @@ def estimate_message_tokens(message: Message) -> int:
             elif part.function_response:
                 fr = part.function_response
                 total_chars += len(fr.name) if fr.name else 0
-                if fr.response:
-                    total_chars += len(str(fr.response))
+                if fr.result:
+                    total_chars += len(str(fr.result))
 
     # Rough estimate: 4 chars per token (conservative)
     return max(1, total_chars // 4)

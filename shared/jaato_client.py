@@ -689,15 +689,15 @@ class JaatoClient:
                 'total_tokens': getattr(usage, 'total_token_count', None),
             })
 
-    def get_history(self) -> List[types.Content]:
-        """Get current conversation history from the SDK.
+    def get_history(self) -> List[Message]:
+        """Get current conversation history.
 
         Returns:
-            List of Content objects representing the conversation.
+            List of Message objects representing the conversation.
         """
         if not self._chat:
             return []
-        return list(self._chat.get_history())
+        return history_from_sdk(list(self._chat.get_history()))
 
     def get_turn_accounting(self) -> List[Dict[str, Any]]:
         """Get token usage and timing per turn.
@@ -803,16 +803,10 @@ class JaatoClient:
         history = self.get_history()
         boundaries = []
 
-        for i, content in enumerate(history):
-            role = getattr(content, 'role', None)
-            parts = getattr(content, 'parts', None) or []
-
+        for i, msg in enumerate(history):
             # A turn starts with a user message that has text (not function response)
-            if role == 'user' and parts:
-                first_part = parts[0]
-                # Check if it's a text part (not function response)
-                if hasattr(first_part, 'text') and first_part.text:
-                    boundaries.append(i)
+            if msg.role == 'user' and msg.parts and msg.parts[0].text:
+                boundaries.append(i)
 
         return boundaries
 
