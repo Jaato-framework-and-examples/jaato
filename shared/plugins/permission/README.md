@@ -1050,3 +1050,101 @@ def sandboxed_execute(command: str, workspace: str) -> dict:
 | `.permissions.json` | Hidden config alternative |
 | `~/.config/jaato/permissions.json` | User-level default config |
 | `PERMISSION_CONFIG_PATH` env var | Override config path |
+
+## User Commands
+
+The permission plugin provides a user-facing command for on-the-fly session permission management. This command is **not exposed to the model** (`share_with_model=False`) - only the user can invoke it.
+
+### `permissions` Command
+
+Manage session permissions without modifying the persistent `permissions.json` file. All changes are session-scoped and lost when the session ends.
+
+#### Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `permissions show` | Display current effective policy with diff from base config |
+| `permissions allow <pattern>` | Add tool/pattern to session whitelist |
+| `permissions deny <pattern>` | Add tool/pattern to session blacklist |
+| `permissions default <policy>` | Set session default policy (allow\|deny\|ask) |
+| `permissions clear` | Reset all session modifications |
+
+#### Usage Examples
+
+**View current policy:**
+```
+> permissions show
+Effective Permission Policy
+═══════════════════════════
+
+Default Policy: ask
+
+Session Rules:
+  (none)
+
+Base Config:
+  Whitelist: git, npm *, python *
+  Blacklist: rm -rf *, sudo *
+```
+
+**Allow a tool for the session:**
+```
+> permissions allow docker *
++ Added to session whitelist: docker *
+```
+
+**Deny a tool for the session:**
+```
+> permissions deny cli_based_tool
+- Added to session blacklist: cli_based_tool
+```
+
+**Change default policy for the session:**
+```
+> permissions default allow
+Session default policy: allow (was: ask)
+```
+
+**View updated policy with session rules:**
+```
+> permissions show
+Effective Permission Policy
+═══════════════════════════
+
+Default Policy: allow (session override, was: ask)
+
+Session Rules:
+  + allow: docker *
+  - deny:  cli_based_tool
+
+Base Config:
+  Whitelist: git, npm *, python *
+  Blacklist: rm -rf *, sudo *
+```
+
+**Clear all session modifications:**
+```
+> permissions clear
+Session rules cleared.
+Reverted to base config.
+```
+
+#### Priority Order
+
+Session rules take priority over base configuration:
+
+| Priority | Rule Type | Description |
+|----------|-----------|-------------|
+| 1 | Session blacklist | Added via `permissions deny` |
+| 2 | Static blacklist | From `permissions.json` |
+| 3 | Session whitelist | Added via `permissions allow` |
+| 4 | Static whitelist | From `permissions.json` |
+| 5 | Session default | Set via `permissions default` |
+| 6 | Base default | From `permissions.json` |
+
+#### Use Cases
+
+- **Quick testing**: Temporarily allow a tool without editing config files
+- **Emergency override**: Block a tool that's misbehaving during a session
+- **Interactive exploration**: Adjust permissions as you discover what tools are needed
+- **Safety net**: Start restrictive (`default deny`) and progressively allow tools as needed
