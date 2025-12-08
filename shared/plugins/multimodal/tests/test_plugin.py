@@ -158,21 +158,21 @@ class TestMultimodalPluginPromptEnrichment:
             assert "b.jpg" in result.metadata["detected_images"]
 
 
-class TestMultimodalPluginFunctionDeclarations:
-    """Tests for function declarations."""
+class TestMultimodalPluginToolSchemas:
+    """Tests for tool schemas."""
 
-    def test_get_function_declarations(self):
+    def test_get_tool_schemas(self):
         plugin = MultimodalPlugin()
-        declarations = plugin.get_function_declarations()
+        schemas = plugin.get_tool_schemas()
 
-        assert len(declarations) == 1
-        assert declarations[0].name == "viewImage"
+        assert len(schemas) == 1
+        assert schemas[0].name == "viewImage"
 
     def test_view_image_schema(self):
         plugin = MultimodalPlugin()
-        declarations = plugin.get_function_declarations()
-        view_image = declarations[0]
-        schema = view_image.parameters_json_schema
+        schemas = plugin.get_tool_schemas()
+        view_image = schemas[0]
+        schema = view_image.parameters
 
         assert schema["type"] == "object"
         assert "path" in schema["properties"]
@@ -180,8 +180,8 @@ class TestMultimodalPluginFunctionDeclarations:
 
     def test_view_image_description(self):
         plugin = MultimodalPlugin()
-        declarations = plugin.get_function_declarations()
-        view_image = declarations[0]
+        schemas = plugin.get_tool_schemas()
+        view_image = schemas[0]
 
         assert "View" in view_image.description
         assert "image" in view_image.description.lower()

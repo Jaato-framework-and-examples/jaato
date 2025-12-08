@@ -3,7 +3,8 @@
 import fnmatch
 from dataclasses import dataclass, field
 from typing import Protocol, List, Dict, Any, Callable, Optional, NamedTuple, runtime_checkable
-from google.genai import types
+
+from .model_provider.types import ToolSchema
 
 
 # Output callback type for real-time output from model and plugins
@@ -110,8 +111,8 @@ class ToolPlugin(Protocol):
     1. Model tools: Functions the AI model can invoke via function calling
     2. User commands: Commands the user can invoke directly (without model mediation)
 
-    Model tools are declared via get_function_declarations() and executed
-    via get_executors(). User commands are declared via get_user_commands()
+    Model tools are declared via get_tool_schemas() and executed via
+    get_executors(). User commands are declared via get_user_commands()
     and are typically handled by the interactive client.
 
     Note on "user": In this context, "user" refers to the entity directly
@@ -125,8 +126,16 @@ class ToolPlugin(Protocol):
         """Unique identifier for this plugin."""
         ...
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
-        """Return Vertex AI FunctionDeclaration objects for this plugin's tools."""
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Return provider-agnostic tool schemas for this plugin's tools.
+
+        Each ToolSchema defines a tool that the model can invoke via
+        function calling. The schema is converted to the appropriate
+        provider-specific format by the model provider plugin.
+
+        Returns:
+            List of ToolSchema objects describing available tools.
+        """
         ...
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
@@ -183,7 +192,7 @@ class ToolPlugin(Protocol):
         """Return user-facing commands this plugin provides.
 
         User commands are different from model tools:
-        - Model tools: Invoked by the AI via function calling (get_function_declarations)
+        - Model tools: Invoked by the AI via function calling (get_tool_schemas)
         - User commands: Invoked directly by the user without model mediation
 
         The "user" here can be:

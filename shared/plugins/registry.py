@@ -6,9 +6,9 @@ import pkgutil
 import sys
 from pathlib import Path
 from typing import Dict, List, Set, Callable, Any, Optional, Protocol, runtime_checkable
-from google.genai import types
 
 from .base import ToolPlugin, UserCommand, PromptEnrichmentResult, model_matches_requirements
+from .model_provider.types import ToolSchema
 
 # Entry point group names by plugin kind
 PLUGIN_ENTRY_POINT_GROUPS = {
@@ -30,7 +30,7 @@ class PluginRegistry:
         registry.expose_tool('mcp')
 
         # Get tools for exposed plugins
-        declarations = registry.get_exposed_declarations()
+        tool_schemas = registry.get_exposed_tool_schemas()
         executors = registry.get_exposed_executors()
 
         # Later, unexpose plugins
@@ -246,7 +246,7 @@ class PluginRegistry:
             plugin: The plugin instance to register.
             expose: If True, also expose the plugin's tools (calls initialize).
             enrichment_only: If True, only participate in prompt enrichment
-                           (not included in get_exposed_declarations/executors).
+                           (not included in get_exposed_tool_schemas/executors).
             config: Optional configuration dict if exposing.
 
         Example:
@@ -335,15 +335,15 @@ class PluginRegistry:
         for name in list(self._exposed):
             self.unexpose_tool(name)
 
-    def get_exposed_declarations(self) -> List[types.FunctionDeclaration]:
-        """Get FunctionDeclarations from all exposed plugins."""
-        decls = []
+    def get_exposed_tool_schemas(self) -> List[ToolSchema]:
+        """Get ToolSchemas from all exposed plugins."""
+        schemas = []
         for name in self._exposed:
             try:
-                decls.extend(self._plugins[name].get_function_declarations())
+                schemas.extend(self._plugins[name].get_tool_schemas())
             except Exception as exc:
-                print(f"[PluginRegistry] Error getting declarations from '{name}': {exc}")
-        return decls
+                print(f"[PluginRegistry] Error getting tool schemas from '{name}': {exc}")
+        return schemas
 
     def get_exposed_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Get executor callables from all exposed plugins."""

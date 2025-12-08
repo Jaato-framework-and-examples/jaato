@@ -6,7 +6,7 @@ Provides helpers for turn splitting, token estimation, and history manipulation.
 from dataclasses import dataclass
 from typing import List, Optional
 
-from google.genai import types
+from ..model_provider.types import Message, Part, Role
 
 
 @dataclass
@@ -14,16 +14,16 @@ class Turn:
     """Represents a conversation turn (user message + model response(s)).
 
     A turn typically consists of:
-    - One user Content (role='user')
-    - One or more model Content objects (role='model')
-    - Possibly function response Content objects (role='user' with function_response parts)
+    - One user Message (role=USER)
+    - One or more model Message objects (role=MODEL)
+    - Possibly function response Message objects (role=USER with function_response parts)
     """
 
     index: int
     """Turn index (0-based)."""
 
-    contents: List[types.Content]
-    """All Content objects in this turn."""
+    contents: List[Message]
+    """All Message objects in this turn."""
 
     estimated_tokens: int = 0
     """Estimated token count for this turn."""
@@ -34,7 +34,7 @@ class Turn:
         return len(self.contents) == 0
 
 
-def split_into_turns(history: List[types.Content]) -> List[Turn]:
+def split_into_turns(history: List[Message]) -> List[Turn]:
     """Split conversation history into logical turns.
 
     A turn starts with a user message and includes all subsequent
@@ -43,28 +43,28 @@ def split_into_turns(history: List[types.Content]) -> List[Turn]:
     preceding model response.
 
     Args:
-        history: List of Content objects from conversation history.
+        history: List of Message objects from conversation history.
 
     Returns:
-        List of Turn objects, each containing related Content objects.
+        List of Turn objects, each containing related Message objects.
     """
     if not history:
         return []
 
     turns: List[Turn] = []
-    current_turn_contents: List[types.Content] = []
+    current_turn_contents: List[Message] = []
     turn_index = 0
 
-    for content in history:
+    for message in history:
         # Check if this is a new user message (not a function response)
-        is_user_message = content.role == "user"
+        is_user_message = message.role == Role.USER
         is_function_response = False
 
-        if is_user_message and content.parts:
+        if is_user_message and message.parts:
             # Check if it's a function response (has function_response parts)
             is_function_response = any(
-                hasattr(part, 'function_response') and part.function_response is not None
-                for part in content.parts
+                part.function_response is not None
+                for part in message.parts
             )
 
         # Start new turn on user message (not function response)
@@ -78,7 +78,7 @@ def split_into_turns(history: List[types.Content]) -> List[Turn]:
             turn_index += 1
             current_turn_contents = []
 
-        current_turn_contents.append(content)
+        current_turn_contents.append(message)
 
     # Don't forget the last turn
     if current_turn_contents:
@@ -91,43 +91,43 @@ def split_into_turns(history: List[types.Content]) -> List[Turn]:
     return turns
 
 
-def flatten_turns(turns: List[Turn]) -> List[types.Content]:
+def flatten_turns(turns: List[Turn]) -> List[Message]:
     """Flatten a list of turns back into a content list.
 
     Args:
         turns: List of Turn objects.
 
     Returns:
-        Flattened list of Content objects preserving order.
+        Flattened list of Message objects preserving order.
     """
-    result: List[types.Content] = []
+    result: List[Message] = []
     for turn in turns:
         result.extend(turn.contents)
     return result
 
 
-def estimate_content_tokens(content: types.Content) -> int:
-    """Estimate token count for a single Content object.
+def estimate_message_tokens(message: Message) -> int:
+    """Estimate token count for a single Message object.
 
     Uses a simple heuristic: ~4 characters per token.
     This is approximate but avoids API calls for counting.
 
     Args:
-        content: A Content object to estimate.
+        message: A Message object to estimate.
 
     Returns:
         Estimated token count.
     """
     total_chars = 0
 
-    if content.parts:
-        for part in content.parts:
+    if message.parts:
+        for part in message.parts:
             # Text parts
-            if hasattr(part, 'text') and part.text:
+            if part.text:
                 total_chars += len(part.text)
 
             # Function call parts
-            elif hasattr(part, 'function_call') and part.function_call:
+            elif part.function_call:
                 fc = part.function_call
                 total_chars += len(fc.name) if fc.name else 0
                 if fc.args:
@@ -135,7 +135,7 @@ def estimate_content_tokens(content: types.Content) -> int:
                     total_chars += len(str(fc.args))
 
             # Function response parts
-            elif hasattr(part, 'function_response') and part.function_response:
+            elif part.function_response:
                 fr = part.function_response
                 total_chars += len(fr.name) if fr.name else 0
                 if fr.response:
@@ -145,19 +145,19 @@ def estimate_content_tokens(content: types.Content) -> int:
     return max(1, total_chars // 4)
 
 
-def estimate_turn_tokens(contents: List[types.Content]) -> int:
-    """Estimate token count for a list of Content objects.
+def estimate_turn_tokens(contents: List[Message]) -> int:
+    """Estimate token count for a list of Message objects.
 
     Args:
-        contents: List of Content objects.
+        contents: List of Message objects.
 
     Returns:
         Total estimated token count.
     """
-    return sum(estimate_content_tokens(c) for c in contents)
+    return sum(estimate_message_tokens(c) for c in contents)
 
 
-def estimate_history_tokens(history: List[types.Content]) -> int:
+def estimate_history_tokens(history: List[Message]) -> int:
     """Estimate total token count for entire history.
 
     Args:
@@ -169,8 +169,8 @@ def estimate_history_tokens(history: List[types.Content]) -> int:
     return estimate_turn_tokens(history)
 
 
-def create_summary_content(summary_text: str) -> types.Content:
-    """Create a Content object containing a context summary.
+def create_summary_message(summary_text: str) -> Message:
+    """Create a Message object containing a context summary.
 
     The summary is marked with special delimiters so the model
     understands it's compressed context, not a user message.
@@ -179,7 +179,7 @@ def create_summary_content(summary_text: str) -> types.Content:
         summary_text: The summary text to include.
 
     Returns:
-        A Content object with role='user' containing the summary.
+        A Message object with role=USER containing the summary.
     """
     formatted_summary = (
         "[Context Summary - Previous conversation compressed]\n"
@@ -187,26 +187,26 @@ def create_summary_content(summary_text: str) -> types.Content:
         "[End Context Summary]"
     )
 
-    return types.Content(
-        role="user",
-        parts=[types.Part(text=formatted_summary)]
+    return Message(
+        role=Role.USER,
+        parts=[Part(text=formatted_summary)]
     )
 
 
-def create_gc_notification_content(message: str) -> types.Content:
-    """Create a Content object notifying about GC.
+def create_gc_notification_message(message: str) -> Message:
+    """Create a Message object notifying about GC.
 
     Args:
         message: The notification message.
 
     Returns:
-        A Content object with the notification.
+        A Message object with the notification.
     """
     formatted_message = f"[System: {message}]"
 
-    return types.Content(
-        role="user",
-        parts=[types.Part(text=formatted_message)]
+    return Message(
+        role=Role.USER,
+        parts=[Part(text=formatted_message)]
     )
 
 

@@ -233,7 +233,7 @@ registry.discover()
 registry.expose_all()  # References plugin is exposed by default
 
 # Get declarations and executors
-declarations = registry.get_exposed_declarations()
+declarations = registry.get_exposed_tool_schemas()
 executors = registry.get_exposed_executors()
 instructions = registry.get_system_instructions()
 ```

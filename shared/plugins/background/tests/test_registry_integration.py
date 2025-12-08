@@ -32,7 +32,7 @@ class TestPluginDiscovery:
 
         # Required ToolPlugin methods
         assert hasattr(plugin, 'name')
-        assert hasattr(plugin, 'get_function_declarations')
+        assert hasattr(plugin, 'get_tool_schemas')
         assert hasattr(plugin, 'get_executors')
         assert hasattr(plugin, 'initialize')
         assert hasattr(plugin, 'shutdown')
@@ -61,11 +61,11 @@ class TestPluginDiscovery:
 
         assert "background" in registry.list_exposed()
 
-        # Check declarations are included
-        declarations = registry.get_exposed_declarations()
-        decl_names = [d.name for d in declarations]
+        # Check schemas are included
+        schemas = registry.get_exposed_tool_schemas()
+        schema_names = [s.name for s in schemas]
 
-        assert "startBackgroundTask" in decl_names
+        assert "startBackgroundTask" in schema_names
 
 
 class TestBackgroundCapableProtocolCheck:
@@ -125,7 +125,7 @@ class TestRegistryWithCapablePlugins:
             def get_auto_background_threshold(self, tool_name: str) -> Optional[float]:
                 return 5.0 if tool_name == "bg_tool" else None
 
-            def get_function_declarations(self):
+            def get_tool_schemas(self):
                 return []
 
             def get_executors(self) -> Dict[str, Any]:

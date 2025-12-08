@@ -71,29 +71,29 @@ class TestRegistryExposeReferencesPlugin:
         registry.unexpose_all()
 
 
-class TestRegistryReferencesToolDeclarations:
-    """Tests for references tool declarations exposure via registry."""
+class TestRegistryReferencesToolSchemas:
+    """Tests for references tool schemas exposure via registry."""
 
     def test_references_tools_not_exposed_before_expose(self):
-        """Test that references tools are not in declarations before expose."""
+        """Test that references tools are not in schemas before expose."""
         registry = PluginRegistry()
         registry.discover()
 
-        declarations = registry.get_exposed_declarations()
-        tool_names = [d.name for d in declarations]
+        schemas = registry.get_exposed_tool_schemas()
+        tool_names = [s.name for s in schemas]
 
         assert "selectReferences" not in tool_names
         assert "listReferences" not in tool_names
 
     def test_references_tools_exposed_after_expose(self):
-        """Test that references tools are in declarations after expose."""
+        """Test that references tools are in schemas after expose."""
         registry = PluginRegistry()
         registry.discover()
 
         registry.expose_tool("references")
 
-        declarations = registry.get_exposed_declarations()
-        tool_names = [d.name for d in declarations]
+        schemas = registry.get_exposed_tool_schemas()
+        tool_names = [s.name for s in schemas]
 
         assert "selectReferences" in tool_names
         assert "listReferences" in tool_names
@@ -108,8 +108,8 @@ class TestRegistryReferencesToolDeclarations:
         registry.expose_tool("references")
         registry.unexpose_tool("references")
 
-        declarations = registry.get_exposed_declarations()
-        tool_names = [d.name for d in declarations]
+        schemas = registry.get_exposed_tool_schemas()
+        tool_names = [s.name for s in schemas]
 
         assert "selectReferences" not in tool_names
         assert "listReferences" not in tool_names

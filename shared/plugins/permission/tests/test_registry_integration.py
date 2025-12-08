@@ -108,13 +108,13 @@ class TestRegistryAskPermissionTool:
         registry.discover()
 
         # Not exposed yet
-        declarations = registry.get_exposed_declarations()
+        declarations = registry.get_exposed_tool_schemas()
         tool_names = [d.name for d in declarations]
         assert "askPermission" not in tool_names
 
         # Expose
         registry.expose_tool("permission")
-        declarations = registry.get_exposed_declarations()
+        declarations = registry.get_exposed_tool_schemas()
         tool_names = [d.name for d in declarations]
         assert "askPermission" in tool_names
 
@@ -305,7 +305,7 @@ class TestRegistryMultiplePluginsWithPermission:
         # Expose permission and any other available plugins
         registry.expose_tool("permission")
 
-        declarations = registry.get_exposed_declarations()
+        declarations = registry.get_exposed_tool_schemas()
         tool_names = [d.name for d in declarations]
 
         # askPermission should be present

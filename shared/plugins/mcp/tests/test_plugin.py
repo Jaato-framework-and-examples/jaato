@@ -39,14 +39,14 @@ class TestMCPPluginInitialization:
 class TestMCPPluginFunctionDeclarations:
     """Tests for function declarations."""
 
-    def test_get_function_declarations_empty(self):
+    def test_get_tool_schemas_empty(self):
         """Without MCP servers, should return empty list."""
         plugin = MCPToolPlugin()
         # Don't initialize - just check the cache-based behavior
         plugin._initialized = True  # Skip actual initialization
-        declarations = plugin.get_function_declarations()
+        schemas = plugin.get_tool_schemas()
 
-        assert declarations == []
+        assert schemas == []
 
     def test_get_executors_empty(self):
         """Without MCP servers, should return empty dict."""

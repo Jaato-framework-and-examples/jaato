@@ -8,10 +8,9 @@ import logging
 import os
 from typing import Any, Callable, Dict, List, Optional
 
-from google.genai import types
-
 from .config import SubagentConfig, SubagentProfile, SubagentResult
 from ..base import UserCommand, CommandCompletion
+from ..model_provider.types import ToolSchema
 
 logger = logging.getLogger(__name__)
 
@@ -138,10 +137,10 @@ class SubagentPlugin:
         self._initialized = False
         logger.info("Subagent plugin shutdown")
 
-    def get_function_declarations(self) -> List[types.FunctionDeclaration]:
+    def get_tool_schemas(self) -> List[ToolSchema]:
         """Return function declarations for subagent tools."""
         declarations = [
-            types.FunctionDeclaration(
+            ToolSchema(
                 name='spawn_subagent',
                 description=(
                     'Spawn a subagent to handle a specialized task. The subagent '
@@ -150,7 +149,7 @@ class SubagentPlugin:
                     'isolate tool access. The subagent will complete the task and '
                     'return the result.'
                 ),
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {
                         "profile": {
@@ -205,13 +204,13 @@ class SubagentPlugin:
                     "required": ["task"]
                 }
             ),
-            types.FunctionDeclaration(
+            ToolSchema(
                 name='list_subagent_profiles',
                 description=(
                     'List available subagent profiles. Use this to see what '
                     'specialized subagents are configured and their capabilities.'
                 ),
-                parameters_json_schema={
+                parameters={
                     "type": "object",
                     "properties": {},
                     "required": []
@@ -549,8 +548,8 @@ class SubagentPlugin:
             else:
                 client.configure_tools(registry)
 
-            # Run the conversation
-            response = client.send_message(prompt)
+            # Run the conversation (subagent output is not streamed)
+            response = client.send_message(prompt, on_output=lambda src, txt, mode: None)
 
             # Get token usage
             usage = client.get_context_usage()

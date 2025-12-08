@@ -9,7 +9,7 @@ Similar to Java's simple heap compaction - just remove the oldest data.
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from google.genai import types
+from ..model_provider.types import Message
 
 from ..gc import (
     GCConfig,
@@ -17,7 +17,7 @@ from ..gc import (
     GCResult,
     GCTriggerReason,
     Turn,
-    create_gc_notification_content,
+    create_gc_notification_message,
     estimate_history_tokens,
     flatten_turns,
     get_preserved_indices,
@@ -109,11 +109,11 @@ class TruncateGCPlugin:
 
     def collect(
         self,
-        history: List[types.Content],
+        history: List[Message],
         context_usage: Dict[str, Any],
         config: GCConfig,
         reason: GCTriggerReason
-    ) -> Tuple[List[types.Content], GCResult]:
+    ) -> Tuple[List[Message], GCResult]:
         """Perform garbage collection by truncating oldest turns.
 
         Args:
@@ -200,7 +200,7 @@ class TruncateGCPlugin:
             result.notification = notification
 
             # Prepend notification to history
-            notification_content = create_gc_notification_content(notification)
+            notification_content = create_gc_notification_message(notification)
             new_history = [notification_content] + new_history
 
         return new_history, result

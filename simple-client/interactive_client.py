@@ -572,13 +572,13 @@ class InteractiveClient:
         self._setup_session_plugin()
 
         # Log available tools (including session plugin)
-        all_decls = self.registry.get_exposed_declarations()
+        all_decls = self.registry.get_exposed_tool_schemas()
         if self.permission_plugin:
-            all_decls.extend(self.permission_plugin.get_function_declarations())
+            all_decls.extend(self.permission_plugin.get_tool_schemas())
         # Session plugin tools are already added to jaato's tool config
         if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
-            if hasattr(self._jaato._session_plugin, 'get_function_declarations'):
-                all_decls.extend(self._jaato._session_plugin.get_function_declarations())
+            if hasattr(self._jaato._session_plugin, 'get_tool_schemas'):
+                all_decls.extend(self._jaato._session_plugin.get_tool_schemas())
         self.log(f"[client] Available tools: {[d.name for d in all_decls]}")
 
         # Register plugin-contributed tools as completable commands
@@ -607,7 +607,7 @@ class InteractiveClient:
             self._jaato.set_session_plugin(session_plugin, session_config)
 
             # Register session plugin with registry for prompt enrichment
-            # (enrichment_only=True means it won't duplicate in get_exposed_declarations)
+            # (enrichment_only=True means it won't duplicate in get_exposed_tool_schemas)
             if self.registry:
                 self.registry.register_plugin(session_plugin, enrichment_only=True)
 
@@ -924,16 +924,16 @@ Keyboard shortcuts:
         """Print available tools."""
         print("\nAvailable tools:")
         # Tools from registry
-        for decl in self.registry.get_exposed_declarations():
+        for decl in self.registry.get_exposed_tool_schemas():
             print(f"  - {decl.name}: {decl.description}")
         # Tools from permission plugin
         if self.permission_plugin:
-            for decl in self.permission_plugin.get_function_declarations():
+            for decl in self.permission_plugin.get_tool_schemas():
                 print(f"  - {decl.name}: {decl.description}")
         # Tools from session plugin (if configured)
         if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
-            if hasattr(self._jaato._session_plugin, 'get_function_declarations'):
-                for decl in self._jaato._session_plugin.get_function_declarations():
+            if hasattr(self._jaato._session_plugin, 'get_tool_schemas'):
+                for decl in self._jaato._session_plugin.get_tool_schemas():
                     print(f"  - {decl.name}: {decl.description}")
         print()
 

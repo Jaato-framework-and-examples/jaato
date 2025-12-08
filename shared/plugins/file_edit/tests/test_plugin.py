@@ -44,9 +44,9 @@ class TestFileEditPluginInitialization:
 class TestFileEditPluginFunctionDeclarations:
     """Tests for function declarations."""
 
-    def test_get_function_declarations(self):
+    def test_get_tool_schemas(self):
         plugin = FileEditPlugin()
-        declarations = plugin.get_function_declarations()
+        declarations = plugin.get_tool_schemas()
 
         assert len(declarations) == 5
         tool_names = [d.name for d in declarations]
@@ -58,9 +58,9 @@ class TestFileEditPluginFunctionDeclarations:
 
     def test_read_file_schema(self):
         plugin = FileEditPlugin()
-        declarations = plugin.get_function_declarations()
-        read_file = [d for d in declarations if d.name == "readFile"][0]
-        schema = read_file.parameters_json_schema
+        schemas = plugin.get_tool_schemas()
+        read_file = [s for s in schemas if s.name == "readFile"][0]
+        schema = read_file.parameters
 
         assert schema["type"] == "object"
         assert "path" in schema["properties"]
@@ -68,9 +68,9 @@ class TestFileEditPluginFunctionDeclarations:
 
     def test_update_file_schema(self):
         plugin = FileEditPlugin()
-        declarations = plugin.get_function_declarations()
-        update_file = [d for d in declarations if d.name == "updateFile"][0]
-        schema = update_file.parameters_json_schema
+        schemas = plugin.get_tool_schemas()
+        update_file = [s for s in schemas if s.name == "updateFile"][0]
+        schema = update_file.parameters
 
         assert schema["type"] == "object"
         assert "path" in schema["properties"]

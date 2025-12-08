@@ -89,29 +89,29 @@ class TestRegistryExposeSubagentPlugin:
         registry.unexpose_all()
 
 
-class TestRegistrySubagentToolDeclarations:
-    """Tests for subagent tool declarations exposure via registry."""
+class TestRegistrySubagentToolSchemas:
+    """Tests for subagent tool schemas exposure via registry."""
 
     def test_subagent_tools_not_exposed_before_expose(self):
-        """Test that subagent tools are not in declarations before expose."""
+        """Test that subagent tools are not in schemas before expose."""
         registry = PluginRegistry()
         registry.discover()
 
-        declarations = registry.get_exposed_declarations()
-        tool_names = [d.name for d in declarations]
+        schemas = registry.get_exposed_tool_schemas()
+        tool_names = [s.name for s in schemas]
 
         assert "spawn_subagent" not in tool_names
         assert "list_subagent_profiles" not in tool_names
 
     def test_subagent_tools_exposed_after_expose(self):
-        """Test that subagent tools are in declarations after expose."""
+        """Test that subagent tools are in schemas after expose."""
         registry = PluginRegistry()
         registry.discover()
 
         registry.expose_tool("subagent")
 
-        declarations = registry.get_exposed_declarations()
-        tool_names = [d.name for d in declarations]
+        schemas = registry.get_exposed_tool_schemas()
+        tool_names = [s.name for s in schemas]
 
         assert "spawn_subagent" in tool_names
         assert "list_subagent_profiles" in tool_names
@@ -126,8 +126,8 @@ class TestRegistrySubagentToolDeclarations:
         registry.expose_tool("subagent")
         registry.unexpose_tool("subagent")
 
-        declarations = registry.get_exposed_declarations()
-        tool_names = [d.name for d in declarations]
+        schemas = registry.get_exposed_tool_schemas()
+        tool_names = [s.name for s in schemas]
 
         assert "spawn_subagent" not in tool_names
         assert "list_subagent_profiles" not in tool_names
