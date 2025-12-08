@@ -677,15 +677,80 @@ class SessionIdCompleter(Completer):
                     )
 
 
+class PermissionsCompleter(Completer):
+    """Complete permissions command subcommands and options.
+
+    Triggers completion for:
+    - "permissions " -> show, allow, deny, default, clear (subcommands)
+    - "permissions default " -> allow, deny, ask (policy options)
+
+    Example usage:
+        "permissions de" -> completes to "default" or "deny"
+        "permissions default a" -> completes to "allow" or "ask"
+    """
+
+    # Subcommands for the permissions command
+    SUBCOMMANDS = [
+        ("show", "Display current effective policy"),
+        ("allow", "Add tool/pattern to session whitelist"),
+        ("deny", "Add tool/pattern to session blacklist"),
+        ("default", "Set session default policy"),
+        ("clear", "Reset all session modifications"),
+    ]
+
+    # Options for "permissions default"
+    DEFAULT_OPTIONS = [
+        ("allow", "Auto-approve all tools"),
+        ("deny", "Auto-deny all tools"),
+        ("ask", "Prompt for each tool"),
+    ]
+
+    def get_completions(
+        self, document: Document, complete_event
+    ) -> Iterable[Completion]:
+        """Get completions for permissions command."""
+        text = document.text_before_cursor
+        text_lower = text.lower()
+
+        # Check for "permissions default " pattern first (more specific)
+        if text_lower.startswith('permissions default '):
+            arg_text = text[len('permissions default '):]
+            for option, description in self.DEFAULT_OPTIONS:
+                if option.startswith(arg_text.lower()):
+                    yield Completion(
+                        option,
+                        start_position=-len(arg_text),
+                        display=option,
+                        display_meta=description,
+                    )
+            return
+
+        # Check for "permissions " pattern (subcommand completion)
+        if text_lower.startswith('permissions '):
+            arg_text = text[len('permissions '):]
+            # Don't complete if there's already a full subcommand with space
+            if ' ' in arg_text:
+                return
+            for subcommand, description in self.SUBCOMMANDS:
+                if subcommand.startswith(arg_text.lower()):
+                    yield Completion(
+                        subcommand,
+                        start_position=-len(arg_text),
+                        display=subcommand,
+                        display_meta=description,
+                    )
+
+
 class CombinedCompleter(Completer):
     """Combined completer for commands, file references, slash commands, and session IDs.
 
-    Merges CommandCompleter, AtFileCompleter, SlashCommandCompleter, and
-    SessionIdCompleter to provide:
+    Merges CommandCompleter, AtFileCompleter, SlashCommandCompleter,
+    SessionIdCompleter, and PermissionsCompleter to provide:
     - Command completion at line start (help, tools, reset, etc.)
     - File path completion after @ symbols
     - Slash command completion after / symbols (from .jaato/commands/)
     - Session ID completion after session commands (delete-session, resume)
+    - Permissions subcommand and option completion
 
     This allows seamless autocompletion for all use cases.
     """
@@ -723,6 +788,7 @@ class CombinedCompleter(Completer):
             base_path=base_path,
         )
         self._session_completer = SessionIdCompleter(session_provider)
+        self._permissions_completer = PermissionsCompleter()
 
     def set_session_provider(self, provider: Callable[[], list]) -> None:
         """Set the session provider callback for session ID completion.
@@ -753,7 +819,9 @@ class CombinedCompleter(Completer):
         # AtFileCompleter will only yield if @ is present
         # SlashCommandCompleter will only yield if / is present at start of word
         # SessionIdCompleter will only yield after session commands (delete-session, resume)
+        # PermissionsCompleter will only yield for permissions command subcommands/options
         yield from self._command_completer.get_completions(document, complete_event)
         yield from self._file_completer.get_completions(document, complete_event)
         yield from self._slash_completer.get_completions(document, complete_event)
         yield from self._session_completer.get_completions(document, complete_event)
+        yield from self._permissions_completer.get_completions(document, complete_event)
