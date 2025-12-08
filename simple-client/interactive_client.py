@@ -1045,13 +1045,12 @@ Keyboard shortcuts:
         current_turn = 0
         turn_index = 0
 
-        for i, content in enumerate(history):
-            role = getattr(content, 'role', None) or 'unknown'
-            parts = getattr(content, 'parts', None) or []
+        for i, msg in enumerate(history):
+            role = msg.role
+            parts = msg.parts
 
             # Check if this is a new user turn (user message with text, not function response)
-            is_user_text = (role == 'user' and parts and
-                           hasattr(parts[0], 'text') and parts[0].text)
+            is_user_text = (role == 'user' and parts and parts[0].text)
 
             # Print turn header if this starts a new turn
             if is_user_text:
@@ -1088,11 +1087,9 @@ Keyboard shortcuts:
             is_last = (i == len(history) - 1)
             next_is_user_text = False
             if not is_last:
-                next_content = history[i + 1]
-                next_role = getattr(next_content, 'role', None) or 'unknown'
-                next_parts = getattr(next_content, 'parts', None) or []
-                next_is_user_text = (next_role == 'user' and next_parts and
-                                    hasattr(next_parts[0], 'text') and next_parts[0].text)
+                next_msg = history[i + 1]
+                next_is_user_text = (next_msg.role == 'user' and
+                                    next_msg.parts and next_msg.parts[0].text)
 
             if (is_last or next_is_user_text) and turn_index < len(turn_accounting):
                 turn = turn_accounting[turn_index]
@@ -1134,7 +1131,7 @@ Keyboard shortcuts:
     def _print_part(self, part) -> None:
         """Print a single content part."""
         # Text content
-        if hasattr(part, 'text') and part.text:
+        if part.text:
             text = part.text
             # Truncate very long text
             if len(text) > 500:
@@ -1142,10 +1139,10 @@ Keyboard shortcuts:
             print(f"  {text}")
 
         # Function call
-        elif hasattr(part, 'function_call') and part.function_call:
+        elif part.function_call:
             fc = part.function_call
-            name = getattr(fc, 'name', 'unknown')
-            args = getattr(fc, 'args', {})
+            name = fc.name
+            args = fc.args
             # Format args compactly
             args_str = str(args)
             if len(args_str) > 200:
@@ -1153,10 +1150,10 @@ Keyboard shortcuts:
             print(f"  📤 CALL: {name}({args_str})")
 
         # Function response
-        elif hasattr(part, 'function_response') and part.function_response:
+        elif part.function_response:
             fr = part.function_response
-            name = getattr(fr, 'name', 'unknown')
-            response = getattr(fr, 'response', {})
+            name = fr.name
+            response = fr.result
 
             # Extract and display permission info first (on separate line)
             if isinstance(response, dict):
@@ -1216,14 +1213,14 @@ Keyboard shortcuts:
         current_permissions: list[str] = []
         in_user_turn = False
 
-        for content in history:
-            role = getattr(content, 'role', None) or 'unknown'
-            parts = getattr(content, 'parts', None) or []
+        for msg in history:
+            role = msg.role
+            parts = msg.parts
 
             if role == 'user':
                 # Check if this is a user text message (starts new turn)
                 for part in parts:
-                    if hasattr(part, 'text') and part.text:
+                    if part.text:
                         text = part.text.strip()
                         if text.startswith('[User executed command:'):
                             continue
@@ -1236,9 +1233,9 @@ Keyboard shortcuts:
             elif role == 'model':
                 # Collect permission data from function responses
                 for part in parts:
-                    if hasattr(part, 'function_response') and part.function_response:
+                    if part.function_response:
                         fr = part.function_response
-                        response = getattr(fr, 'response', {})
+                        response = fr.result
                         if isinstance(response, dict):
                             perm = response.get('_permission')
                             if perm:

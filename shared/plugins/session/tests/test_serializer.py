@@ -48,8 +48,8 @@ class TestPartSerialization:
 
         assert result["type"] == "function_response"
         assert result["name"] == "my_function"
-        assert result["response"]["result"] == "success"
-        assert result["response"]["value"] == 42
+        assert result["result"]["result"] == "success"
+        assert result["result"]["value"] == 42
 
     def test_deserialize_function_response_part(self):
         """Test deserializing a function response part."""
