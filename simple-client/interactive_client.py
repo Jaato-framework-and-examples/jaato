@@ -806,13 +806,13 @@ class InteractiveClient:
 
             def display_output(source: str, text: str, mode: str) -> None:
                 """Display output from model or plugins in real-time."""
-                if source == "permission":
-                    # Permission prompts are interactive - display without prefix
-                    print(text)
-                else:
+                if source == "model":
                     # Model output gets the Model> prefix
                     wrapped = self._wrap_text(text, prefix=continuation_indent, initial_prefix="")
                     print(f"\n{model_prefix}{wrapped}")
+                else:
+                    # Plugin output is displayed as-is (no prefix)
+                    print(text)
 
             # Execute the prompt with real-time output display
             response = self.run_prompt(expanded_prompt, on_output=display_output)
