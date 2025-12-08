@@ -45,10 +45,16 @@ This document describes the architecture of the jaato framework and how a generi
                                               │
                                               ▼
                                ┌──────────────────────────┐
-                               │     Vertex AI / Gemini   │
-                               │   (LLM with function     │
-                               │    calling support)      │
-                               └──────────────────────────┘
+                               │   ModelProviderPlugin    │
+                               │   (Provider abstraction) │
+                               └────────────┬─────────────┘
+                                            │
+                     ┌──────────────────────┼──────────────────────┐
+                     ▼                      ▼                      ▼
+           ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
+           │  Google GenAI   │   │   Anthropic     │   │    Others...    │
+           │ (Gemini models) │   │ (Claude models) │   │                 │
+           └─────────────────┘   └─────────────────┘   └─────────────────┘
 ```
 
 ## Component Diagram (Mermaid)
@@ -222,7 +228,7 @@ registry.expose_tool('cli')
 ```
 
 Tool plugins can provide:
-- **Function declarations** for model function calling
+- **Tool schemas** (`get_tool_schemas()`) for model function calling
 - **Executors** that run when the model invokes tools
 - **System instructions** to guide model behavior
 - **User commands** for direct user invocation (bypassing the model)
@@ -281,6 +287,60 @@ Configuration is stored in `.jaato/.sessions.json`:
 }
 ```
 
+### Model Provider Plugins (Provider Abstraction)
+
+Model provider plugins implement the `ModelProviderPlugin` protocol and abstract away SDK-specific details, enabling support for multiple AI providers:
+
+```python
+from shared.plugins.model_provider import (
+    ModelProviderPlugin,
+    ProviderConfig,
+    load_provider,
+)
+from shared.plugins.model_provider.types import ToolSchema, Message
+
+# Load a provider (auto-discovered or from known implementations)
+provider = load_provider('google_genai')
+provider.initialize(ProviderConfig(project='my-project', location='us-central1'))
+provider.connect('gemini-2.5-flash')
+
+# Create session with provider-agnostic tools
+provider.create_session(
+    system_instruction="You are a helpful assistant.",
+    tools=[ToolSchema(name='greet', description='Say hello', parameters={})]
+)
+
+# Send messages
+response = provider.send_message("Hello!")
+print(response.text)
+print(response.function_calls)  # If any
+```
+
+Model provider plugins provide:
+- **Connection management** (`initialize()`, `connect()`, `shutdown()`)
+- **Chat sessions** (`create_session()`, `get_history()`)
+- **Message handling** (`send_message()`, `send_tool_results()`)
+- **Token management** (`count_tokens()`, `get_context_limit()`)
+- **History serialization** (`serialize_history()`, `deserialize_history()`)
+
+#### Provider-Agnostic Types
+
+All plugins use internal types defined in `shared/plugins/model_provider/types.py`:
+
+| Type | Purpose | Replaces |
+|------|---------|----------|
+| `ToolSchema` | Tool/function declaration | `types.FunctionDeclaration` |
+| `Message` | Conversation message | `types.Content` |
+| `Part` | Message content part | `types.Part` |
+| `FunctionCall` | Function call from model | SDK-specific |
+| `ToolResult` | Function execution result | SDK-specific |
+| `ProviderResponse` | Unified response format | SDK-specific |
+
+#### Available Providers
+
+- **google_genai** - Google GenAI SDK (Vertex AI, Gemini models)
+- **anthropic** - (Future) Anthropic SDK (Claude models)
+
 ### Prompt Enrichment Pipeline
 
 Plugins can subscribe to enrich user prompts before they are sent to the model:
@@ -335,7 +395,7 @@ registry.register_plugin(session_plugin, enrichment_only=True)
 
 The `enrichment_only` mode is used when:
 1. The plugin's tools are already registered elsewhere (e.g., via `set_session_plugin()`)
-2. You want to avoid duplicate tool declarations in `get_exposed_declarations()`
+2. You want to avoid duplicate tool declarations in `get_exposed_tool_schemas()`
 3. The plugin only needs prompt enrichment, not full exposure
 
 ```mermaid
@@ -346,7 +406,7 @@ flowchart LR
     end
 
     subgraph Methods["Registry Methods"]
-        Decls["get_exposed_declarations()"]
+        Decls["get_exposed_tool_schemas()"]
         Execs["get_exposed_executors()"]
         Enrich["get_prompt_enrichment_subscribers()"]
     end
@@ -393,7 +453,7 @@ classDiagram
     class ToolPlugin {
         <<Protocol>>
         +name: str
-        +get_function_declarations() List
+        +get_tool_schemas() List~ToolSchema~
         +get_executors() Dict
         +initialize(config)
         +shutdown()
@@ -411,7 +471,38 @@ classDiagram
         +initialize(config)
         +shutdown()
         +should_collect(context_usage, config) Tuple
-        +collect(history, context_usage, config, reason) Tuple
+        +collect(history: List~Message~, context_usage, config, reason) Tuple
+    }
+
+    class ModelProviderPlugin {
+        <<Protocol>>
+        +name: str
+        +initialize(config: ProviderConfig)
+        +shutdown()
+        +connect(model: str)
+        +create_session(system_instruction, tools, history)
+        +send_message(message: str) ProviderResponse
+        +send_tool_results(results: List~ToolResult~) ProviderResponse
+        +get_history() List~Message~
+        +count_tokens(content: str) int
+        +get_context_limit() int
+        +serialize_history(history) str
+        +deserialize_history(data) List~Message~
+    }
+
+    class ToolSchema {
+        <<dataclass>>
+        +name: str
+        +description: str
+        +parameters: Dict
+    }
+
+    class Message {
+        <<dataclass>>
+        +role: Role
+        +parts: List~Part~
+        +text: str [property]
+        +function_calls: List~FunctionCall~ [property]
     }
 
     class SessionPlugin {
@@ -437,7 +528,7 @@ classDiagram
         +discover(plugin_kind) List
         +expose_tool(name, config)
         +unexpose_tool(name)
-        +get_exposed_declarations()
+        +get_exposed_tool_schemas() List~ToolSchema~
         +get_exposed_executors()
         +get_exposed_user_commands() List~UserCommand~
     }
@@ -671,6 +762,15 @@ shared/
     ├── base.py              # ToolPlugin protocol, UserCommand NamedTuple
     ├── registry.py          # PluginRegistry (for tool plugins)
     │
+    │   # Model Provider Plugins (Provider abstraction layer)
+    ├── model_provider/      # Provider-agnostic types and protocols
+    │   ├── __init__.py      # Exports, discovery functions
+    │   ├── base.py          # ModelProviderPlugin protocol
+    │   ├── types.py         # ToolSchema, Message, Part, ProviderResponse
+    │   └── google_genai/    # Google GenAI implementation
+    │       ├── provider.py  # GoogleGenAIProvider
+    │       └── converters.py # Type conversion utilities
+    │
     │   # Tool Plugins (PLUGIN_KIND = "tool")
     ├── background/          # BackgroundPlugin (orchestrator + protocol)
     │   ├── protocol.py      # BackgroundCapable protocol, TaskHandle, TaskResult
@@ -690,13 +790,13 @@ shared/
     │   # Session Plugins (PLUGIN_KIND = "session") - NOT managed by PluginRegistry
     ├── session/             # Base types + FileSessionPlugin
     │   ├── base.py          # SessionPlugin protocol, SessionState, SessionConfig
-    │   ├── serializer.py    # History serialization/deserialization
+    │   ├── serializer.py    # History serialization (uses Message type)
     │   ├── file_session.py  # FileSessionPlugin - file-based persistence
     │   └── config_loader.py # Load config from .jaato/.sessions.json
     │
     │   # GC Plugins (PLUGIN_KIND = "gc") - NOT managed by PluginRegistry
     ├── gc/                  # Base types: GCPlugin protocol, GCConfig, GCResult
-    │   ├── base.py          # GCPlugin protocol definition
+    │   ├── base.py          # GCPlugin protocol definition (uses Message type)
     │   └── utils.py         # Shared utilities for GC plugins
     ├── gc_truncate/         # TruncateGCPlugin - removes oldest turns
     ├── gc_summarize/        # SummarizeGCPlugin - compresses old turns

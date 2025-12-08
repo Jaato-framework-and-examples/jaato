@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 **jaato** ("just another agentic tool orchestrator") is an experimental project for exploring:
-- Vertex AI SDK integration with Gemini models
+- Multi-provider AI SDK integration (Google GenAI, Anthropic, etc.)
 - Function calling patterns with LLMs
 - Tool orchestration (CLI tools and MCP servers)
 
@@ -55,11 +55,27 @@ python3 -m venv .venv
   - `ToolExecutor`: Registry mapping tool names to callables
   - `run_function_call_loop()`: Legacy function for direct API usage (JaatoClient handles this internally now)
 
-- **plugins/**: Tool plugin system
-  - `PluginRegistry`: Discovers and manages tool plugins
-  - `cli.py`: CLI tool plugin for shell commands
-  - `mcp.py`: MCP tool plugin for Model Context Protocol servers
-  - `permission/`: Permission control for tool execution
+- **plugins/**: Plugin system with three plugin types:
+  - **Tool Plugins**: Provide tools the model can invoke
+    - `PluginRegistry`: Discovers and manages tool plugins
+    - `cli/`: CLI tool plugin for shell commands
+    - `mcp/`: MCP tool plugin for Model Context Protocol servers
+    - `permission/`: Permission control for tool execution
+    - `file_edit/`, `todo/`, `web_search/`, etc.
+  - **GC Plugins**: Garbage collection strategies for context management
+    - `gc_truncate/`: Simple truncation strategy
+    - `gc_summarize/`: Summarization-based strategy
+    - `gc_hybrid/`: Combined approach
+  - **Model Provider Plugins**: SDK abstraction for multi-provider support
+    - `model_provider/`: Provider-agnostic types and protocol
+    - `model_provider/google_genai/`: Google GenAI/Vertex AI implementation
+    - Future: `model_provider/anthropic/` for Claude API
+
+- **plugins/model_provider/**: Provider abstraction layer
+  - `types.py`: Provider-agnostic types (`ToolSchema`, `Message`, `ProviderResponse`)
+  - `base.py`: `ModelProviderPlugin` protocol definition
+  - `google_genai/provider.py`: Google GenAI implementation
+  - `google_genai/converters.py`: Type conversion utilities
 
 - **mcp_context_manager.py**: Multi-server MCP client manager
   - `MCPClientManager`: Manages persistent connections to multiple MCP servers
@@ -103,6 +119,43 @@ MCP servers are configured in `.mcp.json`:
   }
 }
 ```
+
+### Plugin Type System
+
+The project uses provider-agnostic types throughout the plugin system:
+
+```python
+# Tool declarations use ToolSchema (not SDK-specific types)
+from shared.plugins.model_provider.types import ToolSchema
+
+class MyPlugin:
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        return [ToolSchema(
+            name='my_tool',
+            description='Does something useful',
+            parameters={
+                "type": "object",
+                "properties": {"arg": {"type": "string"}},
+                "required": ["arg"]
+            }
+        )]
+```
+
+```python
+# Conversation history uses Message (not types.Content)
+from shared.plugins.model_provider.types import Message, Role
+
+history: List[Message] = client.get_history()
+for msg in history:
+    print(f"{msg.role}: {msg.text}")
+```
+
+Key types in `shared/plugins/model_provider/types.py`:
+- `ToolSchema`: Provider-agnostic function declaration
+- `Message`: Conversation message with role and parts
+- `Part`: Message content (text, function_call, function_response)
+- `ProviderResponse`: Unified response from any provider
+- `FunctionCall`, `ToolResult`: Function calling types
 
 ## Key Environment Variables
 

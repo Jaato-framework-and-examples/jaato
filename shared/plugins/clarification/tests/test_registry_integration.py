@@ -42,16 +42,16 @@ class TestClarificationPluginExpose:
         assert "clarification" not in exposed
 
 
-class TestClarificationPluginDeclarations:
-    """Tests for getting declarations from registry."""
+class TestClarificationPluginToolSchemas:
+    """Tests for getting tool schemas from registry."""
 
-    def test_get_declarations(self):
+    def test_get_tool_schemas(self):
         registry = PluginRegistry()
         registry.discover()
         registry.expose_tool("clarification", {"actor_type": "auto"})
 
-        declarations = registry.get_exposed_declarations()
-        names = [d.name for d in declarations]
+        schemas = registry.get_exposed_tool_schemas()
+        names = [s.name for s in schemas]
 
         assert "request_clarification" in names
 

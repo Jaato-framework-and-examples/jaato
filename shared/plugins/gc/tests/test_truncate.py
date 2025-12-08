@@ -1,17 +1,18 @@
 """Tests for TruncateGCPlugin."""
 
 import pytest
-from google.genai import types
 
 from shared.plugins.gc import GCConfig, GCTriggerReason
 from shared.plugins.gc_truncate import TruncateGCPlugin, create_plugin
+from shared.plugins.model_provider.types import Message, Part, Role
 
 
-def make_content(role: str, text: str) -> types.Content:
-    """Helper to create Content objects."""
-    return types.Content(
-        role=role,
-        parts=[types.Part(text=text)]
+def make_message(role: str, text: str) -> Message:
+    """Helper to create Message objects."""
+    r = Role.USER if role == "user" else Role.MODEL
+    return Message(
+        role=r,
+        parts=[Part(text=text)]
     )
 
 
@@ -19,8 +20,8 @@ def make_history(num_turns: int) -> list:
     """Create a history with N turns (user+model pairs)."""
     history = []
     for i in range(num_turns):
-        history.append(make_content("user", f"User message {i}"))
-        history.append(make_content("model", f"Model response {i}"))
+        history.append(make_message("user", f"User message {i}"))
+        history.append(make_message("model", f"Model response {i}"))
     return history
 
 

@@ -48,15 +48,15 @@ class TestTodoPluginInitialization:
         assert plugin._reporter is None
 
 
-class TestTodoPluginFunctionDeclarations:
-    """Tests for function declarations."""
+class TestTodoPluginToolSchemas:
+    """Tests for tool schemas."""
 
-    def test_get_function_declarations(self):
+    def test_get_tool_schemas(self):
         plugin = TodoPlugin()
-        declarations = plugin.get_function_declarations()
+        schemas = plugin.get_tool_schemas()
 
-        assert len(declarations) == 4
-        names = {d.name for d in declarations}
+        assert len(schemas) == 4
+        names = {s.name for s in schemas}
         assert "createPlan" in names
         assert "updateStep" in names
         assert "getPlanStatus" in names
@@ -64,9 +64,9 @@ class TestTodoPluginFunctionDeclarations:
 
     def test_createPlan_schema(self):
         plugin = TodoPlugin()
-        declarations = plugin.get_function_declarations()
-        create_plan = next(d for d in declarations if d.name == "createPlan")
-        schema = create_plan.parameters_json_schema
+        schemas = plugin.get_tool_schemas()
+        create_plan = next(s for s in schemas if s.name == "createPlan")
+        schema = create_plan.parameters
 
         assert schema["type"] == "object"
         assert "title" in schema["properties"]
@@ -76,9 +76,9 @@ class TestTodoPluginFunctionDeclarations:
 
     def test_updateStep_schema(self):
         plugin = TodoPlugin()
-        declarations = plugin.get_function_declarations()
-        update_step = next(d for d in declarations if d.name == "updateStep")
-        schema = update_step.parameters_json_schema
+        schemas = plugin.get_tool_schemas()
+        update_step = next(s for s in schemas if s.name == "updateStep")
+        schema = update_step.parameters
 
         assert "step_id" in schema["properties"]
         assert "status" in schema["properties"]

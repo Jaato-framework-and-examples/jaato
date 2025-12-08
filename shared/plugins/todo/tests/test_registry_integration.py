@@ -71,16 +71,16 @@ class TestRegistryExposeTodoPlugin:
         registry.unexpose_all()
 
 
-class TestRegistryTodoToolDeclarations:
-    """Tests for TODO tool declarations exposure via registry."""
+class TestRegistryTodoToolSchemas:
+    """Tests for TODO tool schemas exposure via registry."""
 
     def test_todo_tools_not_exposed_before_expose(self):
-        """Test that TODO tools are not in declarations before expose."""
+        """Test that TODO tools are not in schemas before expose."""
         registry = PluginRegistry()
         registry.discover()
 
-        declarations = registry.get_exposed_declarations()
-        tool_names = [d.name for d in declarations]
+        schemas = registry.get_exposed_tool_schemas()
+        tool_names = [s.name for s in schemas]
 
         assert "createPlan" not in tool_names
         assert "startPlan" not in tool_names
@@ -90,14 +90,14 @@ class TestRegistryTodoToolDeclarations:
         assert "addStep" not in tool_names
 
     def test_todo_tools_exposed_after_expose(self):
-        """Test that TODO tools are in declarations after expose."""
+        """Test that TODO tools are in schemas after expose."""
         registry = PluginRegistry()
         registry.discover()
 
         registry.expose_tool("todo")
 
-        declarations = registry.get_exposed_declarations()
-        tool_names = [d.name for d in declarations]
+        schemas = registry.get_exposed_tool_schemas()
+        tool_names = [s.name for s in schemas]
 
         assert "createPlan" in tool_names
         assert "startPlan" in tool_names
@@ -116,8 +116,8 @@ class TestRegistryTodoToolDeclarations:
         registry.expose_tool("todo")
         registry.unexpose_tool("todo")
 
-        declarations = registry.get_exposed_declarations()
-        tool_names = [d.name for d in declarations]
+        schemas = registry.get_exposed_tool_schemas()
+        tool_names = [s.name for s in schemas]
 
         assert "createPlan" not in tool_names
         assert "startPlan" not in tool_names

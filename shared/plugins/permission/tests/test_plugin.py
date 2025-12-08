@@ -82,17 +82,17 @@ class TestPermissionPluginInitialization:
 class TestPermissionPluginFunctionDeclarations:
     """Tests for function declarations."""
 
-    def test_get_function_declarations(self):
+    def test_get_tool_schemas(self):
         plugin = PermissionPlugin()
-        declarations = plugin.get_function_declarations()
+        declarations = plugin.get_tool_schemas()
 
         assert len(declarations) == 1
         assert declarations[0].name == "askPermission"
 
     def test_askPermission_schema(self):
         plugin = PermissionPlugin()
-        declarations = plugin.get_function_declarations()
-        schema = declarations[0].parameters_json_schema
+        schemas = plugin.get_tool_schemas()
+        schema = schemas[0].parameters
 
         assert schema["type"] == "object"
         assert "tool_name" in schema["properties"]

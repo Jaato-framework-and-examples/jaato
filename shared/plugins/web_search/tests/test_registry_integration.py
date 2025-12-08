@@ -88,28 +88,28 @@ class TestRegistryExposeWebSearchPlugin:
         registry.unexpose_all()
 
 
-class TestRegistryWebSearchToolDeclarations:
-    """Tests for web_search tool declarations exposure via registry."""
+class TestRegistryWebSearchToolSchemas:
+    """Tests for web_search tool schemas exposure via registry."""
 
     def test_web_search_not_exposed_before_expose(self):
-        """Test that web_search is not in declarations before expose."""
+        """Test that web_search is not in schemas before expose."""
         registry = PluginRegistry()
         registry.discover()
 
-        declarations = registry.get_exposed_declarations()
-        tool_names = [d.name for d in declarations]
+        schemas = registry.get_exposed_tool_schemas()
+        tool_names = [s.name for s in schemas]
 
         assert "web_search" not in tool_names
 
     def test_web_search_exposed_after_expose(self):
-        """Test that web_search is in declarations after expose."""
+        """Test that web_search is in schemas after expose."""
         registry = PluginRegistry()
         registry.discover()
 
         registry.expose_tool("web_search")
 
-        declarations = registry.get_exposed_declarations()
-        tool_names = [d.name for d in declarations]
+        schemas = registry.get_exposed_tool_schemas()
+        tool_names = [s.name for s in schemas]
 
         assert "web_search" in tool_names
 
@@ -123,8 +123,8 @@ class TestRegistryWebSearchToolDeclarations:
         registry.expose_tool("web_search")
         registry.unexpose_tool("web_search")
 
-        declarations = registry.get_exposed_declarations()
-        tool_names = [d.name for d in declarations]
+        schemas = registry.get_exposed_tool_schemas()
+        tool_names = [s.name for s in schemas]
 
         assert "web_search" not in tool_names
 
