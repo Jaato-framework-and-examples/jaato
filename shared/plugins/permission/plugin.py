@@ -259,6 +259,7 @@ If a tool is denied, do not attempt to execute it."""
         Provides autocompletion for:
         - Subcommands: show, allow, deny, default, clear
         - Default policy options: allow, deny, ask
+        - Tool names for allow/deny subcommands
         """
         if command != "permissions":
             return []
@@ -288,12 +289,43 @@ If a tool is denied, do not attempt to execute it."""
             partial = args[0].lower()
             return [c for c in subcommands if c.value.startswith(partial)]
 
-        if len(args) == 2 and args[0].lower() == "default":
-            # "permissions default <partial>" - filter policy options
+        if len(args) == 2:
+            subcommand = args[0].lower()
             partial = args[1].lower()
-            return [c for c in default_options if c.value.startswith(partial)]
+
+            if subcommand == "default":
+                # "permissions default <partial>" - filter policy options
+                return [c for c in default_options if c.value.startswith(partial)]
+
+            if subcommand in ("allow", "deny"):
+                # "permissions allow/deny <partial>" - provide tool names
+                return self._get_tool_completions(partial)
 
         return []
+
+    def _get_tool_completions(self, partial: str) -> List[CommandCompletion]:
+        """Get tool name completions matching the partial input."""
+        completions = []
+
+        # Get tools from registry
+        if self._registry:
+            for decl in self._registry.get_exposed_declarations():
+                if decl.name.lower().startswith(partial):
+                    desc = decl.description or ""
+                    # Truncate long descriptions
+                    if len(desc) > 50:
+                        desc = desc[:47] + "..."
+                    completions.append(CommandCompletion(decl.name, desc))
+
+        # Include our own tools (askPermission)
+        for decl in self.get_function_declarations():
+            if decl.name.lower().startswith(partial):
+                desc = decl.description or ""
+                if len(desc) > 50:
+                    desc = desc[:47] + "..."
+                completions.append(CommandCompletion(decl.name, desc))
+
+        return completions
 
     def execute_permissions(self, args: Dict[str, Any]) -> str:
         """Execute the permissions user command.
