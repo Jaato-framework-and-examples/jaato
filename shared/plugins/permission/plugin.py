@@ -311,8 +311,11 @@ If a tool is denied, do not attempt to execute it."""
 
         Args:
             partial: Partial tool name to match.
-            exclude_mode: If "allow", exclude tools already whitelisted.
-                         If "deny", exclude tools already blacklisted.
+            exclude_mode: If "allow", exclude tools already in session whitelist.
+                         If "deny", exclude tools already in session blacklist.
+                         Base config rules are NOT excluded since session rules
+                         may need to override patterns (e.g., session blacklist
+                         "create*" blocks a base-whitelisted "createPlan").
         """
         completions = []
 
@@ -320,11 +323,15 @@ If a tool is denied, do not attempt to execute it."""
         excluded: set = set()
         if self._policy and exclude_mode:
             if exclude_mode == "allow":
-                # Don't show tools already allowed
-                excluded = self._policy.whitelist_tools | self._policy.session_whitelist
+                # Only exclude tools already in SESSION whitelist
+                # Tools in base whitelist may still need session whitelist entry
+                # to override session blacklist patterns (e.g., "deny: create*")
+                excluded = self._policy.session_whitelist
             elif exclude_mode == "deny":
-                # Don't show tools already denied
-                excluded = self._policy.blacklist_tools | self._policy.session_blacklist
+                # Only exclude tools already in SESSION blacklist
+                # Tools in base blacklist may still need session blacklist entry
+                # to override session whitelist patterns
+                excluded = self._policy.session_blacklist
 
         # Get tools from registry
         if self._registry:
