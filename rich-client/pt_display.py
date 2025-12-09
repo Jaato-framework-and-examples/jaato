@@ -282,7 +282,10 @@ class PTDisplay:
         are called automatically during render.
         """
         if self._app and self._app.is_running:
+            # Invalidate schedules a redraw
             self._app.invalidate()
+            # Force the renderer to redraw immediately
+            self._app.renderer.render(self._app, self._app.layout)
 
     def start(self) -> None:
         """Start the display (non-blocking).
@@ -334,11 +337,15 @@ class PTDisplay:
     def append_output(self, source: str, text: str, mode: str) -> None:
         """Append output to the scrolling panel."""
         self._output_buffer.append(source, text, mode)
+        # Auto-scroll to bottom when new output arrives
+        self._output_buffer.scroll_to_bottom()
         self.refresh()
 
     def add_system_message(self, message: str, style: str = "dim") -> None:
         """Add a system message to the output."""
         self._output_buffer.add_system_message(message, style)
+        # Auto-scroll to bottom when new output arrives
+        self._output_buffer.scroll_to_bottom()
         self.refresh()
 
     def clear_output(self) -> None:
