@@ -362,6 +362,32 @@ class RichClient:
         except Exception as e:
             pass  # Session plugin is optional
 
+    def _get_plugin_commands_by_plugin(self) -> Dict[str, list]:
+        """Collect plugin commands grouped by plugin name."""
+        commands_by_plugin: Dict[str, list] = {}
+
+        if self.registry:
+            for plugin_name in self.registry.list_exposed():
+                plugin = self.registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'get_user_commands'):
+                    commands = plugin.get_user_commands()
+                    if commands:
+                        commands_by_plugin[plugin_name] = commands
+
+        if self.permission_plugin and hasattr(self.permission_plugin, 'get_user_commands'):
+            commands = self.permission_plugin.get_user_commands()
+            if commands:
+                commands_by_plugin[self.permission_plugin.name] = commands
+
+        if self._jaato:
+            user_commands = self._jaato.get_user_commands()
+            session_cmds = [cmd for name, cmd in user_commands.items()
+                           if name in ('save', 'resume', 'sessions', 'delete-session', 'backtoturn')]
+            if session_cmds:
+                commands_by_plugin['session'] = session_cmds
+
+        return commands_by_plugin
+
     def _register_plugin_commands(self) -> None:
         """Register plugin commands for autocompletion."""
         if not self._jaato:
@@ -806,14 +832,17 @@ class RichClient:
             ("", "dim"),
         ]
 
-        # Add plugin commands if available
-        if self._jaato:
-            user_commands = self._jaato.get_user_commands()
-            if user_commands:
-                help_lines.append(("Plugin Commands:", "bold"))
-                for name, cmd in user_commands.items():
-                    help_lines.append((f"  {name:12} - {cmd.description}", "dim"))
-                help_lines.append(("", "dim"))
+        # Add plugin commands grouped by plugin
+        commands_by_plugin = self._get_plugin_commands_by_plugin()
+        if commands_by_plugin:
+            help_lines.append(("Plugin-provided user commands:", "bold"))
+            for plugin_name, commands in sorted(commands_by_plugin.items()):
+                help_lines.append((f"  [{plugin_name}]", "cyan"))
+                for cmd in commands:
+                    padding = max(2, 14 - len(cmd.name))
+                    shared_marker = " [shared with model]" if cmd.share_with_model else ""
+                    help_lines.append((f"    {cmd.name}{' ' * padding}- {cmd.description}{shared_marker}", "dim"))
+            help_lines.append(("", "dim"))
 
         help_lines.extend([
             ("When the model tries to use a tool, you'll see a permission prompt:", "bold"),
