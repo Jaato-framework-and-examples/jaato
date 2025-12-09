@@ -104,6 +104,11 @@ class PTDisplay:
         # Spinner animation timer (spinner state is in output_buffer)
         self._spinner_timer_active = False
 
+        # Status bar info
+        self._model_provider: str = ""
+        self._model_name: str = ""
+        self._context_usage: Dict[str, Any] = {}
+
         # Build prompt_toolkit application
         self._app: Optional[Application] = None
         self._build_app()
@@ -112,9 +117,42 @@ class PTDisplay:
         """Check if plan panel should be visible."""
         return self._plan_panel.has_plan
 
+    def _get_status_bar_content(self):
+        """Get status bar content as formatted text."""
+        provider = self._model_provider or "—"
+        model = self._model_name or "—"
+
+        # Build context usage display (show percentage available)
+        usage = self._context_usage
+        if usage:
+            percent_used = usage.get('percent_used', 0)
+            percent_available = 100 - percent_used
+            total = usage.get('total_tokens', 0)
+            # Format: "88% available (15K used)"
+            if total >= 1000:
+                context_str = f"{percent_available:.0f}% available ({total // 1000}K used)"
+            else:
+                context_str = f"{percent_available:.0f}% available ({total} used)"
+        else:
+            context_str = "100% available"
+
+        # Build formatted text with columns
+        # Provider | Model | Context
+        return [
+            ("class:status-bar.label", " Provider: "),
+            ("class:status-bar.value", provider),
+            ("class:status-bar.separator", "  │  "),
+            ("class:status-bar.label", "Model: "),
+            ("class:status-bar.value", model),
+            ("class:status-bar.separator", "  │  "),
+            ("class:status-bar.label", "Context: "),
+            ("class:status-bar.value", context_str),
+            ("class:status-bar", " "),
+        ]
+
     def _get_scroll_page_size(self) -> int:
         """Get the number of lines to scroll per page (half the visible height)."""
-        available_height = self._height - 1  # minus input row
+        available_height = self._height - 2  # minus input row and status bar
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
         # Scroll by half the visible content area
@@ -132,7 +170,7 @@ class PTDisplay:
         self._output_buffer._flush_current_block()
 
         # Calculate available height for output
-        available_height = self._height - 1  # minus input row
+        available_height = self._height - 2  # minus input row and status bar
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
 
@@ -222,6 +260,13 @@ class PTDisplay:
             """Handle Down arrow - history/completion navigation."""
             event.current_buffer.auto_down()
 
+        # Status bar at top (always visible, 1 line)
+        status_bar = Window(
+            FormattedTextControl(self._get_status_bar_content),
+            height=1,
+            style="class:status-bar",
+        )
+
         # Plan panel (conditional - hidden when no plan)
         plan_window = ConditionalContainer(
             Window(
@@ -267,6 +312,7 @@ class PTDisplay:
         from prompt_toolkit.layout.containers import FloatContainer, Float
         root = FloatContainer(
             content=HSplit([
+                status_bar,
                 plan_window,
                 output_window,
                 input_row,
@@ -336,6 +382,28 @@ class PTDisplay:
         self._input_callback = on_input
         self._app.run()
 
+    # Status bar methods
+
+    def set_model_info(self, provider: str, model: str) -> None:
+        """Set the model provider and name for the status bar.
+
+        Args:
+            provider: Model provider name (e.g., "Google GenAI", "Anthropic").
+            model: Model name (e.g., "gemini-2.5-flash").
+        """
+        self._model_provider = provider
+        self._model_name = model
+        self.refresh()
+
+    def update_context_usage(self, usage: Dict[str, Any]) -> None:
+        """Update context usage display in status bar.
+
+        Args:
+            usage: Dict with 'total_tokens', 'prompt_tokens', 'output_tokens', etc.
+        """
+        self._context_usage = usage
+        self.refresh()
+
     # Plan panel methods
 
     def update_plan(self, plan_data: Dict[str, Any]) -> None:
@@ -386,7 +454,7 @@ class PTDisplay:
 
         # Calculate page size based on available height
         if page_size is None:
-            available = self._height - 1  # minus input row
+            available = self._height - 2  # minus input row and status bar
             if self._plan_panel.has_plan:
                 available -= self._plan_height
             # Account for panel borders

@@ -88,6 +88,10 @@ class RichClient:
         self._model_thread: Optional[threading.Thread] = None
         self._model_running: bool = False
 
+        # Model info for status bar
+        self._model_provider: str = ""
+        self._model_name: str = ""
+
     def log(self, msg: str) -> None:
         """Log message to output panel."""
         if self.verbose and self._display:
@@ -220,6 +224,10 @@ class RichClient:
         except Exception as e:
             print(f"Error: Failed to connect: {e}")
             return False
+
+        # Store model info for status bar (from jaato client)
+        self._model_name = self._jaato.model_name or model_name
+        self._model_provider = self._jaato.provider_name
 
         # Initialize plugin registry
         self.registry = PluginRegistry(model_name=model_name)
@@ -463,6 +471,11 @@ class RichClient:
                 self._jaato.send_message(prompt, on_output=output_callback)
                 self._trace(f"[model_thread] send_message returned")
 
+                # Update context usage in status bar
+                if self._display and self._jaato:
+                    usage = self._jaato.get_context_usage()
+                    self._display.update_context_usage(usage)
+
                 # Add separator after model finishes
                 # (response content is already shown via the callback)
                 if self._display:
@@ -587,6 +600,9 @@ class RichClient:
         """
         # Create the display with input handler for completions
         self._display = PTDisplay(input_handler=self._input_handler)
+
+        # Set model info in status bar
+        self._display.set_model_info(self._model_provider, self._model_name)
 
         # Set up the live reporter and queue actors
         self._setup_live_reporter()
