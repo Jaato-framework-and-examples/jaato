@@ -47,12 +47,17 @@ class InputHandler:
         self._completer = CombinedCompleter() if (HAS_PROMPT_TOOLKIT and HAS_FILE_COMPLETER) else None
         self._file_processor = FileReferenceProcessor() if HAS_FILE_COMPLETER else None
 
-        # Prompt style for completion menu
+        # Prompt style for completion menu and status bar
         self._pt_style = Style.from_dict({
             'completion-menu.completion': 'bg:#333333 #ffffff',
             'completion-menu.completion.current': 'bg:#00aa00 #ffffff',
             'completion-menu.meta.completion': 'bg:#333333 #888888',
             'completion-menu.meta.completion.current': 'bg:#00aa00 #ffffff',
+            # Status bar styles
+            'status-bar': 'bg:#333333 #aaaaaa',
+            'status-bar.label': 'bg:#333333 #888888',
+            'status-bar.value': 'bg:#333333 #ffffff bold',
+            'status-bar.separator': 'bg:#333333 #555555',
         }) if HAS_PROMPT_TOOLKIT else None
 
     @property
@@ -110,6 +115,7 @@ class InputHandler:
             complete_while_typing=True,
             complete_in_thread=True,
             output=output,
+            reserve_space_for_menu=0,  # Don't reserve space above - completions appear below
         )
         return session.prompt(formatted_prompt).strip()
 
