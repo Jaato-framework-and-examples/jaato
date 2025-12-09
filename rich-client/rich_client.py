@@ -265,15 +265,20 @@ class RichClient:
     def _setup_callback_actors(self) -> None:
         """Set up output callbacks on all callback_console actors.
 
-        Note: PTDisplay uses prompt_toolkit's integrated input, so no
-        pause/resume is needed. We just provide the output callback.
+        Uses prompt_toolkit's run_in_terminal to temporarily suspend the
+        full-screen TUI while console-based actors interact with the user.
         """
         if not self._display:
             return
 
-        def noop():
-            """No-op for pause/resume since PTDisplay handles this internally."""
-            pass
+        from prompt_toolkit.application import run_in_terminal
+
+        def run_in_terminal_wrapper(func):
+            """Wrapper that runs console I/O in terminal mode, suspending the TUI."""
+            run_in_terminal(func)
+            # Refresh display after returning from terminal mode
+            if self._display:
+                self._display.refresh()
 
         # Set callbacks on clarification plugin actor
         if self.registry:
@@ -282,9 +287,8 @@ class RichClient:
                 actor = clarification_plugin._actor
                 if hasattr(actor, 'set_callbacks'):
                     actor.set_callbacks(
-                        noop,
-                        noop,
-                        self._display.append_output,
+                        output_callback=self._display.append_output,
+                        run_in_terminal=run_in_terminal_wrapper,
                     )
 
         # Set callbacks on permission plugin actor
@@ -292,9 +296,8 @@ class RichClient:
             actor = self.permission_plugin._actor
             if actor and hasattr(actor, 'set_callbacks'):
                 actor.set_callbacks(
-                    noop,
-                    noop,
-                    self._display.append_output,
+                    output_callback=self._display.append_output,
+                    run_in_terminal=run_in_terminal_wrapper,
                 )
 
     def _setup_session_plugin(self) -> None:

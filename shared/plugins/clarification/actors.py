@@ -330,11 +330,121 @@ class AutoActor(ClarificationActor):
         return Answer(question_index=question_index, free_text=self._default_free_text)
 
 
+class CallbackConsoleActor(ConsoleActor):
+    """Console actor with pause/resume callbacks for TUI integration.
+
+    Extends ConsoleActor to call pause/resume callbacks before and after
+    user interaction, allowing TUI frameworks to temporarily yield control.
+    """
+
+    def __init__(self, **kwargs):
+        """Initialize the callback console actor.
+
+        Args:
+            **kwargs: Additional arguments passed to ConsoleActor.
+        """
+        super().__init__(**kwargs)
+        self._pause_callback = None
+        self._resume_callback = None
+        self._output_callback = None
+        self._run_in_terminal = None
+
+    def set_callbacks(
+        self,
+        pause_callback=None,
+        resume_callback=None,
+        output_callback=None,
+        run_in_terminal=None,
+    ) -> None:
+        """Set the pause/resume/output callbacks.
+
+        Args:
+            pause_callback: Called before requesting user input (legacy).
+            resume_callback: Called after user input is complete (legacy).
+            output_callback: Called with (source, text, mode) to log the Q&A summary.
+            run_in_terminal: Callable that wraps console I/O for TUI frameworks.
+                            Signature: run_in_terminal(func) -> None
+                            If provided, pause/resume callbacks are ignored.
+        """
+        self._pause_callback = pause_callback
+        self._resume_callback = resume_callback
+        self._output_callback = output_callback
+        self._run_in_terminal = run_in_terminal
+
+    def request_clarification(
+        self, request: ClarificationRequest
+    ) -> ClarificationResponse:
+        """Present questions to user via console with pause/resume callbacks.
+
+        If a run_in_terminal callable is provided via set_callbacks, the
+        console interaction runs inside it to properly suspend TUI frameworks.
+        """
+        response = None
+
+        def do_clarification():
+            nonlocal response
+            response = super(CallbackConsoleActor, self).request_clarification(request)
+
+        # If we have a run_in_terminal wrapper, use it
+        if self._run_in_terminal:
+            self._run_in_terminal(do_clarification)
+        else:
+            # Fallback to simple pause/resume
+            if self._pause_callback:
+                self._pause_callback()
+            try:
+                do_clarification()
+            finally:
+                if self._resume_callback:
+                    self._resume_callback()
+
+        # Log the Q&A summary to output after interaction
+        if self._output_callback and response and not response.cancelled:
+            self._log_qa_summary(request, response)
+
+        return response
+
+    def _log_qa_summary(
+        self, request: ClarificationRequest, response: ClarificationResponse
+    ) -> None:
+        """Log a summary of the Q&A to the output callback."""
+        if not self._output_callback:
+            return
+
+        # Header
+        self._output_callback("clarification", "Clarification Answered:", "write")
+
+        if request.context:
+            self._output_callback("clarification", f"  Context: {request.context}", "append")
+
+        # Each Q&A pair
+        for i, (question, answer) in enumerate(zip(request.questions, response.answers), 1):
+            self._output_callback("clarification", f"  Q{i}: {question.text}", "append")
+
+            # Show available choices if any
+            if question.choices:
+                self._output_callback("clarification", "      Options:", "append")
+                for j, choice in enumerate(question.choices, 1):
+                    self._output_callback("clarification", f"        {j}. {choice.text}", "append")
+
+            if answer.skipped:
+                self._output_callback("clarification", f"  A{i}: (skipped)", "append")
+            elif answer.free_text:
+                self._output_callback("clarification", f"  A{i}: {answer.free_text}", "append")
+            elif answer.selected_choices:
+                # Map choice indices to choice text
+                choices_text = []
+                for choice_idx in answer.selected_choices:
+                    if 1 <= choice_idx <= len(question.choices):
+                        choices_text.append(question.choices[choice_idx - 1].text)
+                self._output_callback("clarification", f"  A{i}: {', '.join(choices_text)}", "append")
+
+
 def create_actor(actor_type: str = "console", **kwargs) -> ClarificationActor:
     """Factory function to create a clarification actor.
 
     Args:
-        actor_type: Type of actor ("console" or "auto")
+        actor_type: Type of actor ("console", "callback_console", or "auto")
         **kwargs: Additional arguments for the specific actor type
 
     Returns:
@@ -342,6 +452,8 @@ def create_actor(actor_type: str = "console", **kwargs) -> ClarificationActor:
     """
     if actor_type == "console":
         return ConsoleActor(**kwargs)
+    elif actor_type == "callback_console":
+        return CallbackConsoleActor(**kwargs)
     elif actor_type == "auto":
         return AutoActor(**kwargs)
     else:
