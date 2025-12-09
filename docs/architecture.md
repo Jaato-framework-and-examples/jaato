@@ -195,7 +195,7 @@ sequenceDiagram
 
 ## Plugin System Architecture
 
-The framework supports two distinct plugin systems with different purposes:
+The framework supports four plugin kinds with different purposes:
 
 ### Plugin Kind Identification
 
@@ -210,12 +210,16 @@ PLUGIN_KIND = "gc"
 
 # Session plugins (for conversation persistence)
 PLUGIN_KIND = "session"
+
+# Model provider plugins (for SDK abstraction)
+PLUGIN_KIND = "model_provider"
 ```
 
 Entry point groups are mapped by plugin kind:
 - `"tool"` → `jaato.plugins`
 - `"gc"` → `jaato.gc_plugins`
 - `"session"` → `jaato.session_plugins`
+- `"model_provider"` → `jaato.model_providers`
 
 ### Tool Plugins (PluginRegistry)
 
@@ -762,7 +766,7 @@ shared/
     ├── base.py              # ToolPlugin protocol, UserCommand NamedTuple
     ├── registry.py          # PluginRegistry (for tool plugins)
     │
-    │   # Model Provider Plugins (Provider abstraction layer)
+    │   # Model Provider Plugins (PLUGIN_KIND = "model_provider")
     ├── model_provider/      # Provider-agnostic types and protocols
     │   ├── __init__.py      # Exports, discovery functions
     │   ├── base.py          # ModelProviderPlugin protocol
