@@ -670,11 +670,103 @@ class FileActor(Actor):
                     f.unlink(missing_ok=True)
 
 
+class CallbackConsoleActor(ConsoleActor):
+    """Console actor with pause/resume callbacks for TUI integration.
+
+    Extends ConsoleActor to call pause/resume callbacks before and after
+    user interaction, allowing TUI frameworks to temporarily yield control.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._pause_callback: Optional[Callable[[], None]] = None
+        self._resume_callback: Optional[Callable[[], None]] = None
+        self._summary_output_callback: Optional[Callable[[str, str, str], None]] = None
+
+    def set_callbacks(
+        self,
+        pause_callback: Optional[Callable[[], None]] = None,
+        resume_callback: Optional[Callable[[], None]] = None,
+        output_callback: Optional[Callable[[str, str, str], None]] = None,
+        **kwargs,  # Accept but ignore other args for compatibility
+    ) -> None:
+        """Set the pause/resume/output callbacks.
+
+        Args:
+            pause_callback: Called before requesting user input.
+            resume_callback: Called after user input is complete.
+            output_callback: Called with (source, text, mode) to log the summary.
+        """
+        self._pause_callback = pause_callback
+        self._resume_callback = resume_callback
+        self._summary_output_callback = output_callback
+
+    def request_permission(self, request: PermissionRequest) -> ActorResponse:
+        """Request permission with pause/resume callbacks."""
+        if self._pause_callback:
+            self._pause_callback()
+
+        # Temporarily restore default output (print to stdout) during interaction
+        # since the TUI display is paused and won't show callback output
+        saved_output_func = self._output_func
+        saved_callback = self._output_callback
+        self._output_func = self._default_output_func
+        self._output_callback = None
+
+        try:
+            response = super().request_permission(request)
+            # Log summary to output after interaction
+            if self._summary_output_callback:
+                self._log_permission_summary(request, response)
+            return response
+        finally:
+            # Restore the callback-based output
+            self._output_func = saved_output_func
+            self._output_callback = saved_callback
+
+            if self._resume_callback:
+                self._resume_callback()
+
+    def _log_permission_summary(
+        self, request: PermissionRequest, response: ActorResponse
+    ) -> None:
+        """Log a summary of the permission decision to the output callback."""
+        if not self._summary_output_callback:
+            return
+
+        import json
+
+        # Format decision
+        decision_text = response.decision.value if response.decision else "unknown"
+
+        # Header
+        self._summary_output_callback("permission", "=" * 60, "write")
+        self._summary_output_callback("permission", f"[Permission] Tool: {request.tool_name}", "append")
+
+        # Intent if provided
+        intent = request.context.get("intent") if request.context else None
+        if intent:
+            self._summary_output_callback("permission", f"  Intent: {intent}", "append")
+
+        # Pretty-print arguments
+        self._summary_output_callback("permission", "  Arguments:", "append")
+        args_str = json.dumps(request.arguments, indent=4)
+        for line in args_str.split('\n'):
+            self._summary_output_callback("permission", f"    {line}", "append")
+
+        # Decision
+        self._summary_output_callback("permission", f"  Decision: {decision_text}", "append")
+        if response.reason:
+            self._summary_output_callback("permission", f"  Reason: {response.reason}", "append")
+
+        self._summary_output_callback("permission", "=" * 60, "append")
+
+
 def create_actor(actor_type: str, config: Optional[Dict[str, Any]] = None) -> Actor:
     """Factory function to create an actor by type.
 
     Args:
-        actor_type: One of "console", "webhook", "file"
+        actor_type: One of "console", "callback_console", "webhook", "file"
         config: Optional configuration for the actor
 
     Returns:
@@ -685,6 +777,7 @@ def create_actor(actor_type: str, config: Optional[Dict[str, Any]] = None) -> Ac
     """
     actors = {
         "console": ConsoleActor,
+        "callback_console": CallbackConsoleActor,
         "webhook": WebhookActor,
         "file": FileActor,
     }

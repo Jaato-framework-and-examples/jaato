@@ -121,6 +121,11 @@ class JaatoClient:
         """Get the configured model name."""
         return self._model_name
 
+    @property
+    def provider_name(self) -> str:
+        """Get the model provider name."""
+        return self._provider_name
+
     def list_available_models(self, prefix: Optional[str] = None) -> List[str]:
         """List models from the provider.
 
