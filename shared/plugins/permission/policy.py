@@ -192,8 +192,28 @@ class PermissionPolicy:
             return f"{tool_name}({', '.join(f'{k}={v}' for k, v in sorted(args.items()))})"
 
     def _matches_session_blacklist(self, tool_name: str, signature: str) -> bool:
-        """Check if tool matches any session blacklist entry."""
+        """Check if tool matches any session blacklist entry.
+
+        Note: If the tool name is an EXACT match in session_whitelist, pattern
+        matches in session_blacklist are skipped. This allows explicit whitelist
+        entries to override blacklist patterns (e.g., allow "createPlan" to
+        override "deny: create*").
+        """
+        # Check if tool has explicit whitelist entry (not pattern) - if so, skip pattern blacklist
+        has_explicit_whitelist = tool_name in self.session_whitelist
+
         for pattern in self.session_blacklist:
+            # Exact matches in blacklist always apply
+            is_exact_blacklist = (pattern == tool_name)
+
+            if is_exact_blacklist:
+                # Explicit blacklist beats explicit whitelist
+                return True
+
+            # Pattern match - but skip if there's an explicit whitelist entry
+            if has_explicit_whitelist:
+                continue
+
             if fnmatch.fnmatch(tool_name, pattern) or fnmatch.fnmatch(signature, pattern):
                 return True
         return False
