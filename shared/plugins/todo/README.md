@@ -12,7 +12,7 @@ The demo below shows creating an execution plan for refactoring the authenticati
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         run_single_prompt()                          │
+│                           JaatoClient                               │
 │                                                                     │
 │  ┌─────────────┐    ┌─────────────────┐    ┌──────────────────┐   │
 │  │PluginRegistry│───▶│  ToolExecutor   │◀───│   TodoPlugin     │   │
@@ -136,12 +136,11 @@ The plugin enforces these rules with guards:
 ### Basic Usage
 
 ```python
-from google import genai
-from shared.ai_tool_runner import run_single_prompt
-from shared.plugins.registry import PluginRegistry
+from shared import JaatoClient, PluginRegistry
 
-# Initialize Vertex AI client
-client = genai.Client(vertexai=True, project="my-project", location="us-central1")
+# Create and connect client
+jaato = JaatoClient()
+jaato.connect(project="my-project", location="us-central1", model="gemini-2.5-flash")
 
 # Set up plugin registry
 registry = PluginRegistry()
@@ -153,12 +152,12 @@ registry.expose_all({
     }
 })
 
+# Configure tools
+jaato.configure_tools(registry)
+
 # Run with TODO tracking
-result = run_single_prompt(
-    client=client,
-    model_name="gemini-2.5-flash",
-    prompt="Refactor the auth module. Use the TODO tools to track your progress.",
-    registry=registry,
+response = jaato.send_message(
+    "Refactor the auth module. Use the TODO tools to track your progress."
 )
 ```
 

@@ -51,6 +51,23 @@ class FunctionCall:
 
 
 @dataclass
+class Attachment:
+    """Multimodal attachment for tool results.
+
+    Used to include binary data (images, files, etc.) in tool responses.
+    The provider converts these to the appropriate SDK-specific format.
+
+    Attributes:
+        mime_type: MIME type of the data (e.g., 'image/png', 'application/pdf').
+        data: Raw binary data.
+        display_name: Optional name for referencing in the response.
+    """
+    mime_type: str
+    data: bytes
+    display_name: Optional[str] = None
+
+
+@dataclass
 class ToolResult:
     """Result of executing a tool/function.
 
@@ -59,11 +76,13 @@ class ToolResult:
         name: Name of the function that was called.
         result: The result data (must be JSON-serializable).
         is_error: Whether this result represents an error.
+        attachments: Optional multimodal attachments (images, files, etc.).
     """
     call_id: str
     name: str
     result: Any
     is_error: bool = False
+    attachments: Optional[List['Attachment']] = None
 
 
 @dataclass

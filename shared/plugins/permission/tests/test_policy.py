@@ -217,6 +217,42 @@ class TestPermissionPolicySessionRules:
         match = policy.check("cli_based_tool", {"command": "git push origin main"})
         assert match.decision == PermissionDecision.DENY
 
+    def test_explicit_session_whitelist_overrides_blacklist_pattern(self):
+        """Explicit session whitelist entry should override blacklist patterns.
+
+        This tests the scenario where:
+        - Session blacklist has pattern "create*" (blocks createPlan, createIssue, etc.)
+        - Session whitelist has explicit "createPlan"
+
+        The explicit whitelist entry should take precedence over the pattern.
+        """
+        policy = PermissionPolicy(default_policy="deny")
+        policy.add_session_blacklist("create*")  # Pattern blocking all create* tools
+        policy.add_session_whitelist("createPlan")  # Explicit override
+
+        # createPlan should be ALLOWED (explicit whitelist overrides pattern)
+        match = policy.check("createPlan", {})
+        assert match.decision == PermissionDecision.ALLOW
+        assert match.rule_type == "session_whitelist"
+
+        # createIssue should still be DENIED (no explicit whitelist)
+        match = policy.check("createIssue", {})
+        assert match.decision == PermissionDecision.DENY
+        assert match.rule_type == "session_blacklist"
+
+    def test_explicit_session_blacklist_beats_explicit_whitelist(self):
+        """Explicit blacklist entry should still beat explicit whitelist.
+
+        If both are explicit (not patterns), blacklist wins.
+        """
+        policy = PermissionPolicy(default_policy="allow")
+        policy.add_session_whitelist("dangerousTool")
+        policy.add_session_blacklist("dangerousTool")  # Exact match
+
+        match = policy.check("dangerousTool", {})
+        assert match.decision == PermissionDecision.DENY
+        assert match.rule_type == "session_blacklist"
+
     def test_session_default_policy_allow(self):
         """Session default policy should override base default."""
         policy = PermissionPolicy(default_policy="deny")

@@ -63,7 +63,7 @@ registry.unexpose_tool('cli')
 Once plugins are exposed, you can retrieve their tool declarations (for the AI model), executors (for running the tools), and user commands (for direct user interaction).
 
 ```python
-# Get FunctionDeclarations for Vertex AI (model tools)
+# Get ToolSchema declarations for the model
 declarations = registry.get_exposed_tool_schemas()
 
 # Get executor callables

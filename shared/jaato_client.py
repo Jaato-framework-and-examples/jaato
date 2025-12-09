@@ -1,57 +1,39 @@
 """JaatoClient - Core client for the jaato framework.
 
-Provides a unified interface for interacting with Vertex AI models,
-with support for tool execution via plugins or custom declarations.
-Uses the SDK chat API for multi-turn conversation management.
+Provides a unified interface for interacting with AI models via the
+ModelProviderPlugin abstraction, supporting multiple providers
+(Google GenAI, Anthropic, etc.).
+Uses the provider's session management for multi-turn conversations.
 """
 
 import re
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
-from google import genai
-from google.genai import types
-
-from .ai_tool_runner import ToolExecutor, extract_text_from_parts, extract_finish_reason
+from .ai_tool_runner import ToolExecutor
 from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, PromptEnrichmentResult, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
-from .plugins.model_provider.types import ToolSchema, Message
-from .plugins.model_provider.google_genai.converters import (
-    tool_schema_to_sdk,
-    history_to_sdk,
-    history_from_sdk,
+from .plugins.model_provider.types import (
+    Attachment,
+    FunctionCall,
+    Message,
+    Part,
+    ProviderResponse,
+    Role,
+    ToolResult,
+    ToolSchema,
 )
+from .plugins.model_provider.base import ModelProviderPlugin, ProviderConfig
+from .plugins.model_provider import load_provider
 
 # Pattern to match @references in prompts (e.g., @file.png, @path/to/file.txt)
 # Matches @ followed by a path-like string (no spaces, common file chars)
 AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
 
-# Context window limits for known Gemini models (total tokens)
-# These are approximate limits; actual limits may vary by API version
-MODEL_CONTEXT_LIMITS: Dict[str, int] = {
-    # Gemini 2.5 models
-    "gemini-2.5-pro": 1_048_576,
-    "gemini-2.5-pro-preview-05-06": 1_048_576,
-    "gemini-2.5-flash": 1_048_576,
-    "gemini-2.5-flash-preview-04-17": 1_048_576,
-    # Gemini 2.0 models
-    "gemini-2.0-flash": 1_048_576,
-    "gemini-2.0-flash-exp": 1_048_576,
-    "gemini-2.0-flash-lite": 1_048_576,
-    # Gemini 1.5 models
-    "gemini-1.5-pro": 2_097_152,
-    "gemini-1.5-pro-latest": 2_097_152,
-    "gemini-1.5-flash": 1_048_576,
-    "gemini-1.5-flash-latest": 1_048_576,
-    # Gemini 1.0 models (legacy)
-    "gemini-1.0-pro": 32_760,
-    "gemini-pro": 32_760,
-}
-
-# Default context limit for unknown models
-DEFAULT_CONTEXT_LIMIT = 1_048_576
+# Default provider name (can be overridden)
+DEFAULT_PROVIDER = "google_genai"
 
 if TYPE_CHECKING:
     from .plugins.registry import PluginRegistry
@@ -59,15 +41,15 @@ if TYPE_CHECKING:
 
 
 class JaatoClient:
-    """Core client for jaato framework with SDK-managed conversation history.
+    """Core client for jaato framework with provider-managed conversation history.
 
     This client provides a unified interface for:
-    - Connecting to Vertex AI
+    - Connecting to AI models via ModelProviderPlugin abstraction
     - Configuring tools from plugin registry or custom declarations
-    - Multi-turn conversations with SDK-managed history
+    - Multi-turn conversations with provider-managed history
     - History access and reset for flexibility
 
-    The SDK chat API manages conversation history internally. Use
+    The provider manages conversation history internally. Use
     get_history() to access it and reset_session() to modify it.
 
     Usage:
@@ -76,7 +58,7 @@ class JaatoClient:
         client.connect(project_id, location, model_name)
         client.configure_tools(registry, permission_plugin, ledger)
 
-        # Multi-turn conversation (SDK manages history)
+        # Multi-turn conversation (provider manages history)
         # Output callback receives (source, text, mode) for real-time display
         def on_output(source: str, text: str, mode: str):
             print(f"[{source}]: {text}")
@@ -90,20 +72,24 @@ class JaatoClient:
         client.reset_session(modified_history)  # Reset with custom history
     """
 
-    def __init__(self):
-        """Initialize JaatoClient (not yet connected)."""
-        # Connection state
-        self._client: Optional[genai.Client] = None
+    def __init__(self, provider_name: str = DEFAULT_PROVIDER):
+        """Initialize JaatoClient with specified provider.
+
+        Args:
+            provider_name: Name of the model provider to use (default: 'google_genai').
+        """
+        # Model provider (abstracts SDK interactions)
+        self._provider: Optional[ModelProviderPlugin] = None
+        self._provider_name: str = provider_name
+
+        # Connection info (for reference)
         self._model_name: Optional[str] = None
         self._project: Optional[str] = None
         self._location: Optional[str] = None
 
-        # Chat session (SDK-managed)
-        self._chat = None  # genai Chat object
-
         # Tool configuration
         self._executor: Optional[ToolExecutor] = None
-        self._tool_decl: Optional[types.Tool] = None
+        self._tools: Optional[List[ToolSchema]] = None
         self._system_instruction: Optional[str] = None
         self._ledger: Optional[TokenLedger] = None
 
@@ -127,8 +113,8 @@ class JaatoClient:
 
     @property
     def is_connected(self) -> bool:
-        """Check if client is connected to Vertex AI."""
-        return self._client is not None
+        """Check if client is connected to the model provider."""
+        return self._provider is not None and self._provider.is_connected
 
     @property
     def model_name(self) -> Optional[str]:
@@ -136,12 +122,10 @@ class JaatoClient:
         return self._model_name
 
     def list_available_models(self, prefix: Optional[str] = None) -> List[str]:
-        """List models from Vertex AI.
+        """List models from the provider.
 
-        Note: This returns the model catalog, not region-specific availability.
-        Some models may not be available in all regions. Use location='global'
-        when connecting for widest model access, or check Google's documentation
-        for region-specific availability.
+        Note: This returns the model catalog from the provider.
+        Availability may vary by region or configuration.
 
         Args:
             prefix: Optional name prefix to filter by (e.g., "gemini").
@@ -153,27 +137,25 @@ class JaatoClient:
         Raises:
             RuntimeError: If client is not connected.
         """
-        if not self._client:
+        if not self._provider:
             raise RuntimeError("Client not connected. Call connect() first.")
 
-        models = []
-        for model in self._client.models.list():
-            # Filter by prefix if specified
-            if prefix and not model.name.startswith(prefix):
-                continue
-            models.append(model.name)
-
-        return models
+        return self._provider.list_models(prefix=prefix)
 
     def connect(self, project: str, location: str, model: str) -> None:
-        """Connect to Vertex AI.
+        """Connect to the AI model provider.
 
         Args:
-            project: GCP project ID.
-            location: Vertex AI region (e.g., 'us-central1', 'global').
+            project: Cloud project ID (e.g., GCP project).
+            location: Provider region (e.g., 'us-central1', 'global').
             model: Model name (e.g., 'gemini-2.0-flash').
         """
-        self._client = genai.Client(vertexai=True, project=project, location=location)
+        # Load and initialize the provider
+        config = ProviderConfig(project=project, location=location)
+        self._provider = load_provider(self._provider_name, config)
+        self._provider.connect(model)
+
+        # Store for reference
         self._model_name = model
         self._project = project
         self._location = location
@@ -226,13 +208,11 @@ class JaatoClient:
             if auto_approved:
                 permission_plugin.add_whitelist_tools(auto_approved)
 
-        # Build tool declarations from ToolSchemas
+        # Build tool schemas list (provider-agnostic)
         all_schemas = registry.get_exposed_tool_schemas()
         if permission_plugin:
             all_schemas.extend(permission_plugin.get_tool_schemas())
-        # Convert ToolSchemas to SDK FunctionDeclarations
-        all_decls = [tool_schema_to_sdk(s) for s in all_schemas]
-        self._tool_decl = types.Tool(function_declarations=all_decls) if all_decls else None
+        self._tools = all_schemas if all_schemas else None
 
         # Collect system instructions
         parts = []
@@ -250,12 +230,12 @@ class JaatoClient:
         for cmd in registry.get_exposed_user_commands():
             self._user_commands[cmd.name] = cmd
 
-        # Create chat session with configured tools
-        self._create_chat()
+        # Create session with provider
+        self._create_session()
 
     def configure_custom_tools(
         self,
-        declarations: List[types.FunctionDeclaration],
+        tools: List[ToolSchema],
         executors: Dict[str, Callable[[Dict[str, Any]], Any]],
         ledger: Optional[TokenLedger] = None,
         system_instruction: Optional[str] = None
@@ -266,7 +246,7 @@ class JaatoClient:
         are needed (e.g., training pipelines with specific function calling).
 
         Args:
-            declarations: List of FunctionDeclaration objects.
+            tools: List of ToolSchema objects defining available tools.
             executors: Dict mapping tool names to executor functions.
             ledger: Optional token ledger for accounting.
             system_instruction: Optional system instruction text.
@@ -277,11 +257,11 @@ class JaatoClient:
         for name, fn in executors.items():
             self._executor.register(name, fn)
 
-        self._tool_decl = types.Tool(function_declarations=declarations) if declarations else None
+        self._tools = tools if tools else None
         self._system_instruction = system_instruction
 
-        # Create chat session with configured tools
-        self._create_chat()
+        # Create session with provider
+        self._create_session()
 
     def _configure_subagent_plugin(
         self,
@@ -341,24 +321,18 @@ class JaatoClient:
             # Background plugin not exposed or not available
             pass
 
-    def _create_chat(self, history: Optional[List[types.Content]] = None) -> None:
-        """Create or recreate the chat session.
+    def _create_session(self, history: Optional[List[Message]] = None) -> None:
+        """Create or recreate the provider session.
 
         Args:
-            history: Optional initial conversation history.
+            history: Optional initial conversation history (provider-agnostic Messages).
         """
-        if not self._client or not self._model_name:
-            return  # Can't create chat without connection
+        if not self._provider or not self._provider.is_connected:
+            return  # Can't create session without connection
 
-        config = types.GenerateContentConfig(
+        self._provider.create_session(
             system_instruction=self._system_instruction,
-            tools=[self._tool_decl] if self._tool_decl else None,
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
-        )
-
-        self._chat = self._client.chats.create(
-            model=self._model_name,
-            config=config,
+            tools=self._tools,
             history=history
         )
 
@@ -369,7 +343,7 @@ class JaatoClient:
     ) -> str:
         """Send a message to the model.
 
-        The SDK manages conversation history internally. Use get_history()
+        The provider manages conversation history internally. Use get_history()
         to access it and reset_session() to modify it.
 
         If a GC plugin is configured with check_before_send=True, this will
@@ -394,9 +368,9 @@ class JaatoClient:
         Raises:
             RuntimeError: If client is not connected or not configured.
         """
-        if not self._client or not self._model_name:
+        if not self._provider or not self._provider.is_connected:
             raise RuntimeError("Client not connected. Call connect() first.")
-        if not self._chat:
+        if not self._tools and not self._system_instruction:
             raise RuntimeError("Tools not configured. Call configure_tools() first.")
 
         # Check and perform GC if needed before sending
@@ -453,7 +427,7 @@ class JaatoClient:
         message: str,
         on_output: OutputCallback
     ) -> str:
-        """Internal function calling loop using chat.send_message().
+        """Internal function calling loop using provider.send_message().
 
         Args:
             message: The user's message text.
@@ -479,36 +453,32 @@ class JaatoClient:
             'duration_seconds': None,
             'function_calls': [],
         }
-        response = None
+        response: Optional[ProviderResponse] = None
 
         try:
-            response = self._chat.send_message(message)
-            self._record_token_usage(response)
-            self._accumulate_turn_tokens(response, turn_data)
+            response = self._provider.send_message(message)
+            self._record_provider_token_usage(response)
+            self._accumulate_provider_turn_tokens(response, turn_data)
 
             # Handle function calling loop
-            # Cache function_calls to avoid potential issues with property access
-            # (some SDK versions may return generators that get exhausted)
             function_calls = list(response.function_calls) if response.function_calls else []
             while function_calls:
                 # Emit any text produced alongside function calls
-                # Use extract_text_from_parts to avoid SDK warning about non-text parts
-                text = extract_text_from_parts(response)
-                if text:
-                    on_output("model", text, "write")
+                if response.text:
+                    on_output("model", response.text, "write")
 
-                func_responses = []
+                tool_results: List[ToolResult] = []
 
                 for fc in function_calls:
                     # Execute the function with timing
                     name = fc.name
-                    args = dict(fc.args) if fc.args else {}
+                    args = fc.args
 
                     fc_start = datetime.now()
                     if self._executor:
-                        result = self._executor.execute(name, args)
+                        executor_result = self._executor.execute(name, args)
                     else:
-                        result = {"error": f"No executor registered for {name}"}
+                        executor_result = (False, {"error": f"No executor registered for {name}"})
                     fc_end = datetime.now()
 
                     # Record function call timing
@@ -519,35 +489,31 @@ class JaatoClient:
                         'duration_seconds': (fc_end - fc_start).total_seconds(),
                     })
 
-                    # Build function response part(s)
-                    parts = self._build_function_response_parts(name, result)
-                    func_responses.extend(parts)
+                    # Build ToolResult from executor result
+                    tool_result = self._build_tool_result(fc, executor_result)
+                    tool_results.append(tool_result)
 
-                # Send function responses back to model
-                # Chat API accepts Parts directly (not Content objects)
-                response = self._chat.send_message(func_responses)
-                self._record_token_usage(response)
-                self._accumulate_turn_tokens(response, turn_data)
+                # Send tool results back to model via provider
+                response = self._provider.send_tool_results(tool_results)
+                self._record_provider_token_usage(response)
+                self._accumulate_provider_turn_tokens(response, turn_data)
 
                 # Check finish_reason for abnormal termination
-                finish_reason = extract_finish_reason(response)
-                if finish_reason not in ('STOP', 'UNKNOWN'):
+                from .plugins.model_provider.types import FinishReason
+                if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE):
                     # Non-normal finish reason - model stopped unexpectedly
-                    # Log warning and include in response
                     import sys
-                    print(f"[warning] Model stopped with finish_reason={finish_reason}", file=sys.stderr)
-                    text = extract_text_from_parts(response)
-                    if text:
-                        return f"{text}\n\n[Model stopped: {finish_reason}]"
+                    print(f"[warning] Model stopped with finish_reason={response.finish_reason}", file=sys.stderr)
+                    if response.text:
+                        return f"{response.text}\n\n[Model stopped: {response.finish_reason}]"
                     else:
-                        return f"[Model stopped unexpectedly: {finish_reason}]"
+                        return f"[Model stopped unexpectedly: {response.finish_reason}]"
 
                 # Re-cache function_calls for next iteration
                 function_calls = list(response.function_calls) if response.function_calls else []
 
             # Return the final response text
-            # Use extract_text_from_parts to avoid SDK warning about non-text parts
-            return extract_text_from_parts(response) or ''
+            return response.text or ''
 
         finally:
             # Record turn end time and duration
@@ -559,135 +525,102 @@ class JaatoClient:
             if turn_data['total'] > 0:
                 self._turn_accounting.append(turn_data)
 
-    def _build_function_response_parts(
+    def _build_tool_result(
         self,
-        name: str,
-        result: Any
-    ) -> List[types.Part]:
-        """Build function response parts, handling multimodal content.
+        fc: FunctionCall,
+        executor_result: Any
+    ) -> ToolResult:
+        """Build a ToolResult from executor output, handling multimodal content.
 
         If the result contains multimodal data (indicated by '_multimodal': True),
-        this builds a multimodal function response with image data.
+        this extracts attachments for the provider to handle.
 
         Args:
-            name: The function name.
-            result: The function result (tuple from executor: (ok, result_dict)).
+            fc: The FunctionCall that was executed.
+            executor_result: The executor result (tuple: (ok, result_dict)).
 
         Returns:
-            List of Part objects for the function response.
+            ToolResult ready for the provider.
         """
         # Executor returns (ok, result_dict) tuple
-        if isinstance(result, tuple) and len(result) == 2:
-            _ok, result_data = result
+        if isinstance(executor_result, tuple) and len(executor_result) == 2:
+            ok, result_data = executor_result
         else:
-            result_data = result
+            ok = True
+            result_data = executor_result
 
         # Check for multimodal result
+        attachments: Optional[List[Attachment]] = None
         if isinstance(result_data, dict) and result_data.get('_multimodal'):
-            return self._build_multimodal_function_response(name, result_data)
+            attachments = self._extract_multimodal_attachments(result_data)
+            # Clean up internal multimodal flags from result
+            result_data = {k: v for k, v in result_data.items()
+                          if not k.startswith('_multimodal') and k not in ('image_data',)}
 
-        # Standard text/JSON response
-        response_dict = result_data if isinstance(result_data, dict) else {"result": result_data}
-        return [types.Part.from_function_response(name=name, response=response_dict)]
+        # Build the result dict
+        if isinstance(result_data, dict):
+            result_dict = result_data
+        else:
+            result_dict = {"result": result_data}
 
-    def _build_multimodal_function_response(
+        return ToolResult(
+            call_id=fc.id,
+            name=fc.name,
+            result=result_dict,
+            is_error=not ok,
+            attachments=attachments
+        )
+
+    def _extract_multimodal_attachments(
         self,
-        name: str,
         result: Dict[str, Any]
-    ) -> List[types.Part]:
-        """Build a multimodal function response with image data.
-
-        Creates a function response that includes inline image data using
-        the FunctionResponsePart/FunctionResponseBlob structure with displayName
-        to link the $ref in the response to the actual image data.
+    ) -> Optional[List[Attachment]]:
+        """Extract multimodal attachments from a result dict.
 
         Args:
-            name: The function name.
-            result: Dict with '_multimodal': True and image data.
+            result: Dict with '_multimodal': True and image/file data.
 
         Returns:
-            List containing a single Part with nested multimodal data.
+            List of Attachment objects, or None if extraction fails.
         """
         multimodal_type = result.get('_multimodal_type', 'image')
 
         if multimodal_type == 'image':
             image_data = result.get('image_data')
+            if not image_data:
+                return None
+
             mime_type = result.get('mime_type', 'image/png')
             display_name = result.get('display_name', 'image')
 
-            if not image_data:
-                # Fallback to text response if no image data
-                return [types.Part.from_function_response(
-                    name=name,
-                    response={'error': 'No image data available'}
-                )]
+            return [Attachment(
+                mime_type=mime_type,
+                data=image_data,
+                display_name=display_name
+            )]
 
-            # Build multimodal response using the correct structure:
-            # - response dict contains {'$ref': display_name} to reference the image
-            # - parts contains FunctionResponsePart with FunctionResponseBlob
-            # - FunctionResponseBlob has displayName that matches the $ref
-            try:
-                # Create the structured response with reference to image
-                response_dict = {
-                    'status': 'success',
-                    'image': {'$ref': display_name},
-                    'file_path': result.get('file_path', ''),
-                    'size_bytes': result.get('size_bytes', len(image_data)),
-                }
+        return None
 
-                # Build the function response with nested multimodal parts
-                # The displayName in FunctionResponseBlob must match the $ref above
-                part = types.Part.from_function_response(
-                    name=name,
-                    response=response_dict,
-                    parts=[
-                        types.FunctionResponsePart(
-                            inlineData=types.FunctionResponseBlob(
-                                mimeType=mime_type,
-                                data=image_data,
-                                displayName=display_name  # Links to {'$ref': display_name}
-                            )
-                        )
-                    ]
-                )
-                return [part]
+    def _accumulate_provider_turn_tokens(
+        self,
+        response: ProviderResponse,
+        turn_tokens: Dict[str, int]
+    ) -> None:
+        """Accumulate token counts from provider response into turn totals."""
+        turn_tokens['prompt'] += response.usage.prompt_tokens
+        turn_tokens['output'] += response.usage.output_tokens
+        turn_tokens['total'] += response.usage.total_tokens
 
-            except Exception as e:
-                # Fallback: return text description if multimodal fails
-                return [types.Part.from_function_response(
-                    name=name,
-                    response={
-                        'error': f'Failed to build multimodal response: {e}',
-                        'file_path': result.get('file_path', ''),
-                    }
-                )]
-
-        # Unknown multimodal type
-        return [types.Part.from_function_response(
-            name=name,
-            response={'error': f'Unknown multimodal type: {multimodal_type}'}
-        )]
-
-    def _accumulate_turn_tokens(self, response, turn_tokens: Dict[str, int]) -> None:
-        """Accumulate token counts from response into turn totals."""
-        usage = getattr(response, 'usage_metadata', None)
-        if usage:
-            turn_tokens['prompt'] += getattr(usage, 'prompt_token_count', 0) or 0
-            turn_tokens['output'] += getattr(usage, 'candidates_token_count', 0) or 0
-            turn_tokens['total'] += getattr(usage, 'total_token_count', 0) or 0
-
-    def _record_token_usage(self, response) -> None:
-        """Record token usage from response to ledger if available."""
+    def _record_provider_token_usage(self, response: ProviderResponse) -> None:
+        """Record token usage from provider response to ledger if available."""
         if not self._ledger:
             return
 
-        usage = getattr(response, 'usage_metadata', None)
-        if usage:
-            self._ledger._record('response', {
-                'prompt_tokens': getattr(usage, 'prompt_token_count', None),
-                'output_tokens': getattr(usage, 'candidates_token_count', None),
-                'total_tokens': getattr(usage, 'total_token_count', None),
-            })
+        self._ledger._record('response', {
+            'prompt_tokens': response.usage.prompt_tokens,
+            'output_tokens': response.usage.output_tokens,
+            'total_tokens': response.usage.total_tokens,
+        })
 
     def get_history(self) -> List[Message]:
         """Get current conversation history.
@@ -695,9 +628,9 @@ class JaatoClient:
         Returns:
             List of Message objects representing the conversation.
         """
-        if not self._chat:
+        if not self._provider:
             return []
-        return history_from_sdk(list(self._chat.get_history()))
+        return self._provider.get_history()
 
     def get_turn_accounting(self) -> List[Dict[str, Any]]:
         """Get token usage and timing per turn.
@@ -728,19 +661,10 @@ class JaatoClient:
         Returns:
             The context window size in tokens.
         """
-        if not self._model_name:
-            return DEFAULT_CONTEXT_LIMIT
+        if not self._provider:
+            return 1_048_576  # Default fallback
 
-        # Try exact match first
-        if self._model_name in MODEL_CONTEXT_LIMITS:
-            return MODEL_CONTEXT_LIMITS[self._model_name]
-
-        # Try prefix matching for versioned model names
-        for model_prefix, limit in MODEL_CONTEXT_LIMITS.items():
-            if self._model_name.startswith(model_prefix):
-                return limit
-
-        return DEFAULT_CONTEXT_LIMIT
+        return self._provider.get_context_limit()
 
     def get_context_usage(self) -> Dict[str, Any]:
         """Get context window usage statistics.
@@ -777,7 +701,7 @@ class JaatoClient:
             'tokens_remaining': tokens_remaining,
         }
 
-    def reset_session(self, history: Optional[List[types.Content]] = None) -> None:
+    def reset_session(self, history: Optional[List[Message]] = None) -> None:
         """Reset the chat session, optionally with modified history.
 
         Use this to:
@@ -785,10 +709,10 @@ class JaatoClient:
         - Start with custom history: reset_session(modified_history)
 
         Args:
-            history: Optional initial history for the new session.
+            history: Optional initial history for the new session (provider-agnostic Messages).
         """
         self._turn_accounting = []
-        self._create_chat(history)
+        self._create_session(history)
 
     def get_turn_boundaries(self) -> List[int]:
         """Get indices where each turn starts in the history.
@@ -805,7 +729,7 @@ class JaatoClient:
 
         for i, msg in enumerate(history):
             # A turn starts with a user message that has text (not function response)
-            if msg.role == 'user' and msg.parts and msg.parts[0].text:
+            if msg.role == Role.USER and msg.parts and msg.parts[0].text:
                 boundaries.append(i)
 
         return boundaries
@@ -864,7 +788,7 @@ class JaatoClient:
             self._turn_accounting = self._turn_accounting[:turn_id]
 
         # Reset session with truncated history
-        self._create_chat(truncated_history)
+        self._create_session(truncated_history)
 
         # Reset session plugin's turn count if it has one
         if self._session_plugin and hasattr(self._session_plugin, 'set_turn_count'):
@@ -922,7 +846,7 @@ class JaatoClient:
         _ok, result = self._executor.execute(command_name, args)
 
         # If share_with_model is True, add to conversation history
-        if cmd.share_with_model and self._chat:
+        if cmd.share_with_model and self._provider:
             # Add as a user message with function call and response
             # This way the model sees what command was executed and what it returned
             self._inject_command_into_history(command_name, args, result)
@@ -949,24 +873,26 @@ class JaatoClient:
         current_history = self.get_history()
 
         # Create a user message indicating the command was run
-        user_content = types.Content(
-            role='user',
-            parts=[types.Part(text=f"[User executed command: {command_name}]")]
+        user_message = Message(
+            role=Role.USER,
+            parts=[Part.from_text(f"[User executed command: {command_name}]")]
         )
 
-        # Create a model message with the function call and response
+        # Create a model message with the function response
         # This simulates the model having called the function
-        model_content = types.Content(
-            role='model',
-            parts=[types.Part.from_function_response(
+        result_dict = result if isinstance(result, dict) else {"result": result}
+        model_message = Message(
+            role=Role.MODEL,
+            parts=[Part.from_function_response(ToolResult(
+                call_id="",
                 name=command_name,
-                response=result if isinstance(result, dict) else {"result": result}
-            )]
+                result=result_dict
+            ))]
         )
 
-        # Recreate chat with updated history
-        new_history = list(current_history) + [user_content, model_content]
-        self._create_chat(new_history)
+        # Recreate session with updated history
+        new_history = list(current_history) + [user_message, model_message]
+        self._create_session(new_history)
 
     def generate(
         self,
@@ -979,7 +905,7 @@ class JaatoClient:
 
         Args:
             prompt: The prompt text.
-            ledger: Optional token ledger for accounting.
+            ledger: Optional token ledger for accounting (currently unused with provider).
 
         Returns:
             The model's response text.
@@ -987,22 +913,24 @@ class JaatoClient:
         Raises:
             RuntimeError: If client is not connected.
         """
-        if not self._client or not self._model_name:
+        if not self._provider or not self._provider.is_connected:
             raise RuntimeError("Client not connected. Call connect() first.")
 
-        if ledger:
-            response = ledger.generate_with_accounting(self._client, self._model_name, prompt)
-        else:
-            response = self._client.models.generate_content(
-                model=self._model_name,
-                contents=prompt
-            )
+        response = self._provider.generate(prompt)
 
-        return getattr(response, 'text', '') or ''
+        # Record token usage if ledger provided
+        if ledger:
+            ledger._record('response', {
+                'prompt_tokens': response.usage.prompt_tokens,
+                'output_tokens': response.usage.output_tokens,
+                'total_tokens': response.usage.total_tokens,
+            })
+
+        return response.text or ''
 
     def send_message_with_parts(
         self,
-        parts: List[types.Part],
+        parts: List[Part],
         on_output: OutputCallback
     ) -> str:
         """Send a message with custom Part objects.
@@ -1021,16 +949,16 @@ class JaatoClient:
         Raises:
             RuntimeError: If client is not connected or not configured.
         """
-        if not self._client or not self._model_name:
+        if not self._provider or not self._provider.is_connected:
             raise RuntimeError("Client not connected. Call connect() first.")
-        if not self._chat:
+        if not self._tools and not self._system_instruction:
             raise RuntimeError("Tools not configured. Call configure_tools() first.")
 
         return self._run_chat_loop_with_parts(parts, on_output)
 
     def _run_chat_loop_with_parts(
         self,
-        parts: List[types.Part],
+        parts: List[Part],
         on_output: OutputCallback
     ) -> str:
         """Internal function calling loop for multi-part messages.
@@ -1059,48 +987,43 @@ class JaatoClient:
             'duration_seconds': None,
             'function_calls': [],
         }
+        response: Optional[ProviderResponse] = None
 
         try:
-            # Send parts as Content object
-            user_content = types.Content(role='user', parts=parts)
-            response = self._chat.send_message(user_content)
-            self._record_token_usage(response)
-            self._accumulate_turn_tokens(response, turn_data)
+            # Send parts via provider
+            response = self._provider.send_message_with_parts(parts)
+            self._record_provider_token_usage(response)
+            self._accumulate_provider_turn_tokens(response, turn_data)
 
             # Check finish_reason for abnormal termination
-            finish_reason = extract_finish_reason(response)
-            if finish_reason not in ('STOP', 'UNKNOWN'):
+            from .plugins.model_provider.types import FinishReason
+            if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE):
                 # Non-normal finish reason - model stopped unexpectedly
                 import sys
-                print(f"[warning] Model stopped with finish_reason={finish_reason}", file=sys.stderr)
-                text = extract_text_from_parts(response)
-                if text:
-                    return f"{text}\n\n[Model stopped: {finish_reason}]"
+                print(f"[warning] Model stopped with finish_reason={response.finish_reason}", file=sys.stderr)
+                if response.text:
+                    return f"{response.text}\n\n[Model stopped: {response.finish_reason}]"
                 else:
-                    return f"[Model stopped unexpectedly: {finish_reason}]"
+                    return f"[Model stopped unexpectedly: {response.finish_reason}]"
 
-            # Handle function calling loop (same as _run_chat_loop)
-            # Cache function_calls to avoid potential issues with property access
-            # (some SDK versions may return generators that get exhausted)
+            # Handle function calling loop
             function_calls = list(response.function_calls) if response.function_calls else []
             while function_calls:
                 # Emit any text produced alongside function calls
-                # Use extract_text_from_parts to avoid SDK warning about non-text parts
-                text = extract_text_from_parts(response)
-                if text:
-                    on_output("model", text, "write")
+                if response.text:
+                    on_output("model", response.text, "write")
 
-                func_responses = []
+                tool_results: List[ToolResult] = []
 
                 for fc in function_calls:
                     name = fc.name
-                    args = dict(fc.args) if fc.args else {}
+                    args = fc.args
 
                     fc_start = datetime.now()
                     if self._executor:
-                        result = self._executor.execute(name, args)
+                        executor_result = self._executor.execute(name, args)
                     else:
-                        result = {"error": f"No executor registered for {name}"}
+                        executor_result = (False, {"error": f"No executor registered for {name}"})
                     fc_end = datetime.now()
 
                     # Record function call timing
@@ -1111,20 +1034,19 @@ class JaatoClient:
                         'duration_seconds': (fc_end - fc_start).total_seconds(),
                     })
 
-                    # Build function response part(s), handling multimodal
-                    response_parts = self._build_function_response_parts(name, result)
-                    func_responses.extend(response_parts)
+                    # Build ToolResult from executor result
+                    tool_result = self._build_tool_result(fc, executor_result)
+                    tool_results.append(tool_result)
 
-                # Chat API accepts Parts directly (not Content objects)
-                response = self._chat.send_message(func_responses)
-                self._record_token_usage(response)
-                self._accumulate_turn_tokens(response, turn_data)
+                # Send tool results back to model via provider
+                response = self._provider.send_tool_results(tool_results)
+                self._record_provider_token_usage(response)
+                self._accumulate_provider_turn_tokens(response, turn_data)
                 # Re-cache function_calls for next iteration
                 function_calls = list(response.function_calls) if response.function_calls else []
 
             # Return the final response text
-            # Use extract_text_from_parts to avoid SDK warning about non-text parts
-            return extract_text_from_parts(response) or ''
+            return response.text or ''
 
         finally:
             # Record turn end time and duration
@@ -1276,21 +1198,18 @@ class JaatoClient:
             for name, fn in plugin.get_executors().items():
                 self._executor.register(name, fn)
 
-        # Add session plugin's tool schemas to chat tools
+        # Add session plugin's tool schemas to the tools list
         if hasattr(plugin, 'get_tool_schemas'):
             session_schemas = plugin.get_tool_schemas()
             if session_schemas:
-                # Convert schemas to SDK declarations and rebuild tools
-                session_decls = [tool_schema_to_sdk(s) for s in session_schemas]
-                current_decls = []
-                if self._tool_decl and self._tool_decl.function_declarations:
-                    current_decls = list(self._tool_decl.function_declarations)
-                current_decls.extend(session_decls)
-                self._tool_decl = types.Tool(function_declarations=current_decls)
+                # Add session schemas to current tools
+                current_tools = list(self._tools) if self._tools else []
+                current_tools.extend(session_schemas)
+                self._tools = current_tools
 
-                # Recreate chat with updated tools
-                history = self.get_history() if self._chat else None
-                self._create_chat(history)
+                # Recreate session with updated tools
+                history = self.get_history() if self._provider else None
+                self._create_session(history)
 
         # Check for auto-resume
         if self._session_config.auto_resume_last:
