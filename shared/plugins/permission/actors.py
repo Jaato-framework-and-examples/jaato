@@ -682,71 +682,50 @@ class CallbackConsoleActor(ConsoleActor):
         self._pause_callback: Optional[Callable[[], None]] = None
         self._resume_callback: Optional[Callable[[], None]] = None
         self._summary_output_callback: Optional[Callable[[str, str, str], None]] = None
-        self._run_in_terminal: Optional[Callable[[Callable[[], None]], None]] = None
 
     def set_callbacks(
         self,
         pause_callback: Optional[Callable[[], None]] = None,
         resume_callback: Optional[Callable[[], None]] = None,
         output_callback: Optional[Callable[[str, str, str], None]] = None,
-        run_in_terminal: Optional[Callable[[Callable[[], None]], None]] = None,
+        **kwargs,  # Accept but ignore other args for compatibility
     ) -> None:
         """Set the pause/resume/output callbacks.
 
         Args:
-            pause_callback: Called before requesting user input (legacy).
-            resume_callback: Called after user input is complete (legacy).
+            pause_callback: Called before requesting user input.
+            resume_callback: Called after user input is complete.
             output_callback: Called with (source, text, mode) to log the summary.
-            run_in_terminal: Callable that wraps console I/O for TUI frameworks.
-                            Signature: run_in_terminal(func) -> None
-                            If provided, pause/resume callbacks are ignored.
         """
         self._pause_callback = pause_callback
         self._resume_callback = resume_callback
         self._summary_output_callback = output_callback
-        self._run_in_terminal = run_in_terminal
 
     def request_permission(self, request: PermissionRequest) -> ActorResponse:
-        """Request permission with pause/resume callbacks.
+        """Request permission with pause/resume callbacks."""
+        if self._pause_callback:
+            self._pause_callback()
 
-        If a run_in_terminal callable is provided via set_callbacks, the
-        console interaction runs inside it to properly suspend TUI frameworks.
-        """
-        response = None
+        # Temporarily restore default output (print to stdout) during interaction
+        # since the TUI display is paused and won't show callback output
+        saved_output_func = self._output_func
+        saved_callback = self._output_callback
+        self._output_func = self._default_output_func
+        self._output_callback = None
 
-        def do_permission():
-            nonlocal response
-            # Temporarily restore default output (print to stdout) during interaction
-            saved_output_func = self._output_func
-            saved_callback = self._output_callback
-            self._output_func = self._default_output_func
-            self._output_callback = None
+        try:
+            response = super().request_permission(request)
+            # Log summary to output after interaction
+            if self._summary_output_callback:
+                self._log_permission_summary(request, response)
+            return response
+        finally:
+            # Restore the callback-based output
+            self._output_func = saved_output_func
+            self._output_callback = saved_callback
 
-            try:
-                response = super(CallbackConsoleActor, self).request_permission(request)
-            finally:
-                # Restore the callback-based output
-                self._output_func = saved_output_func
-                self._output_callback = saved_callback
-
-        # If we have a run_in_terminal wrapper, use it
-        if self._run_in_terminal:
-            self._run_in_terminal(do_permission)
-        else:
-            # Fallback to simple pause/resume
-            if self._pause_callback:
-                self._pause_callback()
-            try:
-                do_permission()
-            finally:
-                if self._resume_callback:
-                    self._resume_callback()
-
-        # Log summary to output after interaction
-        if self._summary_output_callback and response:
-            self._log_permission_summary(request, response)
-
-        return response
+            if self._resume_callback:
+                self._resume_callback()
 
     def _log_permission_summary(
         self, request: PermissionRequest, response: ActorResponse
