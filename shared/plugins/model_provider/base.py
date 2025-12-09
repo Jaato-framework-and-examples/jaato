@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checka
 
 from .types import (
     Message,
+    Part,
     ProviderResponse,
     ToolResult,
     ToolSchema,
@@ -160,6 +161,20 @@ class ModelProviderPlugin(Protocol):
 
     # ==================== Messaging ====================
 
+    def generate(self, prompt: str) -> ProviderResponse:
+        """Simple one-shot generation without session context.
+
+        Use this for basic prompts that don't need conversation history
+        or function calling.
+
+        Args:
+            prompt: The prompt text.
+
+        Returns:
+            ProviderResponse with the model's response.
+        """
+        ...
+
     def send_message(
         self,
         message: str,
@@ -177,6 +192,25 @@ class ModelProviderPlugin(Protocol):
                 conforming to this schema, and the response's structured_output
                 field will contain the parsed result. Not all providers support
                 this - check supports_structured_output() first.
+
+        Returns:
+            ProviderResponse with text and/or function calls.
+        """
+        ...
+
+    def send_message_with_parts(
+        self,
+        parts: List[Part],
+        response_schema: Optional[Dict[str, Any]] = None
+    ) -> ProviderResponse:
+        """Send a message with multiple parts (text, images, etc.).
+
+        Use this for multimodal input where the user message contains
+        more than just text.
+
+        Args:
+            parts: List of Part objects forming the message.
+            response_schema: Optional JSON Schema to constrain the response.
 
         Returns:
             ProviderResponse with text and/or function calls.

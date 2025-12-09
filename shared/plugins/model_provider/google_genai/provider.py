@@ -222,6 +222,29 @@ class GoogleGenAIProvider:
 
     # ==================== Messaging ====================
 
+    def generate(self, prompt: str) -> ProviderResponse:
+        """Simple one-shot generation without session context.
+
+        Use this for basic prompts that don't need conversation history
+        or function calling.
+
+        Args:
+            prompt: The prompt text.
+
+        Returns:
+            ProviderResponse with the model's response.
+        """
+        if not self._client or not self._model_name:
+            raise RuntimeError("Provider not connected. Call connect() first.")
+
+        response = self._client.models.generate_content(
+            model=self._model_name,
+            contents=prompt
+        )
+        provider_response = response_from_sdk(response)
+        self._last_usage = provider_response.usage
+        return provider_response
+
     def send_message(
         self,
         message: str,
@@ -258,6 +281,56 @@ class GoogleGenAIProvider:
                 provider_response.structured_output = json.loads(provider_response.text)
             except json.JSONDecodeError:
                 # Model returned invalid JSON despite schema constraint
+                pass
+
+        return provider_response
+
+    def send_message_with_parts(
+        self,
+        parts: List[Part],
+        response_schema: Optional[Dict[str, Any]] = None
+    ) -> ProviderResponse:
+        """Send a message with multiple parts (text, images, etc.).
+
+        Use this for multimodal input where the user message contains
+        more than just text.
+
+        Args:
+            parts: List of Part objects forming the message.
+            response_schema: Optional JSON Schema to constrain the response.
+
+        Returns:
+            ProviderResponse with text and/or function calls.
+        """
+        if not self._chat:
+            raise RuntimeError("No chat session. Call create_session() first.")
+
+        # Import converter here to avoid circular imports
+        from .converters import part_to_sdk
+
+        # Convert internal Parts to SDK Parts
+        sdk_parts = [part_to_sdk(p) for p in parts]
+
+        # Create user Content with the parts
+        user_content = types.Content(role='user', parts=sdk_parts)
+
+        # Build config override for structured output
+        config = None
+        if response_schema:
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=response_schema
+            )
+
+        response = self._chat.send_message(user_content, config=config)
+        provider_response = response_from_sdk(response)
+        self._last_usage = provider_response.usage
+
+        # Parse structured output if schema was requested
+        if response_schema and provider_response.text:
+            try:
+                provider_response.structured_output = json.loads(provider_response.text)
+            except json.JSONDecodeError:
                 pass
 
         return provider_response

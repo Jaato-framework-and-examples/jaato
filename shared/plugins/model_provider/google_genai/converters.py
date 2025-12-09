@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from google.genai import types
 
 from ..types import (
+    Attachment,
     FinishReason,
     FunctionCall,
     Message,
@@ -195,14 +196,76 @@ def history_from_sdk(history: List[types.Content]) -> List[Message]:
 # ==================== ToolResult Conversion ====================
 
 def tool_result_to_sdk_part(result: ToolResult) -> types.Part:
-    """Convert ToolResult to SDK function response Part."""
+    """Convert ToolResult to SDK function response Part.
+
+    Handles both simple results and multimodal results with attachments.
+    When attachments are present, builds a multimodal function response
+    using FunctionResponsePart/FunctionResponseBlob structure.
+    """
     response = result.result if isinstance(result.result, dict) else {"result": result.result}
     if result.is_error:
         response = {"error": str(result.result)}
+
+    # Handle multimodal attachments
+    if result.attachments:
+        return _build_multimodal_function_response(result.name, response, result.attachments)
+
     return types.Part.from_function_response(
         name=result.name,
         response=response
     )
+
+
+def _build_multimodal_function_response(
+    name: str,
+    response: Dict[str, Any],
+    attachments: List[Attachment]
+) -> types.Part:
+    """Build a multimodal function response with attachments.
+
+    Creates a function response that includes inline binary data using
+    the FunctionResponsePart/FunctionResponseBlob structure. The displayName
+    field links the $ref in the response to the actual data.
+
+    Args:
+        name: The function name.
+        response: The response dict (may contain $ref placeholders).
+        attachments: List of Attachment objects with binary data.
+
+    Returns:
+        A types.Part with nested multimodal data.
+    """
+    # Build FunctionResponsePart list from attachments
+    parts = []
+    for attachment in attachments:
+        display_name = attachment.display_name or f"attachment_{len(parts)}"
+
+        # Add $ref to response if not already present
+        if display_name not in str(response):
+            response[display_name] = {"$ref": display_name}
+
+        parts.append(
+            types.FunctionResponsePart(
+                inlineData=types.FunctionResponseBlob(
+                    mimeType=attachment.mime_type,
+                    data=attachment.data,
+                    displayName=display_name
+                )
+            )
+        )
+
+    try:
+        return types.Part.from_function_response(
+            name=name,
+            response=response,
+            parts=parts
+        )
+    except Exception:
+        # Fallback to simple response if multimodal fails
+        return types.Part.from_function_response(
+            name=name,
+            response={**response, "error": "Failed to attach multimodal data"}
+        )
 
 
 def tool_results_to_sdk_parts(results: List[ToolResult]) -> List[types.Part]:
