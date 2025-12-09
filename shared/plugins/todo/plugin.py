@@ -114,7 +114,9 @@ class TodoPlugin:
                 name="createPlan",
                 description="Step 1: Register a new execution plan with ordered steps. "
                            "Think carefully before calling - only propose plans you can actually "
-                           "achieve with available tools. Each step must be specific and actionable. "
+                           "achieve with available tools. IMPORTANT: Before including any tool "
+                           "in a step, verify that tool is available and you are allowed to use it. "
+                           "Each step must be specific and actionable. "
                            "After calling this, you MUST call startPlan to get user approval.",
                 parameters={
                     "type": "object",
@@ -264,6 +266,15 @@ class TodoPlugin:
             "  Example: 'List files sorted by date using cli_based_tool: ls -lt'\n"
             "  Example: 'Search for Python files using cli_based_tool: find . -name \"*.py\"'\n"
             "- This helps the user understand exactly what will be executed before approving\n\n"
+            "VALIDATE TOOL AVAILABILITY:\n"
+            "- BEFORE including any tool in a plan step, you MUST verify:\n"
+            "  1. The tool exists and is available in the current session\n"
+            "  2. You are allowed/permitted to use that tool\n"
+            "  3. The tool can perform the action described in the step\n"
+            "- Do NOT assume a tool exists - check your available tools first\n"
+            "- Do NOT include steps that rely on tools you cannot access or are not permitted to use\n"
+            "- If unsure whether a tool is available, either check first or choose an alternative approach\n"
+            "- Steps that fail due to unavailable tools waste user time and erode trust\n\n"
             "WORKFLOW:\n"
             "1. createPlan - Register your execution plan with ordered steps\n"
             "2. startPlan - Request user approval (REQUIRED before any execution)\n"
