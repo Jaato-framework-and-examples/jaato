@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, Optional
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout.containers import HSplit, VSplit, Window, ConditionalContainer
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
@@ -101,6 +101,9 @@ class PTDisplay:
         )
         self._input_callback: Optional[Callable[[str], None]] = None
 
+        # Spinner animation timer (spinner state is in output_buffer)
+        self._spinner_timer_active = False
+
         # Build prompt_toolkit application
         self._app: Optional[Application] = None
         self._build_app()
@@ -121,8 +124,8 @@ class PTDisplay:
         """Get rendered plan content as ANSI for prompt_toolkit."""
         if self._plan_panel.has_plan:
             rendered = self._plan_panel.render()
-            return ANSI(self._renderer.render(rendered))
-        return ANSI("")
+            return to_formatted_text(ANSI(self._renderer.render(rendered)))
+        return to_formatted_text(ANSI(""))
 
     def _get_output_content(self):
         """Get rendered output content as ANSI for prompt_toolkit."""
@@ -138,7 +141,7 @@ class PTDisplay:
             height=available_height,
             width=self._width,
         )
-        return ANSI(self._renderer.render(panel))
+        return to_formatted_text(ANSI(self._renderer.render(panel)))
 
     def _build_app(self) -> None:
         """Build the prompt_toolkit application."""
@@ -234,10 +237,12 @@ class PTDisplay:
             wrap_lines=False,
         )
 
-        # Input prompt label - changes during pager mode
+        # Input prompt label - changes based on mode (pager, waiting for actor, normal)
         def get_prompt_text():
             if getattr(self, '_pager_active', False):
                 return [("class:prompt.pager", "── Enter: next, q: quit ──")]
+            if getattr(self, '_waiting_for_actor_input', False):
+                return [("class:prompt.permission", "Answer> ")]
             return [("class:prompt", "You> ")]
 
         prompt_label = Window(
@@ -294,16 +299,14 @@ class PTDisplay:
         Invalidates the prompt_toolkit app to trigger re-render.
         The content getter methods (_get_plan_content, _get_output_content)
         are called automatically during render.
+
+        NOTE: We only call invalidate() - do NOT call renderer.render() directly
+        as this may be called from background threads and would cause race
+        conditions with the main event loop's rendering.
         """
         if self._app and self._app.is_running:
-            # Invalidate schedules a redraw
+            # Invalidate schedules a redraw in the main event loop
             self._app.invalidate()
-            # Force the renderer to redraw immediately
-            try:
-                self._app.renderer.render(self._app, self._app.layout)
-            except Exception:
-                # Renderer may not be ready in some edge cases
-                pass
 
     def start(self) -> None:
         """Start the display (non-blocking).
@@ -497,3 +500,34 @@ class PTDisplay:
     def pager_active(self) -> bool:
         """Check if pager mode is active."""
         return getattr(self, '_pager_active', False)
+
+    def start_spinner(self) -> None:
+        """Start the spinner animation to show model is thinking."""
+        self._output_buffer.start_spinner()
+        self._spinner_timer_active = True
+        self._advance_spinner()
+
+    def stop_spinner(self) -> None:
+        """Stop the spinner animation."""
+        self._spinner_timer_active = False
+        self._output_buffer.stop_spinner()
+        self.refresh()
+
+    def _advance_spinner(self) -> None:
+        """Advance spinner animation frame."""
+        if not self._spinner_timer_active:
+            return
+        self._output_buffer.advance_spinner()
+        self.refresh()
+        # Schedule next frame using prompt_toolkit's call_later
+        if self._app and self._app.is_running:
+            self._app.loop.call_later(0.1, self._advance_spinner)
+
+    def set_waiting_for_actor_input(self, waiting: bool) -> None:
+        """Set whether we're waiting for actor (permission/clarification) input.
+
+        Args:
+            waiting: True if waiting for actor input, False otherwise.
+        """
+        self._waiting_for_actor_input = waiting
+        self.refresh()

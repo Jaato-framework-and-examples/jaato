@@ -156,7 +156,6 @@ class PlanPanel:
         table.add_column("status", width=2)
         table.add_column("seq", width=3)
         table.add_column("description", ratio=1)
-        table.add_column("result", ratio=1, style="dim")
 
         # Sort by sequence
         sorted_steps = sorted(steps, key=lambda s: s.get("sequence", 0))
@@ -178,31 +177,29 @@ class PlanPanel:
             # Get symbol and style
             symbol, style = self.STATUS_SYMBOLS.get(step_status, ("?", "white"))
 
-            # Truncate description if too long
-            max_desc = 40
-            if len(desc) > max_desc:
-                desc = desc[:max_desc - 3] + "..."
-
-            # Build result/error text
-            result_text = ""
-            result_style = "dim"
-            if step_status == "completed" and result:
-                result_text = result[:30] + "..." if len(result) > 30 else result
-                result_style = "dim green"
-            elif step_status == "failed" and error:
-                result_text = error[:30] + "..." if len(error) > 30 else error
-                result_style = "dim red"
-
             # Highlight current step
             is_current = seq == current_step_seq
             desc_style = "bold" if is_current else ""
 
-            # Add row
+            # Add step row
             table.add_row(
                 Text(symbol, style=style),
                 Text(f"{seq}.", style="dim"),
                 Text(desc, style=desc_style),
-                Text(result_text, style=result_style),
             )
+
+            # Add result/error on next line if present
+            if step_status == "completed" and result:
+                table.add_row(
+                    Text(""),
+                    Text(""),
+                    Text(f"→ {result}", style="dim green"),
+                )
+            elif step_status == "failed" and error:
+                table.add_row(
+                    Text(""),
+                    Text(""),
+                    Text(f"✗ {error}", style="dim red"),
+                )
 
         return table
