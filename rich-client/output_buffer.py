@@ -31,6 +31,9 @@ class OutputBuffer:
     for display in the output panel.
     """
 
+    # Spinner animation frames
+    SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+
     def __init__(self, max_lines: int = 1000):
         """Initialize the output buffer.
 
@@ -43,6 +46,8 @@ class OutputBuffer:
         self._console_width: int = 80
         self._last_source: Optional[str] = None  # Track source for turn detection
         self._scroll_offset: int = 0  # Lines scrolled up from bottom (0 = at bottom)
+        self._spinner_active: bool = False
+        self._spinner_index: int = 0
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -128,12 +133,12 @@ class OutputBuffer:
         """Flush the current block to lines."""
         if self._current_block:
             source, parts, is_new_turn = self._current_block
-            full_text = ''.join(parts)
+            # Join parts with newlines - each append is a separate line
+            full_text = '\n'.join(parts)
             lines = full_text.split('\n')
             for i, line in enumerate(lines):
-                if line:  # Skip empty lines from split
-                    # Only first line of a new turn gets the prefix
-                    self._add_line(source, line, "line", is_turn_start=(i == 0 and is_new_turn))
+                # Only first line of a new turn gets the prefix
+                self._add_line(source, line, "line", is_turn_start=(i == 0 and is_new_turn))
             self._last_source = source
             self._current_block = None
 
@@ -152,6 +157,26 @@ class OutputBuffer:
         self._lines.clear()
         self._current_block = None
         self._scroll_offset = 0
+        self._spinner_active = False
+
+    def start_spinner(self) -> None:
+        """Start showing spinner in the output."""
+        self._spinner_active = True
+        self._spinner_index = 0
+
+    def stop_spinner(self) -> None:
+        """Stop showing spinner."""
+        self._spinner_active = False
+
+    def advance_spinner(self) -> None:
+        """Advance spinner to next frame."""
+        if self._spinner_active:
+            self._spinner_index = (self._spinner_index + 1) % len(self.SPINNER_FRAMES)
+
+    @property
+    def spinner_active(self) -> bool:
+        """Check if spinner is currently active."""
+        return self._spinner_active
 
     def scroll_up(self, lines: int = 5) -> bool:
         """Scroll up (view older content).
@@ -277,6 +302,14 @@ class OutputBuffer:
                 if line.is_turn_start:
                     output.append(f"[{line.source}] ", style="dim magenta")
                 output.append(line.text)
+
+        # Add spinner at the bottom if active
+        if self._spinner_active:
+            if lines_to_show:
+                output.append("\n")
+            frame = self.SPINNER_FRAMES[self._spinner_index]
+            output.append(f"Model> {frame} ", style="bold cyan")
+            output.append("thinking...", style="dim italic")
 
         return output
 

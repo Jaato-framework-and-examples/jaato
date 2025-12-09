@@ -12,6 +12,7 @@ Requires an interactive TTY. For non-TTY environments, use simple-client.
 import os
 import sys
 import pathlib
+import threading
 from typing import Any, Callable, Dict, List, Optional
 
 # Add project root to path for imports
@@ -78,15 +79,34 @@ class RichClient:
         # Flag to signal exit from input loop
         self._should_exit = False
 
+        # Queue for permission/clarification input routing
+        import queue
+        self._actor_input_queue: queue.Queue[str] = queue.Queue()
+        self._waiting_for_actor_input: bool = False
+
+        # Background model thread tracking
+        self._model_thread: Optional[threading.Thread] = None
+        self._model_running: bool = False
+
     def log(self, msg: str) -> None:
         """Log message to output panel."""
         if self.verbose and self._display:
             self._display.add_system_message(msg, style="cyan")
 
-    def _create_output_callback(self) -> Callable[[str, str, str], None]:
-        """Create callback for real-time output to display."""
+    def _create_output_callback(self, stop_spinner_on_first: bool = False) -> Callable[[str, str, str], None]:
+        """Create callback for real-time output to display.
+
+        Args:
+            stop_spinner_on_first: If True, stop the spinner on first output.
+        """
+        first_output_received = [False]  # Use list for mutability in closure
+
         def callback(source: str, text: str, mode: str) -> None:
             if self._display:
+                # Stop spinner on first output if requested
+                if stop_spinner_on_first and not first_output_received[0]:
+                    first_output_received[0] = True
+                    self._display.stop_spinner()
                 self._display.append_output(source, text, mode)
         return callback
 
@@ -207,7 +227,7 @@ class RichClient:
 
         # We'll configure the todo reporter after display is created
         # For now, use memory storage
-        # Note: clarification plugin callbacks are set up in _setup_callback_actors()
+        # Note: clarification and permission actors use "queue" type for TUI integration
         plugin_configs = {
             "todo": {
                 "reporter_type": "console",  # Temporary, will be replaced
@@ -217,17 +237,17 @@ class RichClient:
                 "actor_type": "console",
             },
             "clarification": {
-                "actor_type": "callback_console",
+                "actor_type": "queue",
                 # Callbacks will be set after display is created
             },
         }
         self.registry.expose_all(plugin_configs)
         self.todo_plugin = self.registry.get_plugin("todo")
 
-        # Initialize permission plugin with callback_console actor
+        # Initialize permission plugin with queue actor for TUI integration
         self.permission_plugin = PermissionPlugin()
         self.permission_plugin.initialize({
-            "actor_type": "callback_console",
+            "actor_type": "queue",
             "policy": {
                 "defaultPolicy": "ask",
                 "whitelist": {"tools": [], "patterns": []},
@@ -262,27 +282,30 @@ class RichClient:
         if hasattr(self.todo_plugin, '_reporter'):
             self.todo_plugin._reporter = live_reporter
 
-    def _setup_callback_actors(self) -> None:
-        """Set up callbacks on all callback_console actors.
+    def _trace(self, msg: str) -> None:
+        """Write trace message to file for debugging."""
+        import datetime
+        with open("/tmp/rich_client_trace.log", "a") as f:
+            ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            f.write(f"[{ts}] {msg}\n")
+            f.flush()
 
-        The model runs in a background thread, but we still need to handle
-        terminal mode for stdin to work. We temporarily reset the terminal
-        before permission/clarification prompts.
+    def _setup_queue_actors(self) -> None:
+        """Set up queue-based actors for permission and clarification.
+
+        Queue actors display prompts in the output panel and receive user
+        input via a shared queue. This avoids terminal mode switching issues
+        that occur when the model runs in a background thread.
         """
         if not self._display:
             return
 
-        def pause_for_input():
-            """Temporarily reset terminal for stdin input."""
-            if self._display and self._display._app:
-                # Reset terminal to normal mode
-                self._display._app.renderer.reset()
-                self._display._app.output.flush()
-
-        def resume_after_input():
-            """Re-render after stdin input."""
+        def on_prompt_state_change(waiting: bool):
+            """Called when actor starts/stops waiting for input."""
+            self._waiting_for_actor_input = waiting
+            self._trace(f"prompt_callback: waiting={waiting}")
             if self._display:
-                self._display.refresh()
+                self._display.set_waiting_for_actor_input(waiting)
 
         # Set callbacks on clarification plugin actor
         if self.registry:
@@ -291,20 +314,23 @@ class RichClient:
                 actor = clarification_plugin._actor
                 if hasattr(actor, 'set_callbacks'):
                     actor.set_callbacks(
-                        pause_callback=pause_for_input,
-                        resume_callback=resume_after_input,
-                        output_callback=self._display.append_output,
+                        output_callback=self._create_output_callback(),
+                        input_queue=self._actor_input_queue,
+                        prompt_callback=on_prompt_state_change,
                     )
+                    self._trace("Clarification actor callbacks set (queue)")
 
         # Set callbacks on permission plugin actor
         if self.permission_plugin and hasattr(self.permission_plugin, '_actor'):
             actor = self.permission_plugin._actor
+            self._trace(f"Permission actor type: {type(actor).__name__}")
             if actor and hasattr(actor, 'set_callbacks'):
                 actor.set_callbacks(
-                    pause_callback=pause_for_input,
-                    resume_callback=resume_after_input,
-                    output_callback=self._display.append_output,
+                    output_callback=self._create_output_callback(),
+                    input_queue=self._actor_input_queue,
+                    prompt_callback=on_prompt_state_change,
                 )
+                self._trace("Permission actor callbacks set (queue)")
 
     def _setup_session_plugin(self) -> None:
         """Set up session persistence plugin."""
@@ -389,48 +415,80 @@ class RichClient:
         )
 
     def run_prompt(self, prompt: str) -> str:
-        """Execute a prompt and return the response.
+        """Execute a prompt synchronously and return the response.
 
-        Runs the model call in a background thread so that prompt_toolkit
-        can continue processing input events (for permission/clarification prompts).
+        This is used for single-prompt (non-interactive) mode only.
+        For interactive mode, use _start_model_thread instead.
         """
         if not self._jaato:
             return "Error: Client not initialized"
 
-        self.log("Sending prompt to model...")
+        try:
+            response = self._jaato.send_message(prompt, on_output=lambda s, t, m: print(f"[{s}] {t}"))
+            return response if response else "(No response)"
+        except Exception as e:
+            return f"Error: {e}"
 
-        import threading
-        import queue
+    def _start_model_thread(self, prompt: str) -> None:
+        """Start the model call in a background thread.
 
-        result_queue = queue.Queue()
-        output_callback = self._create_output_callback()
+        This allows the prompt_toolkit event loop to continue running,
+        which is necessary for handling permission/clarification prompts.
+        The model thread will update the display via callbacks.
+        """
+        if not self._jaato:
+            if self._display:
+                self._display.add_system_message("Error: Client not initialized", style="red")
+            return
+
+        if self._model_running:
+            if self._display:
+                self._display.add_system_message("Model is already running", style="yellow")
+            return
+
+        self._trace("_start_model_thread starting")
+
+        # Start spinner to show we're waiting for the model
+        if self._display:
+            self._display.start_spinner()
+
+        # Create callback that stops spinner on first output
+        output_callback = self._create_output_callback(stop_spinner_on_first=True)
 
         def model_thread():
+            self._trace("[model_thread] started")
+            self._model_running = True
             try:
-                response = self._jaato.send_message(prompt, on_output=output_callback)
-                result_queue.put(('success', response if response else '(No response)'))
+                self._trace("[model_thread] calling send_message...")
+                self._jaato.send_message(prompt, on_output=output_callback)
+                self._trace(f"[model_thread] send_message returned")
+
+                # Add separator after model finishes
+                # (response content is already shown via the callback)
+                if self._display:
+                    self._display.add_system_message("─" * 40, style="dim")
+                    self._display.add_system_message("", style="dim")
+
             except KeyboardInterrupt:
-                result_queue.put(('interrupted', "[Interrupted]"))
+                self._trace("[model_thread] KeyboardInterrupt")
+                if self._display:
+                    self._display.add_system_message("[Interrupted]", style="yellow")
             except Exception as e:
-                result_queue.put(('error', f"Error: {e}"))
+                self._trace(f"[model_thread] Exception: {e}")
+                if self._display:
+                    self._display.add_system_message(f"Error: {e}", style="red")
+            finally:
+                self._model_running = False
+                self._model_thread = None
+                # Ensure spinner is stopped (in case no output was received)
+                if self._display:
+                    self._display.stop_spinner()
+                self._trace("[model_thread] finished")
 
         # Start model call in background thread
-        thread = threading.Thread(target=model_thread, daemon=True)
-        thread.start()
-
-        # Wait for completion while keeping the display responsive
-        while thread.is_alive():
-            thread.join(timeout=0.05)
-            # Refresh display to show any output from the callback
-            if self._display:
-                self._display.refresh()
-
-        # Get result
-        try:
-            status, response = result_queue.get_nowait()
-            return response
-        except queue.Empty:
-            return "Error: No response from model thread"
+        self._model_thread = threading.Thread(target=model_thread, daemon=True)
+        self._model_thread.start()
+        self._trace("model thread started")
 
     def clear_history(self) -> None:
         """Clear conversation history."""
@@ -450,6 +508,15 @@ class RichClient:
         # Check if pager is active - handle pager input first
         if self._display.pager_active:
             self._display.handle_pager_input(user_input)
+            return
+
+        # Route input to actor queue if waiting for permission/clarification
+        if self._waiting_for_actor_input:
+            # Show the answer in output panel
+            if user_input:
+                self._display.append_output("user", user_input, "write")
+            self._actor_input_queue.put(user_input)
+            self._trace(f"Input routed to actor queue: {user_input}")
             return
 
         if not user_input:
@@ -508,16 +575,9 @@ class RichClient:
         # Expand file references
         expanded_prompt = self._input_handler.expand_file_references(user_input)
 
-        # Execute prompt
-        response = self.run_prompt(expanded_prompt)
-
-        # Display the final response (callback only fires during function calling loops)
-        if response and response not in ('(No response)', ''):
-            self._display.append_output("model", response, "write")
-
-        # Add a separator and blank line
-        self._display.add_system_message("─" * 40, style="dim")
-        self._display.add_system_message("", style="dim")
+        # Start model in background thread (non-blocking)
+        # This allows the event loop to continue running for permission prompts
+        self._start_model_thread(expanded_prompt)
 
     def run_interactive(self, initial_prompt: Optional[str] = None) -> None:
         """Run the interactive TUI loop.
@@ -528,9 +588,9 @@ class RichClient:
         # Create the display with input handler for completions
         self._display = PTDisplay(input_handler=self._input_handler)
 
-        # Set up the live reporter and callback actors
+        # Set up the live reporter and queue actors
         self._setup_live_reporter()
-        self._setup_callback_actors()
+        self._setup_queue_actors()
 
         # Add welcome messages
         self._display.add_system_message(
@@ -630,10 +690,10 @@ class RichClient:
                 if hasattr(part, 'text') and part.text:
                     text = part.text[:100] + "..." if len(part.text) > 100 else part.text
                     lines.append((f"  [{role_label}] {text}", "dim"))
-                elif hasattr(part, 'function_call'):
+                elif hasattr(part, 'function_call') and part.function_call:
                     fc = part.function_call
                     lines.append((f"  [{role_label}] → {fc.name}(...)", "dim yellow"))
-                elif hasattr(part, 'function_response'):
+                elif hasattr(part, 'function_response') and part.function_response:
                     fr = part.function_response
                     lines.append((f"  [{role_label}] ← {fr.name} response", "dim green"))
 
