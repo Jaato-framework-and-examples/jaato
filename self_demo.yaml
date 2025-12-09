@@ -1,0 +1,28 @@
+name: Session Export [2025-12-09 10:42]
+timeout: 120
+steps:
+- type: permissions check createPlan
+  local: true
+- type: permissions check create_or_update_file
+  local: true
+- type: permissions default allow
+  local: true
+- type: permissions deny create*
+  local: true
+- type: permissions allow createPlan
+  local: true
+- type: permissions allow create_or_update_file
+  local: true
+- type: permissions check createPlan
+  local: true
+- type: permissions check create_or_update_file
+  local: true
+- type: permissions
+  local: true
+- type: 'why don''t you design a very detailed plan to show off all your current capabilities
+    by your own or empowered by the tools this current environment pro
+
+    vides to you?'
+  permission: y
+- type: quit
+  delay: 0.08

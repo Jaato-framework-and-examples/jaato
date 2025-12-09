@@ -133,7 +133,7 @@ def serialize_message(message: Message) -> Dict[str, Any]:
     """
     return {
         'role': message.role.value,
-        'parts': [serialize_part(p) for p in message.parts]
+        'parts': [serialize_part(p) for p in (message.parts or [])]
     }
 
 
@@ -159,7 +159,7 @@ def serialize_history(history: List[Message]) -> List[Dict[str, Any]]:
     Returns:
         List of dictionary representations.
     """
-    return [serialize_message(m) for m in history]
+    return [serialize_message(m) for m in (history or [])]
 
 
 def deserialize_history(data: List[Dict[str, Any]]) -> List[Message]:
@@ -171,7 +171,7 @@ def deserialize_history(data: List[Dict[str, Any]]) -> List[Message]:
     Returns:
         List of Message objects.
     """
-    return [deserialize_message(d) for d in data]
+    return [deserialize_message(d) for d in (data or [])]
 
 
 def serialize_session_state(state: SessionState) -> Dict[str, Any]:
