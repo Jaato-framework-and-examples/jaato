@@ -285,7 +285,11 @@ class PTDisplay:
             # Invalidate schedules a redraw
             self._app.invalidate()
             # Force the renderer to redraw immediately
-            self._app.renderer.render(self._app, self._app.layout)
+            try:
+                self._app.renderer.render(self._app, self._app.layout)
+            except Exception:
+                # Renderer may not be ready in some edge cases
+                pass
 
     def start(self) -> None:
         """Start the display (non-blocking).

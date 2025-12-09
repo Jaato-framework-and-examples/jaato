@@ -478,7 +478,10 @@ class RichClient:
         # Execute prompt
         response = self.run_prompt(expanded_prompt)
 
-        # Response is already displayed via callback
+        # Display the final response (callback only fires during function calling loops)
+        if response and response not in ('(No response)', ''):
+            self._display.append_output("model", response, "write")
+
         # Add a separator and blank line
         self._display.add_system_message("─" * 40, style="dim")
         self._display.add_system_message("", style="dim")
