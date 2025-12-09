@@ -290,6 +290,49 @@ class RichClient:
             if hasattr(session_plugin, 'list_sessions'):
                 self._input_handler.set_session_provider(session_plugin.list_sessions)
 
+        # Set up plugin command argument completion
+        self._setup_command_completion_provider()
+
+    def _setup_command_completion_provider(self) -> None:
+        """Set up the provider for plugin command argument completions."""
+        if not self.registry:
+            return
+
+        command_to_plugin: dict = {}
+
+        for plugin_name in self.registry.list_exposed():
+            plugin = self.registry.get_plugin(plugin_name)
+            if plugin and hasattr(plugin, 'get_command_completions'):
+                if hasattr(plugin, 'get_user_commands'):
+                    for cmd in plugin.get_user_commands():
+                        command_to_plugin[cmd.name] = plugin
+
+        if hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
+            session_plugin = self._jaato._session_plugin
+            if hasattr(session_plugin, 'get_command_completions'):
+                if hasattr(session_plugin, 'get_user_commands'):
+                    for cmd in session_plugin.get_user_commands():
+                        command_to_plugin[cmd.name] = session_plugin
+
+        if self.permission_plugin and hasattr(self.permission_plugin, 'get_command_completions'):
+            if hasattr(self.permission_plugin, 'get_user_commands'):
+                for cmd in self.permission_plugin.get_user_commands():
+                    command_to_plugin[cmd.name] = self.permission_plugin
+
+        if not command_to_plugin:
+            return
+
+        def completion_provider(command: str, args: list) -> list:
+            plugin = command_to_plugin.get(command)
+            if plugin and hasattr(plugin, 'get_command_completions'):
+                return plugin.get_command_completions(command, args)
+            return []
+
+        self._input_handler.set_command_completion_provider(
+            completion_provider,
+            set(command_to_plugin.keys())
+        )
+
     def run_prompt(self, prompt: str) -> str:
         """Execute a prompt and return the response."""
         if not self._jaato:
@@ -324,6 +367,9 @@ class RichClient:
         # Create and start the live display
         self._display = LiveDisplay()
 
+        # Build the prompt string with ANSI colors for InputHandler
+        prompt_str = "\n\033[32mYou>\033[0m "
+
         with self._display:
             # Now set up the live reporter
             self._setup_live_reporter()
@@ -332,6 +378,11 @@ class RichClient:
                 "Rich TUI Client - Sticky Plan Display",
                 style="bold cyan"
             )
+            if self._input_handler.has_completion:
+                self._display.add_system_message(
+                    "Tab completion enabled. Use @file to reference files, /command for slash commands.",
+                    style="dim"
+                )
             self._display.add_system_message(
                 "Type 'help' for commands, 'quit' to exit",
                 style="dim"
@@ -340,8 +391,11 @@ class RichClient:
 
             while True:
                 try:
-                    # Get input (pauses live display temporarily)
-                    user_input = self._display.get_input("You> ")
+                    # Get input with completion support (pauses live display temporarily)
+                    user_input = self._display.get_input(
+                        prompt_str,
+                        input_handler=self._input_handler
+                    )
                 except (EOFError, KeyboardInterrupt):
                     self._display.add_system_message("Goodbye!", style="bold")
                     break
@@ -355,6 +409,10 @@ class RichClient:
 
                 if user_input.lower() == 'help':
                     self._show_help()
+                    continue
+
+                if user_input.lower() == 'tools':
+                    self._show_tools()
                     continue
 
                 if user_input.lower() == 'reset':
@@ -391,26 +449,71 @@ class RichClient:
                 # Just add a separator
                 self._display.add_system_message("─" * 40, style="dim")
 
+    def _get_all_tool_schemas(self) -> list:
+        """Get all tool schemas from registry and plugins."""
+        all_decls = []
+        if self.registry:
+            all_decls.extend(self.registry.get_exposed_tool_schemas())
+        if self.permission_plugin:
+            all_decls.extend(self.permission_plugin.get_tool_schemas())
+        if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
+            if hasattr(self._jaato._session_plugin, 'get_tool_schemas'):
+                all_decls.extend(self._jaato._session_plugin.get_tool_schemas())
+        return all_decls
+
+    def _show_tools(self) -> None:
+        """Show available tools in output panel."""
+        if not self._display:
+            return
+
+        tools = self._get_all_tool_schemas()
+        self._display.add_system_message("Available Tools:", style="bold")
+        for tool in tools:
+            self._display.add_system_message(f"  {tool.name}: {tool.description}", style="dim")
+
     def _show_help(self) -> None:
         """Show help in output panel."""
         if not self._display:
             return
 
         help_lines = [
-            "Commands:",
-            "  help   - Show this help",
-            "  reset  - Clear conversation history",
-            "  clear  - Clear output panel",
-            "  quit   - Exit the client",
-            "",
-            "The plan panel at top shows current plan status.",
-            "Model output scrolls in the panel below.",
-            "",
-            "Use @path/to/file to reference files in prompts.",
+            ("Commands:", "bold"),
+            ("  help   - Show this help", "dim"),
+            ("  tools  - List available tools", "dim"),
+            ("  reset  - Clear conversation history", "dim"),
+            ("  clear  - Clear output panel", "dim"),
+            ("  quit   - Exit the client", "dim"),
+            ("", "dim"),
+            ("Display:", "bold"),
+            ("  The plan panel at top shows current plan status.", "dim"),
+            ("  Model output scrolls in the panel below.", "dim"),
+            ("", "dim"),
         ]
 
-        for line in help_lines:
-            self._display.add_system_message(line, style="dim" if line.startswith("  ") else "bold")
+        if self._input_handler.has_completion:
+            help_lines.extend([
+                ("Completion (auto-complete as you type):", "bold"),
+                ("  Commands   - Type first letters to see matches", "dim"),
+                ("  @file      - Tab to complete file paths", "dim"),
+                ("  /command   - Slash commands from .jaato/commands/", "dim"),
+                ("", "dim"),
+                ("Keyboard:", "bold"),
+                ("  ↑/↓        - Navigate history or completion menu", "dim"),
+                ("  Tab/Enter  - Accept completion", "dim"),
+                ("  Escape     - Dismiss completion menu", "dim"),
+            ])
+
+        # Add plugin commands if available
+        if self._jaato:
+            user_commands = self._jaato.get_user_commands()
+            if user_commands:
+                help_lines.append(("", "dim"))
+                help_lines.append(("Plugin Commands:", "bold"))
+                for name, cmd in user_commands.items():
+                    help_lines.append((f"  {name:12} - {cmd.description}", "dim"))
+
+        for line, style in help_lines:
+            self._display.add_system_message(line, style=style)
 
     def shutdown(self) -> None:
         """Clean up resources."""

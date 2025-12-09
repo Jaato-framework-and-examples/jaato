@@ -6,7 +6,7 @@ Manages the Rich Live context with a split layout:
 """
 
 import sys
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 from rich.console import Console, Group
 from rich.layout import Layout
@@ -16,6 +16,9 @@ from rich.text import Text
 
 from plan_panel import PlanPanel
 from output_buffer import OutputBuffer
+
+if TYPE_CHECKING:
+    from input_handler import InputHandler
 
 
 class LiveDisplay:
@@ -183,7 +186,11 @@ class LiveDisplay:
 
     # Input handling
 
-    def get_input(self, prompt: str = "You> ") -> str:
+    def get_input(
+        self,
+        prompt: str = "You> ",
+        input_handler: Optional["InputHandler"] = None
+    ) -> str:
         """Get user input while pausing live updates.
 
         The live display is temporarily suspended to allow clean input,
@@ -191,17 +198,24 @@ class LiveDisplay:
 
         Args:
             prompt: The input prompt string.
+            input_handler: Optional InputHandler for completion support.
+                          If provided, uses prompt_toolkit with completions.
+                          Otherwise falls back to basic Rich console input.
 
         Returns:
             The user's input string.
         """
         if self._live:
-            # Temporarily stop live updates for clean input
+            # Temporarily stop live updates and exit alternate screen
             self._live.stop()
 
         try:
-            # Use console input for consistent styling
-            user_input = self._console.input(f"[green]{prompt}[/green]")
+            if input_handler:
+                # Use InputHandler with full completion support
+                user_input = input_handler.get_input(prompt)
+            else:
+                # Fallback to basic Rich console input
+                user_input = self._console.input(f"[green]{prompt}[/green]")
             return user_input.strip()
         finally:
             if self._live:
