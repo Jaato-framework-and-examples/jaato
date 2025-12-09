@@ -670,103 +670,181 @@ class FileActor(Actor):
                     f.unlink(missing_ok=True)
 
 
-class CallbackConsoleActor(ConsoleActor):
-    """Console actor with pause/resume callbacks for TUI integration.
+class QueueActor(ConsoleActor):
+    """Actor that displays prompts via callback and receives input via queue.
 
-    Extends ConsoleActor to call pause/resume callbacks before and after
-    user interaction, allowing TUI frameworks to temporarily yield control.
+    Designed for TUI integration where:
+    - Permission prompts are shown in an output panel
+    - User input comes through a shared queue from the main input handler
+    - No direct stdin access needed (works with full-screen terminal UIs)
     """
 
     def __init__(self):
         super().__init__()
-        self._pause_callback: Optional[Callable[[], None]] = None
-        self._resume_callback: Optional[Callable[[], None]] = None
-        self._summary_output_callback: Optional[Callable[[str, str, str], None]] = None
+        self._output_callback: Optional[Callable[[str, str, str], None]] = None
+        self._input_queue: Optional['queue.Queue[str]'] = None
+        self._waiting_for_input: bool = False
+        self._prompt_callback: Optional[Callable[[bool], None]] = None
 
     def set_callbacks(
         self,
-        pause_callback: Optional[Callable[[], None]] = None,
-        resume_callback: Optional[Callable[[], None]] = None,
         output_callback: Optional[Callable[[str, str, str], None]] = None,
-        **kwargs,  # Accept but ignore other args for compatibility
+        input_queue: Optional['queue.Queue[str]'] = None,
+        prompt_callback: Optional[Callable[[bool], None]] = None,
+        **kwargs,
     ) -> None:
-        """Set the pause/resume/output callbacks.
+        """Set the callbacks and queue for TUI integration.
 
         Args:
-            pause_callback: Called before requesting user input.
-            resume_callback: Called after user input is complete.
-            output_callback: Called with (source, text, mode) to log the summary.
+            output_callback: Called with (source, text, mode) to display output.
+            input_queue: Queue to receive user input from the main input handler.
+            prompt_callback: Called with True when waiting for input, False when done.
         """
-        self._pause_callback = pause_callback
-        self._resume_callback = resume_callback
-        self._summary_output_callback = output_callback
+        self._output_callback = output_callback
+        self._input_queue = input_queue
+        self._prompt_callback = prompt_callback
 
-    def request_permission(self, request: PermissionRequest) -> ActorResponse:
-        """Request permission with pause/resume callbacks."""
-        if self._pause_callback:
-            self._pause_callback()
+    @property
+    def waiting_for_input(self) -> bool:
+        """Check if actor is waiting for user input."""
+        return self._waiting_for_input
 
-        # Temporarily restore default output (print to stdout) during interaction
-        # since the TUI display is paused and won't show callback output
-        saved_output_func = self._output_func
-        saved_callback = self._output_callback
-        self._output_func = self._default_output_func
-        self._output_callback = None
+    def _output(self, text: str, mode: str = "append") -> None:
+        """Output text via callback."""
+        if self._output_callback:
+            self._output_callback("permission", text, mode)
+
+    def _read_input(self, timeout: float = 30.0) -> Optional[str]:
+        """Read input from the queue with timeout.
+
+        Args:
+            timeout: Seconds to wait for input.
+
+        Returns:
+            User input string, or None on timeout.
+        """
+        import queue
+
+        if not self._input_queue:
+            return None
 
         try:
-            response = super().request_permission(request)
-            # Log summary to output after interaction
-            if self._summary_output_callback:
-                self._log_permission_summary(request, response)
-            return response
-        finally:
-            # Restore the callback-based output
-            self._output_func = saved_output_func
-            self._output_callback = saved_callback
+            return self._input_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
 
-            if self._resume_callback:
-                self._resume_callback()
+    def request_permission(self, request: PermissionRequest) -> ActorResponse:
+        """Request permission by displaying in output panel and waiting for queue input."""
+        from ..base import PermissionDisplayInfo
 
-    def _log_permission_summary(
-        self, request: PermissionRequest, response: ActorResponse
-    ) -> None:
-        """Log a summary of the permission decision to the output callback."""
-        if not self._summary_output_callback:
-            return
+        # Display the permission request header
+        self._output("=" * 60, "write")
 
-        import json
+        # Show agent type if subagent
+        agent_type = request.context.get("agent_type") if request.context else None
+        agent_name = request.context.get("agent_name") if request.context else None
+        if agent_type == "subagent":
+            if agent_name:
+                self._output(f"  [Subagent: {agent_name}] Permission Request", "append")
+            else:
+                self._output("  [Subagent] Permission Request", "append")
+        else:
+            self._output("  Permission Request", "append")
 
-        # Format decision
-        decision_text = response.decision.value if response.decision else "unknown"
+        self._output("=" * 60, "append")
+        self._output("", "append")
 
-        # Header
-        self._summary_output_callback("permission", "=" * 60, "write")
-        self._summary_output_callback("permission", f"[Permission] Tool: {request.tool_name}", "append")
+        # Tool name
+        self._output(f"  Tool: {request.tool_name}", "append")
 
         # Intent if provided
         intent = request.context.get("intent") if request.context else None
         if intent:
-            self._summary_output_callback("permission", f"  Intent: {intent}", "append")
+            self._output(f"  Intent: {intent}", "append")
 
-        # Pretty-print arguments
-        self._summary_output_callback("permission", "  Arguments:", "append")
-        args_str = json.dumps(request.arguments, indent=4)
-        for line in args_str.split('\n'):
-            self._summary_output_callback("permission", f"    {line}", "append")
+        # Check for custom display info
+        display_info = request.context.get("display_info") if request.context else None
+        if isinstance(display_info, PermissionDisplayInfo):
+            self._output("", "append")
+            self._output(f"  {display_info.summary}", "append")
+            if display_info.details:
+                self._output("", "append")
+                for line in display_info.details.split('\n')[:20]:  # Limit lines
+                    self._output(f"  {line}", "append")
+                if display_info.truncated:
+                    self._output("  [Content truncated]", "append")
+        else:
+            # Show arguments
+            self._output("", "append")
+            self._output("  Arguments:", "append")
+            import json
+            args_str = json.dumps(request.arguments, indent=2)
+            for line in args_str.split('\n')[:15]:  # Limit lines
+                self._output(f"    {line}", "append")
 
-        # Decision
-        self._summary_output_callback("permission", f"  Decision: {decision_text}", "append")
-        if response.reason:
-            self._summary_output_callback("permission", f"  Reason: {response.reason}", "append")
+        # Show options
+        self._output("", "append")
+        self._output("  Options: [y]es, [n]o, [a]lways, [never], [once], [all]", "append")
+        self._output("=" * 60, "append")
 
-        self._summary_output_callback("permission", "=" * 60, "append")
+        # Signal that we're waiting for input
+        self._waiting_for_input = True
+        if self._prompt_callback:
+            self._prompt_callback(True)
+
+        try:
+            # Wait for input from queue
+            response_text = self._read_input(timeout=request.timeout_seconds)
+
+            if response_text is None:
+                # Timeout
+                if request.default_on_timeout == "allow":
+                    return ActorResponse(
+                        decision=ActorDecision.ALLOW,
+                        reason="Timeout - default allow",
+                    )
+                return ActorResponse(
+                    decision=ActorDecision.TIMEOUT,
+                    reason=f"No response within {request.timeout_seconds}s",
+                )
+
+            # Parse response
+            response_lower = response_text.strip().lower()
+
+            if response_lower in ('y', 'yes'):
+                decision = ActorDecision.ALLOW
+            elif response_lower in ('n', 'no'):
+                decision = ActorDecision.DENY
+            elif response_lower in ('a', 'always'):
+                decision = ActorDecision.ALLOW_SESSION
+            elif response_lower == 'never':
+                decision = ActorDecision.DENY_SESSION
+            elif response_lower == 'once':
+                decision = ActorDecision.ALLOW_ONCE
+            elif response_lower == 'all':
+                decision = ActorDecision.ALLOW_ALL
+            else:
+                # Invalid input - treat as deny
+                decision = ActorDecision.DENY
+                return ActorResponse(
+                    decision=decision,
+                    reason=f"Invalid response: {response_text}",
+                )
+
+            return ActorResponse(decision=decision)
+
+        finally:
+            # Signal that we're done waiting
+            self._waiting_for_input = False
+            if self._prompt_callback:
+                self._prompt_callback(False)
 
 
 def create_actor(actor_type: str, config: Optional[Dict[str, Any]] = None) -> Actor:
     """Factory function to create an actor by type.
 
     Args:
-        actor_type: One of "console", "callback_console", "webhook", "file"
+        actor_type: One of "console", "queue", "webhook", "file"
         config: Optional configuration for the actor
 
     Returns:
@@ -777,7 +855,7 @@ def create_actor(actor_type: str, config: Optional[Dict[str, Any]] = None) -> Ac
     """
     actors = {
         "console": ConsoleActor,
-        "callback_console": CallbackConsoleActor,
+        "queue": QueueActor,
         "webhook": WebhookActor,
         "file": FileActor,
     }

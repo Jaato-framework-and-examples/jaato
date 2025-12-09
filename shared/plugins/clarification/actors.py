@@ -330,100 +330,174 @@ class AutoActor(ClarificationActor):
         return Answer(question_index=question_index, free_text=self._default_free_text)
 
 
-class CallbackConsoleActor(ConsoleActor):
-    """Console actor with pause/resume callbacks for TUI integration.
+class QueueActor(ClarificationActor):
+    """Actor that displays prompts via callback and receives input via queue.
 
-    Extends ConsoleActor to call pause/resume callbacks before and after
-    user interaction, allowing TUI frameworks to temporarily yield control.
+    Designed for TUI integration where:
+    - Clarification prompts are shown in an output panel
+    - User input comes through a shared queue from the main input handler
+    - No direct stdin access needed (works with full-screen terminal UIs)
     """
 
     def __init__(self, **kwargs):
-        """Initialize the callback console actor.
-
-        Args:
-            **kwargs: Additional arguments passed to ConsoleActor.
-        """
-        super().__init__(**kwargs)
-        self._pause_callback = None
-        self._resume_callback = None
-        self._output_callback = None
+        self._output_callback: Optional[callable] = None
+        self._input_queue: Optional['queue.Queue[str]'] = None
+        self._waiting_for_input: bool = False
+        self._prompt_callback: Optional[callable] = None
 
     def set_callbacks(
         self,
-        pause_callback=None,
-        resume_callback=None,
-        output_callback=None,
-        **kwargs,  # Accept but ignore other args for compatibility
+        output_callback: Optional[callable] = None,
+        input_queue: Optional['queue.Queue[str]'] = None,
+        prompt_callback: Optional[callable] = None,
+        **kwargs,
     ) -> None:
-        """Set the pause/resume/output callbacks.
+        """Set the callbacks and queue for TUI integration.
 
         Args:
-            pause_callback: Called before requesting user input.
-            resume_callback: Called after user input is complete.
-            output_callback: Called with (source, text, mode) to log the Q&A summary.
+            output_callback: Called with (source, text, mode) to display output.
+            input_queue: Queue to receive user input from the main input handler.
+            prompt_callback: Called with True when waiting for input, False when done.
         """
-        self._pause_callback = pause_callback
-        self._resume_callback = resume_callback
         self._output_callback = output_callback
+        self._input_queue = input_queue
+        self._prompt_callback = prompt_callback
+
+    @property
+    def waiting_for_input(self) -> bool:
+        """Check if actor is waiting for user input."""
+        return self._waiting_for_input
+
+    def _output(self, text: str, mode: str = "append") -> None:
+        """Output text via callback."""
+        if self._output_callback:
+            self._output_callback("clarification", text, mode)
+
+    def _read_input(self, timeout: float = 60.0) -> Optional[str]:
+        """Read input from the queue with timeout."""
+        import queue as queue_module
+
+        if not self._input_queue:
+            return None
+
+        try:
+            return self._input_queue.get(timeout=timeout)
+        except queue_module.Empty:
+            return None
 
     def request_clarification(
         self, request: ClarificationRequest
     ) -> ClarificationResponse:
-        """Present questions to user via console with pause/resume callbacks."""
-        if self._pause_callback:
-            self._pause_callback()
-
-        try:
-            response = super().request_clarification(request)
-            # Log the Q&A summary to output after interaction
-            if self._output_callback and not response.cancelled:
-                self._log_qa_summary(request, response)
-            return response
-        finally:
-            if self._resume_callback:
-                self._resume_callback()
-
-    def _log_qa_summary(
-        self, request: ClarificationRequest, response: ClarificationResponse
-    ) -> None:
-        """Log a summary of the Q&A to the output callback."""
-        if not self._output_callback:
-            return
-
-        # Header
-        self._output_callback("clarification", "Clarification Answered:", "write")
+        """Present questions via output panel and collect responses via queue."""
+        self._output("=" * 60, "write")
+        self._output("  Clarification Needed", "append")
+        self._output("=" * 60, "append")
+        self._output("", "append")
 
         if request.context:
-            self._output_callback("clarification", f"  Context: {request.context}", "append")
+            self._output(f"  Context: {request.context}", "append")
+            self._output("", "append")
 
-        # Each Q&A pair
-        for i, (question, answer) in enumerate(zip(request.questions, response.answers), 1):
-            self._output_callback("clarification", f"  Q{i}: {question.text}", "append")
+        answers = []
+        for i, question in enumerate(request.questions, 1):
+            # Show question
+            req_status = "*required" if question.required else "optional"
+            self._output(f"  Question {i}/{len(request.questions)} [{req_status}]", "append")
+            self._output(f"    {question.text}", "append")
 
-            # Show available choices if any
+            # Show choices if any
             if question.choices:
-                self._output_callback("clarification", "      Options:", "append")
                 for j, choice in enumerate(question.choices, 1):
-                    self._output_callback("clarification", f"        {j}. {choice.text}", "append")
+                    default_marker = " (default)" if question.default_choice == j else ""
+                    self._output(f"      {j}. {choice.text}{default_marker}", "append")
 
-            if answer.skipped:
-                self._output_callback("clarification", f"  A{i}: (skipped)", "append")
-            elif answer.free_text:
-                self._output_callback("clarification", f"  A{i}: {answer.free_text}", "append")
-            elif answer.selected_choices:
-                # Map choice indices to choice text
-                choices_text = []
-                for choice_idx in answer.selected_choices:
-                    if 1 <= choice_idx <= len(question.choices):
-                        choices_text.append(question.choices[choice_idx - 1].text)
-                self._output_callback("clarification", f"  A{i}: {', '.join(choices_text)}", "append")
+            # Show input hint
+            if question.question_type == QuestionType.FREE_TEXT:
+                if not question.required:
+                    self._output("    (press Enter to skip, or type 'cancel' to cancel)", "append")
+                else:
+                    self._output("    (type 'cancel' to cancel)", "append")
+            elif question.question_type == QuestionType.SINGLE_CHOICE:
+                self._output(f"    Enter choice [1-{len(question.choices)}]:", "append")
+            elif question.question_type == QuestionType.MULTIPLE_CHOICE:
+                self._output("    Enter choices (comma-separated, e.g., 1,3):", "append")
+
+            self._output("=" * 60, "append")
+
+            # Signal waiting for input
+            self._waiting_for_input = True
+            if self._prompt_callback:
+                self._prompt_callback(True)
+
+            try:
+                response = self._read_input(timeout=60.0)
+
+                if response is None or response.lower() == 'cancel':
+                    return ClarificationResponse(cancelled=True)
+
+                answer = self._parse_answer(i, question, response)
+                answers.append(answer)
+
+            finally:
+                self._waiting_for_input = False
+                if self._prompt_callback:
+                    self._prompt_callback(False)
+
+            self._output("", "append")
+
+        self._output("✓ All questions answered.", "append")
+        return ClarificationResponse(answers=answers)
+
+    def _parse_answer(self, question_index: int, question: Question, response: str) -> Answer:
+        """Parse user response into an Answer."""
+        response = response.strip()
+
+        if question.question_type == QuestionType.FREE_TEXT:
+            if not response and not question.required:
+                return Answer(question_index=question_index, skipped=True)
+            return Answer(question_index=question_index, free_text=response)
+
+        elif question.question_type == QuestionType.SINGLE_CHOICE:
+            if not response and question.default_choice:
+                return Answer(question_index=question_index, selected_choices=[question.default_choice])
+            if not response and not question.required:
+                return Answer(question_index=question_index, skipped=True)
+            try:
+                choice_num = int(response)
+                if 1 <= choice_num <= len(question.choices):
+                    return Answer(question_index=question_index, selected_choices=[choice_num])
+            except ValueError:
+                pass
+            # Invalid - return first choice as fallback
+            return Answer(question_index=question_index, selected_choices=[1])
+
+        elif question.question_type == QuestionType.MULTIPLE_CHOICE:
+            if not response and not question.required:
+                return Answer(question_index=question_index, skipped=True)
+            selected = []
+            for part in response.split(','):
+                part = part.strip()
+                if part:
+                    try:
+                        num = int(part)
+                        if 1 <= num <= len(question.choices) and num not in selected:
+                            selected.append(num)
+                    except ValueError:
+                        pass
+            if selected:
+                return Answer(question_index=question_index, selected_choices=selected)
+            # Fallback
+            return Answer(question_index=question_index, selected_choices=[1])
+
+        # Unknown type - treat as free text
+        return Answer(question_index=question_index, free_text=response)
 
 
 def create_actor(actor_type: str = "console", **kwargs) -> ClarificationActor:
     """Factory function to create a clarification actor.
 
     Args:
-        actor_type: Type of actor ("console", "callback_console", or "auto")
+        actor_type: Type of actor ("console", "queue", or "auto")
         **kwargs: Additional arguments for the specific actor type
 
     Returns:
@@ -431,8 +505,8 @@ def create_actor(actor_type: str = "console", **kwargs) -> ClarificationActor:
     """
     if actor_type == "console":
         return ConsoleActor(**kwargs)
-    elif actor_type == "callback_console":
-        return CallbackConsoleActor(**kwargs)
+    elif actor_type == "queue":
+        return QueueActor(**kwargs)
     elif actor_type == "auto":
         return AutoActor(**kwargs)
     else:
