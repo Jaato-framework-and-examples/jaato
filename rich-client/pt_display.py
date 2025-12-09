@@ -97,6 +97,7 @@ class PTDisplay:
             completer=input_handler._completer if input_handler else None,
             history=input_handler._pt_history if input_handler else None,
             complete_while_typing=True if input_handler else False,
+            enable_history_search=True,  # Enable up/down arrow history navigation
         )
         self._input_callback: Optional[Callable[[str], None]] = None
 
@@ -154,6 +155,9 @@ class PTDisplay:
             else:
                 # Normal mode - submit input
                 text = self._input_buffer.text.strip()
+                # Add to history before reset (like PromptSession does)
+                if text and self._input_buffer.history:
+                    self._input_buffer.history.append_string(text)
                 self._input_buffer.reset()
                 if self._input_callback:
                     self._input_callback(text)
@@ -204,6 +208,16 @@ class PTDisplay:
             """Handle End - scroll to bottom of output."""
             self._output_buffer.scroll_to_bottom()
             self._app.invalidate()
+
+        @kb.add("up")
+        def handle_up(event):
+            """Handle Up arrow - history/completion navigation."""
+            event.current_buffer.auto_up()
+
+        @kb.add("down")
+        def handle_down(event):
+            """Handle Down arrow - history/completion navigation."""
+            event.current_buffer.auto_down()
 
         # Plan panel (conditional - hidden when no plan)
         plan_window = ConditionalContainer(
