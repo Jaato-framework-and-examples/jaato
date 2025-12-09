@@ -4,6 +4,7 @@ This plugin intercepts tool execution requests and enforces access policies
 through blacklist/whitelist rules and interactive actor approval.
 """
 
+import fnmatch
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..model_provider.types import ToolSchema
@@ -267,6 +268,7 @@ If a tool is denied, do not attempt to execute it."""
         # Subcommand completions
         subcommands = [
             CommandCompletion("show", "Display current effective policy"),
+            CommandCompletion("check", "Test what decision a tool would get"),
             CommandCompletion("allow", "Add tool/pattern to session whitelist"),
             CommandCompletion("deny", "Add tool/pattern to session blacklist"),
             CommandCompletion("default", "Set session default policy"),
@@ -301,6 +303,10 @@ If a tool is denied, do not attempt to execute it."""
                 # "permissions allow/deny <partial>" - provide tool names
                 # Filter based on current status (don't show already allowed/denied)
                 return self._get_tool_completions(partial, exclude_mode=subcommand)
+
+            if subcommand == "check":
+                # "permissions check <partial>" - provide all tool names
+                return self._get_tool_completions(partial)
 
         return []
 
@@ -362,6 +368,7 @@ If a tool is denied, do not attempt to execute it."""
 
         Subcommands:
             show              - Display current effective policy with diff from base
+            check <tool>      - Test what decision a tool would get (uses real evaluation)
             allow <pattern>   - Add tool/pattern to session whitelist
             deny <pattern>    - Add tool/pattern to session blacklist
             default <policy>  - Set session default policy (allow|deny|ask)
@@ -382,6 +389,11 @@ If a tool is denied, do not attempt to execute it."""
 
         if subcommand == "show":
             return self._permissions_show()
+        elif subcommand == "check":
+            if len(cmd_args) < 2:
+                return "Usage: permissions check <tool_name>"
+            tool_name = cmd_args[1]
+            return self._permissions_check(tool_name)
         elif subcommand == "allow":
             if len(cmd_args) < 2:
                 return "Usage: permissions allow <tool_or_pattern>"
@@ -402,8 +414,9 @@ If a tool is denied, do not attempt to execute it."""
         else:
             return (
                 f"Unknown subcommand: {subcommand}\n"
-                "Usage: permissions <show|allow|deny|default|clear>\n"
+                "Usage: permissions <show|check|allow|deny|default|clear>\n"
                 "  show              - Display current effective policy\n"
+                "  check <tool>      - Test what decision a tool would get\n"
                 "  allow <pattern>   - Add to session whitelist\n"
                 "  deny <pattern>    - Add to session blacklist\n"
                 "  default <policy>  - Set session default (allow|deny|ask)\n"
@@ -465,6 +478,44 @@ If a tool is denied, do not attempt to execute it."""
             lines.append(f"  Blacklist: {', '.join(all_blacklist)}")
         else:
             lines.append("  Blacklist: (none)")
+
+        return "\n".join(lines)
+
+    def _permissions_check(self, tool_name: str) -> str:
+        """Check what decision a specific tool would get.
+
+        This uses the actual policy.check() evaluation engine, ensuring
+        the result exactly matches what would happen during tool execution.
+        """
+        if not self._policy:
+            return "Error: Permission plugin not initialized."
+
+        # Use the real evaluation engine
+        match = self._policy.check(tool_name, {})
+
+        # Format decision
+        decision_symbol = {
+            "ALLOW": "✓",
+            "DENY": "✗",
+            "ASK_ACTOR": "?",
+        }.get(match.decision.name, "•")
+
+        lines = [f"{tool_name} → {decision_symbol} {match.decision.name}"]
+        lines.append(f"  Reason: {match.reason}")
+
+        if match.rule_type:
+            lines.append(f"  Rule type: {match.rule_type}")
+
+        if match.matched_rule:
+            lines.append(f"  Matched rule: {match.matched_rule}")
+
+        # Show helpful context for session rule interactions
+        if match.rule_type == "session_whitelist" and tool_name in self._policy.session_whitelist:
+            # Check if there's a pattern in session_blacklist that would have matched
+            for pattern in self._policy.session_blacklist:
+                if pattern != tool_name and fnmatch.fnmatch(tool_name, pattern):
+                    lines.append(f"  Note: Explicit whitelist overrides blacklist pattern '{pattern}'")
+                    break
 
         return "\n".join(lines)
 
