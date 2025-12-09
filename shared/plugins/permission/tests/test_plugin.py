@@ -1046,6 +1046,70 @@ class TestPermissionPluginUserCommands:
         assert "+ allow: docker *" in result
         assert "- deny:  dangerous_tool" in result
 
+    def test_permissions_check_basic(self):
+        """Test permissions check shows correct decision for a tool."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        result = plugin.execute_permissions({"args": ["check", "some_tool"]})
+
+        assert "some_tool" in result
+        assert "DENY" in result
+        assert "default" in result.lower()
+
+    def test_permissions_check_whitelist(self):
+        """Test permissions check shows ALLOW for whitelisted tool."""
+        plugin = PermissionPlugin()
+        plugin.initialize({
+            "policy": {
+                "defaultPolicy": "deny",
+                "whitelist": {"tools": ["allowed_tool"]}
+            }
+        })
+
+        result = plugin.execute_permissions({"args": ["check", "allowed_tool"]})
+
+        assert "allowed_tool" in result
+        assert "ALLOW" in result
+        assert "whitelist" in result.lower()
+
+    def test_permissions_check_session_override(self):
+        """Test permissions check reflects session whitelist overriding blacklist pattern."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        # Add pattern deny and explicit allow
+        plugin._policy.add_session_blacklist("create*")
+        plugin._policy.add_session_whitelist("createPlan")
+
+        # createPlan should be ALLOWED (explicit override)
+        result = plugin.execute_permissions({"args": ["check", "createPlan"]})
+        assert "ALLOW" in result
+        assert "session_whitelist" in result
+
+        # createIssue should be DENIED (no explicit override)
+        result = plugin.execute_permissions({"args": ["check", "createIssue"]})
+        assert "DENY" in result
+        assert "session_blacklist" in result
+
+    def test_permissions_check_missing_tool(self):
+        """Test permissions check requires a tool name."""
+        plugin = PermissionPlugin()
+        plugin.initialize({"policy": {"defaultPolicy": "deny"}})
+
+        result = plugin.execute_permissions({"args": ["check"]})
+
+        assert "Usage" in result
+        assert "check" in result
+
+    def test_permissions_check_without_init(self):
+        """Test permissions check handles uninitialized plugin."""
+        plugin = PermissionPlugin()
+
+        result = plugin.execute_permissions({"args": ["check", "some_tool"]})
+
+        assert "not initialized" in result.lower()
+
     def test_session_default_affects_permission_check(self):
         """Verify session default policy actually affects permission checks."""
         plugin = PermissionPlugin()

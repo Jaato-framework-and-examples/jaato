@@ -130,26 +130,26 @@ flowchart TB
 sequenceDiagram
     participant App as Generic Client
     participant JC as JaatoClient
-    participant SDK as Vertex AI SDK
+    participant Provider as ModelProviderPlugin
     participant TE as ToolExecutor
     participant Plugin as Tool Plugin
     participant TL as TokenLedger
 
     App->>JC: send_message("List files")
-    JC->>SDK: chat.send_message()
-    SDK->>SDK: Model generates response
+    JC->>Provider: send_message()
+    Provider->>Provider: Model generates response
 
     alt Response has function_calls
-        SDK-->>JC: function_call: cli_based_tool
+        Provider-->>JC: function_call: cli_based_tool
         JC->>TE: execute("cli_based_tool", args)
         TE->>Plugin: call registered executor
         Plugin-->>TE: result
         TE-->>JC: function response
-        JC->>SDK: send function response
-        SDK->>SDK: Model processes result
+        JC->>Provider: send_tool_results()
+        Provider->>Provider: Model processes result
     end
 
-    SDK-->>JC: final text response
+    Provider-->>JC: final text response
     JC->>TL: record token usage
     JC-->>App: "Here are the files: ..."
 ```
@@ -195,7 +195,7 @@ sequenceDiagram
 
 ## Plugin System Architecture
 
-The framework supports two distinct plugin systems with different purposes:
+The framework supports four plugin kinds with different purposes:
 
 ### Plugin Kind Identification
 
@@ -210,12 +210,16 @@ PLUGIN_KIND = "gc"
 
 # Session plugins (for conversation persistence)
 PLUGIN_KIND = "session"
+
+# Model provider plugins (for SDK abstraction)
+PLUGIN_KIND = "model_provider"
 ```
 
 Entry point groups are mapped by plugin kind:
 - `"tool"` → `jaato.plugins`
 - `"gc"` → `jaato.gc_plugins`
 - `"session"` → `jaato.session_plugins`
+- `"model_provider"` → `jaato.model_providers`
 
 ### Tool Plugins (PluginRegistry)
 
@@ -762,7 +766,7 @@ shared/
     ├── base.py              # ToolPlugin protocol, UserCommand NamedTuple
     ├── registry.py          # PluginRegistry (for tool plugins)
     │
-    │   # Model Provider Plugins (Provider abstraction layer)
+    │   # Model Provider Plugins (PLUGIN_KIND = "model_provider")
     ├── model_provider/      # Provider-agnostic types and protocols
     │   ├── __init__.py      # Exports, discovery functions
     │   ├── base.py          # ModelProviderPlugin protocol

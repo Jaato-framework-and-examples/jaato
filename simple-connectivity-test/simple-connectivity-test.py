@@ -9,7 +9,9 @@ if str(ROOT) not in sys.path:
 
 from dotenv import load_dotenv
 
-from shared import genai, TokenLedger, active_cert_bundle
+from google import genai
+
+from shared import TokenLedger, active_cert_bundle
 
 # === Prompt (can be overridden with --prompt) ===
 DEFAULT_PROMPT = (

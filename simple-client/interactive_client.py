@@ -366,6 +366,8 @@ class InteractiveClient:
         except KeyboardInterrupt:
             return "\n[Interrupted by user]"
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             return f"Error during execution: {e}"
 
     def clear_history(self) -> None:

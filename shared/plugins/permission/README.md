@@ -12,7 +12,7 @@ The demo below shows the permission plugin intercepting a tool execution request
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         run_single_prompt()                          │
+│                           JaatoClient                               │
 │                                                                     │
 │  ┌─────────────┐    ┌─────────────────┐    ┌──────────────────┐   │
 │  │PluginRegistry│───▶│  ToolExecutor   │◀───│PermissionPlugin  │   │
@@ -86,48 +86,47 @@ executor.set_permission_plugin(permission_plugin)
 
 ## Client Integration
 
-### Method 1: Via `run_single_prompt()` (Recommended)
+### Method 1: Via JaatoClient (Recommended)
 
 ```python
-from google import genai
-from shared.ai_tool_runner import run_single_prompt
-from shared.plugins.registry import PluginRegistry
-from shared.plugins.permission import PermissionPlugin
+from shared import JaatoClient, PluginRegistry, PermissionPlugin
 
-# Initialize Vertex AI client
-client = genai.Client(vertexai=True, project="my-project", location="us-central1")
+# Create and connect client
+jaato = JaatoClient()
+jaato.connect(project="my-project", location="us-central1", model="gemini-2.5-flash")
 
 # Set up plugin registry
 registry = PluginRegistry()
 registry.discover()
 registry.expose_all()  # All plugins exposed by default
 
-# Create permission plugin
+# Create and initialize permission plugin
 permission_plugin = PermissionPlugin()
+permission_plugin.initialize({
+    "config_path": "permissions.json",  # Optional: path to config file
+    "actor_type": "console",            # console, webhook, or file
+})
+
+# Configure tools with permission control
+jaato.configure_tools(registry, permission_plugin=permission_plugin)
 
 # Run with permission control
-result = run_single_prompt(
-    client=client,
-    model_name="gemini-2.5-flash",
-    prompt="List files in the current directory",
-    ledger_path=Path("ledger.jsonl"),
-    registry=registry,
-    permission_plugin=permission_plugin,
-    permission_config={
-        "config_path": "permissions.json",  # Optional: path to config file
-        "actor_type": "console",            # console, webhook, or file
-    }
-)
+response = jaato.send_message("List files in the current directory")
 ```
 
 ### Method 2: Manual Integration with ToolExecutor
 
 ```python
-from shared.ai_tool_runner import ToolExecutor, run_function_call_loop
+from shared import ToolExecutor, PluginRegistry
 from shared.plugins.permission import PermissionPlugin
 
-# Create executor with ledger
-executor = ToolExecutor(ledger=ledger)
+# Create executor
+executor = ToolExecutor()
+
+# Set up plugin registry
+registry = PluginRegistry()
+registry.discover()
+registry.expose_all()
 
 # Register plugin executors
 for name, fn in registry.get_exposed_executors().items():
@@ -180,7 +179,7 @@ permission_plugin.add_whitelist_tools(['tool1', 'tool2'])
 
 ## Permission Config Parameter
 
-The `permission_config` parameter passed to `run_single_prompt()` (or directly to `PermissionPlugin.initialize()`) controls how the plugin is configured.
+The configuration dict passed to `PermissionPlugin.initialize()` controls how the plugin is configured.
 
 ### Config Structure
 
@@ -285,65 +284,55 @@ Use enforcement-only when you want:
 
 **Minimal (uses defaults + environment):**
 ```python
-result = run_single_prompt(
-    ...,
-    permission_plugin=PermissionPlugin(),
-    permission_config=None  # Uses PERMISSION_CONFIG_PATH env or defaults
-)
+permission_plugin = PermissionPlugin()
+permission_plugin.initialize(None)  # Uses PERMISSION_CONFIG_PATH env or defaults
 ```
 
 **File-based configuration:**
 ```python
-result = run_single_prompt(
-    ...,
-    permission_plugin=PermissionPlugin(),
-    permission_config={
-        "config_path": "permissions.json",
-        "actor_type": "console"
-    }
-)
+permission_plugin = PermissionPlugin()
+permission_plugin.initialize({
+    "config_path": "permissions.json",
+    "actor_type": "console"
+})
 ```
 
 **Inline policy (no file needed):**
 ```python
-result = run_single_prompt(
-    ...,
-    permission_plugin=PermissionPlugin(),
-    permission_config={
-        "policy": {
-            "defaultPolicy": "deny",
-            "blacklist": {
-                "patterns": ["rm -rf *", "sudo *"]
-            },
-            "whitelist": {
-                "patterns": ["git *", "npm *", "python *"]
-            }
+permission_plugin = PermissionPlugin()
+permission_plugin.initialize({
+    "policy": {
+        "defaultPolicy": "deny",
+        "blacklist": {
+            "patterns": ["rm -rf *", "sudo *"]
         },
-        "actor_type": "console"
-    }
-)
+        "whitelist": {
+            "patterns": ["git *", "npm *", "python *"]
+        }
+    },
+    "actor_type": "console"
+})
 ```
 
 **Webhook actor for external approval:**
 ```python
-result = run_single_prompt(
-    ...,
-    permission_plugin=PermissionPlugin(),
-    permission_config={
-        "config_path": "permissions.json",
-        "actor_type": "webhook",
-        "actor_config": {
-            "endpoint": "https://approvals.example.com/api/permission",
-            "timeout": 60,
-            "headers": {"X-Service": "jaato"}
-        }
+permission_plugin = PermissionPlugin()
+permission_plugin.initialize({
+    "config_path": "permissions.json",
+    "actor_type": "webhook",
+    "actor_config": {
+        "endpoint": "https://approvals.example.com/api/permission",
+        "timeout": 60,
+        "headers": {"X-Service": "jaato"}
     }
-)
+})
 ```
 
 **Harness integration pattern:**
 ```python
-# In your harness config (e.g., scenarios.yaml or config dict)
+from shared import JaatoClient, PluginRegistry, PermissionPlugin
+
+# Configuration
 harness_config = {
     "model": "gemini-2.5-flash",
     "enable_permissions": True,
@@ -353,21 +342,23 @@ harness_config = {
     }
 }
 
-# In harness code
-def run_scenario(scenario_name: str, config: Dict) -> Dict:
-    permission_plugin = None
-    if config.get("enable_permissions"):
-        permission_plugin = PermissionPlugin()
+# Setup
+jaato = JaatoClient()
+jaato.connect(project="my-project", location="us-central1", model=harness_config["model"])
 
-    return run_single_prompt(
-        client=client,
-        model_name=config["model"],
-        prompt=scenario_prompt,
-        ledger_path=ledger_path,
-        registry=registry,
-        permission_plugin=permission_plugin,
-        permission_config=config.get("permission_config")  # None if not set
-    )
+registry = PluginRegistry()
+registry.discover()
+registry.expose_all()
+
+permission_plugin = None
+if harness_config.get("enable_permissions"):
+    permission_plugin = PermissionPlugin()
+    permission_plugin.initialize(harness_config.get("permission_config"))
+
+jaato.configure_tools(registry, permission_plugin=permission_plugin)
+
+# Run
+response = jaato.send_message(scenario_prompt)
 ```
 
 ## Configuration
@@ -651,30 +642,33 @@ For background/automated approval workflows:
 ### Harness Integration Example
 
 ```python
-# In cli_mcp_harness.py or similar
+from shared import JaatoClient, PluginRegistry, PermissionPlugin
 
-def run_scenario(scenario_name: str, config: Dict) -> Dict:
-    # ... existing setup ...
+def run_scenario(scenario_name: str, config: Dict) -> str:
+    # Create client
+    jaato = JaatoClient()
+    jaato.connect(
+        project=config["project"],
+        location=config["location"],
+        model=config["model"]
+    )
+
+    # Set up plugins
+    registry = PluginRegistry()
+    registry.discover()
+    registry.expose_all()
 
     # Initialize permission plugin based on config
     permission_plugin = None
     if config.get("enable_permissions", False):
         permission_plugin = PermissionPlugin()
+        permission_plugin.initialize(config.get("permission_config"))
 
-    result = run_single_prompt(
-        client=client,
-        model_name=model_name,
-        prompt=scenario_prompt,
-        ledger_path=ledger_path,
-        registry=registry,
-        permission_plugin=permission_plugin,
-        permission_config=config.get("permission_config")
-    )
+    jaato.configure_tools(registry, permission_plugin=permission_plugin)
 
-    # Permission decisions are logged in the ledger
-    # Access via result["summary"]["events"] with stage="permission-check"
-
-    return result
+    # Run and return response
+    # Permission decisions are recorded via the ledger
+    return jaato.send_message(scenario_prompt)
 ```
 
 ### Ledger Events
