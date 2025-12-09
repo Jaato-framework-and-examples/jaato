@@ -1,6 +1,6 @@
 """Plan reporter that updates the sticky plan panel.
 
-A TodoReporter implementation that integrates with the LiveDisplay
+A TodoReporter implementation that integrates with PTDisplay
 to update the sticky plan panel in real-time.
 """
 
@@ -19,10 +19,10 @@ from shared.plugins.todo.models import TodoPlan, TodoStep, StepStatus
 
 
 class LivePlanReporter(TodoReporter):
-    """Reporter that updates the LiveDisplay's sticky plan panel.
+    """Reporter that updates the display's sticky plan panel.
 
     Instead of printing to console, this reporter calls back to the
-    LiveDisplay to update the sticky plan panel in-place.
+    display to update the sticky plan panel in-place.
     """
 
     def __init__(self):
@@ -35,7 +35,7 @@ class LivePlanReporter(TodoReporter):
         return "live_panel"
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """Initialize with callbacks to LiveDisplay.
+        """Initialize with callbacks to display.
 
         Config options:
             update_callback: Callable[[Dict], None] - called with plan data to update panel

@@ -2,12 +2,15 @@
 """
 Demo runner for recording plugin demos with termsvg.
 
-This script uses pexpect to interact with the real simple client,
+This script uses pexpect to interact with the client,
 running demo scripts defined in YAML files.
 
 Usage:
-    # Run a demo script
+    # Run a demo script with simple client (default)
     python run_demo.py shared/plugins/cli/demo.yaml
+
+    # Run with rich client
+    python run_demo.py --client rich shared/plugins/cli/demo.yaml
 
     # Record with termtosvg
     termtosvg -c "python run_demo.py shared/plugins/cli/demo.yaml" -g 100x40 demo.svg
@@ -64,11 +67,30 @@ PATTERN_CLARIFY_SINGLE = 2
 PATTERN_CLARIFY_MULTI = 3
 PATTERN_CLARIFY_FREE = 4
 PATTERN_REFERENCE_SELECT = 5
+PATTERN_PAGER = 6
 
 
 def wait_for_prompt(child, timeout=60):
-    """Wait for the 'You>' prompt (with optional ANSI color codes)."""
-    child.expect(rf'{ANSI}You>{ANSI}', timeout=timeout)
+    """Wait for the 'You>' prompt (with optional ANSI color codes).
+
+    Automatically advances through any pagination prompts.
+    """
+    patterns = [
+        rf'{ANSI}You>{ANSI}',                    # 0: Ready for next input
+        r'Enter: next, q: quit',                  # 1: Pager prompt (rich client)
+        r"Press Enter for more, 'q' to quit",     # 2: Pager page indicator
+    ]
+
+    while True:
+        index = child.expect(patterns, timeout=timeout)
+
+        if index == 0:
+            # Got the You> prompt, we're done
+            return
+        else:
+            # Pager prompt - press Enter to advance
+            time.sleep(0.2)
+            child.send('\n')
 
 
 def wait_for_permission_or_prompt(child, response='y', timeout=60):
@@ -77,6 +99,7 @@ def wait_for_permission_or_prompt(child, response='y', timeout=60):
     Handles:
     - Permission prompts (Options:) - responds with the given response
     - Clarification prompts - auto-responds with first choice or default text
+    - Pagination prompts - auto-advances through pages
     - You> prompt - returns when ready for next input
     """
     # First wait for the client to acknowledge the command
@@ -84,12 +107,14 @@ def wait_for_permission_or_prompt(child, response='y', timeout=60):
 
     # Now wait for various prompts in a loop until we get back to You>
     patterns = [
-        rf'{ANSI}You>{ANSI}',           # 0: Ready for next input
-        r'Options:',                     # 1: Permission prompt
-        r'Enter choice \[[\d-]+\]:',     # 2: Single choice clarification
-        r'Enter choices:',               # 3: Multiple choice clarification
-        r'  > ',                          # 4: Free text clarification
-        r"'none' or empty to skip",      # 5: Reference selection prompt
+        rf'{ANSI}You>{ANSI}',              # 0: Ready for next input
+        r'Options:',                        # 1: Permission prompt
+        r'Enter choice \[[\d-]+\]:',        # 2: Single choice clarification
+        r'Enter choices:',                  # 3: Multiple choice clarification
+        r'  > ',                            # 4: Free text clarification
+        r"'none' or empty to skip",         # 5: Reference selection prompt
+        r'Enter: next, q: quit',            # 6: Pager prompt (rich client)
+        r"Press Enter for more, 'q' to quit",  # 7: Pager page indicator
     ]
 
     while True:
@@ -124,9 +149,39 @@ def wait_for_permission_or_prompt(child, response='y', timeout=60):
             time.sleep(0.3)
             child.send('all\n')
 
+        elif index == PATTERN_PAGER or index == 7:
+            # Pager prompt - press Enter to advance
+            time.sleep(0.2)
+            child.send('\n')
 
-def run_demo(script_path: Path):
-    """Run a demo from a YAML script file."""
+
+# Client configurations
+CLIENTS = {
+    'simple': {
+        'path': 'simple-client/interactive_client.py',
+        'name': 'Simple Client',
+    },
+    'rich': {
+        'path': 'rich-client/rich_client.py',
+        'name': 'Rich TUI Client',
+    },
+}
+
+
+def run_demo(script_path: Path, client: str = 'simple'):
+    """Run a demo from a YAML script file.
+
+    Args:
+        script_path: Path to the YAML demo script.
+        client: Client to use ('simple' or 'rich').
+    """
+    # Validate client
+    if client not in CLIENTS:
+        print(f"Error: Unknown client '{client}'. Available: {', '.join(CLIENTS.keys())}")
+        sys.exit(1)
+
+    client_config = CLIENTS[client]
+
     # Load the script
     with open(script_path) as f:
         script = yaml.safe_load(f)
@@ -136,7 +191,7 @@ def run_demo(script_path: Path):
     steps = script.get('steps', [])
     setup = script.get('setup')
 
-    print(f"Starting {name}...")
+    print(f"Starting {name} with {client_config['name']}...")
 
     # Run setup commands if specified
     if setup:
@@ -146,7 +201,7 @@ def run_demo(script_path: Path):
 
     # Spawn the client
     child = pexpect.spawn(
-        'python', ['simple-client/interactive_client.py', '--env-file', '.env'],
+        'python', [client_config['path'], '--env-file', '.env'],
         encoding='utf-8',
         timeout=timeout,
         cwd=str(PROJECT_ROOT)
@@ -198,6 +253,7 @@ def main():
         epilog="""
 Examples:
     python run_demo.py shared/plugins/cli/demo.yaml
+    python run_demo.py --client rich shared/plugins/cli/demo.yaml
     python run_demo.py shared/plugins/file_edit/demo.yaml
 
 Script format (YAML):
@@ -216,6 +272,12 @@ Script format (YAML):
         """
     )
     parser.add_argument('script', type=Path, help='Path to demo YAML script')
+    parser.add_argument(
+        '--client', '-c',
+        choices=list(CLIENTS.keys()),
+        default='simple',
+        help='Client to use for demo (default: simple)'
+    )
 
     args = parser.parse_args()
 
@@ -228,7 +290,7 @@ Script format (YAML):
     else:
         script_path = args.script
 
-    run_demo(script_path)
+    run_demo(script_path, client=args.client)
 
 
 if __name__ == '__main__':

@@ -41,16 +41,17 @@ from shared.plugins.base import parse_command_args
 from input_handler import InputHandler
 
 # Rich TUI components
-from live_display import LiveDisplay
+from pt_display import PTDisplay
 from plan_reporter import create_live_reporter
 
 
 class RichClient:
     """Rich TUI client with sticky plan display.
 
-    Uses LiveDisplay to manage a split-screen layout with:
-    - Sticky plan panel at top
+    Uses PTDisplay (prompt_toolkit-based) to manage a full-screen layout with:
+    - Sticky plan panel at top (hidden when no plan)
     - Scrolling output below
+    - Integrated input prompt at bottom
 
     The plan panel updates in-place as plan steps progress,
     while model output scrolls naturally below.
@@ -65,14 +66,17 @@ class RichClient:
         self.todo_plugin: Optional[TodoPlugin] = None
         self.ledger = TokenLedger()
 
-        # Rich TUI display
-        self._display: Optional[LiveDisplay] = None
+        # Rich TUI display (prompt_toolkit-based)
+        self._display: Optional[PTDisplay] = None
 
-        # Input handler (reused from simple-client)
+        # Input handler (for file expansion, history, completions)
         self._input_handler = InputHandler()
 
         # Track original inputs for session export
         self._original_inputs: list[dict] = []
+
+        # Flag to signal exit from input loop
+        self._should_exit = False
 
     def log(self, msg: str) -> None:
         """Log message to output panel."""
@@ -126,7 +130,7 @@ class RichClient:
 
         except Exception as e:
             if self._display:
-                self._display.add_system_message(f"Error: {e}", style="red")
+                self._display.show_lines([(f"Error: {e}", "red")])
             return {"error": str(e)}
 
     def _display_command_result(
@@ -143,17 +147,19 @@ class RichClient:
         if command_name == "plan":
             return
 
-        self._display.add_system_message(f"[{command_name}]", style="bold")
+        lines = [(f"[{command_name}]", "bold")]
 
         if isinstance(result, dict):
             for key, value in result.items():
                 if not key.startswith('_'):
-                    self._display.add_system_message(f"  {key}: {value}", style="dim")
+                    lines.append((f"  {key}: {value}", "dim"))
         else:
-            self._display.add_system_message(f"  {result}", style="dim")
+            lines.append((f"  {result}", "dim"))
 
         if shared:
-            self._display.add_system_message("  [Result shared with model]", style="dim cyan")
+            lines.append(("  [Result shared with model]", "dim cyan"))
+
+        self._display.show_lines(lines)
 
     def _restore_user_inputs(self, user_inputs: List[str]) -> None:
         """Restore user inputs to prompt history after session resume."""
@@ -201,6 +207,7 @@ class RichClient:
 
         # We'll configure the todo reporter after display is created
         # For now, use memory storage
+        # Note: clarification plugin callbacks are set up in _setup_clarification_actor()
         plugin_configs = {
             "todo": {
                 "reporter_type": "console",  # Temporary, will be replaced
@@ -209,14 +216,18 @@ class RichClient:
             "references": {
                 "actor_type": "console",
             },
+            "clarification": {
+                "actor_type": "callback_console",
+                # Callbacks will be set after display is created
+            },
         }
         self.registry.expose_all(plugin_configs)
         self.todo_plugin = self.registry.get_plugin("todo")
 
-        # Initialize permission plugin
+        # Initialize permission plugin with callback_console actor
         self.permission_plugin = PermissionPlugin()
         self.permission_plugin.initialize({
-            "actor_type": "console",
+            "actor_type": "callback_console",
             "policy": {
                 "defaultPolicy": "ask",
                 "whitelist": {"tools": [], "patterns": []},
@@ -250,6 +261,41 @@ class RichClient:
         # Replace the todo plugin's reporter
         if hasattr(self.todo_plugin, '_reporter'):
             self.todo_plugin._reporter = live_reporter
+
+    def _setup_callback_actors(self) -> None:
+        """Set up output callbacks on all callback_console actors.
+
+        Note: PTDisplay uses prompt_toolkit's integrated input, so no
+        pause/resume is needed. We just provide the output callback.
+        """
+        if not self._display:
+            return
+
+        def noop():
+            """No-op for pause/resume since PTDisplay handles this internally."""
+            pass
+
+        # Set callbacks on clarification plugin actor
+        if self.registry:
+            clarification_plugin = self.registry.get_plugin("clarification")
+            if clarification_plugin and hasattr(clarification_plugin, '_actor'):
+                actor = clarification_plugin._actor
+                if hasattr(actor, 'set_callbacks'):
+                    actor.set_callbacks(
+                        noop,
+                        noop,
+                        self._display.append_output,
+                    )
+
+        # Set callbacks on permission plugin actor
+        if self.permission_plugin and hasattr(self.permission_plugin, '_actor'):
+            actor = self.permission_plugin._actor
+            if actor and hasattr(actor, 'set_callbacks'):
+                actor.set_callbacks(
+                    noop,
+                    noop,
+                    self._display.append_output,
+                )
 
     def _setup_session_plugin(self) -> None:
         """Set up session persistence plugin."""
@@ -362,92 +408,124 @@ class RichClient:
             self._display.clear_output()
             self._display.clear_plan()
 
-    def run_interactive(self) -> None:
-        """Run the interactive TUI loop."""
-        # Create and start the live display
-        self._display = LiveDisplay()
+    def _handle_input(self, user_input: str) -> None:
+        """Handle user input from the prompt_toolkit input loop.
 
-        # Build the prompt string with ANSI colors for InputHandler
-        prompt_str = "\n\033[32mYou>\033[0m "
+        Args:
+            user_input: The text entered by the user.
+        """
+        # Check if pager is active - handle pager input first
+        if self._display.pager_active:
+            self._display.handle_pager_input(user_input)
+            return
 
-        with self._display:
-            # Now set up the live reporter
-            self._setup_live_reporter()
+        if not user_input:
+            return
 
+        if user_input.lower() in ('quit', 'exit', 'q'):
+            self._display.add_system_message("Goodbye!", style="bold")
+            self._display.stop()
+            return
+
+        if user_input.lower() == 'help':
+            self._show_help()
+            return
+
+        if user_input.lower() == 'tools':
+            self._show_tools()
+            return
+
+        if user_input.lower() == 'reset':
+            self.clear_history()
+            self._display.show_lines([("[History cleared]", "yellow")])
+            return
+
+        if user_input.lower() == 'clear':
+            self._display.clear_output()
+            return
+
+        if user_input.lower() == 'history':
+            self._show_history()
+            return
+
+        if user_input.lower() == 'context':
+            self._show_context()
+            return
+
+        if user_input.lower().startswith('export'):
+            parts = user_input.split(maxsplit=1)
+            filename = parts[1] if len(parts) > 1 else "session_export.yaml"
+            if filename.startswith('@'):
+                filename = filename[1:]
+            self._export_session(filename)
+            return
+
+        # Check for plugin commands
+        plugin_result = self._try_execute_plugin_command(user_input)
+        if plugin_result is not None:
+            self._original_inputs.append({"text": user_input, "local": True})
+            return
+
+        # Track input
+        self._original_inputs.append({"text": user_input, "local": False})
+
+        # Expand file references
+        expanded_prompt = self._input_handler.expand_file_references(user_input)
+
+        # Show user input in output
+        self._display.append_output("user", user_input, "write")
+
+        # Execute prompt
+        response = self.run_prompt(expanded_prompt)
+
+        # Response is already displayed via callback
+        # Add a separator and blank line
+        self._display.add_system_message("─" * 40, style="dim")
+        self._display.add_system_message("", style="dim")
+
+    def run_interactive(self, initial_prompt: Optional[str] = None) -> None:
+        """Run the interactive TUI loop.
+
+        Args:
+            initial_prompt: Optional prompt to run before entering interactive mode.
+        """
+        # Create the display with input handler for completions
+        self._display = PTDisplay(input_handler=self._input_handler)
+
+        # Set up the live reporter and callback actors
+        self._setup_live_reporter()
+        self._setup_callback_actors()
+
+        # Add welcome messages
+        self._display.add_system_message(
+            "Rich TUI Client - Sticky Plan Display",
+            style="bold cyan"
+        )
+        if self._input_handler.has_completion:
             self._display.add_system_message(
-                "Rich TUI Client - Sticky Plan Display",
-                style="bold cyan"
-            )
-            if self._input_handler.has_completion:
-                self._display.add_system_message(
-                    "Tab completion enabled. Use @file to reference files, /command for slash commands.",
-                    style="dim"
-                )
-            self._display.add_system_message(
-                "Type 'help' for commands, 'quit' to exit",
+                "Tab completion enabled. Use @file to reference files, /command for slash commands.",
                 style="dim"
             )
-            self._display.add_system_message("", style="dim")
+        self._display.add_system_message(
+            "Type 'help' for commands, 'quit' to exit",
+            style="dim"
+        )
+        self._display.add_system_message("", style="dim")
 
-            while True:
-                try:
-                    # Get input with completion support (pauses live display temporarily)
-                    user_input = self._display.get_input(
-                        prompt_str,
-                        input_handler=self._input_handler
-                    )
-                except (EOFError, KeyboardInterrupt):
-                    self._display.add_system_message("Goodbye!", style="bold")
-                    break
+        # Handle initial prompt if provided
+        if initial_prompt:
+            self._handle_input(initial_prompt)
 
-                if not user_input:
-                    continue
+        # Validate TTY
+        self._display.start()
 
-                if user_input.lower() in ('quit', 'exit', 'q'):
-                    self._display.add_system_message("Goodbye!", style="bold")
-                    break
+        try:
+            # Run the prompt_toolkit input loop
+            self._display.run_input_loop(self._handle_input)
+        except (EOFError, KeyboardInterrupt):
+            pass
 
-                if user_input.lower() == 'help':
-                    self._show_help()
-                    continue
-
-                if user_input.lower() == 'tools':
-                    self._show_tools()
-                    continue
-
-                if user_input.lower() == 'reset':
-                    self.clear_history()
-                    self._display.add_system_message(
-                        "[History cleared]",
-                        style="yellow"
-                    )
-                    continue
-
-                if user_input.lower() == 'clear':
-                    self._display.clear_output()
-                    continue
-
-                # Check for plugin commands
-                plugin_result = self._try_execute_plugin_command(user_input)
-                if plugin_result is not None:
-                    self._original_inputs.append({"text": user_input, "local": True})
-                    continue
-
-                # Track input
-                self._original_inputs.append({"text": user_input, "local": False})
-
-                # Expand file references
-                expanded_prompt = self._input_handler.expand_file_references(user_input)
-
-                # Show user input in output
-                self._display.append_output("user", user_input, "write")
-
-                # Execute prompt
-                response = self.run_prompt(expanded_prompt)
-
-                # Response is already displayed via callback
-                # Just add a separator
-                self._display.add_system_message("─" * 40, style="dim")
+        print("Goodbye!")
 
     def _get_all_tool_schemas(self) -> list:
         """Get all tool schemas from registry and plugins."""
@@ -467,53 +545,204 @@ class RichClient:
             return
 
         tools = self._get_all_tool_schemas()
-        self._display.add_system_message("Available Tools:", style="bold")
+        lines = [("Available Tools:", "bold")]
         for tool in tools:
-            self._display.add_system_message(f"  {tool.name}: {tool.description}", style="dim")
+            lines.append((f"  {tool.name}: {tool.description}", "dim"))
+
+        self._display.show_lines(lines)
+
+    def _show_history(self) -> None:
+        """Show conversation history in output panel."""
+        if not self._display or not self._jaato:
+            return
+
+        history = self._jaato.get_history()
+        turn_accounting = self._jaato.get_turn_accounting()
+        turn_boundaries = self._jaato.get_turn_boundaries()
+
+        count = len(history)
+        total_turns = len(turn_boundaries)
+
+        lines = [
+            ("─" * 50, "dim"),
+            (f"Conversation History: {count} message(s), {total_turns} turn(s)", "bold"),
+            ("Tip: Use 'backtoturn <turn_id>' to revert to a specific turn", "dim"),
+        ]
+
+        if count == 0:
+            lines.append(("  (empty)", "dim"))
+            self._display.show_lines(lines)
+            return
+
+        current_turn = 0
+        turn_index = 0
+
+        for i, content in enumerate(history):
+            role = getattr(content, 'role', None) or 'unknown'
+            parts = getattr(content, 'parts', None) or []
+
+            is_user_text = (role == 'user' and parts and
+                           hasattr(parts[0], 'text') and parts[0].text)
+
+            if is_user_text:
+                current_turn += 1
+                lines.append((f"─ TURN {current_turn} ─", "cyan"))
+
+            role_label = "USER" if role == 'user' else "MODEL" if role == 'model' else role.upper()
+
+            for part in parts:
+                if hasattr(part, 'text') and part.text:
+                    text = part.text[:100] + "..." if len(part.text) > 100 else part.text
+                    lines.append((f"  [{role_label}] {text}", "dim"))
+                elif hasattr(part, 'function_call'):
+                    fc = part.function_call
+                    lines.append((f"  [{role_label}] → {fc.name}(...)", "dim yellow"))
+                elif hasattr(part, 'function_response'):
+                    fr = part.function_response
+                    lines.append((f"  [{role_label}] ← {fr.name} response", "dim green"))
+
+            # Show token accounting at end of turn
+            is_last = (i == len(history) - 1)
+            next_is_user_text = False
+            if not is_last:
+                next_content = history[i + 1]
+                next_role = getattr(next_content, 'role', None) or 'unknown'
+                next_parts = getattr(next_content, 'parts', None) or []
+                next_is_user_text = (next_role == 'user' and next_parts and
+                                    hasattr(next_parts[0], 'text') and next_parts[0].text)
+
+            if (is_last or next_is_user_text) and turn_index < len(turn_accounting):
+                turn = turn_accounting[turn_index]
+                lines.append((f"    tokens: {turn['prompt']} in / {turn['output']} out", "dim"))
+                turn_index += 1
+
+        # Print totals
+        if turn_accounting:
+            total_prompt = sum(t['prompt'] for t in turn_accounting)
+            total_output = sum(t['output'] for t in turn_accounting)
+            lines.append(("─" * 50, "dim"))
+            lines.append((
+                f"Total: {total_prompt} prompt + {total_output} output = {total_prompt + total_output} tokens",
+                "bold"
+            ))
+
+        self._display.show_lines(lines)
+
+    def _show_context(self) -> None:
+        """Show context/token usage in output panel."""
+        if not self._display or not self._jaato:
+            self._display.show_lines([("Context tracking not available", "yellow")])
+            return
+
+        usage = self._jaato.get_context_usage()
+
+        lines = [
+            ("─" * 50, "dim"),
+            ("Context Usage:", "bold"),
+            (f"  Total tokens: {usage['total_tokens']}", "dim"),
+            (f"  Prompt tokens: {usage['prompt_tokens']}", "dim"),
+            (f"  Output tokens: {usage['output_tokens']}", "dim"),
+            (f"  Turns: {usage['turns']}", "dim"),
+            ("─" * 50, "dim"),
+        ]
+
+        self._display.show_lines(lines)
+
+    def _export_session(self, filename: str) -> None:
+        """Export session to YAML file."""
+        if not self._display or not self._jaato:
+            return
+
+        try:
+            from session_exporter import SessionExporter
+            exporter = SessionExporter()
+            history = self._jaato.get_history()
+            result = exporter.export_to_yaml(history, self._original_inputs, filename)
+
+            if result.get('success'):
+                self._display.show_lines([
+                    (f"Session exported to: {result['filename']}", "green")
+                ])
+            else:
+                self._display.show_lines([
+                    (f"Export failed: {result.get('error', 'Unknown error')}", "red")
+                ])
+        except ImportError:
+            self._display.show_lines([
+                ("Session exporter not available", "yellow")
+            ])
+        except Exception as e:
+            self._display.show_lines([
+                (f"Export error: {e}", "red")
+            ])
 
     def _show_help(self) -> None:
-        """Show help in output panel."""
+        """Show help in output panel with pagination."""
         if not self._display:
             return
 
         help_lines = [
-            ("Commands:", "bold"),
-            ("  help   - Show this help", "dim"),
-            ("  tools  - List available tools", "dim"),
-            ("  reset  - Clear conversation history", "dim"),
-            ("  clear  - Clear output panel", "dim"),
-            ("  quit   - Exit the client", "dim"),
-            ("", "dim"),
-            ("Display:", "bold"),
-            ("  The plan panel at top shows current plan status.", "dim"),
-            ("  Model output scrolls in the panel below.", "dim"),
+            ("Commands (auto-complete as you type):", "bold"),
+            ("  help          - Show this help message", "dim"),
+            ("  tools         - List tools available to the model", "dim"),
+            ("  reset         - Clear conversation history", "dim"),
+            ("  history       - Show full conversation history", "dim"),
+            ("  context       - Show context window usage", "dim"),
+            ("  export [file] - Export session to YAML (default: session_export.yaml)", "dim"),
+            ("  clear         - Clear output panel", "dim"),
+            ("  quit          - Exit the client", "dim"),
             ("", "dim"),
         ]
-
-        if self._input_handler.has_completion:
-            help_lines.extend([
-                ("Completion (auto-complete as you type):", "bold"),
-                ("  Commands   - Type first letters to see matches", "dim"),
-                ("  @file      - Tab to complete file paths", "dim"),
-                ("  /command   - Slash commands from .jaato/commands/", "dim"),
-                ("", "dim"),
-                ("Keyboard:", "bold"),
-                ("  ↑/↓        - Navigate history or completion menu", "dim"),
-                ("  Tab/Enter  - Accept completion", "dim"),
-                ("  Escape     - Dismiss completion menu", "dim"),
-            ])
 
         # Add plugin commands if available
         if self._jaato:
             user_commands = self._jaato.get_user_commands()
             if user_commands:
-                help_lines.append(("", "dim"))
                 help_lines.append(("Plugin Commands:", "bold"))
                 for name, cmd in user_commands.items():
                     help_lines.append((f"  {name:12} - {cmd.description}", "dim"))
+                help_lines.append(("", "dim"))
 
-        for line, style in help_lines:
-            self._display.add_system_message(line, style=style)
+        help_lines.extend([
+            ("When the model tries to use a tool, you'll see a permission prompt:", "bold"),
+            ("  [y]es     - Allow this execution", "dim"),
+            ("  [n]o      - Deny this execution", "dim"),
+            ("  [a]lways  - Allow and remember for this session", "dim"),
+            ("  [never]   - Deny and block for this session", "dim"),
+            ("  [once]    - Allow just this once", "dim"),
+            ("", "dim"),
+            ("File references:", "bold"),
+            ("  Use @path/to/file to include file contents in your prompt.", "dim"),
+            ("  - @src/main.py      - Reference a file (contents included)", "dim"),
+            ("  - @./config.json    - Reference with explicit relative path", "dim"),
+            ("  - @~/documents/     - Reference with home directory", "dim"),
+            ("  Completions appear automatically as you type after @.", "dim"),
+            ("", "dim"),
+            ("Slash commands:", "bold"),
+            ("  Use /command_name [args...] to invoke slash commands from .jaato/commands/.", "dim"),
+            ("  - Type / to see available commands with descriptions", "dim"),
+            ("  - Pass arguments after the command name: /review file.py", "dim"),
+            ("", "dim"),
+            ("Multi-turn conversation:", "bold"),
+            ("  The model remembers previous exchanges in this session.", "dim"),
+            ("  Use 'reset' to start a fresh conversation.", "dim"),
+            ("", "dim"),
+            ("Keyboard shortcuts:", "bold"),
+            ("  ↑/↓       - Navigate prompt history (or completion menu)", "dim"),
+            ("  ←/→       - Move cursor within line", "dim"),
+            ("  Ctrl+A/E  - Jump to start/end of line", "dim"),
+            ("  TAB/Enter - Accept selected completion", "dim"),
+            ("  Escape    - Dismiss completion menu", "dim"),
+            ("  PgUp/PgDn - Scroll output up/down", "dim"),
+            ("  Home/End  - Scroll to top/bottom of output", "dim"),
+            ("", "dim"),
+            ("Display:", "bold"),
+            ("  The plan panel at top shows current plan status.", "dim"),
+            ("  Model output scrolls in the panel below.", "dim"),
+        ])
+
+        # Show help with auto-pagination if needed
+        self._display.show_lines(help_lines)
 
     def shutdown(self) -> None:
         """Clean up resources."""
@@ -532,17 +761,27 @@ def main():
     parser.add_argument(
         "--env-file",
         default=".env",
-        help="Path to .env file"
+        help="Path to .env file (default: .env)"
     )
     parser.add_argument(
         "--quiet", "-q",
         action="store_true",
         help="Reduce verbose output"
     )
+    parser.add_argument(
+        "--prompt", "-p",
+        type=str,
+        help="Run a single prompt and exit (non-interactive mode)"
+    )
+    parser.add_argument(
+        "--initial-prompt", "-i",
+        type=str,
+        help="Start with this prompt, then continue interactively"
+    )
     args = parser.parse_args()
 
-    # Check TTY before proceeding
-    if not sys.stdout.isatty():
+    # Check TTY before proceeding (except for single prompt mode)
+    if not sys.stdout.isatty() and not args.prompt:
         sys.exit(
             "Error: rich-client requires an interactive terminal.\n"
             "Use simple-client for non-TTY environments."
@@ -557,7 +796,16 @@ def main():
         sys.exit(1)
 
     try:
-        client.run_interactive()
+        if args.prompt:
+            # Single prompt mode - run and exit (no TUI)
+            response = client.run_prompt(args.prompt)
+            print(response)
+        elif args.initial_prompt:
+            # Initial prompt mode - run prompt first, then continue interactively
+            client.run_interactive(initial_prompt=args.initial_prompt)
+        else:
+            # Interactive mode
+            client.run_interactive()
     finally:
         client.shutdown()
 
