@@ -469,11 +469,11 @@ class RichClient:
         # Track input
         self._original_inputs.append({"text": user_input, "local": False})
 
+        # Show user input in output immediately
+        self._display.append_output("user", user_input, "write")
+
         # Expand file references
         expanded_prompt = self._input_handler.expand_file_references(user_input)
-
-        # Show user input in output
-        self._display.append_output("user", user_input, "write")
 
         # Execute prompt
         response = self.run_prompt(expanded_prompt)
