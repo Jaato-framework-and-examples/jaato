@@ -737,25 +737,31 @@ class QueueChannel(ConsoleChannel):
         """Request permission by displaying in output panel and waiting for queue input."""
         from ..base import PermissionDisplayInfo
 
-        # Display the permission request header
-        self._output("=" * 60, "write")
+        # Display the permission request header with coloring
+        self._output(self._c("=" * 60, self.ANSI_BOLD), "write")
 
-        # Show agent type if subagent
+        # Show agent type with colored label
         agent_type = request.context.get("agent_type") if request.context else None
         agent_name = request.context.get("agent_name") if request.context else None
         if agent_type == "subagent":
             if agent_name:
-                self._output(f"  [Subagent: {agent_name}] Permission Request", "append")
+                self._output(
+                    f"{self._c('[askPermission]', self.ANSI_YELLOW)} "
+                    f"Subagent '{agent_name}' requesting tool execution:",
+                    "append"
+                )
             else:
-                self._output("  [Subagent] Permission Request", "append")
+                self._output(
+                    f"{self._c('[askPermission]', self.ANSI_YELLOW)} "
+                    "Subagent requesting tool execution:",
+                    "append"
+                )
         else:
-            self._output("  Permission Request", "append")
-
-        self._output("=" * 60, "append")
-        self._output("", "append")
-
-        # Tool name
-        self._output(f"  Tool: {request.tool_name}", "append")
+            self._output(
+                f"{self._c('[askPermission]', self.ANSI_YELLOW)} "
+                "Main agent requesting tool execution:",
+                "append"
+            )
 
         # Intent if provided
         intent = request.context.get("intent") if request.context else None
@@ -769,23 +775,38 @@ class QueueChannel(ConsoleChannel):
             self._output(f"  {display_info.summary}", "append")
             if display_info.details:
                 self._output("", "append")
-                for line in display_info.details.split('\n')[:20]:  # Limit lines
-                    self._output(f"  {line}", "append")
+                # Colorize diff if format hint is diff
+                if display_info.format_hint == "diff":
+                    for line in display_info.details.split('\n')[:20]:
+                        self._output(f"  {self._colorize_diff_line(line)}", "append")
+                else:
+                    for line in display_info.details.split('\n')[:20]:
+                        self._output(f"  {line}", "append")
                 if display_info.truncated:
-                    self._output("  [Content truncated]", "append")
+                    self._output(f"  {self._c('[Content truncated]', self.ANSI_DIM)}", "append")
         else:
-            # Show arguments
+            # Show tool name and arguments
+            self._output(f"  {self._c('Tool:', self.ANSI_BOLD)} {request.tool_name}", "append")
             self._output("", "append")
             self._output("  Arguments:", "append")
-            import json
             args_str = json.dumps(request.arguments, indent=2)
             for line in args_str.split('\n')[:15]:  # Limit lines
                 self._output(f"    {line}", "append")
 
-        # Show options
+        self._output(self._c("=" * 60, self.ANSI_BOLD), "append")
         self._output("", "append")
-        self._output("  Options: [y]es, [n]o, [a]lways, [never], [once], [all]", "append")
-        self._output("=" * 60, "append")
+
+        # Colorized options line
+        options = (
+            f"Options: "
+            f"[{self._c('y', self.ANSI_GREEN)}]es, "
+            f"[{self._c('n', self.ANSI_RED)}]o, "
+            f"[{self._c('a', self.ANSI_CYAN)}]lways, "
+            f"[{self._c('never', self.ANSI_YELLOW)}], "
+            f"[once], "
+            f"[all]"
+        )
+        self._output(options, "append")
 
         # Signal that we're waiting for input
         self._waiting_for_input = True
