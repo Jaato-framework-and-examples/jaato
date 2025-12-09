@@ -347,62 +347,41 @@ class CallbackConsoleActor(ConsoleActor):
         self._pause_callback = None
         self._resume_callback = None
         self._output_callback = None
-        self._run_in_terminal = None
 
     def set_callbacks(
         self,
         pause_callback=None,
         resume_callback=None,
         output_callback=None,
-        run_in_terminal=None,
+        **kwargs,  # Accept but ignore other args for compatibility
     ) -> None:
         """Set the pause/resume/output callbacks.
 
         Args:
-            pause_callback: Called before requesting user input (legacy).
-            resume_callback: Called after user input is complete (legacy).
+            pause_callback: Called before requesting user input.
+            resume_callback: Called after user input is complete.
             output_callback: Called with (source, text, mode) to log the Q&A summary.
-            run_in_terminal: Callable that wraps console I/O for TUI frameworks.
-                            Signature: run_in_terminal(func) -> None
-                            If provided, pause/resume callbacks are ignored.
         """
         self._pause_callback = pause_callback
         self._resume_callback = resume_callback
         self._output_callback = output_callback
-        self._run_in_terminal = run_in_terminal
 
     def request_clarification(
         self, request: ClarificationRequest
     ) -> ClarificationResponse:
-        """Present questions to user via console with pause/resume callbacks.
+        """Present questions to user via console with pause/resume callbacks."""
+        if self._pause_callback:
+            self._pause_callback()
 
-        If a run_in_terminal callable is provided via set_callbacks, the
-        console interaction runs inside it to properly suspend TUI frameworks.
-        """
-        response = None
-
-        def do_clarification():
-            nonlocal response
-            response = super(CallbackConsoleActor, self).request_clarification(request)
-
-        # If we have a run_in_terminal wrapper, use it
-        if self._run_in_terminal:
-            self._run_in_terminal(do_clarification)
-        else:
-            # Fallback to simple pause/resume
-            if self._pause_callback:
-                self._pause_callback()
-            try:
-                do_clarification()
-            finally:
-                if self._resume_callback:
-                    self._resume_callback()
-
-        # Log the Q&A summary to output after interaction
-        if self._output_callback and response and not response.cancelled:
-            self._log_qa_summary(request, response)
-
-        return response
+        try:
+            response = super().request_clarification(request)
+            # Log the Q&A summary to output after interaction
+            if self._output_callback and not response.cancelled:
+                self._log_qa_summary(request, response)
+            return response
+        finally:
+            if self._resume_callback:
+                self._resume_callback()
 
     def _log_qa_summary(
         self, request: ClarificationRequest, response: ClarificationResponse

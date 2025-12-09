@@ -207,7 +207,7 @@ class RichClient:
 
         # We'll configure the todo reporter after display is created
         # For now, use memory storage
-        # Note: clarification plugin callbacks are set up in _setup_clarification_actor()
+        # Note: clarification plugin callbacks are set up in _setup_callback_actors()
         plugin_configs = {
             "todo": {
                 "reporter_type": "console",  # Temporary, will be replaced
@@ -263,14 +263,26 @@ class RichClient:
             self.todo_plugin._reporter = live_reporter
 
     def _setup_callback_actors(self) -> None:
-        """Set up output callbacks on all callback_console actors.
+        """Set up callbacks on all callback_console actors.
 
-        For now, we don't use run_in_terminal as it causes deadlocks when
-        called from within blocking model calls. The actors will use their
-        default stdout/stdin which works but may have display glitches.
+        The model runs in a background thread, but we still need to handle
+        terminal mode for stdin to work. We temporarily reset the terminal
+        before permission/clarification prompts.
         """
         if not self._display:
             return
+
+        def pause_for_input():
+            """Temporarily reset terminal for stdin input."""
+            if self._display and self._display._app:
+                # Reset terminal to normal mode
+                self._display._app.renderer.reset()
+                self._display._app.output.flush()
+
+        def resume_after_input():
+            """Re-render after stdin input."""
+            if self._display:
+                self._display.refresh()
 
         # Set callbacks on clarification plugin actor
         if self.registry:
@@ -279,6 +291,8 @@ class RichClient:
                 actor = clarification_plugin._actor
                 if hasattr(actor, 'set_callbacks'):
                     actor.set_callbacks(
+                        pause_callback=pause_for_input,
+                        resume_callback=resume_after_input,
                         output_callback=self._display.append_output,
                     )
 
@@ -287,6 +301,8 @@ class RichClient:
             actor = self.permission_plugin._actor
             if actor and hasattr(actor, 'set_callbacks'):
                 actor.set_callbacks(
+                    pause_callback=pause_for_input,
+                    resume_callback=resume_after_input,
                     output_callback=self._display.append_output,
                 )
 
@@ -373,24 +389,48 @@ class RichClient:
         )
 
     def run_prompt(self, prompt: str) -> str:
-        """Execute a prompt and return the response."""
+        """Execute a prompt and return the response.
+
+        Runs the model call in a background thread so that prompt_toolkit
+        can continue processing input events (for permission/clarification prompts).
+        """
         if not self._jaato:
             return "Error: Client not initialized"
 
         self.log("Sending prompt to model...")
 
-        try:
-            response = self._jaato.send_message(
-                prompt,
-                on_output=self._create_output_callback()
-            )
-            return response if response else '(No response)'
+        import threading
+        import queue
 
-        except KeyboardInterrupt:
-            return "[Interrupted]"
-        except Exception as e:
-            import traceback
-            return f"Error: {e}"
+        result_queue = queue.Queue()
+        output_callback = self._create_output_callback()
+
+        def model_thread():
+            try:
+                response = self._jaato.send_message(prompt, on_output=output_callback)
+                result_queue.put(('success', response if response else '(No response)'))
+            except KeyboardInterrupt:
+                result_queue.put(('interrupted', "[Interrupted]"))
+            except Exception as e:
+                result_queue.put(('error', f"Error: {e}"))
+
+        # Start model call in background thread
+        thread = threading.Thread(target=model_thread, daemon=True)
+        thread.start()
+
+        # Wait for completion while keeping the display responsive
+        while thread.is_alive():
+            thread.join(timeout=0.05)
+            # Refresh display to show any output from the callback
+            if self._display:
+                self._display.refresh()
+
+        # Get result
+        try:
+            status, response = result_queue.get_nowait()
+            return response
+        except queue.Empty:
+            return "Error: No response from model thread"
 
     def clear_history(self) -> None:
         """Clear conversation history."""
