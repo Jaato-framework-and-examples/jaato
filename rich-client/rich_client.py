@@ -265,20 +265,12 @@ class RichClient:
     def _setup_callback_actors(self) -> None:
         """Set up output callbacks on all callback_console actors.
 
-        Uses prompt_toolkit's run_in_terminal to temporarily suspend the
-        full-screen TUI while console-based actors interact with the user.
+        For now, we don't use run_in_terminal as it causes deadlocks when
+        called from within blocking model calls. The actors will use their
+        default stdout/stdin which works but may have display glitches.
         """
         if not self._display:
             return
-
-        from prompt_toolkit.application import run_in_terminal
-
-        def run_in_terminal_wrapper(func):
-            """Wrapper that runs console I/O in terminal mode, suspending the TUI."""
-            run_in_terminal(func)
-            # Refresh display after returning from terminal mode
-            if self._display:
-                self._display.refresh()
 
         # Set callbacks on clarification plugin actor
         if self.registry:
@@ -288,7 +280,6 @@ class RichClient:
                 if hasattr(actor, 'set_callbacks'):
                     actor.set_callbacks(
                         output_callback=self._display.append_output,
-                        run_in_terminal=run_in_terminal_wrapper,
                     )
 
         # Set callbacks on permission plugin actor
@@ -297,7 +288,6 @@ class RichClient:
             if actor and hasattr(actor, 'set_callbacks'):
                 actor.set_callbacks(
                     output_callback=self._display.append_output,
-                    run_in_terminal=run_in_terminal_wrapper,
                 )
 
     def _setup_session_plugin(self) -> None:

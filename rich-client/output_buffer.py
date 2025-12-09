@@ -257,6 +257,11 @@ class OutputBuffer:
             if line.source == "system":
                 # System messages use their style directly
                 output.append(line.text, style=line.style)
+            elif line.source == "user":
+                # User input - show with You> prefix on turn start
+                if line.is_turn_start:
+                    output.append("You> ", style="bold green")
+                output.append(line.text)
             elif line.source == "model":
                 # Model output - only show prefix on turn start
                 if line.is_turn_start:
