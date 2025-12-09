@@ -277,7 +277,7 @@ def tool_results_to_sdk_parts(results: List[ToolResult]) -> List[types.Part]:
 
 def extract_text_from_response(response) -> Optional[str]:
     """Extract text from SDK response, handling function call parts safely."""
-    if not response or not hasattr(response, 'candidates'):
+    if not response or not hasattr(response, 'candidates') or not response.candidates:
         return None
 
     texts = []
@@ -312,7 +312,7 @@ def extract_function_calls_from_response(response) -> List[FunctionCall]:
 
 def extract_finish_reason_from_response(response) -> FinishReason:
     """Extract finish reason from SDK response."""
-    if not response or not hasattr(response, 'candidates'):
+    if not response or not hasattr(response, 'candidates') or not response.candidates:
         return FinishReason.UNKNOWN
 
     for candidate in response.candidates:
