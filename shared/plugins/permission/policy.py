@@ -183,12 +183,14 @@ class PermissionPolicy:
         """
         if tool_name == "cli_based_tool":
             command = args.get("command", "")
-            arg_list = args.get("args", [])
+            arg_list = args.get("args") or []  # Handle both missing and None
             if arg_list:
                 return f"{command} {' '.join(str(a) for a in arg_list)}"
             return command
         else:
             # For non-CLI tools, create a simple signature
+            if not args:
+                return f"{tool_name}()"
             return f"{tool_name}({', '.join(f'{k}={v}' for k, v in sorted(args.items()))})"
 
     def _matches_session_blacklist(self, tool_name: str, signature: str) -> bool:
