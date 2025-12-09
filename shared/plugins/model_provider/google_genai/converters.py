@@ -167,7 +167,7 @@ def part_from_sdk(part: types.Part) -> Part:
 
 def message_to_sdk(message: Message) -> types.Content:
     """Convert internal Message to SDK Content."""
-    sdk_parts = [part_to_sdk(p) for p in message.parts]
+    sdk_parts = [part_to_sdk(p) for p in (message.parts or [])]
     return types.Content(
         role=role_to_sdk(message.role),
         parts=sdk_parts
@@ -185,12 +185,12 @@ def message_from_sdk(content: types.Content) -> Message:
 
 def history_to_sdk(history: List[Message]) -> List[types.Content]:
     """Convert internal history to SDK history."""
-    return [message_to_sdk(m) for m in history]
+    return [message_to_sdk(m) for m in (history or [])]
 
 
 def history_from_sdk(history: List[types.Content]) -> List[Message]:
     """Convert SDK history to internal history."""
-    return [message_from_sdk(c) for c in history]
+    return [message_from_sdk(c) for c in (history or [])]
 
 
 # ==================== ToolResult Conversion ====================
@@ -270,7 +270,7 @@ def _build_multimodal_function_response(
 
 def tool_results_to_sdk_parts(results: List[ToolResult]) -> List[types.Part]:
     """Convert list of ToolResults to SDK Parts."""
-    return [tool_result_to_sdk_part(r) for r in results]
+    return [tool_result_to_sdk_part(r) for r in (results or [])]
 
 
 # ==================== Response Conversion ====================
