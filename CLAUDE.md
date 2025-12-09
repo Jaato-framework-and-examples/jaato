@@ -51,9 +51,8 @@ python3 -m venv .venv
   - `get_history()`, `reset_session()` - history access and control
   - SDK manages conversation history internally
 
-- **ai_tool_runner.py**: Central orchestrator for function-calling loops with Vertex AI
-  - `ToolExecutor`: Registry mapping tool names to callables
-  - `run_function_call_loop()`: Legacy function for direct API usage (JaatoClient handles this internally now)
+- **ai_tool_runner.py**: Tool execution infrastructure
+  - `ToolExecutor`: Registry mapping tool names to callables with permission checking and auto-backgrounding
 
 - **plugins/**: Plugin system with three plugin types:
   - **Tool Plugins**: Provide tools the model can invoke
