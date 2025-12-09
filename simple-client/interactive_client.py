@@ -199,18 +199,18 @@ class InteractiveClient:
                 "storage_type": "memory",
             },
             "references": {
-                "actor_type": "console",
+                "channel_type": "console",
             },
         }
         self.registry.expose_all(plugin_configs)
         self.todo_plugin = self.registry.get_plugin("todo")
         self.log(f"[client] Enabled plugins: {self.registry.list_exposed()}")
 
-        # Initialize permission plugin with console actor
-        self.log("[client] Initializing permission plugin with console actor...")
+        # Initialize permission plugin with console channel
+        self.log("[client] Initializing permission plugin with console channel...")
         self.permission_plugin = PermissionPlugin()
         self.permission_plugin.initialize({
-            "actor_type": "console",
+            "channel_type": "console",
             "policy": {
                 "defaultPolicy": "ask",
                 "whitelist": {"tools": [], "patterns": []},

@@ -19,11 +19,11 @@ class ReferencesConfig:
     version: str = "1.0"
     sources: List[ReferenceSource] = field(default_factory=list)
 
-    # Actor configuration
-    actor_type: str = "console"
-    actor_timeout: int = 60
-    actor_endpoint: Optional[str] = None  # For webhook
-    actor_base_path: Optional[str] = None  # For file
+    # Channel configuration
+    channel_type: str = "console"
+    channel_timeout: int = 60
+    channel_endpoint: Optional[str] = None  # For webhook
+    channel_base_path: Optional[str] = None  # For file
 
 
 class ConfigValidationError(Exception):
@@ -111,26 +111,26 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
                     errors.append(f"sources[{i}]: Duplicate id '{source_id}'")
                 seen_ids.add(source_id)
 
-    # Validate actor configuration
-    actor = config.get("actor", {})
-    if actor:
-        actor_type = actor.get("type", "console")
-        if actor_type not in ("console", "webhook", "file"):
-            errors.append(f"Invalid actor type: {actor_type}. Must be 'console', 'webhook', or 'file'")
+    # Validate channel configuration
+    channel = config.get("channel", {})
+    if channel:
+        channel_type = channel.get("type", "console")
+        if channel_type not in ("console", "webhook", "file"):
+            errors.append(f"Invalid channel type: {channel_type}. Must be 'console', 'webhook', or 'file'")
 
-        if actor_type == "webhook":
-            endpoint = actor.get("endpoint")
+        if channel_type == "webhook":
+            endpoint = channel.get("endpoint")
             if not endpoint or not isinstance(endpoint, str):
-                errors.append("Webhook actor requires 'endpoint' URL")
+                errors.append("Webhook channel requires 'endpoint' URL")
 
-        if actor_type == "file":
-            base_path = actor.get("base_path")
+        if channel_type == "file":
+            base_path = channel.get("base_path")
             if not base_path or not isinstance(base_path, str):
-                errors.append("File actor requires 'base_path'")
+                errors.append("File channel requires 'base_path'")
 
-        timeout = actor.get("timeout")
+        timeout = channel.get("timeout")
         if timeout is not None and (not isinstance(timeout, (int, float)) or timeout <= 0):
-            errors.append("Actor timeout must be a positive number")
+            errors.append("Channel timeout must be a positive number")
 
     return len(errors) == 0, errors
 
@@ -192,16 +192,16 @@ def load_config(
         for s in raw_config.get("sources", [])
     ]
 
-    # Parse actor config
-    actor = raw_config.get("actor", {})
+    # Parse channel config
+    channel = raw_config.get("channel", {})
 
     return ReferencesConfig(
         version=str(raw_config.get("version", "1.0")),
         sources=sources,
-        actor_type=actor.get("type", "console"),
-        actor_timeout=actor.get("timeout", 60),
-        actor_endpoint=actor.get("endpoint"),
-        actor_base_path=actor.get("base_path"),
+        channel_type=channel.get("type", "console"),
+        channel_timeout=channel.get("timeout", 60),
+        channel_endpoint=channel.get("endpoint"),
+        channel_base_path=channel.get("base_path"),
     )
 
 
@@ -233,7 +233,7 @@ def create_default_config(path: str) -> None:
                 "tags": ["api", "reference"]
             }
         ],
-        "actor": {
+        "channel": {
             "type": "console",
             "timeout": 60
         }

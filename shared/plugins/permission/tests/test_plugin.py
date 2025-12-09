@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch, MagicMock
 import pytest
 
 from ..plugin import PermissionPlugin, create_plugin
-from ..actors import ActorDecision, ActorResponse, PermissionRequest
+from ..channels import ChannelDecision, ChannelResponse, PermissionRequest
 from ..policy import PermissionDecision
 
 
@@ -56,18 +56,18 @@ class TestPermissionPluginInitialization:
             finally:
                 os.unlink(f.name)
 
-    def test_initialize_with_actor_type(self):
+    def test_initialize_with_channel_type(self):
         plugin = PermissionPlugin()
-        plugin.initialize({"actor_type": "console"})
-        assert plugin._actor is not None
-        assert plugin._actor.name == "console"
+        plugin.initialize({"channel_type": "console"})
+        assert plugin._channel is not None
+        assert plugin._channel.name == "console"
 
-    def test_initialize_fallback_to_console_actor(self):
+    def test_initialize_fallback_to_console_channel(self):
         plugin = PermissionPlugin()
         # Webhook without endpoint should fail and fall back to console
-        plugin.initialize({"actor_type": "webhook"})
-        assert plugin._actor is not None
-        assert plugin._actor.name == "console"  # Fallback
+        plugin.initialize({"channel_type": "webhook"})
+        assert plugin._channel is not None
+        assert plugin._channel.name == "console"  # Fallback
 
     def test_shutdown(self):
         plugin = PermissionPlugin()
@@ -76,7 +76,7 @@ class TestPermissionPluginInitialization:
 
         assert plugin._initialized is False
         assert plugin._policy is None
-        assert plugin._actor is None
+        assert plugin._channel is None
 
 
 class TestPermissionPluginFunctionDeclarations:
@@ -250,121 +250,121 @@ class TestPermissionPluginCheckPermission:
         assert log[0]["decision"] == "allow"
 
 
-class TestPermissionPluginActorInteraction:
-    """Tests for actor interaction when policy returns ASK_ACTOR."""
+class TestPermissionPluginChannelInteraction:
+    """Tests for channel interaction when policy returns ASK_CHANNEL."""
 
-    def test_ask_actor_allow(self):
+    def test_ask_channel_allow(self):
         plugin = PermissionPlugin()
         plugin.initialize({
             "policy": {"defaultPolicy": "ask"}
         })
 
-        # Mock the actor
-        mock_actor = Mock()
-        mock_actor.request_permission.return_value = ActorResponse(
+        # Mock the channel
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.ALLOW,
+            decision=ChannelDecision.ALLOW,
             reason="User approved"
         )
-        plugin._actor = mock_actor
+        plugin._channel = mock_channel
 
         allowed, reason = plugin.check_permission("test_tool", {})
         assert allowed is True
         assert "approved" in reason.lower()
 
-    def test_ask_actor_deny(self):
+    def test_ask_channel_deny(self):
         plugin = PermissionPlugin()
         plugin.initialize({
             "policy": {"defaultPolicy": "ask"}
         })
 
-        mock_actor = Mock()
-        mock_actor.request_permission.return_value = ActorResponse(
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.DENY,
+            decision=ChannelDecision.DENY,
             reason="User denied"
         )
-        plugin._actor = mock_actor
+        plugin._channel = mock_channel
 
         allowed, reason = plugin.check_permission("test_tool", {})
         assert allowed is False
 
-    def test_ask_actor_allow_session(self):
+    def test_ask_channel_allow_session(self):
         plugin = PermissionPlugin()
         plugin.initialize({
             "policy": {"defaultPolicy": "ask"}
         })
 
-        mock_actor = Mock()
-        mock_actor.request_permission.return_value = ActorResponse(
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.ALLOW_SESSION,
+            decision=ChannelDecision.ALLOW_SESSION,
             reason="Approved for session",
             remember_pattern="test_tool"
         )
-        plugin._actor = mock_actor
+        plugin._channel = mock_channel
 
         allowed, reason = plugin.check_permission("test_tool", {})
         assert allowed is True
 
         # Should be allowed without asking again
-        plugin._actor.request_permission.reset_mock()
+        plugin._channel.request_permission.reset_mock()
         allowed2, reason2 = plugin.check_permission("test_tool", {})
         assert allowed2 is True
-        # Actor should not be called again
-        mock_actor.request_permission.assert_not_called()
+        # Channel should not be called again
+        mock_channel.request_permission.assert_not_called()
 
-    def test_ask_actor_deny_session(self):
+    def test_ask_channel_deny_session(self):
         plugin = PermissionPlugin()
         plugin.initialize({
             "policy": {"defaultPolicy": "ask"}
         })
 
-        mock_actor = Mock()
-        mock_actor.request_permission.return_value = ActorResponse(
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.DENY_SESSION,
+            decision=ChannelDecision.DENY_SESSION,
             reason="Denied for session",
             remember_pattern="test_tool"
         )
-        plugin._actor = mock_actor
+        plugin._channel = mock_channel
 
         allowed, reason = plugin.check_permission("test_tool", {})
         assert allowed is False
 
         # Should be denied without asking again
-        plugin._actor.request_permission.reset_mock()
+        plugin._channel.request_permission.reset_mock()
         allowed2, reason2 = plugin.check_permission("test_tool", {})
         assert allowed2 is False
-        mock_actor.request_permission.assert_not_called()
+        mock_channel.request_permission.assert_not_called()
 
-    def test_ask_actor_timeout(self):
+    def test_ask_channel_timeout(self):
         plugin = PermissionPlugin()
         plugin.initialize({
             "policy": {"defaultPolicy": "ask"}
         })
 
-        mock_actor = Mock()
-        mock_actor.request_permission.return_value = ActorResponse(
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.TIMEOUT,
+            decision=ChannelDecision.TIMEOUT,
             reason="Timeout"
         )
-        plugin._actor = mock_actor
+        plugin._channel = mock_channel
 
         allowed, reason = plugin.check_permission("test_tool", {})
         assert allowed is False
 
-    def test_no_actor_configured(self):
+    def test_no_channel_configured(self):
         plugin = PermissionPlugin()
         plugin.initialize({
             "policy": {"defaultPolicy": "ask"}
         })
-        plugin._actor = None  # Remove actor
+        plugin._channel = None  # Remove channel
 
         allowed, reason = plugin.check_permission("test_tool", {})
         assert allowed is False
-        assert "no actor" in reason.lower()
+        assert "no channel" in reason.lower()
 
 
 class TestPermissionPluginExecutionLog:
@@ -494,7 +494,7 @@ class TestPermissionPluginWrapExecutor:
 
 
 class TestPermissionPluginContextPassing:
-    """Tests for context passing to actors."""
+    """Tests for context passing to channels."""
 
     def test_check_permission_passes_context(self):
         plugin = PermissionPlugin()
@@ -502,19 +502,19 @@ class TestPermissionPluginContextPassing:
             "policy": {"defaultPolicy": "ask"}
         })
 
-        mock_actor = Mock()
-        mock_actor.request_permission.return_value = ActorResponse(
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.ALLOW,
+            decision=ChannelDecision.ALLOW,
             reason="OK"
         )
-        plugin._actor = mock_actor
+        plugin._channel = mock_channel
 
         context = {"session_id": "abc123", "turn": 5}
         plugin.check_permission("test_tool", {"arg": "val"}, context=context)
 
-        # Check that actor received the context
-        call_args = mock_actor.request_permission.call_args
+        # Check that channel received the context
+        call_args = mock_channel.request_permission.call_args
         request = call_args[0][0]
         assert isinstance(request, PermissionRequest)
         assert request.context == context
@@ -523,10 +523,10 @@ class TestPermissionPluginContextPassing:
 class TestPermissionPluginConfigOptions:
     """Tests for various configuration options."""
 
-    def test_actor_timeout_from_config(self):
+    def test_channel_timeout_from_config(self):
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
             config = {
-                "actor": {
+                "channel": {
                     "type": "console",
                     "timeout": 120
                 }
@@ -537,40 +537,40 @@ class TestPermissionPluginConfigOptions:
             try:
                 plugin = PermissionPlugin()
                 plugin.initialize({"config_path": f.name})
-                assert plugin._config.actor_timeout == 120
+                assert plugin._config.channel_timeout == 120
             finally:
                 os.unlink(f.name)
 
-    def test_actor_config_override(self):
+    def test_channel_config_override(self):
         plugin = PermissionPlugin()
         plugin.initialize({
-            "actor_type": "console",
-            "actor_config": {"timeout": 60}
+            "channel_type": "console",
+            "channel_config": {"timeout": 60}
         })
-        # Actor should be initialized with the config
+        # Channel should be initialized with the config
 
 
 class TestPermissionPluginEdgeCases:
     """Tests for edge cases and error handling."""
 
-    def test_unknown_actor_decision(self):
+    def test_unknown_channel_decision(self):
         plugin = PermissionPlugin()
         plugin.initialize({
             "policy": {"defaultPolicy": "ask"}
         })
 
         # Create a response with an unexpected decision value
-        mock_actor = Mock()
-        response = ActorResponse(
+        mock_channel = Mock()
+        response = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.ALLOW,  # Will be modified
+            decision=ChannelDecision.ALLOW,  # Will be modified
             reason="OK"
         )
         # Modify to simulate unknown decision
         response.decision = Mock()
         response.decision.name = "UNKNOWN"
-        mock_actor.request_permission.return_value = response
-        plugin._actor = mock_actor
+        mock_channel.request_permission.return_value = response
+        plugin._channel = mock_channel
 
         allowed, reason = plugin.check_permission("test_tool", {})
         # Should default to deny for unknown decisions
@@ -600,191 +600,191 @@ class TestPermissionPluginEdgeCases:
         assert allowed is True
 
 
-class TestActorCommunication:
-    """Comprehensive tests for actor communication."""
+class TestChannelCommunication:
+    """Comprehensive tests for channel communication."""
 
     def test_request_contains_tool_name(self):
-        """Verify actor receives correct tool_name."""
+        """Verify channel receives correct tool_name."""
         plugin = PermissionPlugin()
         plugin.initialize({"policy": {"defaultPolicy": "ask"}})
 
-        mock_actor = Mock()
-        mock_actor.request_permission.return_value = ActorResponse(
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.ALLOW,
+            decision=ChannelDecision.ALLOW,
             reason="OK"
         )
-        plugin._actor = mock_actor
+        plugin._channel = mock_channel
 
         plugin.check_permission("my_specific_tool", {"arg": "val"})
 
-        request = mock_actor.request_permission.call_args[0][0]
+        request = mock_channel.request_permission.call_args[0][0]
         assert request.tool_name == "my_specific_tool"
 
     def test_request_contains_arguments(self):
-        """Verify actor receives correct arguments."""
+        """Verify channel receives correct arguments."""
         plugin = PermissionPlugin()
         plugin.initialize({"policy": {"defaultPolicy": "ask"}})
 
-        mock_actor = Mock()
-        mock_actor.request_permission.return_value = ActorResponse(
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.ALLOW,
+            decision=ChannelDecision.ALLOW,
             reason="OK"
         )
-        plugin._actor = mock_actor
+        plugin._channel = mock_channel
 
         test_args = {"command": "git status", "cwd": "/home/user"}
         plugin.check_permission("cli_based_tool", test_args)
 
-        request = mock_actor.request_permission.call_args[0][0]
+        request = mock_channel.request_permission.call_args[0][0]
         assert request.arguments == test_args
 
     def test_request_contains_timeout(self):
-        """Verify actor receives configured timeout."""
+        """Verify channel receives configured timeout."""
         plugin = PermissionPlugin()
         plugin.initialize({
             "policy": {"defaultPolicy": "ask"},
-            "actor_config": {"timeout": 45}
+            "channel_config": {"timeout": 45}
         })
 
-        mock_actor = Mock()
-        mock_actor.request_permission.return_value = ActorResponse(
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.ALLOW,
+            decision=ChannelDecision.ALLOW,
             reason="OK"
         )
-        plugin._actor = mock_actor
+        plugin._channel = mock_channel
 
         plugin.check_permission("test_tool", {})
 
-        request = mock_actor.request_permission.call_args[0][0]
+        request = mock_channel.request_permission.call_args[0][0]
         # Timeout should come from config
-        assert request.timeout_seconds == plugin._config.actor_timeout
+        assert request.timeout_seconds == plugin._config.channel_timeout
 
     def test_allow_once_does_not_remember(self):
         """ALLOW_ONCE should execute but still ask next time."""
         plugin = PermissionPlugin()
         plugin.initialize({"policy": {"defaultPolicy": "ask"}})
 
-        mock_actor = Mock()
-        mock_actor.request_permission.return_value = ActorResponse(
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.ALLOW_ONCE,
+            decision=ChannelDecision.ALLOW_ONCE,
             reason="Allowed once"
         )
-        plugin._actor = mock_actor
+        plugin._channel = mock_channel
 
         # First call - should be allowed
         allowed1, _ = plugin.check_permission("test_tool", {})
         assert allowed1 is True
-        assert mock_actor.request_permission.call_count == 1
+        assert mock_channel.request_permission.call_count == 1
 
-        # Second call - should ask actor again (not remembered)
+        # Second call - should ask channel again (not remembered)
         allowed2, _ = plugin.check_permission("test_tool", {})
         assert allowed2 is True
-        assert mock_actor.request_permission.call_count == 2
+        assert mock_channel.request_permission.call_count == 2
 
     def test_allow_session_remembers_exact_tool(self):
         """ALLOW_SESSION with tool name should remember for that tool."""
         plugin = PermissionPlugin()
         plugin.initialize({"policy": {"defaultPolicy": "ask"}})
 
-        mock_actor = Mock()
-        mock_actor.request_permission.return_value = ActorResponse(
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.ALLOW_SESSION,
+            decision=ChannelDecision.ALLOW_SESSION,
             reason="Approved for session",
             remember_pattern="specific_tool"
         )
-        plugin._actor = mock_actor
+        plugin._channel = mock_channel
 
-        # First call - asks actor
+        # First call - asks channel
         allowed1, _ = plugin.check_permission("specific_tool", {})
         assert allowed1 is True
-        assert mock_actor.request_permission.call_count == 1
+        assert mock_channel.request_permission.call_count == 1
 
-        # Second call - should NOT ask actor (remembered)
+        # Second call - should NOT ask channel (remembered)
         allowed2, _ = plugin.check_permission("specific_tool", {})
         assert allowed2 is True
-        assert mock_actor.request_permission.call_count == 1  # Still 1, not called again
+        assert mock_channel.request_permission.call_count == 1  # Still 1, not called again
 
     def test_allow_session_pattern_matching(self):
         """ALLOW_SESSION with pattern 'git *' should match git commands."""
         plugin = PermissionPlugin()
         plugin.initialize({"policy": {"defaultPolicy": "ask"}})
 
-        mock_actor = Mock()
-        mock_actor.request_permission.return_value = ActorResponse(
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.ALLOW_SESSION,
+            decision=ChannelDecision.ALLOW_SESSION,
             reason="Git commands approved",
             remember_pattern="git *"
         )
-        plugin._actor = mock_actor
+        plugin._channel = mock_channel
 
-        # First call with "git status" - asks actor
+        # First call with "git status" - asks channel
         allowed1, _ = plugin.check_permission(
             "cli_based_tool",
             {"command": "git status"}
         )
         assert allowed1 is True
-        assert mock_actor.request_permission.call_count == 1
+        assert mock_channel.request_permission.call_count == 1
 
-        # Second call with "git push" - should NOT ask actor (pattern match)
+        # Second call with "git push" - should NOT ask channel (pattern match)
         allowed2, _ = plugin.check_permission(
             "cli_based_tool",
             {"command": "git push origin main"}
         )
         assert allowed2 is True
-        # Pattern should match, so actor not called again
-        assert mock_actor.request_permission.call_count == 1
+        # Pattern should match, so channel not called again
+        assert mock_channel.request_permission.call_count == 1
 
     def test_deny_session_remembers(self):
         """DENY_SESSION should block subsequent calls without asking."""
         plugin = PermissionPlugin()
         plugin.initialize({"policy": {"defaultPolicy": "ask"}})
 
-        mock_actor = Mock()
-        mock_actor.request_permission.return_value = ActorResponse(
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.DENY_SESSION,
+            decision=ChannelDecision.DENY_SESSION,
             reason="Blocked for session",
             remember_pattern="dangerous_tool"
         )
-        plugin._actor = mock_actor
+        plugin._channel = mock_channel
 
-        # First call - asks actor, gets denied
+        # First call - asks channel, gets denied
         allowed1, _ = plugin.check_permission("dangerous_tool", {})
         assert allowed1 is False
-        assert mock_actor.request_permission.call_count == 1
+        assert mock_channel.request_permission.call_count == 1
 
-        # Second call - should NOT ask actor (remembered denial)
+        # Second call - should NOT ask channel (remembered denial)
         allowed2, _ = plugin.check_permission("dangerous_tool", {})
         assert allowed2 is False
-        assert mock_actor.request_permission.call_count == 1  # Not called again
+        assert mock_channel.request_permission.call_count == 1  # Not called again
 
     def test_deny_session_pattern_blocking(self):
         """DENY_SESSION with pattern should block matching commands."""
         plugin = PermissionPlugin()
         plugin.initialize({"policy": {"defaultPolicy": "ask"}})
 
-        mock_actor = Mock()
-        mock_actor.request_permission.return_value = ActorResponse(
+        mock_channel = Mock()
+        mock_channel.request_permission.return_value = ChannelResponse(
             request_id="test",
-            decision=ActorDecision.DENY_SESSION,
+            decision=ChannelDecision.DENY_SESSION,
             reason="rm commands blocked",
             remember_pattern="rm *"
         )
-        plugin._actor = mock_actor
+        plugin._channel = mock_channel
 
-        # First call with "rm -rf" - asks actor
+        # First call with "rm -rf" - asks channel
         allowed1, _ = plugin.check_permission(
             "cli_based_tool",
             {"command": "rm -rf /tmp/test"}
         )
         assert allowed1 is False
-        assert mock_actor.request_permission.call_count == 1
+        assert mock_channel.request_permission.call_count == 1
 
         # Second call with "rm file.txt" - should NOT ask (pattern blocks)
         allowed2, _ = plugin.check_permission(
@@ -792,28 +792,28 @@ class TestActorCommunication:
             {"command": "rm file.txt"}
         )
         assert allowed2 is False
-        assert mock_actor.request_permission.call_count == 1
+        assert mock_channel.request_permission.call_count == 1
 
     def test_different_tool_still_asks(self):
         """Session rule for one tool should not affect different tools."""
         plugin = PermissionPlugin()
         plugin.initialize({"policy": {"defaultPolicy": "ask"}})
 
-        # Set up actor to return ALLOW_SESSION for first tool
+        # Set up channel to return ALLOW_SESSION for first tool
         call_count = [0]
 
         def mock_request_permission(request):
             call_count[0] += 1
-            return ActorResponse(
+            return ChannelResponse(
                 request_id="test",
-                decision=ActorDecision.ALLOW_SESSION,
+                decision=ChannelDecision.ALLOW_SESSION,
                 reason="Approved",
                 remember_pattern="tool_a"
             )
 
-        mock_actor = Mock()
-        mock_actor.request_permission = mock_request_permission
-        plugin._actor = mock_actor
+        mock_channel = Mock()
+        mock_channel.request_permission = mock_request_permission
+        plugin._channel = mock_channel
 
         # Call tool_a - gets remembered
         plugin.check_permission("tool_a", {})
@@ -823,7 +823,7 @@ class TestActorCommunication:
         plugin.check_permission("tool_a", {})
         assert call_count[0] == 1
 
-        # Call tool_b - should ask actor (different tool)
+        # Call tool_b - should ask channel (different tool)
         plugin.check_permission("tool_b", {})
         assert call_count[0] == 2
 
@@ -836,15 +836,15 @@ class TestActorCommunication:
 
         def capture_request(request):
             request_ids.append(request.request_id)
-            return ActorResponse(
+            return ChannelResponse(
                 request_id=request.request_id,
-                decision=ActorDecision.ALLOW,
+                decision=ChannelDecision.ALLOW,
                 reason="OK"
             )
 
-        mock_actor = Mock()
-        mock_actor.request_permission = capture_request
-        plugin._actor = mock_actor
+        mock_channel = Mock()
+        mock_channel.request_permission = capture_request
+        plugin._channel = mock_channel
 
         # Make multiple requests
         plugin.check_permission("tool1", {})
@@ -864,15 +864,15 @@ class TestActorCommunication:
 
         def capture_request(request):
             captured_request[0] = request
-            return ActorResponse(
+            return ChannelResponse(
                 request_id=request.request_id,
-                decision=ActorDecision.ALLOW,
+                decision=ChannelDecision.ALLOW,
                 reason="OK"
             )
 
-        mock_actor = Mock()
-        mock_actor.request_permission = capture_request
-        plugin._actor = mock_actor
+        mock_channel = Mock()
+        mock_channel.request_permission = capture_request
+        plugin._channel = mock_channel
 
         plugin.check_permission("test_tool", {})
 

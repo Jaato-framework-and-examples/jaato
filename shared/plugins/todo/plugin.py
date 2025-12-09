@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 from .models import PlanStatus, StepStatus, TodoPlan, TodoStep
 from ..model_provider.types import ToolSchema
 from .storage import TodoStorage, create_storage, InMemoryStorage
-from .actors import TodoReporter, ConsoleReporter, create_reporter
+from .channels import TodoReporter, ConsoleReporter, create_reporter
 from .config_loader import load_config, TodoConfig
 from ..base import UserCommand
 

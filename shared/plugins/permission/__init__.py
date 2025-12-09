@@ -1,7 +1,7 @@
 """Permission plugin for controlling tool execution access.
 
 This plugin provides blacklist/whitelist-based permission control for tool
-execution, with support for interactive actor approval when policy is ambiguous.
+execution, with support for interactive channel approval when policy is ambiguous.
 
 Also includes sanitization features for:
 - Shell injection prevention
@@ -14,7 +14,7 @@ PLUGIN_KIND = "tool"
 
 from .policy import PermissionPolicy, PermissionDecision, PolicyMatch
 from .config_loader import load_config, validate_config, PermissionConfig
-from .actors import Actor, ConsoleActor, WebhookActor, ActorResponse
+from .channels import Channel, ConsoleChannel, WebhookChannel, ChannelResponse
 from .plugin import PermissionPlugin, create_plugin
 from .sanitization import (
     SanitizationConfig,
@@ -37,11 +37,11 @@ __all__ = [
     'PermissionConfig',
     'load_config',
     'validate_config',
-    # Actors
-    'Actor',
-    'ConsoleActor',
-    'WebhookActor',
-    'ActorResponse',
+    # Channels
+    'Channel',
+    'ConsoleChannel',
+    'WebhookChannel',
+    'ChannelResponse',
     # Plugin
     'PermissionPlugin',
     'create_plugin',

@@ -723,8 +723,8 @@ registry.expose_all({'file_edit': {'backup_dir': '/custom/backup/path'}})
 Allows the model to request clarification from users by asking questions with multiple choice options or free-text responses.
 
 **Configuration:**
-- `actor_type`: How to collect responses - `"console"` (default) or `"auto"` (for testing)
-- `actor_config`: Actor-specific configuration
+- `channel_type`: How to collect responses - `"console"` (default) or `"auto"` (for testing)
+- `channel_config`: Channel-specific configuration
 
 **Tools:**
 - `request_clarification`: Ask the user one or more questions
@@ -740,7 +740,7 @@ Allows the model to request clarification from users by asking questions with mu
 
 **Example:**
 ```python
-registry.expose_all({'clarification': {'actor_type': 'console'}})
+registry.expose_all({'clarification': {'channel_type': 'console'}})
 ```
 
 **Tool Usage Example:**
@@ -809,7 +809,7 @@ shared/plugins/
 │   ├── __init__.py
 │   ├── plugin.py
 │   ├── models.py
-│   ├── actors.py
+│   ├── channels.py
 │   └── tests/
 └── references/      # Documentation injection plugin
     ├── __init__.py

@@ -24,14 +24,14 @@ The demo below shows the model triggering a clarification request with multiple 
 
 ```python
 registry.expose_tool('clarification', {
-    'actor_type': 'console',  # 'console' or 'auto'
-    'actor_config': {}        # Actor-specific options
+    'channel_type': 'console',  # 'console' or 'auto'
+    'channel_config': {}        # Channel-specific options
 })
 ```
 
-### Actor Types
+### Channel Types
 
-| Actor | Description | Use Case |
+| Channel | Description | Use Case |
 |-------|-------------|----------|
 | `console` | Interactive terminal prompts | Production use |
 | `auto` | Automatically selects defaults | Testing/automation |
@@ -143,7 +143,7 @@ from shared.plugins import PluginRegistry
 # Setup
 registry = PluginRegistry()
 registry.discover()
-registry.expose_tool('clarification', {'actor_type': 'console'})
+registry.expose_tool('clarification', {'channel_type': 'console'})
 
 # Get executor
 executors = registry.get_exposed_executors()
@@ -185,11 +185,11 @@ shared/plugins/clarification/
 ├── __init__.py      # Package exports, PLUGIN_KIND = "tool"
 ├── plugin.py        # ClarificationPlugin class
 ├── models.py        # Data models (Question, Choice, Answer, etc.)
-├── actors.py        # User interaction actors (ConsoleActor, AutoActor)
+├── channels.py        # User interaction channels (ConsoleChannel, AutoChannel)
 ├── README.md        # This file
 └── tests/
     ├── test_models.py
-    ├── test_actors.py
+    ├── test_channels.py
     ├── test_plugin.py
     └── test_registry_integration.py
 ```

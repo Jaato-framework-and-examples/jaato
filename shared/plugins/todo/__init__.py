@@ -50,7 +50,7 @@ from .storage import (
     HybridStorage,
     create_storage,
 )
-from .actors import (
+from .channels import (
     TodoReporter,
     ConsoleReporter,
     WebhookReporter,
@@ -80,7 +80,7 @@ __all__ = [
     'FileStorage',
     'HybridStorage',
     'create_storage',
-    # Reporters (Actors)
+    # Reporters (Channels)
     'TodoReporter',
     'ConsoleReporter',
     'WebhookReporter',

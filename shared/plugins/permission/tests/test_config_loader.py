@@ -29,25 +29,25 @@ class TestPermissionConfig:
         assert config.whitelist_tools == []
         assert config.whitelist_patterns == []
         assert config.whitelist_arguments == {}
-        assert config.actor_type == "console"
-        assert config.actor_endpoint is None
-        assert config.actor_timeout == 30
+        assert config.channel_type == "console"
+        assert config.channel_endpoint is None
+        assert config.channel_timeout == 30
 
     def test_custom_values(self):
         config = PermissionConfig(
             default_policy="allow",
             blacklist_tools=["dangerous"],
             whitelist_patterns=["git *"],
-            actor_type="webhook",
-            actor_endpoint="http://example.com",
-            actor_timeout=60,
+            channel_type="webhook",
+            channel_endpoint="http://example.com",
+            channel_timeout=60,
         )
         assert config.default_policy == "allow"
         assert config.blacklist_tools == ["dangerous"]
         assert config.whitelist_patterns == ["git *"]
-        assert config.actor_type == "webhook"
-        assert config.actor_endpoint == "http://example.com"
-        assert config.actor_timeout == 60
+        assert config.channel_type == "webhook"
+        assert config.channel_endpoint == "http://example.com"
+        assert config.channel_timeout == 60
 
     def test_to_policy_dict(self):
         config = PermissionConfig(
@@ -96,7 +96,7 @@ class TestValidateConfig:
                 "patterns": ["git *"],
                 "arguments": {}
             },
-            "actor": {
+            "channel": {
                 "type": "console",
                 "timeout": 30
             }
@@ -163,26 +163,26 @@ class TestValidateConfig:
         assert not is_valid
         assert any("whitelist" in e for e in errors)
 
-    def test_invalid_actor_type(self):
-        config = {"actor": {"type": "invalid"}}
+    def test_invalid_channel_type(self):
+        config = {"channel": {"type": "invalid"}}
         is_valid, errors = validate_config(config)
         assert not is_valid
-        assert any("actor type" in e.lower() for e in errors)
+        assert any("channel type" in e.lower() for e in errors)
 
     def test_webhook_requires_endpoint(self):
-        config = {"actor": {"type": "webhook"}}
+        config = {"channel": {"type": "webhook"}}
         is_valid, errors = validate_config(config)
         assert not is_valid
         assert any("endpoint" in e.lower() for e in errors)
 
     def test_invalid_timeout(self):
-        config = {"actor": {"timeout": -5}}
+        config = {"channel": {"timeout": -5}}
         is_valid, errors = validate_config(config)
         assert not is_valid
         assert any("timeout" in e.lower() for e in errors)
 
     def test_invalid_timeout_type(self):
-        config = {"actor": {"timeout": "thirty"}}
+        config = {"channel": {"timeout": "thirty"}}
         is_valid, errors = validate_config(config)
         assert not is_valid
         assert any("timeout" in e.lower() for e in errors)
@@ -277,10 +277,10 @@ class TestLoadConfig:
             finally:
                 os.chdir(original_cwd)
 
-    def test_load_with_actor_config(self):
+    def test_load_with_channel_config(self):
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
             config_data = {
-                "actor": {
+                "channel": {
                     "type": "webhook",
                     "endpoint": "http://example.com/hook",
                     "timeout": 60
@@ -291,9 +291,9 @@ class TestLoadConfig:
 
             try:
                 config = load_config(f.name)
-                assert config.actor_type == "webhook"
-                assert config.actor_endpoint == "http://example.com/hook"
-                assert config.actor_timeout == 60
+                assert config.channel_type == "webhook"
+                assert config.channel_endpoint == "http://example.com/hook"
+                assert config.channel_timeout == 60
             finally:
                 os.unlink(f.name)
 

@@ -295,7 +295,7 @@ class TodoPlan:
 class ProgressEvent:
     """An event representing progress in a plan.
 
-    Used for reporting to actors.
+    Used for reporting to channels.
     """
 
     event_id: str

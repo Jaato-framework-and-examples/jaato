@@ -81,8 +81,8 @@ class RichClient:
 
         # Queue for permission/clarification input routing
         import queue
-        self._actor_input_queue: queue.Queue[str] = queue.Queue()
-        self._waiting_for_actor_input: bool = False
+        self._channel_input_queue: queue.Queue[str] = queue.Queue()
+        self._waiting_for_channel_input: bool = False
 
         # Background model thread tracking
         self._model_thread: Optional[threading.Thread] = None
@@ -235,27 +235,27 @@ class RichClient:
 
         # We'll configure the todo reporter after display is created
         # For now, use memory storage
-        # Note: clarification and permission actors use "queue" type for TUI integration
+        # Note: clarification and permission channels use "queue" type for TUI integration
         plugin_configs = {
             "todo": {
                 "reporter_type": "console",  # Temporary, will be replaced
                 "storage_type": "memory",
             },
             "references": {
-                "actor_type": "console",
+                "channel_type": "console",
             },
             "clarification": {
-                "actor_type": "queue",
+                "channel_type": "queue",
                 # Callbacks will be set after display is created
             },
         }
         self.registry.expose_all(plugin_configs)
         self.todo_plugin = self.registry.get_plugin("todo")
 
-        # Initialize permission plugin with queue actor for TUI integration
+        # Initialize permission plugin with queue channel for TUI integration
         self.permission_plugin = PermissionPlugin()
         self.permission_plugin.initialize({
-            "actor_type": "queue",
+            "channel_type": "queue",
             "policy": {
                 "defaultPolicy": "ask",
                 "whitelist": {"tools": [], "patterns": []},
@@ -298,10 +298,10 @@ class RichClient:
             f.write(f"[{ts}] {msg}\n")
             f.flush()
 
-    def _setup_queue_actors(self) -> None:
-        """Set up queue-based actors for permission and clarification.
+    def _setup_queue_channels(self) -> None:
+        """Set up queue-based channels for permission and clarification.
 
-        Queue actors display prompts in the output panel and receive user
+        Queue channels display prompts in the output panel and receive user
         input via a shared queue. This avoids terminal mode switching issues
         that occur when the model runs in a background thread.
         """
@@ -309,36 +309,36 @@ class RichClient:
             return
 
         def on_prompt_state_change(waiting: bool):
-            """Called when actor starts/stops waiting for input."""
-            self._waiting_for_actor_input = waiting
+            """Called when channel starts/stops waiting for input."""
+            self._waiting_for_channel_input = waiting
             self._trace(f"prompt_callback: waiting={waiting}")
             if self._display:
-                self._display.set_waiting_for_actor_input(waiting)
+                self._display.set_waiting_for_channel_input(waiting)
 
-        # Set callbacks on clarification plugin actor
+        # Set callbacks on clarification plugin channel
         if self.registry:
             clarification_plugin = self.registry.get_plugin("clarification")
-            if clarification_plugin and hasattr(clarification_plugin, '_actor'):
-                actor = clarification_plugin._actor
-                if hasattr(actor, 'set_callbacks'):
-                    actor.set_callbacks(
+            if clarification_plugin and hasattr(clarification_plugin, '_channel'):
+                channel = clarification_plugin._channel
+                if hasattr(channel, 'set_callbacks'):
+                    channel.set_callbacks(
                         output_callback=self._create_output_callback(),
-                        input_queue=self._actor_input_queue,
+                        input_queue=self._channel_input_queue,
                         prompt_callback=on_prompt_state_change,
                     )
-                    self._trace("Clarification actor callbacks set (queue)")
+                    self._trace("Clarification channel callbacks set (queue)")
 
-        # Set callbacks on permission plugin actor
-        if self.permission_plugin and hasattr(self.permission_plugin, '_actor'):
-            actor = self.permission_plugin._actor
-            self._trace(f"Permission actor type: {type(actor).__name__}")
-            if actor and hasattr(actor, 'set_callbacks'):
-                actor.set_callbacks(
+        # Set callbacks on permission plugin channel
+        if self.permission_plugin and hasattr(self.permission_plugin, '_channel'):
+            channel = self.permission_plugin._channel
+            self._trace(f"Permission channel type: {type(channel).__name__}")
+            if channel and hasattr(channel, 'set_callbacks'):
+                channel.set_callbacks(
                     output_callback=self._create_output_callback(),
-                    input_queue=self._actor_input_queue,
+                    input_queue=self._channel_input_queue,
                     prompt_callback=on_prompt_state_change,
                 )
-                self._trace("Permission actor callbacks set (queue)")
+                self._trace("Permission channel callbacks set (queue)")
 
     def _setup_session_plugin(self) -> None:
         """Set up session persistence plugin."""
@@ -523,13 +523,13 @@ class RichClient:
             self._display.handle_pager_input(user_input)
             return
 
-        # Route input to actor queue if waiting for permission/clarification
-        if self._waiting_for_actor_input:
+        # Route input to channel queue if waiting for permission/clarification
+        if self._waiting_for_channel_input:
             # Show the answer in output panel
             if user_input:
                 self._display.append_output("user", user_input, "write")
-            self._actor_input_queue.put(user_input)
-            self._trace(f"Input routed to actor queue: {user_input}")
+            self._channel_input_queue.put(user_input)
+            self._trace(f"Input routed to channel queue: {user_input}")
             return
 
         if not user_input:
@@ -604,9 +604,9 @@ class RichClient:
         # Set model info in status bar
         self._display.set_model_info(self._model_provider, self._model_name)
 
-        # Set up the live reporter and queue actors
+        # Set up the live reporter and queue channels
         self._setup_live_reporter()
-        self._setup_queue_actors()
+        self._setup_queue_channels()
 
         # Add welcome messages
         self._display.add_system_message(

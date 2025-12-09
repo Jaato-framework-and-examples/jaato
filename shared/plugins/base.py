@@ -54,7 +54,7 @@ class PermissionDisplayInfo:
     """Display information for permission approval UI.
 
     Plugins can provide this to customize how their tools are displayed
-    when requesting permission from the user/actor.
+    when requesting permission from the user/channel.
 
     Attributes:
         summary: Brief one-line description (e.g., "Update file: src/main.py")
@@ -347,7 +347,7 @@ class ToolPlugin(Protocol):
     #     self,
     #     tool_name: str,
     #     arguments: Dict[str, Any],
-    #     actor_type: str
+    #     channel_type: str
     # ) -> Optional[PermissionDisplayInfo]:
     #     """Format a permission request for display.
     #
@@ -358,7 +358,7 @@ class ToolPlugin(Protocol):
     #     Args:
     #         tool_name: Name of the tool being executed
     #         arguments: Arguments passed to the tool
-    #         actor_type: Type of actor requesting approval ("console", "webhook", "file")
+    #         channel_type: Type of channel requesting approval ("console", "webhook", "file")
     #
     #     Returns:
     #         PermissionDisplayInfo with formatted content, or None to use default.

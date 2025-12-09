@@ -27,10 +27,10 @@ class PermissionConfig:
     whitelist_patterns: List[str] = field(default_factory=list)
     whitelist_arguments: Dict[str, Dict[str, List[str]]] = field(default_factory=dict)
 
-    # Actor configuration
-    actor_type: str = "console"  # console, webhook, queue, file
-    actor_endpoint: Optional[str] = None
-    actor_timeout: int = 30  # seconds
+    # Channel configuration
+    channel_type: str = "console"  # console, webhook, queue, file
+    channel_endpoint: Optional[str] = None
+    channel_timeout: int = 30  # seconds
 
     def to_policy_dict(self) -> Dict[str, Any]:
         """Convert to dict format expected by PermissionPolicy.from_config()."""
@@ -92,21 +92,21 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
     else:
         _validate_list_rules(whitelist, "whitelist", errors)
 
-    # Validate actor configuration
-    actor = config.get("actor", {})
-    if actor:
-        actor_type = actor.get("type", "console")
-        if actor_type not in ("console", "webhook", "queue", "file"):
-            errors.append(f"Invalid actor type: {actor_type}")
+    # Validate channel configuration
+    channel = config.get("channel", {})
+    if channel:
+        channel_type = channel.get("type", "console")
+        if channel_type not in ("console", "webhook", "queue", "file"):
+            errors.append(f"Invalid channel type: {channel_type}")
 
-        if actor_type == "webhook":
-            endpoint = actor.get("endpoint")
+        if channel_type == "webhook":
+            endpoint = channel.get("endpoint")
             if not endpoint or not isinstance(endpoint, str):
-                errors.append("Webhook actor requires 'endpoint' URL")
+                errors.append("Webhook channel requires 'endpoint' URL")
 
-        timeout = actor.get("timeout")
+        timeout = channel.get("timeout")
         if timeout is not None and (not isinstance(timeout, (int, float)) or timeout <= 0):
-            errors.append("Actor timeout must be a positive number")
+            errors.append("Channel timeout must be a positive number")
 
     # Check for blacklist/whitelist conflicts (warning, not error)
     _check_conflicts(config, errors)
@@ -237,7 +237,7 @@ def load_config(
     # Parse into structured config
     blacklist = raw_config.get("blacklist", {})
     whitelist = raw_config.get("whitelist", {})
-    actor = raw_config.get("actor", {})
+    channel = raw_config.get("channel", {})
 
     return PermissionConfig(
         version=str(raw_config.get("version", "1.0")),
@@ -248,9 +248,9 @@ def load_config(
         whitelist_tools=whitelist.get("tools", []),
         whitelist_patterns=whitelist.get("patterns", []),
         whitelist_arguments=whitelist.get("arguments", {}),
-        actor_type=actor.get("type", "console"),
-        actor_endpoint=actor.get("endpoint"),
-        actor_timeout=actor.get("timeout", 30),
+        channel_type=channel.get("type", "console"),
+        channel_endpoint=channel.get("endpoint"),
+        channel_timeout=channel.get("timeout", 30),
     )
 
 
@@ -286,7 +286,7 @@ def create_default_config(path: str) -> None:
             ],
             "arguments": {}
         },
-        "actor": {
+        "channel": {
             "type": "console",
             "timeout": 30
         }

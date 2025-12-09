@@ -20,7 +20,7 @@ Example usage:
     # Create and initialize plugin
     plugin = create_plugin()
     plugin.initialize({
-        "actor_type": "console",
+        "channel_type": "console",
     })
 
     # Use via tool executors (for LLM)
@@ -46,12 +46,12 @@ from .models import (
     SelectionRequest,
     SelectionResponse,
 )
-from .actors import (
-    SelectionActor,
-    ConsoleSelectionActor,
-    WebhookSelectionActor,
-    FileSelectionActor,
-    create_actor,
+from .channels import (
+    SelectionChannel,
+    ConsoleSelectionChannel,
+    WebhookSelectionChannel,
+    FileSelectionChannel,
+    create_channel,
 )
 from .config_loader import (
     ReferencesConfig,
@@ -69,12 +69,12 @@ __all__ = [
     'ReferenceSource',
     'SelectionRequest',
     'SelectionResponse',
-    # Actors
-    'SelectionActor',
-    'ConsoleSelectionActor',
-    'WebhookSelectionActor',
-    'FileSelectionActor',
-    'create_actor',
+    # Channels
+    'SelectionChannel',
+    'ConsoleSelectionChannel',
+    'WebhookSelectionChannel',
+    'FileSelectionChannel',
+    'create_channel',
     # Config
     'ReferencesConfig',
     'ConfigValidationError',

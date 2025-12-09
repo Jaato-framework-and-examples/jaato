@@ -236,7 +236,7 @@ updateFile and removeFile operations."""
         self,
         tool_name: str,
         arguments: Dict[str, Any],
-        actor_type: str
+        channel_type: str
     ) -> Optional[PermissionDisplayInfo]:
         """Format permission request with diff display for file operations.
 
@@ -246,7 +246,7 @@ updateFile and removeFile operations."""
         Args:
             tool_name: Name of the tool
             arguments: Tool arguments
-            actor_type: Type of actor (console, webhook, file)
+            channel_type: Type of channel (console, webhook, file)
 
         Returns:
             PermissionDisplayInfo with formatted diff, or None for default display

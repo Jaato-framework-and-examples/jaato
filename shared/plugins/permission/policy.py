@@ -27,7 +27,7 @@ class PermissionDecision(Enum):
     """Possible decisions from permission evaluation."""
     ALLOW = "allow"
     DENY = "deny"
-    ASK_ACTOR = "ask_actor"  # Policy undecided, needs actor approval
+    ASK_CHANNEL = "ask_channel"  # Policy undecided, needs channel approval
 
 
 @dataclass
@@ -65,7 +65,7 @@ class PermissionPolicy:
     whitelist_patterns: List[str] = field(default_factory=list)
     whitelist_arguments: Dict[str, Dict[str, List[str]]] = field(default_factory=dict)
 
-    # Session-level dynamic rules (added via actor responses)
+    # Session-level dynamic rules (added via channel responses)
     session_blacklist: Set[str] = field(default_factory=set)
     session_whitelist: Set[str] = field(default_factory=set)
     session_default_policy: Optional[str] = None  # Overrides default_policy when set
@@ -134,10 +134,10 @@ class PermissionPolicy:
                 rule_type="default"
             )
         else:
-            # effective_default == "ask" or unknown -> ask actor
+            # effective_default == "ask" or unknown -> ask channel
             return PolicyMatch(
-                decision=PermissionDecision.ASK_ACTOR,
-                reason="No matching rule, requires actor approval",
+                decision=PermissionDecision.ASK_CHANNEL,
+                reason="No matching rule, requires channel approval",
                 rule_type="default"
             )
 

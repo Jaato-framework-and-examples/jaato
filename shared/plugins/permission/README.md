@@ -30,8 +30,8 @@ The demo below shows the permission plugin intercepting a tool execution request
 │                     │  [if allowed]   │    └────────┬─────────┘   │
 │                     │       │         │             │             │
 │                     │       ▼         │    ┌────────▼─────────┐   │
-│                     │  Execute Tool   │    │      Actor       │   │
-│                     └─────────────────┘    │ (if ASK_ACTOR)   │   │
+│                     │  Execute Tool   │    │      Channel       │   │
+│                     └─────────────────┘    │ (if ASK_CHANNEL)   │   │
 │                                            └──────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -47,7 +47,7 @@ The demo below shows the permission plugin intercepting a tool execution request
    - Check static blacklist
    - Check session whitelist
    - Check static whitelist
-   - Apply default policy or ask actor
+   - Apply default policy or ask channel
 4. **If allowed**: Original plugin executor runs
 5. **If denied**: Error returned to model
 
@@ -104,7 +104,7 @@ registry.expose_all()  # All plugins exposed by default
 permission_plugin = PermissionPlugin()
 permission_plugin.initialize({
     "config_path": "permissions.json",  # Optional: path to config file
-    "actor_type": "console",            # console, webhook, or file
+    "channel_type": "console",            # console, webhook, or file
 })
 
 # Configure tools with permission control
@@ -140,7 +140,7 @@ permission_plugin.initialize({
         "blacklist": {"patterns": ["rm -rf *", "sudo *"]},
         "whitelist": {"patterns": ["git *", "ls *"]}
     },
-    "actor_type": "console"
+    "channel_type": "console"
 })
 executor.set_permission_plugin(permission_plugin)
 
@@ -154,7 +154,7 @@ for name, fn in permission_plugin.get_executors().items():
 ```bash
 # Set config path via environment
 export PERMISSION_CONFIG_PATH=/path/to/permissions.json
-export PERMISSION_WEBHOOK_TOKEN=secret-token  # For webhook actor
+export PERMISSION_WEBHOOK_TOKEN=secret-token  # For webhook channel
 
 # Run your script
 python cli_vs_mcp/cli_mcp_harness.py --scenarios get_page
@@ -195,11 +195,11 @@ permission_config = {
         "whitelist": {...}
     },
 
-    # Actor type: "console", "webhook", or "file"
-    "actor_type": "console",
+    # Channel type: "console", "webhook", or "file"
+    "channel_type": "console",
 
-    # Actor-specific configuration (optional)
-    "actor_config": {
+    # Channel-specific configuration (optional)
+    "channel_config": {
         "timeout": 30,
         "endpoint": "https://...",  # for webhook
         "base_path": "/tmp/approvals"  # for file
@@ -213,21 +213,21 @@ permission_config = {
 |-----|------|---------|-------------|
 | `config_path` | `str` | `None` | Path to `permissions.json` file |
 | `policy` | `dict` | `None` | Inline policy dict (overrides file) |
-| `actor_type` | `str` | `"console"` | Actor type for interactive approval |
-| `actor_config` | `dict` | `{}` | Actor-specific settings |
+| `channel_type` | `str` | `"console"` | Channel type for interactive approval |
+| `channel_config` | `dict` | `{}` | Channel-specific settings |
 
-### Actor-Specific Configuration
+### Channel-Specific Configuration
 
-**Console Actor** (`actor_type: "console"`):
+**Console Channel** (`channel_type: "console"`):
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `use_colors` | `bool` | `True` | Enable ANSI colorized output for prompts and diffs |
 | `skip_readline_history` | `bool` | `True` | Avoid polluting readline history with y/n responses |
 
-**Output Callback Support**: The console actor supports real-time output via the `OutputCallback` mechanism. When a callback is set (via `set_output_callback()`), permission prompts are emitted through the callback with `source="permission"` instead of being printed directly to the console. This enables clients to integrate permission prompts into their own output handling.
+**Output Callback Support**: The console channel supports real-time output via the `OutputCallback` mechanism. When a callback is set (via `set_output_callback()`), permission prompts are emitted through the callback with `source="permission"` instead of being printed directly to the console. This enables clients to integrate permission prompts into their own output handling.
 
-**Webhook Actor** (`actor_type: "webhook"`):
+**Webhook Channel** (`channel_type: "webhook"`):
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -236,7 +236,7 @@ permission_config = {
 | `headers` | `dict` | `{}` | Additional HTTP headers |
 | `auth_token` | `str` | `None` | Bearer token (or use `PERMISSION_WEBHOOK_TOKEN` env var) |
 
-**File Actor** (`actor_type: "file"`):
+**File Channel** (`channel_type: "file"`):
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -293,7 +293,7 @@ permission_plugin.initialize(None)  # Uses PERMISSION_CONFIG_PATH env or default
 permission_plugin = PermissionPlugin()
 permission_plugin.initialize({
     "config_path": "permissions.json",
-    "actor_type": "console"
+    "channel_type": "console"
 })
 ```
 
@@ -310,17 +310,17 @@ permission_plugin.initialize({
             "patterns": ["git *", "npm *", "python *"]
         }
     },
-    "actor_type": "console"
+    "channel_type": "console"
 })
 ```
 
-**Webhook actor for external approval:**
+**Webhook channel for external approval:**
 ```python
 permission_plugin = PermissionPlugin()
 permission_plugin.initialize({
     "config_path": "permissions.json",
-    "actor_type": "webhook",
-    "actor_config": {
+    "channel_type": "webhook",
+    "channel_config": {
         "endpoint": "https://approvals.example.com/api/permission",
         "timeout": 60,
         "headers": {"X-Service": "jaato"}
@@ -338,7 +338,7 @@ harness_config = {
     "enable_permissions": True,
     "permission_config": {
         "config_path": "permissions.json",
-        "actor_type": "console"
+        "channel_type": "console"
     }
 }
 
@@ -390,7 +390,7 @@ response = jaato.send_message(scenario_prompt)
     }
   },
 
-  "actor": {
+  "channel": {
     "type": "console",
     "timeout": 30,
     "endpoint": "https://approvals.example.com/api/permission"
@@ -548,9 +548,9 @@ This configuration:
 
 | Priority | Rule Type | Effect |
 |----------|-----------|--------|
-| 1 | Session blacklist | DENY (added via actor "never" response) |
+| 1 | Session blacklist | DENY (added via channel "never" response) |
 | 2 | Static blacklist | DENY |
-| 3 | Session whitelist | ALLOW (added via actor "always" response) |
+| 3 | Session whitelist | ALLOW (added via channel "always" response) |
 | 4 | Static whitelist | ALLOW |
 | 5 | Default policy | "allow", "deny", or "ask" |
 
@@ -565,9 +565,9 @@ Within blacklist (or whitelist), rules are checked in this order:
 
 First match wins within each priority level.
 
-## Actor Types
+## Channel Types
 
-### Console Actor (Interactive)
+### Console Channel (Interactive)
 
 Prompts the user in the terminal:
 
@@ -598,12 +598,12 @@ Responses:
 **Readline History**: By default, permission responses are automatically excluded from readline history since they have no utility for recall. This can be disabled via config:
 
 ```python
-actor_config = {
+channel_config = {
     "skip_readline_history": False  # Include responses in readline history
 }
 ```
 
-### Webhook Actor (External Approval)
+### Webhook Channel (External Approval)
 
 Sends HTTP POST to configured endpoint:
 
@@ -630,7 +630,7 @@ Expected response:
 }
 ```
 
-### File Actor (Async Approval)
+### File Channel (Async Approval)
 
 For background/automated approval workflows:
 1. Writes request to `{base_path}/requests/{request_id}.json`
@@ -697,9 +697,9 @@ Example ledger entry:
 The `method` field indicates how the decision was made:
 - `whitelist` / `blacklist`: Matched static policy rule
 - `session_whitelist` / `session_blacklist`: Matched session rule
-- `user_approved` / `user_denied`: Actor approval
+- `user_approved` / `user_denied`: Channel approval
 - `allow_all`: User pre-approved all requests for this session
-- `timeout`: Actor timed out
+- `timeout`: Channel timed out
 - `default`: Default policy applied
 
 ### Permission Metadata in Function Responses
@@ -743,7 +743,7 @@ The intent helps users understand WHY the model wants to run a command, making a
 
 ## Context Parameter
 
-The permission system supports an optional `context` parameter that provides additional information to actors when making approval decisions. This context flows through the entire permission check pipeline.
+The permission system supports an optional `context` parameter that provides additional information to channels when making approval decisions. This context flows through the entire permission check pipeline.
 
 ### Setting Context
 
@@ -773,21 +773,21 @@ ToolExecutor.execute(name, args)
         ▼
 PermissionPlugin.check_permission(name, args, context)
         │
-        ▼ (if ASK_ACTOR)
+        ▼ (if ASK_CHANNEL)
 PermissionRequest.create(..., context=context)
         │
         ▼
-Actor.request_permission(request)
+Channel.request_permission(request)
         │
         ▼
-Actor displays/uses context for decision
+Channel displays/uses context for decision
 ```
 
-### Context in Actor Requests
+### Context in Channel Requests
 
-When an actor is invoked, the context is included in the permission request:
+When an channel is invoked, the context is included in the permission request:
 
-**Console Actor Display:**
+**Console Channel Display:**
 ```
 ============================================================
 [askPermission] Tool execution request:
@@ -973,7 +973,7 @@ For true isolation, wrap execution in OS-level sandboxes:
 │ Application Layer (this plugin)                               │
 │ - Permission policies (blacklist/whitelist)                  │
 │ - Sanitization (shell injection, path scope)                 │
-│ - Actor approval                                              │
+│ - Channel approval                                              │
 └──────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -1032,7 +1032,7 @@ def sandboxed_execute(command: str, workspace: str) -> dict:
 2. **No self-bypass**: askPermission tool cannot modify its own permissions
 3. **Session isolation**: Session rules don't persist across runs
 4. **Audit trail**: All decisions logged to ledger for review
-5. **Timeout handling**: Actor timeouts default to DENY (configurable)
+5. **Timeout handling**: Channel timeouts default to DENY (configurable)
 6. **Sanitization runs first**: Before blacklist/whitelist checks
 7. **Defense in depth**: Application controls + OS isolation required
 

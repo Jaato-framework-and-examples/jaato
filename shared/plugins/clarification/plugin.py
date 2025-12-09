@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..model_provider.types import ToolSchema
 
 from ..base import UserCommand
-from .actors import ClarificationActor, create_actor
+from .channels import ClarificationChannel, create_channel
 from .models import (
     Choice,
     ClarificationRequest,
@@ -30,7 +30,7 @@ class ClarificationPlugin:
 
     def __init__(self):
         self._initialized = False
-        self._actor: Optional[ClarificationActor] = None
+        self._channel: Optional[ClarificationChannel] = None
 
     @property
     def name(self) -> str:
@@ -41,19 +41,19 @@ class ClarificationPlugin:
 
         Args:
             config: Optional configuration dictionary with:
-                - actor_type: "console" (default) or "auto"
-                - actor_config: Dict of config for the actor
+                - channel_type: "console" (default) or "auto"
+                - channel_config: Dict of config for the channel
         """
         config = config or {}
-        actor_type = config.get("actor_type", "console")
-        actor_config = config.get("actor_config", {})
+        channel_type = config.get("channel_type", "console")
+        channel_config = config.get("channel_config", {})
 
-        self._actor = create_actor(actor_type, **actor_config)
+        self._channel = create_channel(channel_type, **channel_config)
         self._initialized = True
 
     def shutdown(self) -> None:
         """Clean up plugin resources."""
-        self._actor = None
+        self._channel = None
         self._initialized = False
 
     def get_tool_schemas(self) -> List[ToolSchema]:
@@ -230,15 +230,15 @@ The tool returns responses keyed by question number (1-based):
         Returns:
             Dict with either 'responses' (answers) or 'error'
         """
-        if not self._initialized or not self._actor:
+        if not self._initialized or not self._channel:
             return {"error": "Plugin not initialized"}
 
         try:
             # Parse the request
             request = self._parse_request(args)
 
-            # Get user responses via the actor
-            response = self._actor.request_clarification(request)
+            # Get user responses via the channel
+            response = self._channel.request_clarification(request)
 
             # Format the response for the model
             if response.cancelled:

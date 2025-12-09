@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..model_provider.types import ToolSchema
 
 from .models import ReferenceSource, InjectionMode
-from .actors import SelectionActor, ConsoleSelectionActor, create_actor
+from .channels import SelectionChannel, ConsoleSelectionChannel, create_channel
 from .config_loader import load_config, ReferencesConfig
 from ..base import UserCommand, CommandCompletion
 
@@ -24,7 +24,7 @@ class ReferencesPlugin:
 
     The plugin maintains a catalog of reference sources and:
     - AUTO sources: Included in system instructions for model to fetch
-    - SELECTABLE sources: User chooses via actor (console/webhook/file)
+    - SELECTABLE sources: User chooses via channel (console/webhook/file)
 
     The model uses existing tools (CLI, MCP, URL fetch) to retrieve content.
     This plugin only provides metadata and handles user selection.
@@ -34,7 +34,7 @@ class ReferencesPlugin:
         self._name = "references"
         self._config: Optional[ReferencesConfig] = None
         self._sources: List[ReferenceSource] = []
-        self._actor: Optional[SelectionActor] = None
+        self._channel: Optional[SelectionChannel] = None
         self._selected_source_ids: List[str] = []  # User-selected during session
         self._initialized = False
 
@@ -51,8 +51,8 @@ class ReferencesPlugin:
 
                    Config options:
                    - config_path: Path to references.json file
-                   - actor_type: Type of actor ("console", "webhook", "file")
-                   - actor_config: Configuration for the actor
+                   - channel_type: Type of channel ("console", "webhook", "file")
+                   - channel_config: Configuration for the channel
                    - sources: Inline sources list (overrides file)
         """
         config = config or {}
@@ -74,40 +74,40 @@ class ReferencesPlugin:
         else:
             self._sources = self._config.sources
 
-        # Initialize actor
-        actor_type = config.get("actor_type") or self._config.actor_type
-        actor_config = config.get("actor_config", {})
+        # Initialize channel
+        channel_type = config.get("channel_type") or self._config.channel_type
+        channel_config = config.get("channel_config", {})
 
         # Set timeout from config
-        if "timeout" not in actor_config:
-            actor_config["timeout"] = self._config.actor_timeout
+        if "timeout" not in channel_config:
+            channel_config["timeout"] = self._config.channel_timeout
 
         # Set type-specific config
-        if actor_type == "webhook" and "endpoint" not in actor_config:
-            if self._config.actor_endpoint:
-                actor_config["endpoint"] = self._config.actor_endpoint
+        if channel_type == "webhook" and "endpoint" not in channel_config:
+            if self._config.channel_endpoint:
+                channel_config["endpoint"] = self._config.channel_endpoint
 
-        if actor_type == "file" and "base_path" not in actor_config:
-            if self._config.actor_base_path:
-                actor_config["base_path"] = self._config.actor_base_path
+        if channel_type == "file" and "base_path" not in channel_config:
+            if self._config.channel_base_path:
+                channel_config["base_path"] = self._config.channel_base_path
 
         try:
-            self._actor = create_actor(actor_type, actor_config)
+            self._channel = create_channel(channel_type, channel_config)
         except (ValueError, RuntimeError) as e:
-            # Fall back to console actor if configured actor fails
-            print(f"Warning: Failed to initialize {actor_type} actor: {e}")
-            print("Falling back to console actor")
-            self._actor = ConsoleSelectionActor()
-            self._actor.initialize({})
+            # Fall back to console channel if configured channel fails
+            print(f"Warning: Failed to initialize {channel_type} channel: {e}")
+            print("Falling back to console channel")
+            self._channel = ConsoleSelectionChannel()
+            self._channel.initialize({})
 
         self._selected_source_ids = []
         self._initialized = True
 
     def shutdown(self) -> None:
         """Shutdown the plugin and clean up resources."""
-        if self._actor:
-            self._actor.shutdown()
-        self._actor = None
+        if self._channel:
+            self._channel.shutdown()
+        self._channel = None
         self._sources = []
         self._selected_source_ids = []
         self._initialized = False
@@ -179,7 +179,7 @@ class ReferencesPlugin:
     def _execute_select(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute reference selection flow.
 
-        Presents available selectable sources to user via the configured actor,
+        Presents available selectable sources to user via the configured channel,
         then returns instructions for the model to fetch selected references.
         """
         # Early check: no sources configured at all
@@ -212,11 +212,11 @@ class ReferencesPlugin:
                 "message": "No additional reference sources available for selection."
             }
 
-        # Present to user via actor
-        selected_ids = self._actor.present_selection(available, context)
+        # Present to user via channel
+        selected_ids = self._channel.present_selection(available, context)
 
         if not selected_ids:
-            self._actor.notify_result("No reference sources selected.")
+            self._channel.notify_result("No reference sources selected.")
             return {
                 "status": "none_selected",
                 "message": "User did not select any reference sources."
@@ -232,7 +232,7 @@ class ReferencesPlugin:
         for source in selected_sources:
             instructions.append(source.to_instruction())
 
-        self._actor.notify_result(
+        self._channel.notify_result(
             f"Selected {len(selected_sources)} reference source(s). "
             "Instructions provided to model."
         )

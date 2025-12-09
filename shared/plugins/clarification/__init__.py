@@ -10,7 +10,7 @@ more information to proceed with a task. It supports:
 
 PLUGIN_KIND = "tool"
 
-from .actors import AutoActor, ClarificationActor, ConsoleActor, create_actor
+from .channels import AutoChannel, ClarificationChannel, ConsoleChannel, create_channel
 from .models import (
     Answer,
     Choice,
@@ -33,9 +33,9 @@ __all__ = [
     "ClarificationRequest",
     "Answer",
     "ClarificationResponse",
-    # Actors
-    "ClarificationActor",
-    "ConsoleActor",
-    "AutoActor",
-    "create_actor",
+    # Channels
+    "ClarificationChannel",
+    "ConsoleChannel",
+    "AutoChannel",
+    "create_channel",
 ]

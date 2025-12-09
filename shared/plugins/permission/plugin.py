@@ -1,7 +1,7 @@
 """Permission plugin for controlling tool execution access.
 
 This plugin intercepts tool execution requests and enforces access policies
-through blacklist/whitelist rules and interactive actor approval.
+through blacklist/whitelist rules and interactive channel approval.
 """
 
 import fnmatch
@@ -11,13 +11,13 @@ from ..model_provider.types import ToolSchema
 
 from .policy import PermissionPolicy, PermissionDecision, PolicyMatch
 from .config_loader import load_config, PermissionConfig
-from .actors import (
-    Actor,
-    ActorDecision,
-    ActorResponse,
+from .channels import (
+    Channel,
+    ChannelDecision,
+    ChannelResponse,
     PermissionRequest,
-    ConsoleActor,
-    create_actor,
+    ConsoleChannel,
+    create_channel,
 )
 from ..base import UserCommand, CommandCompletion, PermissionDisplayInfo, OutputCallback
 
@@ -34,7 +34,7 @@ class PermissionPlugin:
     requests and enforces access policies. It can:
     - Block tools via blacklist rules
     - Allow tools via whitelist rules
-    - Prompt an actor for approval when policy is ambiguous
+    - Prompt an channel for approval when policy is ambiguous
 
     The plugin has two distinct roles that are controlled independently:
 
@@ -54,7 +54,7 @@ class PermissionPlugin:
     def __init__(self):
         self._config: Optional[PermissionConfig] = None
         self._policy: Optional[PermissionPolicy] = None
-        self._actor: Optional[Actor] = None
+        self._channel: Optional[Channel] = None
         self._registry: Optional['PluginRegistry'] = None
         self._initialized = False
         self._wrapped_executors: Dict[str, Callable] = {}
@@ -82,9 +82,9 @@ class PermissionPlugin:
         Args:
             callback: OutputCallback function, or None to use default output.
         """
-        # Forward to actor if it supports callbacks
-        if self._actor and hasattr(self._actor, 'set_output_callback'):
-            self._actor.set_output_callback(callback)
+        # Forward to channel if it supports callbacks
+        if self._channel and hasattr(self._channel, 'set_output_callback'):
+            self._channel.set_output_callback(callback)
 
     @property
     def name(self) -> str:
@@ -99,8 +99,8 @@ class PermissionPlugin:
 
                    Config options:
                    - config_path: Path to permissions.json file
-                   - actor_type: Type of actor ("console", "webhook", "file")
-                   - actor_config: Configuration for the actor
+                   - channel_type: Type of channel ("console", "webhook", "file")
+                   - channel_config: Configuration for the channel
                    - policy: Inline policy dict (overrides file)
         """
         # Load configuration
@@ -121,34 +121,34 @@ class PermissionPlugin:
         else:
             self._policy = PermissionPolicy.from_config(self._config.to_policy_dict())
 
-        # Initialize actor
-        actor_type = config.get("actor_type") or self._config.actor_type
-        actor_config = config.get("actor_config", {})
+        # Initialize channel
+        channel_type = config.get("channel_type") or self._config.channel_type
+        channel_config = config.get("channel_config", {})
 
         # Set default timeout from config
-        if "timeout" not in actor_config:
-            actor_config["timeout"] = self._config.actor_timeout
+        if "timeout" not in channel_config:
+            channel_config["timeout"] = self._config.channel_timeout
 
         # For webhook, ensure endpoint is set
-        if actor_type == "webhook" and "endpoint" not in actor_config:
-            actor_config["endpoint"] = self._config.actor_endpoint
+        if channel_type == "webhook" and "endpoint" not in channel_config:
+            channel_config["endpoint"] = self._config.channel_endpoint
 
         try:
-            self._actor = create_actor(actor_type, actor_config)
+            self._channel = create_channel(channel_type, channel_config)
         except (ValueError, RuntimeError) as e:
-            # Fall back to console actor if configured actor fails
-            print(f"Warning: Failed to initialize {actor_type} actor: {e}")
-            print("Falling back to console actor")
-            self._actor = ConsoleActor()
+            # Fall back to console channel if configured channel fails
+            print(f"Warning: Failed to initialize {channel_type} channel: {e}")
+            print("Falling back to console channel")
+            self._channel = ConsoleChannel()
 
         self._initialized = True
 
     def shutdown(self) -> None:
         """Shutdown the permission plugin."""
-        if self._actor:
-            self._actor.shutdown()
+        if self._channel:
+            self._channel.shutdown()
         self._policy = None
-        self._actor = None
+        self._channel = None
         self._registry = None
         self._initialized = False
         self._wrapped_executors.clear()
@@ -497,7 +497,7 @@ If a tool is denied, do not attempt to execute it."""
         decision_symbol = {
             "ALLOW": "✓",
             "DENY": "✗",
-            "ASK_ACTOR": "?",
+            "ASK_CHANNEL": "?",
         }.get(match.decision.name, "•")
 
         lines = [f"{tool_name} → {decision_symbol} {match.decision.name}"]
@@ -572,7 +572,7 @@ If a tool is denied, do not attempt to execute it."""
         if not intent:
             return {"error": "intent is required - explain what you intend to achieve with this tool"}
 
-        # Pass intent in context for actor to display
+        # Pass intent in context for channel to display
         context = {"intent": intent}
         allowed, perm_info = self.check_permission(tool_name, tool_args, context)
 
@@ -598,7 +598,7 @@ If a tool is denied, do not attempt to execute it."""
         Args:
             tool_name: Name of the tool to execute
             args: Arguments for the tool
-            context: Optional context for actor (session_id, turn_number, etc.)
+            context: Optional context for channel (session_id, turn_number, etc.)
 
         Returns:
             Tuple of (is_allowed, metadata_dict) where metadata_dict contains:
@@ -626,15 +626,15 @@ If a tool is denied, do not attempt to execute it."""
             self._log_decision(tool_name, args, "deny", match.reason)
             return False, {'reason': match.reason, 'method': match.rule_type or 'policy'}
 
-        elif match.decision == PermissionDecision.ASK_ACTOR:
-            # Need to ask the actor
-            if not self._actor:
-                self._log_decision(tool_name, args, "deny", "No actor configured")
-                return False, {'reason': 'No actor configured for approval', 'method': 'no_actor'}
+        elif match.decision == PermissionDecision.ASK_CHANNEL:
+            # Need to ask the channel
+            if not self._channel:
+                self._log_decision(tool_name, args, "deny", "No channel configured")
+                return False, {'reason': 'No channel configured for approval', 'method': 'no_channel'}
 
             # Get custom display info from source plugin if available
-            actor_type = self._actor.name if self._actor else "console"
-            display_info = self._get_display_info(tool_name, args, actor_type)
+            channel_type = self._channel.name if self._channel else "console"
+            display_info = self._get_display_info(tool_name, args, channel_type)
 
             # Build context with display info
             request_context = dict(context) if context else {}
@@ -644,36 +644,36 @@ If a tool is denied, do not attempt to execute it."""
             request = PermissionRequest.create(
                 tool_name=tool_name,
                 arguments=args,
-                timeout=self._config.actor_timeout if self._config else 30,
+                timeout=self._config.channel_timeout if self._config else 30,
                 context=request_context,
             )
 
-            response = self._actor.request_permission(request)
-            return self._handle_actor_response(tool_name, args, response)
+            response = self._channel.request_permission(request)
+            return self._handle_channel_response(tool_name, args, response)
 
         # Unknown decision type, deny by default
         return False, {'reason': 'Unknown policy decision', 'method': 'unknown'}
 
-    def _handle_actor_response(
+    def _handle_channel_response(
         self,
         tool_name: str,
         args: Dict[str, Any],
-        response: ActorResponse
+        response: ChannelResponse
     ) -> Tuple[bool, Dict[str, Any]]:
-        """Handle response from an actor.
+        """Handle response from an channel.
 
-        Updates session rules if actor requests it.
+        Updates session rules if channel requests it.
 
         Returns:
             Tuple of (is_allowed, metadata_dict) with 'reason' and 'method'.
         """
         decision = response.decision
 
-        if decision in (ActorDecision.ALLOW, ActorDecision.ALLOW_ONCE):
+        if decision in (ChannelDecision.ALLOW, ChannelDecision.ALLOW_ONCE):
             self._log_decision(tool_name, args, "allow", response.reason)
             return True, {'reason': response.reason, 'method': 'user_approved'}
 
-        elif decision == ActorDecision.ALLOW_SESSION:
+        elif decision == ChannelDecision.ALLOW_SESSION:
             # Add to session whitelist
             pattern = response.remember_pattern or tool_name
             if self._policy:
@@ -681,17 +681,17 @@ If a tool is denied, do not attempt to execute it."""
             self._log_decision(tool_name, args, "allow", f"Session whitelist: {pattern}")
             return True, {'reason': response.reason, 'method': 'session_whitelist'}
 
-        elif decision == ActorDecision.ALLOW_ALL:
+        elif decision == ChannelDecision.ALLOW_ALL:
             # Pre-approve all future requests in this session
             self._allow_all = True
             self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
             return True, {'reason': response.reason, 'method': 'allow_all'}
 
-        elif decision == ActorDecision.DENY:
+        elif decision == ChannelDecision.DENY:
             self._log_decision(tool_name, args, "deny", response.reason)
             return False, {'reason': response.reason, 'method': 'user_denied'}
 
-        elif decision == ActorDecision.DENY_SESSION:
+        elif decision == ChannelDecision.DENY_SESSION:
             # Add to session blacklist
             pattern = response.remember_pattern or tool_name
             if self._policy:
@@ -699,13 +699,13 @@ If a tool is denied, do not attempt to execute it."""
             self._log_decision(tool_name, args, "deny", f"Session blacklist: {pattern}")
             return False, {'reason': response.reason, 'method': 'session_blacklist'}
 
-        elif decision == ActorDecision.TIMEOUT:
-            self._log_decision(tool_name, args, "deny", "Actor timeout")
+        elif decision == ChannelDecision.TIMEOUT:
+            self._log_decision(tool_name, args, "deny", "Channel timeout")
             return False, {'reason': response.reason, 'method': 'timeout'}
 
         # Unknown decision, deny
-        self._log_decision(tool_name, args, "deny", "Unknown actor decision")
-        return False, {'reason': 'Unknown actor decision', 'method': 'unknown'}
+        self._log_decision(tool_name, args, "deny", "Unknown channel decision")
+        return False, {'reason': 'Unknown channel decision', 'method': 'unknown'}
 
     def _log_decision(
         self,
@@ -726,7 +726,7 @@ If a tool is denied, do not attempt to execute it."""
         self,
         tool_name: str,
         args: Dict[str, Any],
-        actor_type: str
+        channel_type: str
     ) -> Optional[PermissionDisplayInfo]:
         """Get display info for a tool from its source plugin.
 
@@ -736,7 +736,7 @@ If a tool is denied, do not attempt to execute it."""
         Args:
             tool_name: Name of the tool
             args: Arguments passed to the tool
-            actor_type: Type of actor requesting display info
+            channel_type: Type of channel requesting display info
 
         Returns:
             PermissionDisplayInfo if plugin provides custom formatting, None otherwise.
@@ -750,7 +750,7 @@ If a tool is denied, do not attempt to execute it."""
 
         if hasattr(plugin, 'format_permission_request'):
             try:
-                return plugin.format_permission_request(tool_name, args, actor_type)
+                return plugin.format_permission_request(tool_name, args, channel_type)
             except Exception:
                 # If formatting fails, fall back to default
                 return None

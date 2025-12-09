@@ -3,7 +3,7 @@
 import pytest
 
 from ..plugin import ClarificationPlugin, create_plugin
-from ..actors import AutoActor
+from ..channels import AutoChannel
 
 
 class TestClarificationPluginInitialization:
@@ -21,24 +21,24 @@ class TestClarificationPluginInitialization:
         plugin = ClarificationPlugin()
         plugin.initialize()
         assert plugin._initialized is True
-        assert plugin._actor is not None
+        assert plugin._channel is not None
 
-    def test_initialize_with_console_actor(self):
+    def test_initialize_with_console_channel(self):
         plugin = ClarificationPlugin()
-        plugin.initialize({"actor_type": "console"})
+        plugin.initialize({"channel_type": "console"})
         assert plugin._initialized is True
 
-    def test_initialize_with_auto_actor(self):
+    def test_initialize_with_auto_channel(self):
         plugin = ClarificationPlugin()
-        plugin.initialize({"actor_type": "auto"})
+        plugin.initialize({"channel_type": "auto"})
         assert plugin._initialized is True
-        assert isinstance(plugin._actor, AutoActor)
+        assert isinstance(plugin._channel, AutoChannel)
 
-    def test_initialize_with_auto_actor_config(self):
+    def test_initialize_with_auto_channel_config(self):
         plugin = ClarificationPlugin()
         plugin.initialize({
-            "actor_type": "auto",
-            "actor_config": {"default_free_text": "custom"},
+            "channel_type": "auto",
+            "channel_config": {"default_free_text": "custom"},
         })
         assert plugin._initialized is True
 
@@ -48,7 +48,7 @@ class TestClarificationPluginInitialization:
         plugin.shutdown()
 
         assert plugin._initialized is False
-        assert plugin._actor is None
+        assert plugin._channel is None
 
 
 class TestClarificationPluginToolSchemas:
@@ -124,7 +124,7 @@ class TestRequestClarificationExecutor:
 
     def test_execute_single_choice_question(self):
         plugin = ClarificationPlugin()
-        plugin.initialize({"actor_type": "auto"})
+        plugin.initialize({"channel_type": "auto"})
         executors = plugin.get_executors()
 
         result = executors["request_clarification"]({
@@ -147,7 +147,7 @@ class TestRequestClarificationExecutor:
 
     def test_execute_multiple_choice_question(self):
         plugin = ClarificationPlugin()
-        plugin.initialize({"actor_type": "auto"})
+        plugin.initialize({"channel_type": "auto"})
         executors = plugin.get_executors()
 
         result = executors["request_clarification"]({
@@ -171,8 +171,8 @@ class TestRequestClarificationExecutor:
     def test_execute_free_text_question(self):
         plugin = ClarificationPlugin()
         plugin.initialize({
-            "actor_type": "auto",
-            "actor_config": {"default_free_text": "my custom answer"},
+            "channel_type": "auto",
+            "channel_config": {"default_free_text": "my custom answer"},
         })
         executors = plugin.get_executors()
 
@@ -193,7 +193,7 @@ class TestRequestClarificationExecutor:
 
     def test_execute_multiple_questions(self):
         plugin = ClarificationPlugin()
-        plugin.initialize({"actor_type": "auto"})
+        plugin.initialize({"channel_type": "auto"})
         executors = plugin.get_executors()
 
         result = executors["request_clarification"]({
@@ -224,7 +224,7 @@ class TestRequestClarificationExecutor:
 
     def test_execute_with_defaults(self):
         plugin = ClarificationPlugin()
-        plugin.initialize({"actor_type": "auto"})
+        plugin.initialize({"channel_type": "auto"})
         executors = plugin.get_executors()
 
         result = executors["request_clarification"]({
@@ -242,7 +242,7 @@ class TestRequestClarificationExecutor:
 
     def test_execute_question_type_defaults_to_single_choice(self):
         plugin = ClarificationPlugin()
-        plugin.initialize({"actor_type": "auto"})
+        plugin.initialize({"channel_type": "auto"})
         executors = plugin.get_executors()
 
         result = executors["request_clarification"]({
@@ -295,7 +295,7 @@ class TestClarificationPluginWorkflow:
 
     def test_full_workflow_deployment_config(self):
         plugin = ClarificationPlugin()
-        plugin.initialize({"actor_type": "auto"})
+        plugin.initialize({"channel_type": "auto"})
         executors = plugin.get_executors()
 
         # Simulate model asking for deployment configuration
@@ -337,7 +337,7 @@ class TestClarificationPluginWorkflow:
 
     def test_workflow_ambiguous_request(self):
         plugin = ClarificationPlugin()
-        plugin.initialize({"actor_type": "auto"})
+        plugin.initialize({"channel_type": "auto"})
         executors = plugin.get_executors()
 
         # Simulate model clarifying an ambiguous user request

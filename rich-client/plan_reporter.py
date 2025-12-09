@@ -14,7 +14,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared.plugins.todo.actors import TodoReporter
+from shared.plugins.todo.channels import TodoReporter
 from shared.plugins.todo.models import TodoPlan, TodoStep, StepStatus
 
 

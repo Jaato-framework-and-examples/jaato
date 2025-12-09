@@ -7,7 +7,7 @@
       "reason": "Destructive file operations blocked"
     }
   ],
-  "actor": {
+  "channel": {
     "type": "console",
     "timeout": 60
   }

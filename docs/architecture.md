@@ -558,7 +558,7 @@ classDiagram
     class PermissionPlugin {
         +name = "permission"
         -policy: PermissionPolicy
-        -actor: PermissionActor
+        -channel: PermissionChannel
         +check_permission(tool, args)
         +askPermission(tool)
     }
@@ -635,7 +635,7 @@ classDiagram
 
     class ClarificationPlugin {
         +name = "clarification"
-        -actor: ClarificationActor
+        -channel: ClarificationChannel
         +request_clarification(context, questions)
     }
 

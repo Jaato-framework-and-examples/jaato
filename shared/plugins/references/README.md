@@ -77,7 +77,7 @@ Create a `references.json` file:
       "tags": ["rules"]
     }
   ],
-  "actor": {
+  "channel": {
     "type": "console",
     "timeout": 60
   }
@@ -102,14 +102,14 @@ The `type` field is **required** for each source. It determines which additional
 | `auto` | Included in system instructions; model fetches at startup |
 | `selectable` | User selects when model calls `selectReferences` |
 
-### Actor Configuration
+### Channel Configuration
 
-The actor handles user interaction for selecting references. Three protocols are supported:
+The channel handles user interaction for selecting references. Three protocols are supported:
 
-#### Console Actor (default)
+#### Console Channel (default)
 ```json
 {
-  "actor": {
+  "channel": {
     "type": "console",
     "timeout": 60
   }
@@ -118,10 +118,10 @@ The actor handles user interaction for selecting references. Three protocols are
 
 Interactive terminal prompts for reference selection.
 
-#### Webhook Actor
+#### Webhook Channel
 ```json
 {
-  "actor": {
+  "channel": {
     "type": "webhook",
     "endpoint": "https://approval-service.internal/references",
     "timeout": 300
@@ -136,10 +136,10 @@ Sends selection requests to an HTTP endpoint. Expected response:
 }
 ```
 
-#### File Actor
+#### File Channel
 ```json
 {
-  "actor": {
+  "channel": {
     "type": "file",
     "base_path": "/tmp/jaato-references",
     "timeout": 300
@@ -246,7 +246,7 @@ from shared.plugins.references import create_plugin
 plugin = create_plugin()
 plugin.initialize({
     "config_path": "./references.json",
-    "actor_type": "console",
+    "channel_type": "console",
 })
 
 # Execute tools directly
@@ -275,7 +275,7 @@ plugin.initialize({
             "tags": ["overview"]
         }
     ],
-    "actor_type": "console",
+    "channel_type": "console",
 })
 ```
 
@@ -287,7 +287,7 @@ plugin.initialize({
 
 ## Console Selection Example
 
-When the model calls `selectReferences`, the console actor displays:
+When the model calls `selectReferences`, the console channel displays:
 
 ```
 ============================================================
@@ -325,4 +325,4 @@ Selected 2 reference source(s). Instructions provided to model.
 - This plugin is user-triggered and all tools are auto-approved (no permission prompts)
 - The plugin only provides metadata; actual content fetching uses existing tools with their own permission controls
 - Webhook endpoints should be properly authenticated
-- File actor paths should have appropriate filesystem permissions
+- File channel paths should have appropriate filesystem permissions

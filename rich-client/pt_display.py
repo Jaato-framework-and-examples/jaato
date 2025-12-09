@@ -282,11 +282,11 @@ class PTDisplay:
             wrap_lines=False,
         )
 
-        # Input prompt label - changes based on mode (pager, waiting for actor, normal)
+        # Input prompt label - changes based on mode (pager, waiting for channel, normal)
         def get_prompt_text():
             if getattr(self, '_pager_active', False):
                 return [("class:prompt.pager", "── Enter: next, q: quit ──")]
-            if getattr(self, '_waiting_for_actor_input', False):
+            if getattr(self, '_waiting_for_channel_input', False):
                 return [("class:prompt.permission", "Answer> ")]
             return [("class:prompt", "You> ")]
 
@@ -591,11 +591,11 @@ class PTDisplay:
         if self._app and self._app.is_running:
             self._app.loop.call_later(0.1, self._advance_spinner)
 
-    def set_waiting_for_actor_input(self, waiting: bool) -> None:
-        """Set whether we're waiting for actor (permission/clarification) input.
+    def set_waiting_for_channel_input(self, waiting: bool) -> None:
+        """Set whether we're waiting for channel (permission/clarification) input.
 
         Args:
-            waiting: True if waiting for actor input, False otherwise.
+            waiting: True if waiting for channel input, False otherwise.
         """
-        self._waiting_for_actor_input = waiting
+        self._waiting_for_channel_input = waiting
         self.refresh()

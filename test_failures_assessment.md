@@ -14,7 +14,7 @@ The 45 failing tests are **pre-existing issues** unrelated to the provider-agnos
 |----------|-------|------------|
 | Output Callback | 6 | Tests mock internal `_run_chat_loop` which changed |
 | Background Tasks | 6 | Race conditions in async task completion checks |
-| Permission Plugin | 10 | Actor mocking and initialization order issues |
+| Permission Plugin | 10 | Channel mocking and initialization order issues |
 | Todo Plugin | 12 | Step dict structure mismatch (`KeyError: 'status'`) |
 | Session Plugin | 3 | `backtoturn` command parameter handling |
 | File Edit | 3 | Backup file sorting/pruning logic |
@@ -65,22 +65,22 @@ The 45 failing tests are **pre-existing issues** unrelated to the provider-agnos
 **Location**: `shared/plugins/permission/tests/`
 
 **Failing Tests**:
-- `test_actors.py::TestConsoleActor::test_output_format`
+- `test_channels.py::TestConsoleChannel::test_output_format`
 - `test_plugin.py::TestPermissionPluginExecutors::test_execute_ask_permission_allowed`
 - `test_plugin.py::TestPermissionPluginExecutors::test_execute_ask_permission_denied`
 - `test_plugin.py::TestPermissionPluginCheckPermission::test_check_permission_not_initialized`
-- `test_plugin.py::TestPermissionPluginActorInteraction::test_ask_actor_allow`
-- `test_plugin.py::TestPermissionPluginActorInteraction::test_no_actor_configured`
+- `test_plugin.py::TestPermissionPluginChannelInteraction::test_ask_channel_allow`
+- `test_plugin.py::TestPermissionPluginChannelInteraction::test_no_channel_configured`
 - `test_plugin.py::TestPermissionPluginWrapExecutor::test_wrap_executor`
 - `test_plugin.py::TestPermissionPluginWrapExecutor::test_wrap_all_executors_blocks_blacklisted`
 - `test_registry_integration.py::TestRegistryAskPermissionExecution::test_execute_askPermission_*` (3 tests)
 
 **Root Cause**:
-1. Actor mocking doesn't properly simulate the approval flow
+1. Channel mocking doesn't properly simulate the approval flow
 2. Some tests expect specific initialization state that's not set up correctly
 3. The `askPermission` executor now requires `intent` parameter
 
-**Fix**: Update test fixtures to properly initialize the permission plugin with mock actors, and update executor calls to include required `intent` parameter.
+**Fix**: Update test fixtures to properly initialize the permission plugin with mock channels, and update executor calls to include required `intent` parameter.
 
 ---
 
@@ -156,7 +156,7 @@ The 45 failing tests are **pre-existing issues** unrelated to the provider-agnos
 
 ### Priority 3 (Requires Design Review)
 5. **Output callback tests** - Redesign to test at provider level (6 tests, ~2 hours)
-6. **Permission plugin tests** - Review actor mocking strategy (10 tests, ~2 hours)
+6. **Permission plugin tests** - Review channel mocking strategy (10 tests, ~2 hours)
 7. **Session plugin tests** - Review backtoturn command (3 tests, ~1 hour)
 
 ---

@@ -27,7 +27,7 @@ class TestClarificationPluginExpose:
     def test_expose_clarification_plugin(self):
         registry = PluginRegistry()
         registry.discover()
-        registry.expose_tool("clarification", {"actor_type": "auto"})
+        registry.expose_tool("clarification", {"channel_type": "auto"})
 
         exposed = registry.list_exposed()
         assert "clarification" in exposed
@@ -35,7 +35,7 @@ class TestClarificationPluginExpose:
     def test_unexpose_clarification_plugin(self):
         registry = PluginRegistry()
         registry.discover()
-        registry.expose_tool("clarification", {"actor_type": "auto"})
+        registry.expose_tool("clarification", {"channel_type": "auto"})
         registry.unexpose_tool("clarification")
 
         exposed = registry.list_exposed()
@@ -48,7 +48,7 @@ class TestClarificationPluginToolSchemas:
     def test_get_tool_schemas(self):
         registry = PluginRegistry()
         registry.discover()
-        registry.expose_tool("clarification", {"actor_type": "auto"})
+        registry.expose_tool("clarification", {"channel_type": "auto"})
 
         schemas = registry.get_exposed_tool_schemas()
         names = [s.name for s in schemas]
@@ -62,7 +62,7 @@ class TestClarificationPluginExecutors:
     def test_get_executors(self):
         registry = PluginRegistry()
         registry.discover()
-        registry.expose_tool("clarification", {"actor_type": "auto"})
+        registry.expose_tool("clarification", {"channel_type": "auto"})
 
         executors = registry.get_exposed_executors()
 
@@ -72,7 +72,7 @@ class TestClarificationPluginExecutors:
     def test_execute_via_registry(self):
         registry = PluginRegistry()
         registry.discover()
-        registry.expose_tool("clarification", {"actor_type": "auto"})
+        registry.expose_tool("clarification", {"channel_type": "auto"})
 
         executors = registry.get_exposed_executors()
         result = executors["request_clarification"]({
@@ -95,7 +95,7 @@ class TestClarificationPluginSystemInstructions:
     def test_get_system_instructions(self):
         registry = PluginRegistry()
         registry.discover()
-        registry.expose_tool("clarification", {"actor_type": "auto"})
+        registry.expose_tool("clarification", {"channel_type": "auto"})
 
         instructions = registry.get_system_instructions()
 
@@ -109,7 +109,7 @@ class TestClarificationPluginForTool:
     def test_get_plugin_for_tool(self):
         registry = PluginRegistry()
         registry.discover()
-        registry.expose_tool("clarification", {"actor_type": "auto"})
+        registry.expose_tool("clarification", {"channel_type": "auto"})
 
         plugin = registry.get_plugin_for_tool("request_clarification")
 
@@ -119,7 +119,7 @@ class TestClarificationPluginForTool:
     def test_get_plugin_for_unknown_tool(self):
         registry = PluginRegistry()
         registry.discover()
-        registry.expose_tool("clarification", {"actor_type": "auto"})
+        registry.expose_tool("clarification", {"channel_type": "auto"})
 
         plugin = registry.get_plugin_for_tool("unknown_tool")
 

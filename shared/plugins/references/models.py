@@ -19,7 +19,7 @@ class SourceType(Enum):
 class InjectionMode(Enum):
     """When the reference should be offered to the model."""
     AUTO = "auto"            # Include in system instructions at startup
-    SELECTABLE = "selectable"  # User must explicitly select via actor
+    SELECTABLE = "selectable"  # User must explicitly select via channel
 
 
 @dataclass
@@ -142,7 +142,7 @@ class ReferenceSource:
 
 @dataclass
 class SelectionRequest:
-    """Request sent to an actor for reference selection."""
+    """Request sent to an channel for reference selection."""
 
     request_id: str
     timestamp: str
@@ -170,7 +170,7 @@ class SelectionRequest:
 
 @dataclass
 class SelectionResponse:
-    """Response from an actor with selected reference IDs."""
+    """Response from an channel with selected reference IDs."""
 
     request_id: str
     selected_ids: List[str]

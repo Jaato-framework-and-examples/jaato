@@ -10,7 +10,7 @@ class TestPermissionDecision:
     def test_decision_values(self):
         assert PermissionDecision.ALLOW.value == "allow"
         assert PermissionDecision.DENY.value == "deny"
-        assert PermissionDecision.ASK_ACTOR.value == "ask_actor"
+        assert PermissionDecision.ASK_CHANNEL.value == "ask_channel"
 
 
 class TestPolicyMatch:
@@ -181,7 +181,7 @@ class TestPermissionPolicyDefaultPolicy:
     def test_default_policy_ask(self):
         policy = PermissionPolicy(default_policy="ask")
         match = policy.check("unknown_tool", {})
-        assert match.decision == PermissionDecision.ASK_ACTOR
+        assert match.decision == PermissionDecision.ASK_CHANNEL
         assert match.rule_type == "default"
 
 
@@ -275,7 +275,7 @@ class TestPermissionPolicySessionRules:
         policy.set_session_default_policy("ask")
 
         match = policy.check("unknown_tool", {})
-        assert match.decision == PermissionDecision.ASK_ACTOR
+        assert match.decision == PermissionDecision.ASK_CHANNEL
 
     def test_session_default_policy_cleared_on_clear(self):
         """clear_session_rules should also clear session default policy."""
