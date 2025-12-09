@@ -66,7 +66,8 @@ class SessionExporter:
                     f,
                     default_flow_style=False,
                     sort_keys=False,
-                    allow_unicode=True
+                    allow_unicode=True,
+                    width=float('inf')  # Prevent line wrapping that splits words
                 )
             return {
                 'success': True,

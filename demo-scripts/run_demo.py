@@ -172,6 +172,12 @@ def run_demo(script_path: Path):
             delay = step.get('delay', 0)  # Send instantly by default
             is_local = step.get('local', False)
 
+        # Sanitize text: replace embedded newlines with spaces
+        # This prevents multi-line YAML strings from being interpreted
+        # as multiple separate commands by the terminal
+        if text and '\n' in text:
+            text = ' '.join(text.split())
+
         type_slowly(child, text, delay=delay)
 
         if text.lower() == 'quit':
