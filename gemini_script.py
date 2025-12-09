@@ -1,0 +1,1 @@
+print("Hello from Gemini's Python script!")
