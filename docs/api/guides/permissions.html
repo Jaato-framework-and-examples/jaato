@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Permissions - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="tool-plugins.html">Building Plugins</a></li>
+          <li><a href="mcp-integration.html">MCP Integration</a></li>
+          <li><a href="permissions.html" class="active">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/index.html">Overview</a></li>
+          <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Introduction -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Permissions</h1>
+          <p class="lead">
+            Control what tools can do with a flexible permission system.
+            Protect sensitive operations while allowing the model to work freely
+            on safe tasks.
+          </p>
+
+          <h2 id="why-permissions">Why Permissions?</h2>
+          <p>
+            AI models are powerful but unpredictable. Without guardrails, a model might:
+          </p>
+          <ul>
+            <li>Delete important files</li>
+            <li>Execute destructive commands</li>
+            <li>Access sensitive data</li>
+            <li>Make unintended API calls</li>
+          </ul>
+          <p>
+            The permission system lets you allow helpful actions while blocking
+            dangerous ones—with user approval as a middle ground.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Permission flow</div>
+          <div class="diagram-container" style="padding: 20px; background: rgba(255,255,255,0.03); border-radius: 8px;">
+            <svg viewBox="0 0 340 200" style="width: 100%; max-width: 340px; height: auto;">
+              <defs>
+                <marker id="perm-arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                  <polygon points="0 0, 10 3.5, 0 7" fill="#8b8b8b"/>
+                </marker>
+              </defs>
+
+              <!-- Tool Call -->
+              <rect x="10" y="80" width="80" height="40" rx="4" fill="#2d2d3f" stroke="#4b4b5f" stroke-width="1"/>
+              <text x="50" y="104" text-anchor="middle" fill="#a5a5b5" font-size="11" font-family="system-ui, sans-serif">Tool Call</text>
+
+              <!-- Arrow to Permission Check -->
+              <line x1="90" y1="100" x2="115" y2="100" stroke="#8b8b8b" stroke-width="1.5" marker-end="url(#perm-arrow)"/>
+
+              <!-- Permission Check -->
+              <polygon points="170,70 220,100 170,130 120,100" fill="#635bff" fill-opacity="0.2" stroke="#635bff" stroke-width="1.5"/>
+              <text x="170" y="104" text-anchor="middle" fill="#a5a5b5" font-size="10" font-family="system-ui, sans-serif">Check</text>
+
+              <!-- Allow path -->
+              <line x1="220" y1="100" x2="260" y2="100" stroke="#10b981" stroke-width="1.5" marker-end="url(#perm-arrow)"/>
+              <text x="240" y="92" text-anchor="middle" fill="#10b981" font-size="9" font-family="system-ui, sans-serif">allow</text>
+
+              <rect x="270" y="80" width="60" height="40" rx="4" fill="#10b981" fill-opacity="0.15" stroke="#10b981" stroke-width="1"/>
+              <text x="300" y="104" text-anchor="middle" fill="#10b981" font-size="10" font-family="system-ui, sans-serif">Execute</text>
+
+              <!-- Deny path -->
+              <line x1="170" y1="130" x2="170" y2="160" stroke="#ef4444" stroke-width="1.5" marker-end="url(#perm-arrow)"/>
+              <text x="182" y="150" text-anchor="start" fill="#ef4444" font-size="9" font-family="system-ui, sans-serif">deny</text>
+
+              <rect x="130" y="170" width="80" height="30" rx="4" fill="#ef4444" fill-opacity="0.15" stroke="#ef4444" stroke-width="1"/>
+              <text x="170" y="189" text-anchor="middle" fill="#ef4444" font-size="10" font-family="system-ui, sans-serif">Block</text>
+
+              <!-- Ask path -->
+              <line x1="170" y1="70" x2="170" y2="40" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#perm-arrow)"/>
+              <text x="182" y="55" text-anchor="start" fill="#f59e0b" font-size="9" font-family="system-ui, sans-serif">ask</text>
+
+              <rect x="130" y="5" width="80" height="30" rx="4" fill="#f59e0b" fill-opacity="0.15" stroke="#f59e0b" stroke-width="1"/>
+              <text x="170" y="24" text-anchor="middle" fill="#f59e0b" font-size="10" font-family="system-ui, sans-serif">Ask User</text>
+            </svg>
+          </div>
+        </div>
+      </section>
+
+      <!-- Permission Policies -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="policies">Permission Policies</h2>
+          <p>
+            Policies define the rules for each tool or pattern of tools.
+            Each policy specifies one of three actions:
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Policy</th>
+                <th>Behavior</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>allow</code></td>
+                <td>Execute immediately, no questions</td>
+              </tr>
+              <tr>
+                <td><code>deny</code></td>
+                <td>Block execution, return error to model</td>
+              </tr>
+              <tr>
+                <td><code>ask</code></td>
+                <td>Prompt user for approval each time</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Policy Matching</h3>
+          <p>
+            Policies can match:
+          </p>
+          <ul>
+            <li><strong>Exact tool names</strong> — <code>execute_command</code></li>
+            <li><strong>Wildcards</strong> — <code>file_*</code> matches all file tools</li>
+            <li><strong>All tools</strong> — <code>*</code> as default</li>
+          </ul>
+          <p>
+            More specific patterns take precedence over wildcards.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Policy examples</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.permission import (
+    create_plugin as create_permission,
+    PermissionPolicy
+)
+
+# Create permission plugin
+perm = create_permission()
+
+# Define policies
+policies = [
+    # Safe tools: always allow
+    PermissionPolicy(
+        pattern="read_file",
+        action="allow"
+    ),
+    PermissionPolicy(
+        pattern="list_directory",
+        action="allow"
+    ),
+
+    # Dangerous: always deny
+    PermissionPolicy(
+        pattern="execute_command",
+        action="deny"
+    ),
+
+    # File writes: ask user
+    PermissionPolicy(
+        pattern="write_file",
+        action="ask"
+    ),
+    PermissionPolicy(
+        pattern="delete_file",
+        action="ask"
+    ),
+
+    # Default: ask for unknown tools
+    PermissionPolicy(
+        pattern="*",
+        action="ask"
+    )
+]
+
+perm.initialize({"policies": policies})</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Configuration</h2>
+          <p>
+            Permission policies can be configured via code or a JSON file.
+          </p>
+
+          <h3>Config File</h3>
+          <p>
+            For easier management, define policies in a JSON file:
+          </p>
+
+          <h3>Configuration Options</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Option</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>policies</code></td>
+                <td>List of permission policies</td>
+              </tr>
+              <tr>
+                <td><code>default_action</code></td>
+                <td>Action for unmatched tools (ask)</td>
+              </tr>
+              <tr>
+                <td><code>ask_timeout</code></td>
+                <td>Seconds to wait for user response</td>
+              </tr>
+              <tr>
+                <td><code>remember_session</code></td>
+                <td>Remember user choices this session</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">permissions.json</div>
+          <div class="code-block">
+            <pre><code class="language-python">{
+  "default_action": "ask",
+  "ask_timeout": 60,
+  "remember_session": true,
+  "policies": [
+    {
+      "pattern": "read_*",
+      "action": "allow",
+      "description": "Reading is safe"
+    },
+    {
+      "pattern": "list_*",
+      "action": "allow"
+    },
+    {
+      "pattern": "search_*",
+      "action": "allow"
+    },
+    {
+      "pattern": "write_*",
+      "action": "ask",
+      "description": "Confirm before writing"
+    },
+    {
+      "pattern": "delete_*",
+      "action": "ask",
+      "description": "Confirm before deleting"
+    },
+    {
+      "pattern": "execute_command",
+      "action": "deny",
+      "description": "Shell commands blocked"
+    }
+  ]
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Load from file</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.permission import create_plugin
+
+perm = create_plugin()
+perm.initialize({
+    "config_path": "permissions.json"
+})
+
+# Use with client
+client.configure_tools(
+    registry,
+    permission_plugin=perm
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Using with Client -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="using-with-client">Using with Client</h2>
+          <p>
+            Pass the permission plugin to <code>configure_tools()</code> to
+            enable permission checking for all tool calls.
+          </p>
+
+          <h3>How It Works</h3>
+          <ol>
+            <li>Model decides to call a tool</li>
+            <li>Permission plugin checks the policy</li>
+            <li>Based on policy:
+              <ul>
+                <li><code>allow</code>: Tool executes</li>
+                <li><code>deny</code>: Error returned to model</li>
+                <li><code>ask</code>: User prompted</li>
+              </ul>
+            </li>
+            <li>Result returned to model</li>
+          </ol>
+
+          <h3>User Prompts</h3>
+          <p>
+            When a tool requires approval, the user sees the tool name and
+            arguments, and can approve or deny.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Complete setup</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
+from shared.plugins.permission import (
+    create_plugin as create_permission,
+    PermissionPolicy
+)
+
+# Create client
+client = JaatoClient()
+client.connect(project, location, model)
+
+# Create registry and expose tools
+registry = PluginRegistry(model_name=model)
+registry.discover()
+registry.expose_tool("cli")
+registry.expose_tool("file_edit")
+
+# Create permission plugin
+perm = create_permission()
+perm.initialize({
+    "policies": [
+        PermissionPolicy("read_file", "allow"),
+        PermissionPolicy("write_file", "ask"),
+        PermissionPolicy("execute_command", "ask"),
+        PermissionPolicy("*", "ask"),
+    ],
+    "remember_session": True
+})
+
+# Configure with permissions
+client.configure_tools(
+    registry,
+    permission_plugin=perm
+)
+
+# Now tool calls go through permission check
+response = client.send_message(
+    "Delete the temp files",
+    on_output=handler
+)
+# User will be prompted before delete executes</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Auto-Approved Tools -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="auto-approved">Auto-Approved Tools</h2>
+          <p>
+            Plugins can declare certain tools as "auto-approved"—these bypass
+            permission checks entirely. Use for tools that are inherently safe.
+          </p>
+
+          <h3>When to Use</h3>
+          <ul>
+            <li>Read-only operations</li>
+            <li>Local calculations</li>
+            <li>Status queries</li>
+            <li>Tools with no side effects</li>
+          </ul>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Use Sparingly</div>
+            Auto-approved tools skip ALL permission checks. Only use for
+            genuinely safe operations that can't cause harm.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Declaring auto-approved tools</div>
+          <div class="code-block">
+            <pre><code class="language-python">class MyPlugin:
+    def get_tool_schemas(self):
+        return [
+            ToolSchema(name="get_status", ...),
+            ToolSchema(name="calculate", ...),
+            ToolSchema(name="write_file", ...),
+        ]
+
+    def get_auto_approved_tools(self):
+        """
+        These tools skip permission checks.
+        """
+        return [
+            "get_status",   # Read-only
+            "calculate",    # No side effects
+            # NOT write_file - has side effects
+        ]</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Check auto-approved list</div>
+          <div class="code-block">
+            <pre><code class="language-python"># See all auto-approved tools
+registry.discover()
+registry.expose_tool("my_plugin")
+
+plugin = registry.get_plugin("my_plugin")
+auto = plugin.get_auto_approved_tools()
+print(f"Auto-approved: {auto}")
+
+# These will execute without permission check
+# even if policy says "ask" or "deny"</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Ask Channels -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="ask-channels">Ask Channels</h2>
+          <p>
+            When a tool needs user approval, the permission plugin uses an
+            "ask channel" to communicate with the user.
+          </p>
+
+          <h3>Built-in Channels</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Channel</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>console</code></td>
+                <td>Prompt in terminal (default)</td>
+              </tr>
+              <tr>
+                <td><code>callback</code></td>
+                <td>Call a function you provide</td>
+              </tr>
+              <tr>
+                <td><code>auto_deny</code></td>
+                <td>Deny all without asking</td>
+              </tr>
+              <tr>
+                <td><code>auto_allow</code></td>
+                <td>Allow all without asking</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Custom Channels</h3>
+          <p>
+            For GUI apps or special workflows, implement a custom ask channel.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Configure ask channel</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Console channel (default)
+perm.initialize({
+    "policies": policies,
+    "ask_channel": "console"
+})
+
+# Custom callback channel
+def my_ask_handler(tool_name, args, description):
+    """
+    Return True to allow, False to deny.
+    """
+    print(f"Tool: {tool_name}")
+    print(f"Args: {args}")
+    response = input("Allow? (y/n): ")
+    return response.lower() == "y"
+
+perm.initialize({
+    "policies": policies,
+    "ask_channel": "callback",
+    "ask_callback": my_ask_handler
+})</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">GUI integration</div>
+          <div class="code-block">
+            <pre><code class="language-python"># For GUI apps, use async callback
+import asyncio
+
+async def gui_permission_dialog(tool_name, args, desc):
+    """Show dialog and wait for user response."""
+    dialog = PermissionDialog(
+        title=f"Allow {tool_name}?",
+        message=desc,
+        details=str(args)
+    )
+    return await dialog.show_async()
+
+perm.initialize({
+    "policies": policies,
+    "ask_channel": "callback",
+    "ask_callback": gui_permission_dialog,
+    "async_mode": True
+})</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Session Memory -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="session-memory">Session Memory</h2>
+          <p>
+            With <code>remember_session=True</code>, user choices are remembered
+            for the current session. This avoids asking repeatedly for the same
+            tool.
+          </p>
+
+          <h3>How It Works</h3>
+          <ul>
+            <li>User approves <code>write_file</code></li>
+            <li>Future <code>write_file</code> calls auto-approve</li>
+            <li>Memory clears when session ends</li>
+          </ul>
+
+          <h3>Granularity</h3>
+          <p>
+            Memory can be per-tool or per-tool-with-args:
+          </p>
+          <ul>
+            <li><code>per_tool</code>: Approve once for all calls</li>
+            <li><code>per_call</code>: Approve each unique call</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Session memory options</div>
+          <div class="code-block">
+            <pre><code class="language-python">perm.initialize({
+    "policies": policies,
+
+    # Remember approvals this session
+    "remember_session": True,
+
+    # Granularity: "per_tool" or "per_call"
+    "remember_granularity": "per_tool",
+})
+
+# With per_tool:
+# - User approves write_file once
+# - All write_file calls auto-approve
+
+# With per_call:
+# - User approves write_file("a.txt")
+# - write_file("a.txt") auto-approves
+# - write_file("b.txt") still asks</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Clear memory</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Clear all remembered approvals
+perm.clear_session_memory()
+
+# Check current memory
+memory = perm.get_session_memory()
+for tool, approved in memory.items():
+    status = "approved" if approved else "denied"
+    print(f"{tool}: {status}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Best Practices -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="best-practices">Best Practices</h2>
+
+          <h3>Default to Ask</h3>
+          <p>
+            Use <code>ask</code> as the default action. Only <code>allow</code>
+            tools you've verified are safe.
+          </p>
+
+          <h3>Be Specific</h3>
+          <p>
+            Use specific patterns rather than broad wildcards. <code>read_file</code>
+            is better than <code>*_file</code>.
+          </p>
+
+          <h3>Document Policies</h3>
+          <p>
+            Add descriptions to policies so users understand why they're being
+            asked.
+          </p>
+
+          <h3>Review Regularly</h3>
+          <p>
+            As you add tools, review your permission policies to ensure new
+            tools are covered appropriately.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Recommended setup</div>
+          <div class="code-block">
+            <pre><code class="language-python">{
+  "default_action": "ask",
+  "remember_session": true,
+  "remember_granularity": "per_tool",
+  "ask_timeout": 30,
+
+  "policies": [
+    // Explicitly safe - allow
+    {"pattern": "read_file", "action": "allow"},
+    {"pattern": "list_directory", "action": "allow"},
+    {"pattern": "search_files", "action": "allow"},
+    {"pattern": "get_*", "action": "allow"},
+
+    // Destructive - ask with description
+    {
+      "pattern": "write_file",
+      "action": "ask",
+      "description": "This will modify a file"
+    },
+    {
+      "pattern": "delete_*",
+      "action": "ask",
+      "description": "This will delete data"
+    },
+
+    // Very dangerous - deny
+    {
+      "pattern": "execute_command",
+      "action": "deny",
+      "description": "Shell commands are blocked"
+    },
+    {
+      "pattern": "*_production_*",
+      "action": "deny",
+      "description": "Production access blocked"
+    }
+  ]
+}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Next Steps -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="next-steps">Next Steps</h2>
+          <ul>
+            <li><a href="../core-concepts/tools.html">Tools</a> — Understand tool execution</li>
+            <li><a href="tool-plugins.html">Building Plugins</a> — Create plugins with auto-approved tools</li>
+            <li><a href="../api-reference/plugins/permission.html">Permission Plugin Reference</a> — Full API details</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick reference</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Policy actions
+"allow"  # Execute immediately
+"deny"   # Block with error
+"ask"    # Prompt user
+
+# Pattern matching
+"tool_name"     # Exact match
+"read_*"        # Wildcard suffix
+"*_file"        # Wildcard prefix
+"*"             # Match all (default)
+
+# Ask channels
+"console"       # Terminal prompt
+"callback"      # Custom function
+"auto_deny"     # Deny all asks
+"auto_allow"    # Allow all asks
+
+# Memory
+"per_tool"      # Remember by tool name
+"per_call"      # Remember by tool + args</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>
