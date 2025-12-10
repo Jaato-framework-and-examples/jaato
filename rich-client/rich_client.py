@@ -318,6 +318,12 @@ class RichClient:
             self._trace(f"prompt_callback: waiting={waiting}")
             if self._display:
                 self._display.set_waiting_for_channel_input(waiting)
+                if waiting:
+                    # Channel waiting for user input - stop spinner
+                    self._display.stop_spinner()
+                else:
+                    # Channel finished - start spinner while model continues
+                    self._display.start_spinner()
 
         # Set callbacks on clarification plugin channel
         if self.registry:
@@ -560,8 +566,9 @@ class RichClient:
                 self._display.append_output("user", user_input, "write")
             self._channel_input_queue.put(user_input)
             self._trace(f"Input routed to channel queue: {user_input}")
-            # Restart spinner while waiting for model to continue
-            self._display.start_spinner()
+            # Don't start spinner here - the channel may have more questions.
+            # Spinner will be started when prompt_callback(False) indicates
+            # the channel is done and model continues.
             return
 
         if not user_input:
@@ -866,8 +873,22 @@ class RichClient:
                 resp_str = resp_str[:300] + "..."
             lines.append((f"  📥 RESULT: {name} → {resp_str}", "green"))
 
+        # Inline data (images, etc.)
+        elif hasattr(part, 'inline_data') and part.inline_data:
+            mime_type = part.inline_data.get('mime_type', 'unknown')
+            data = part.inline_data.get('data')
+            size = len(data) if data else 0
+            lines.append((f"  📎 INLINE DATA: {mime_type} ({size} bytes)", "cyan"))
+
         else:
-            lines.append((f"  (unknown part: {type(part).__name__})", "dim"))
+            # Unknown part type - show diagnostic info like simple client
+            part_type = type(part).__name__
+            # Show available attributes to help debugging
+            attrs = [a for a in dir(part) if not a.startswith('_')]
+            attr_preview = ', '.join(attrs[:5])
+            if len(attrs) > 5:
+                attr_preview += f", ... (+{len(attrs) - 5} more)"
+            lines.append((f"  (unknown part: {part_type}, attrs: [{attr_preview}])", "yellow"))
 
     def _show_context(self) -> None:
         """Show context/token usage in output panel."""

@@ -256,6 +256,9 @@ class TodoPlugin:
             "- Only use these tools if the user explicitly requests a plan\n"
             "- Do NOT automatically create plans for every task\n"
             "- If the user does not ask for a plan, just do the task directly\n\n"
+            "**IMPORTANT**: When you decide to present a plan to the user, you MUST use the `createPlan` tool. "
+            "Do NOT write the plan as text in your response - always use the tool instead. "
+            "This ensures proper plan tracking and user approval workflow.\n\n"
             "BEFORE CREATING A PLAN:\n"
             "- Think carefully about what steps are actually needed to achieve the goal\n"
             "- Break down the task into minimal, concrete steps you can realistically complete\n"
@@ -701,6 +704,50 @@ class TodoPlugin:
         if not self._storage:
             return []
         return self._storage.get_all_plans()
+
+    # Interactivity protocol methods
+
+    def supports_interactivity(self) -> bool:
+        """TODO plugin has interactive features for progress reporting.
+
+        Returns:
+            True - TODO plugin has interactive progress reporting.
+        """
+        return True
+
+    def get_supported_channels(self) -> List[str]:
+        """Return list of channel types supported by TODO plugin.
+
+        Returns:
+            List of supported channel types matching available reporters.
+        """
+        return ["console", "webhook", "file"]
+
+    def set_channel(
+        self,
+        channel_type: str,
+        channel_config: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Set the interaction channel for progress reporting.
+
+        Args:
+            channel_type: One of: console, webhook, file
+            channel_config: Optional channel-specific configuration
+                For "console": output_callback for rich client integration
+
+        Raises:
+            ValueError: If channel_type is not supported
+        """
+        if channel_type not in self.get_supported_channels():
+            raise ValueError(
+                f"Channel type '{channel_type}' not supported. "
+                f"Supported: {self.get_supported_channels()}"
+            )
+
+        # Create reporter with config
+        from .channels import create_reporter
+        reporter_config = channel_config or {}
+        self._reporter = create_reporter(channel_type, reporter_config)
 
 
 def create_plugin() -> TodoPlugin:

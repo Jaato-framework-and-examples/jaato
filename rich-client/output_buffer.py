@@ -114,6 +114,10 @@ class OutputBuffer:
             text: The output text.
             mode: "write" for new block, "append" to continue.
         """
+        # Skip plan messages - they're shown in the sticky plan panel
+        if source == "plan":
+            return
+
         if mode == "write":
             # Start a new block - this is a new turn
             self._flush_current_block()
@@ -248,26 +252,25 @@ class OutputBuffer:
         lines_to_show: List[OutputLine] = []
 
         if height:
-            # Skip scroll_offset display lines from the bottom
-            display_lines_skipped = 0
-            start_index = len(all_lines)
+            # Calculate total display lines
+            total_display_lines = sum(line.display_lines for line in all_lines)
 
-            for i in range(len(all_lines) - 1, -1, -1):
-                line = all_lines[i]
-                if display_lines_skipped + line.display_lines <= self._scroll_offset:
-                    display_lines_skipped += line.display_lines
-                    start_index = i
-                else:
-                    break
+            # Find the end position (bottom of visible window)
+            # scroll_offset=0 means show the most recent content
+            # scroll_offset>0 means we've scrolled up, showing older content
+            end_display_line = total_display_lines - self._scroll_offset
+            start_display_line = max(0, end_display_line - height)
 
-            # Now collect 'height' display lines going backwards from start_index
-            display_lines_used = 0
-            for i in range(start_index - 1, -1, -1):
-                line = all_lines[i]
-                if display_lines_used + line.display_lines <= height:
-                    lines_to_show.insert(0, line)
-                    display_lines_used += line.display_lines
-                else:
+            # Collect lines that fall within the visible range
+            current_display_line = 0
+            for line in all_lines:
+                line_end = current_display_line + line.display_lines
+                # Include line if it overlaps with visible range
+                if line_end > start_display_line and current_display_line < end_display_line:
+                    lines_to_show.append(line)
+                current_display_line = line_end
+                # Stop if we've passed the visible range
+                if current_display_line >= end_display_line:
                     break
         else:
             lines_to_show = all_lines
@@ -299,26 +302,51 @@ class OutputBuffer:
                 output.append(line.text, style="dim")
             elif line.source == "permission":
                 # Permission prompts - no prefix needed, they self-identify with [askPermission]
-                # Highlight specific keywords in permission prompts
+                # Text may contain ANSI escape codes (e.g., for diff coloring)
+                # Use Text.from_ansi() to preserve them
                 text = line.text
                 if "[askPermission]" in text:
                     # Color the label
                     text = text.replace("[askPermission]", "")
                     output.append("[askPermission] ", style="bold yellow")
-                    output.append(text)
+                    output.append_text(Text.from_ansi(text))
                 elif "Options:" in text:
                     # Highlight options line
-                    output.append(text, style="cyan")
+                    output.append_text(Text.from_ansi(text, style="cyan"))
                 elif text.startswith("===") or text.startswith("─") or text.startswith("="):
                     # Separators
                     output.append(text, style="dim")
                 else:
-                    output.append(text)
+                    # Preserve any ANSI codes in the text (e.g., diff coloring)
+                    output.append_text(Text.from_ansi(text))
+            elif line.source == "clarification":
+                # Clarification prompts - no prefix needed, they self-identify
+                # Text may contain ANSI escape codes, use Text.from_ansi() to preserve them
+                text = line.text
+                if "Clarification Needed" in text:
+                    output.append_text(Text.from_ansi(text, style="bold cyan"))
+                elif text.startswith("===") or text.startswith("─") or text.startswith("="):
+                    # Separators
+                    output.append(text, style="dim")
+                elif "Enter choice" in text:
+                    output.append_text(Text.from_ansi(text, style="cyan"))
+                elif text.strip().startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.")):
+                    # Numbered options
+                    output.append_text(Text.from_ansi(text, style="cyan"))
+                elif "Question" in text and "/" in text:
+                    # Question counter like "Question 1/1"
+                    output.append_text(Text.from_ansi(text, style="bold"))
+                elif "[*required]" in text:
+                    text = text.replace("[*required]", "")
+                    output.append_text(Text.from_ansi(text))
+                    output.append("[*required]", style="yellow")
+                else:
+                    output.append_text(Text.from_ansi(text))
             else:
-                # Other plugin output
+                # Other plugin output - preserve any ANSI codes
                 if line.is_turn_start:
                     output.append(f"[{line.source}] ", style="dim magenta")
-                output.append(line.text)
+                output.append_text(Text.from_ansi(line.text))
 
         # Add spinner at the bottom if active
         if self._spinner_active:

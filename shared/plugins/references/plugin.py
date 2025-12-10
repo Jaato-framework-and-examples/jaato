@@ -426,6 +426,49 @@ class ReferencesPlugin:
         """Clear all session selections."""
         self._selected_source_ids.clear()
 
+    # Interactivity protocol methods
+
+    def supports_interactivity(self) -> bool:
+        """References plugin requires user interaction for source selection.
+
+        Returns:
+            True - references plugin has interactive selection prompts.
+        """
+        return True
+
+    def get_supported_channels(self) -> List[str]:
+        """Return list of channel types supported by references plugin.
+
+        Returns:
+            List of supported channel types: console, webhook, file.
+            Note: Queue channel support not yet implemented.
+        """
+        return ["console", "webhook", "file"]
+
+    def set_channel(
+        self,
+        channel_type: str,
+        channel_config: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Set the interaction channel for reference selection.
+
+        Args:
+            channel_type: One of: console, webhook, file
+            channel_config: Optional channel-specific configuration
+
+        Raises:
+            ValueError: If channel_type is not supported
+        """
+        if channel_type not in self.get_supported_channels():
+            raise ValueError(
+                f"Channel type '{channel_type}' not supported. "
+                f"Supported: {self.get_supported_channels()}"
+            )
+
+        # Create the channel with config
+        from .channels import create_channel
+        self._channel = create_channel(channel_type, channel_config)
+
 
 def create_plugin() -> ReferencesPlugin:
     """Factory function to create the references plugin instance."""
