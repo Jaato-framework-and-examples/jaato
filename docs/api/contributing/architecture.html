@@ -110,56 +110,77 @@
 
       <!-- High-Level Overview -->
       <section>
-        <h2 id="overview">High-Level Overview</h2>
+        <h2 id="overview">High-Level Architecture</h2>
         <p>
           At its core, jaato is a client framework that orchestrates communication between
-          your application, AI models, and tool execution. Here's how the pieces fit together:
+          your application, AI models, and tool execution. Here's the layered architecture:
         </p>
 
-        <div class="ascii-diagram">┌─────────────────────────────────────────────────────────────────────────────┐
-│                           GENERIC CLIENT APPLICATION                         │
-│  (Your code that wants to use AI with tools)                                │
-└─────────────────────────────────────────────┬───────────────────────────────┘
-                                              │
-                                              ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              JaatoClient                                     │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Public API:                                                         │    │
-│  │  • connect(project, location, model)                                │    │
-│  │  • configure_tools(registry, permission_plugin, ledger)             │    │
-│  │  • send_message(message) → response                                 │    │
-│  │  • get_history() / reset_session()                                  │    │
-│  │  • get_context_usage()                                              │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                              │                               │
-│              ┌───────────────────────────────┼───────────────────────────┐   │
-│              │                               │                           │   │
-│              ▼                               ▼                           ▼   │
-│  ┌───────────────────┐       ┌───────────────────┐       ┌──────────────┐   │
-│  │   ToolExecutor    │       │  PluginRegistry   │       │ TokenLedger  │   │
-│  │  (Runs functions) │◄──────│  (Manages tools)  │       │ (Accounting) │   │
-│  └─────────┬─────────┘       └───────────────────┘       └──────────────┘   │
-│            │                          │                                      │
-│            ▼                          ▼                                      │
-│  ┌───────────────────┐       ┌────────────────────────────────────────────┐ │
-│  │PermissionPlugin   │       │   Tool Plugins                              │ │
-│  │ (Access control)  │       │ (CLI, MCP, Todo, References, etc.)          │ │
-│  └───────────────────┘       └────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                              │
-                                              ▼
-                               ┌──────────────────────────┐
-                               │   ModelProviderPlugin    │
-                               │   (Provider abstraction) │
-                               └────────────┬─────────────┘
-                                            │
-                     ┌──────────────────────┼──────────────────────┐
-                     ▼                      ▼                      ▼
-           ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
-           │  Google GenAI   │   │   Anthropic     │   │    Others...    │
-           │ (Gemini models) │   │ (Claude models) │   │                 │
-           └─────────────────┘   └─────────────────┘   └─────────────────┘</div>
+        <div class="mermaid">
+graph TB
+    subgraph ClientLayer["Your Application Layer"]
+        App["Generic Client Application<br/>(Your code that uses jaato)"]
+    end
+
+    subgraph JaatoLayer["Jaato Framework Layer"]
+        subgraph JaatoClient["JaatoClient (Main Orchestrator)"]
+            API["Public API:<br/>• connect()<br/>• configure_tools()<br/>• send_message()<br/>• get_history()"]
+        end
+
+        subgraph CoreComponents["Core Components"]
+            TE["ToolExecutor<br/>(Runs tool functions)"]
+            PR["PluginRegistry<br/>(Manages plugins)"]
+            TL["TokenLedger<br/>(Token accounting)"]
+        end
+
+        subgraph PluginLayer["Plugin Layer"]
+            PERM["PermissionPlugin<br/>(Access control)"]
+            TOOLS["Tool Plugins<br/>(CLI, MCP, Todo, etc.)"]
+        end
+    end
+
+    subgraph ProviderLayer["Provider Abstraction Layer"]
+        Provider["ModelProviderPlugin<br/>(Provider-agnostic interface)"]
+    end
+
+    subgraph ExternalServices["External AI Services"]
+        Google["Google GenAI<br/>(Gemini models)"]
+        Anthropic["Anthropic<br/>(Claude models)"]
+        Others["Others..."]
+    end
+
+    App --> API
+    API --> TE
+    API --> PR
+    API --> TL
+    TE --> PERM
+    PR --> TOOLS
+    TE --> TOOLS
+    API --> Provider
+    Provider --> Google
+    Provider --> Anthropic
+    Provider --> Others
+
+    classDef clientStyle fill:#e1f5ff,stroke:#0288d1,stroke-width:2px
+    classDef frameworkStyle fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef providerStyle fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef externalStyle fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
+
+    class App clientStyle
+    class API,TE,PR,TL,PERM,TOOLS frameworkStyle
+    class Provider providerStyle
+    class Google,Anthropic,Others externalStyle
+        </div>
+
+        <p style="margin-top: 24px;">
+          <strong>Key layers:</strong>
+        </p>
+        <ul>
+          <li><strong>Application Layer</strong> (Blue) - Your code using jaato</li>
+          <li><strong>Framework Layer</strong> (Purple) - jaato's core orchestration and plugin system</li>
+          <li><strong>Provider Layer</strong> (Orange) - Abstract AI provider interface</li>
+          <li><strong>External Services</strong> (Green) - AI model providers (Google, Anthropic, etc.)</li>
+        </ul>
       </section>
 
       <!-- Component Diagram -->
