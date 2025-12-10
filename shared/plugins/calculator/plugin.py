@@ -1,5 +1,6 @@
 # shared/plugins/calculator/plugin.py
 
+from typing import Dict, List, Optional, Any, Callable
 from jaato import ToolSchema
 import json
 
@@ -7,17 +8,27 @@ import json
 class CalculatorPlugin:
     """Plugin that provides mathematical calculation tools."""
 
+    @property
+    def name(self) -> str:
+        """Unique identifier for this plugin."""
+        return "calculator"
+
     def __init__(self):
         self.precision = 2
 
-    def initialize(self, config: dict):
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """
         Called by registry with configuration.
 
         Args:
             config: Dict with plugin settings
         """
-        self.precision = config.get("precision", 2)
+        if config:
+            self.precision = config.get("precision", 2)
+
+    def shutdown(self) -> None:
+        """Cleanup when plugin is disabled."""
+        pass  # Nothing to clean up
 
     def get_tool_schemas(self):
         """Declare the tools this plugin provides."""
@@ -227,3 +238,17 @@ class CalculatorPlugin:
             return f"Error: Invalid operation or function in expression - {e}"
         except Exception as e:
             return f"Error: {str(e)}"
+
+    # ==================== Required Protocol Methods ====================
+
+    def get_system_instructions(self) -> Optional[str]:
+        """Instructions for the model about calculator tools."""
+        return None  # Tool descriptions are self-explanatory
+
+    def get_auto_approved_tools(self) -> List[str]:
+        """All calculator tools are safe, read-only operations."""
+        return ["add", "subtract", "multiply", "divide", "calculate"]
+
+    def get_user_commands(self) -> List:
+        """Calculator provides model tools only, no user commands."""
+        return []

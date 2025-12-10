@@ -138,20 +138,35 @@ class MyPlugin:
             with your plugin name. Then create the main plugin class.
           </p>
 
-          <h3>Required Methods</h3>
+          <h3>Required Members</h3>
+          <p>
+            All plugins must implement these members to satisfy the <code>ToolPlugin</code> protocol.
+            The registry uses <code>isinstance(plugin, ToolPlugin)</code> at runtime and will reject
+            plugins missing any of these.
+          </p>
           <table>
             <thead>
               <tr>
-                <th>Method</th>
-                <th>Returns</th>
+                <th>Member</th>
+                <th>Type/Returns</th>
                 <th>Purpose</th>
               </tr>
             </thead>
             <tbody>
               <tr>
+                <td><code>name</code></td>
+                <td><code>str</code> (property)</td>
+                <td>Unique identifier for this plugin</td>
+              </tr>
+              <tr>
                 <td><code>initialize(config)</code></td>
                 <td><code>None</code></td>
                 <td>Setup with configuration dict</td>
+              </tr>
+              <tr>
+                <td><code>shutdown()</code></td>
+                <td><code>None</code></td>
+                <td>Cleanup when plugin is disabled</td>
               </tr>
               <tr>
                 <td><code>get_tool_schemas()</code></td>
@@ -163,10 +178,35 @@ class MyPlugin:
                 <td><code>Dict[str, Callable]</code></td>
                 <td>Map tool names to functions</td>
               </tr>
+              <tr>
+                <td><code>get_system_instructions()</code></td>
+                <td><code>Optional[str]</code></td>
+                <td>Instructions for the model (return <code>None</code> if not needed)</td>
+              </tr>
+              <tr>
+                <td><code>get_auto_approved_tools()</code></td>
+                <td><code>List[str]</code></td>
+                <td>Tool names that skip permission checks (return <code>[]</code> if none)</td>
+              </tr>
+              <tr>
+                <td><code>get_user_commands()</code></td>
+                <td><code>List[UserCommand]</code></td>
+                <td>Commands users can invoke directly (return <code>[]</code> if none)</td>
+              </tr>
             </tbody>
           </table>
 
+          <div class="callout callout-warning">
+            <div class="callout-title">Protocol Compliance</div>
+            <p>
+              The registry validates plugins using Python's <code>@runtime_checkable</code> protocol.
+              If any required member is missing, you'll see:
+              <code>"plugin does not implement ToolPlugin protocol"</code>
+            </p>
+          </div>
+
           <h3>Optional Methods</h3>
+          <p>These methods extend plugin capabilities but are not required for protocol compliance.</p>
           <table>
             <thead>
               <tr>
@@ -177,19 +217,14 @@ class MyPlugin:
             </thead>
             <tbody>
               <tr>
-                <td><code>get_user_commands()</code></td>
-                <td><code>List[UserCommand]</code></td>
-                <td>Commands users can invoke directly (see Step 4)</td>
+                <td><code>subscribes_to_prompt_enrichment()</code></td>
+                <td><code>bool</code></td>
+                <td>Return <code>True</code> to enable prompt enrichment</td>
               </tr>
               <tr>
-                <td><code>get_auto_approved_tools()</code></td>
-                <td><code>List[str]</code></td>
-                <td>Tool names that skip permission checks</td>
-              </tr>
-              <tr>
-                <td><code>get_prompt_enrichment()</code></td>
-                <td><code>str</code></td>
-                <td>Text added to system prompt to guide the model</td>
+                <td><code>enrich_prompt(prompt)</code></td>
+                <td><code>PromptEnrichmentResult</code></td>
+                <td>Discover and inject context the user didn't provide (see multimodal plugin example)</td>
               </tr>
               <tr>
                 <td><code>supports_interactivity()</code></td>
@@ -210,41 +245,43 @@ class MyPlugin:
           </table>
 
           <div class="callout callout-info">
-            <div class="callout-title">When to Use Optional Methods</div>
-            <ul style="margin: 8px 0 0 0; padding-left: 20px;">
-              <li><strong>get_user_commands()</strong> — Your plugin provides commands users type directly (e.g., <code>/search</code>)</li>
-              <li><strong>get_auto_approved_tools()</strong> — Your tools are safe to run without asking permission (read-only operations)</li>
-              <li><strong>get_prompt_enrichment()</strong> — The model needs context about when/how to use your tools</li>
-              <li><strong>Interactivity methods</strong> — Your plugin asks questions or shows progress to users</li>
-            </ul>
+            <div class="callout-title">Prompt Enrichment</div>
+            <p>
+              Prompt enrichment allows plugins to discover and provide relevant information
+              that the user didn't explicitly include. For example, the <code>multimodal</code>
+              plugin detects <code>@image.png</code> references in prompts and adds context
+              about the <code>viewImage</code> tool availability.
+            </p>
           </div>
         </div>
         <div class="panel-code">
-          <div class="code-label">Basic plugin class</div>
+          <div class="code-label">Complete plugin class (all required members)</div>
           <div class="code-block">
-            <pre><code class="language-python">from jaato import ToolSchema
+            <pre><code class="language-python">from typing import Dict, List, Optional, Any, Callable
+from jaato import ToolSchema
 
 class WeatherPlugin:
     """Plugin that provides weather information."""
+
+    @property
+    def name(self) -> str:
+        """Unique identifier for this plugin."""
+        return "weather"
 
     def __init__(self):
         self.api_key = None
         self.default_units = "celsius"
 
     def initialize(self, config: dict):
-        """
-        Called by registry with configuration.
-
-        Args:
-            config: Dict with plugin settings
-        """
+        """Called by registry with configuration."""
         self.api_key = config.get("api_key")
-        self.default_units = config.get(
-            "units",
-            "celsius"
-        )
+        self.default_units = config.get("units", "celsius")
 
-    def get_tool_schemas(self):
+    def shutdown(self):
+        """Cleanup when plugin is disabled."""
+        pass  # Nothing to clean up
+
+    def get_tool_schemas(self) -> List[ToolSchema]:
         """Declare the tools this plugin provides."""
         return [
             ToolSchema(
@@ -256,11 +293,6 @@ class WeatherPlugin:
                         "city": {
                             "type": "string",
                             "description": "City name"
-                        },
-                        "units": {
-                            "type": "string",
-                            "enum": ["celsius", "fahrenheit"],
-                            "description": "Temperature units"
                         }
                     },
                     "required": ["city"]
@@ -268,34 +300,52 @@ class WeatherPlugin:
             )
         ]
 
-    def get_executors(self):
+    def get_executors(self) -> Dict[str, Callable]:
         """Map tool names to executor functions."""
-        return {
-            "get_weather": self._get_weather
-        }
+        return {"get_weather": self._get_weather}
 
-    def _get_weather(self, city: str, units: str = None):
+    def get_system_instructions(self) -> Optional[str]:
+        """Instructions for the model."""
+        return None  # No special instructions needed
+
+    def get_auto_approved_tools(self) -> List[str]:
+        """Tools that skip permission checks."""
+        return ["get_weather"]  # Read-only, safe
+
+    def get_user_commands(self) -> List:
+        """User-invokable commands."""
+        return []  # No user commands
+
+    def _get_weather(self, city: str):
         """Execute the get_weather tool."""
-        units = units or self.default_units
-        # Implementation here...
         return f"Weather in {city}: 22°C, Sunny"</code></pre>
           </div>
 
-          <div class="code-label" style="margin-top: 24px;">Optional method examples</div>
+          <div class="code-label" style="margin-top: 24px;">Optional: Prompt enrichment</div>
           <div class="code-block">
-            <pre><code class="language-python"># Auto-approved tools (safe, read-only operations)
-def get_auto_approved_tools(self):
-    """List tools that don't need permission prompts."""
-    return [
-        "get_weather",  # Read-only, safe
-        "list_cities"   # Just lists data
-    ]
-    # Don't auto-approve: delete, modify, execute
+            <pre><code class="language-python"># See multimodal plugin for a real example
+def subscribes_to_prompt_enrichment(self) -> bool:
+    """Return True to enable prompt enrichment."""
+    return True
 
+def enrich_prompt(self, prompt: str):
+    """Discover context the user didn't provide.
 
-# Prompt enrichment (guide the model)
+    Example: multimodal plugin detects @image.png
+    references and adds viewImage tool context.
+    """
+    from shared.plugins.base import PromptEnrichmentResult
+    # Detect patterns, add context...
+    return PromptEnrichmentResult(
+        prompt=prompt,  # Modified or original
+        metadata={}     # Any discovered info
+    )</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Deprecated: get_prompt_enrichment</div>
+          <div class="code-block">
+            <pre><code class="language-python"># OLD (deprecated) - static text added to prompt
 def get_prompt_enrichment(self):
-    """Add context to help model use tools correctly."""
     return """
 You have access to weather tools. Use get_weather
 to check current conditions for any city worldwide.
