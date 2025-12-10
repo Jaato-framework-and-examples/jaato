@@ -88,6 +88,19 @@
             Optionally, plugins can also provide user commands, auto-approved tools,
             and prompt enrichment.
           </p>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Import Pattern</div>
+            <p>
+              Throughout this guide, examples use <code>from jaato import ToolSchema</code>.
+              This is the recommended import pattern for all plugins (both in-tree and external).
+            </p>
+            <p>
+              When jaato is installed as a package, <code>from jaato import ...</code> imports
+              from the public API. The internal <code>shared/</code> directory is an
+              implementation detail.
+            </p>
+          </div>
         </div>
         <div class="panel-code">
           <div class="code-label">Plugin structure</div>
@@ -209,7 +222,7 @@ class MyPlugin:
         <div class="panel-code">
           <div class="code-label">Basic plugin class</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared.plugins.model_provider.types import ToolSchema
+            <pre><code class="language-python">from jaato import ToolSchema
 
 class WeatherPlugin:
     """Plugin that provides weather information."""
@@ -387,7 +400,7 @@ Always specify the city name clearly.
         <div class="panel-code">
           <div class="code-label">Schema examples</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared.plugins.model_provider.types import ToolSchema
+            <pre><code class="language-python">from jaato import ToolSchema
 
 # Simple tool with required parameter
 search_schema = ToolSchema(
@@ -609,7 +622,7 @@ class MyPlugin:
         <div class="panel-code">
           <div class="code-label">Adding user commands</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared.plugins.base import UserCommand
+            <pre><code class="language-python">from jaato import UserCommand
 
 class MyPlugin:
     def get_user_commands(self):
@@ -1233,7 +1246,7 @@ def create_plugin():
     return CalculatorPlugin()
 
 # shared/plugins/calculator/plugin.py
-from shared.plugins.model_provider.types import ToolSchema
+from jaato import ToolSchema
 
 class CalculatorPlugin:
     def initialize(self, config):
