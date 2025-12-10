@@ -82,6 +82,7 @@ class ConsoleReporter(TodoReporter):
 
     def __init__(self):
         self._output_func: Optional[Callable[[str], None]] = None
+        self._output_callback: Optional[Callable[[str, str, str], None]] = None
         self._show_timestamps: bool = True
         self._progress_bar: bool = True
         self._use_colors: bool = True
@@ -107,6 +108,8 @@ class ConsoleReporter(TodoReporter):
 
         Config options:
             output_func: Custom output function (for testing, disables rich)
+            output_callback: Callback for rich client integration (Callable[[str, str, str], None])
+                            Called with (source, text, mode) for output
             show_timestamps: Show timestamps in output
             progress_bar: Show ASCII progress bar
             colors: Use ANSI colors (default True)
@@ -116,6 +119,8 @@ class ConsoleReporter(TodoReporter):
         if config:
             if "output_func" in config:
                 self._output_func = config["output_func"]
+            if "output_callback" in config:
+                self._output_callback = config["output_callback"]
             self._show_timestamps = config.get("show_timestamps", True)
             self._progress_bar = config.get("progress_bar", True)
             self._use_colors = config.get("colors", True)
@@ -124,9 +129,16 @@ class ConsoleReporter(TodoReporter):
         # Initialize rich console after config is set
         self._init_console()
 
-    def _print(self, text: str) -> None:
-        """Print text using either custom output_func, rich console, or print."""
-        if self._output_func is not None:
+    def _print(self, text: str, mode: str = "append") -> None:
+        """Print text using callback, output_func, rich console, or print.
+
+        Args:
+            text: Text to output
+            mode: Output mode - "write" for new block, "append" to continue (default: "append")
+        """
+        if self._output_callback is not None:
+            self._output_callback("todo", text, mode)
+        elif self._output_func is not None:
             self._output_func(text)
         elif self._console is not None:
             self._console.print(text, highlight=False, markup=False)
@@ -189,7 +201,7 @@ class ConsoleReporter(TodoReporter):
 
     def report_plan_created(self, plan: TodoPlan) -> None:
         """Report new plan creation."""
-        self._print("")
+        self._print("", "write")  # Start new output block
         self._print("=" * self._width)
         self._print(self._color(f"📋 PLAN: {plan.title}", "bold"))
         self._print("=" * self._width)
@@ -236,7 +248,7 @@ class ConsoleReporter(TodoReporter):
             f"[{step.sequence}/{len(plan.steps)}] "
             f"{self._color(status_text, status_color)}: {step.description}"
         )
-        self._print(status_line)
+        self._print(status_line, "write")  # Start new output block for each step
 
         # Show result or error for completed/failed/skipped steps
         if step.result and step.status in (StepStatus.COMPLETED, StepStatus.SKIPPED):
@@ -253,7 +265,7 @@ class ConsoleReporter(TodoReporter):
 
     def report_plan_completed(self, plan: TodoPlan) -> None:
         """Report plan completion."""
-        self._print("")
+        self._print("", "write")  # Start new output block
         self._print("=" * self._width)
 
         progress = plan.get_progress()

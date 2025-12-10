@@ -151,6 +151,8 @@ class ClarificationPlugin:
 
 You have access to a `request_clarification` tool that allows you to ask the user questions when you need more information.
 
+**IMPORTANT**: When you need to ask the user a question, you MUST use the `request_clarification` tool. Do NOT ask questions directly in your text response - always use the tool instead. This ensures a consistent user experience and proper input handling.
+
 ### When to use:
 - When the user's request is ambiguous
 - When you need to choose between multiple valid approaches
@@ -324,6 +326,48 @@ The tool returns responses keyed by question number (1-based):
             questions.append(question)
 
         return ClarificationRequest(context=context, questions=questions)
+
+    # Interactivity protocol methods
+
+    def supports_interactivity(self) -> bool:
+        """Clarification plugin requires user interaction for answering questions.
+
+        Returns:
+            True - clarification plugin has interactive question prompts.
+        """
+        return True
+
+    def get_supported_channels(self) -> List[str]:
+        """Return list of channel types supported by clarification plugin.
+
+        Returns:
+            List of supported channel types: console, queue, auto.
+        """
+        return ["console", "queue", "auto"]
+
+    def set_channel(
+        self,
+        channel_type: str,
+        channel_config: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Set the interaction channel for clarification prompts.
+
+        Args:
+            channel_type: One of: console, queue, auto
+            channel_config: Optional channel-specific configuration
+
+        Raises:
+            ValueError: If channel_type is not supported
+        """
+        if channel_type not in self.get_supported_channels():
+            raise ValueError(
+                f"Channel type '{channel_type}' not supported. "
+                f"Supported: {self.get_supported_channels()}"
+            )
+
+        # Create the channel with config
+        from .channels import create_channel
+        self._channel = create_channel(channel_type, **(channel_config or {}))
 
 
 def create_plugin() -> ClarificationPlugin:

@@ -518,6 +518,10 @@ class JaatoClient:
                 # Re-cache function_calls for next iteration
                 function_calls = list(response.function_calls) if response.function_calls else []
 
+            # Emit final response text (when function call loop ends with text)
+            if response.text and on_output:
+                on_output("model", response.text, "write")
+
             # Return the final response text
             return response.text or ''
 
@@ -1050,6 +1054,10 @@ class JaatoClient:
                 self._accumulate_provider_turn_tokens(response, turn_data)
                 # Re-cache function_calls for next iteration
                 function_calls = list(response.function_calls) if response.function_calls else []
+
+            # Emit final response text (when function call loop ends with text)
+            if response.text and on_output:
+                on_output("model", response.text, "write")
 
             # Return the final response text
             return response.text or ''
