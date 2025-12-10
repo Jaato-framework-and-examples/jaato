@@ -4,7 +4,7 @@ import pytest
 
 from shared.plugins.gc import GCConfig, GCTriggerReason
 from shared.plugins.gc_truncate import TruncateGCPlugin, create_plugin
-from shared.plugins.model_provider.types import Message, Part, Role
+from jaato import Message, Part, Role
 
 
 def make_message(role: str, text: str) -> Message:
