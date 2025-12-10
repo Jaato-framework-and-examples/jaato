@@ -299,26 +299,51 @@ class OutputBuffer:
                 output.append(line.text, style="dim")
             elif line.source == "permission":
                 # Permission prompts - no prefix needed, they self-identify with [askPermission]
-                # Highlight specific keywords in permission prompts
+                # Text may contain ANSI escape codes (e.g., for diff coloring)
+                # Use Text.from_ansi() to preserve them
                 text = line.text
                 if "[askPermission]" in text:
                     # Color the label
                     text = text.replace("[askPermission]", "")
                     output.append("[askPermission] ", style="bold yellow")
-                    output.append(text)
+                    output.append_text(Text.from_ansi(text))
                 elif "Options:" in text:
                     # Highlight options line
-                    output.append(text, style="cyan")
+                    output.append_text(Text.from_ansi(text, style="cyan"))
                 elif text.startswith("===") or text.startswith("─") or text.startswith("="):
                     # Separators
                     output.append(text, style="dim")
                 else:
-                    output.append(text)
+                    # Preserve any ANSI codes in the text (e.g., diff coloring)
+                    output.append_text(Text.from_ansi(text))
+            elif line.source == "clarification":
+                # Clarification prompts - no prefix needed, they self-identify
+                # Text may contain ANSI escape codes, use Text.from_ansi() to preserve them
+                text = line.text
+                if "Clarification Needed" in text:
+                    output.append_text(Text.from_ansi(text, style="bold cyan"))
+                elif text.startswith("===") or text.startswith("─") or text.startswith("="):
+                    # Separators
+                    output.append(text, style="dim")
+                elif "Enter choice" in text:
+                    output.append_text(Text.from_ansi(text, style="cyan"))
+                elif text.strip().startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.")):
+                    # Numbered options
+                    output.append_text(Text.from_ansi(text, style="cyan"))
+                elif "Question" in text and "/" in text:
+                    # Question counter like "Question 1/1"
+                    output.append_text(Text.from_ansi(text, style="bold"))
+                elif "[*required]" in text:
+                    text = text.replace("[*required]", "")
+                    output.append_text(Text.from_ansi(text))
+                    output.append("[*required]", style="yellow")
+                else:
+                    output.append_text(Text.from_ansi(text))
             else:
-                # Other plugin output
+                # Other plugin output - preserve any ANSI codes
                 if line.is_turn_start:
                     output.append(f"[{line.source}] ", style="dim magenta")
-                output.append(line.text)
+                output.append_text(Text.from_ansi(line.text))
 
         # Add spinner at the bottom if active
         if self._spinner_active:

@@ -318,6 +318,9 @@ class RichClient:
             self._trace(f"prompt_callback: waiting={waiting}")
             if self._display:
                 self._display.set_waiting_for_channel_input(waiting)
+                if not waiting:
+                    # Channel finished - start spinner while model continues
+                    self._display.start_spinner()
 
         # Set callbacks on clarification plugin channel
         if self.registry:
@@ -560,8 +563,9 @@ class RichClient:
                 self._display.append_output("user", user_input, "write")
             self._channel_input_queue.put(user_input)
             self._trace(f"Input routed to channel queue: {user_input}")
-            # Restart spinner while waiting for model to continue
-            self._display.start_spinner()
+            # Don't start spinner here - the channel may have more questions.
+            # Spinner will be started when prompt_callback(False) indicates
+            # the channel is done and model continues.
             return
 
         if not user_input:
