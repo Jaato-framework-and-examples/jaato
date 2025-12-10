@@ -702,6 +702,50 @@ class TodoPlugin:
             return []
         return self._storage.get_all_plans()
 
+    # Interactivity protocol methods
+
+    def supports_interactivity(self) -> bool:
+        """TODO plugin has interactive features for progress reporting.
+
+        Returns:
+            True - TODO plugin has interactive progress reporting.
+        """
+        return True
+
+    def get_supported_channels(self) -> List[str]:
+        """Return list of channel types supported by TODO plugin.
+
+        Returns:
+            List of supported channel types matching available reporters.
+        """
+        return ["console", "webhook", "file"]
+
+    def set_channel(
+        self,
+        channel_type: str,
+        channel_config: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Set the interaction channel for progress reporting.
+
+        Args:
+            channel_type: One of: console, webhook, file
+            channel_config: Optional channel-specific configuration
+                For "console": output_callback for rich client integration
+
+        Raises:
+            ValueError: If channel_type is not supported
+        """
+        if channel_type not in self.get_supported_channels():
+            raise ValueError(
+                f"Channel type '{channel_type}' not supported. "
+                f"Supported: {self.get_supported_channels()}"
+            )
+
+        # Create reporter with config
+        from .channels import create_reporter
+        reporter_config = channel_config or {}
+        self._reporter = create_reporter(channel_type, reporter_config)
+
 
 def create_plugin() -> TodoPlugin:
     """Factory function to create the TODO plugin instance."""

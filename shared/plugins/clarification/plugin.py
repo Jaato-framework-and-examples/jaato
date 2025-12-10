@@ -325,6 +325,48 @@ The tool returns responses keyed by question number (1-based):
 
         return ClarificationRequest(context=context, questions=questions)
 
+    # Interactivity protocol methods
+
+    def supports_interactivity(self) -> bool:
+        """Clarification plugin requires user interaction for answering questions.
+
+        Returns:
+            True - clarification plugin has interactive question prompts.
+        """
+        return True
+
+    def get_supported_channels(self) -> List[str]:
+        """Return list of channel types supported by clarification plugin.
+
+        Returns:
+            List of supported channel types: console, queue, auto.
+        """
+        return ["console", "queue", "auto"]
+
+    def set_channel(
+        self,
+        channel_type: str,
+        channel_config: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Set the interaction channel for clarification prompts.
+
+        Args:
+            channel_type: One of: console, queue, auto
+            channel_config: Optional channel-specific configuration
+
+        Raises:
+            ValueError: If channel_type is not supported
+        """
+        if channel_type not in self.get_supported_channels():
+            raise ValueError(
+                f"Channel type '{channel_type}' not supported. "
+                f"Supported: {self.get_supported_channels()}"
+            )
+
+        # Create the channel with config
+        from .channels import create_channel
+        self._channel = create_channel(channel_type, **(channel_config or {}))
+
 
 def create_plugin() -> ClarificationPlugin:
     """Factory function to create a ClarificationPlugin instance."""

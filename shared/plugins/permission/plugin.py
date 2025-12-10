@@ -817,6 +817,47 @@ If a tool is denied, do not attempt to execute it."""
                 wrapped[name] = self.wrap_executor(name, executor)
         return wrapped
 
+    # Interactivity protocol methods
+
+    def supports_interactivity(self) -> bool:
+        """Permission plugin requires user interaction for approval prompts.
+
+        Returns:
+            True - permission plugin has interactive approval features.
+        """
+        return True
+
+    def get_supported_channels(self) -> List[str]:
+        """Return list of channel types supported by permission plugin.
+
+        Returns:
+            List of supported channel types: console, queue, webhook, file.
+        """
+        return ["console", "queue", "webhook", "file"]
+
+    def set_channel(
+        self,
+        channel_type: str,
+        channel_config: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Set the interaction channel for permission prompts.
+
+        Args:
+            channel_type: One of: console, queue, webhook, file
+            channel_config: Optional channel-specific configuration
+
+        Raises:
+            ValueError: If channel_type is not supported
+        """
+        if channel_type not in self.get_supported_channels():
+            raise ValueError(
+                f"Channel type '{channel_type}' not supported. "
+                f"Supported: {self.get_supported_channels()}"
+            )
+
+        # Create the channel with config
+        self._channel = create_channel(channel_type, channel_config)
+
 
 def create_plugin() -> PermissionPlugin:
     """Factory function to create the permission plugin instance."""
