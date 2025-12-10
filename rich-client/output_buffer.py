@@ -114,6 +114,10 @@ class OutputBuffer:
             text: The output text.
             mode: "write" for new block, "append" to continue.
         """
+        # Skip plan messages - they're shown in the sticky plan panel
+        if source == "plan":
+            return
+
         if mode == "write":
             # Start a new block - this is a new turn
             self._flush_current_block()
@@ -248,26 +252,25 @@ class OutputBuffer:
         lines_to_show: List[OutputLine] = []
 
         if height:
-            # Skip scroll_offset display lines from the bottom
-            display_lines_skipped = 0
-            start_index = len(all_lines)
+            # Calculate total display lines
+            total_display_lines = sum(line.display_lines for line in all_lines)
 
-            for i in range(len(all_lines) - 1, -1, -1):
-                line = all_lines[i]
-                if display_lines_skipped + line.display_lines <= self._scroll_offset:
-                    display_lines_skipped += line.display_lines
-                    start_index = i
-                else:
-                    break
+            # Find the end position (bottom of visible window)
+            # scroll_offset=0 means show the most recent content
+            # scroll_offset>0 means we've scrolled up, showing older content
+            end_display_line = total_display_lines - self._scroll_offset
+            start_display_line = max(0, end_display_line - height)
 
-            # Now collect 'height' display lines going backwards from start_index
-            display_lines_used = 0
-            for i in range(start_index - 1, -1, -1):
-                line = all_lines[i]
-                if display_lines_used + line.display_lines <= height:
-                    lines_to_show.insert(0, line)
-                    display_lines_used += line.display_lines
-                else:
+            # Collect lines that fall within the visible range
+            current_display_line = 0
+            for line in all_lines:
+                line_end = current_display_line + line.display_lines
+                # Include line if it overlaps with visible range
+                if line_end > start_display_line and current_display_line < end_display_line:
+                    lines_to_show.append(line)
+                current_display_line = line_end
+                # Stop if we've passed the visible range
+                if current_display_line >= end_display_line:
                     break
         else:
             lines_to_show = all_lines
