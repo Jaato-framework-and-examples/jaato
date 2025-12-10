@@ -203,6 +203,7 @@ a:hover {
 .two-panel {
   display: flex;
   border-bottom: 1px solid var(--color-border);
+  align-items: flex-start; /* Prevent panels from stretching to same height */
 }
 
 .two-panel:last-child {
@@ -213,6 +214,11 @@ a:hover {
   width: var(--explanation-width);
   padding: 32px 40px;
   border-right: 1px solid var(--color-border);
+  /* Sticky behavior: stays visible while scrolling through long code */
+  position: sticky;
+  top: var(--header-height);
+  max-height: calc(100vh - var(--header-height));
+  overflow-y: auto;
 }
 
 .panel-code {
@@ -667,12 +673,20 @@ h3:hover .anchor-link {
 @media (max-width: 900px) {
   .two-panel {
     flex-direction: column;
+    align-items: stretch; /* Reset for stacked layout */
   }
 
   .panel-explanation,
   .panel-code {
     width: 100%;
     border-right: none;
+  }
+
+  .panel-explanation {
+    /* Disable sticky on mobile where panels stack */
+    position: static;
+    max-height: none;
+    overflow-y: visible;
   }
 
   .panel-code {
