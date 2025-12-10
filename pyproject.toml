@@ -44,20 +44,20 @@ dev = [
 # Entry points for plugin discovery
 # External packages can register plugins by adding to this group
 [project.entry-points."jaato.plugins"]
-cli = "shared.plugins.cli:create_plugin"
-mcp = "shared.plugins.mcp:create_plugin"
-multimodal = "shared.plugins.multimodal:create_plugin"
-permission = "shared.plugins.permission:create_plugin"
-todo = "shared.plugins.todo:create_plugin"
-references = "shared.plugins.references:create_plugin"
+cli = "jaato.plugins.cli:create_plugin"
+mcp = "jaato.plugins.mcp:create_plugin"
+multimodal = "jaato.plugins.multimodal:create_plugin"
+permission = "jaato.plugins.permission:create_plugin"
+todo = "jaato.plugins.todo:create_plugin"
+references = "jaato.plugins.references:create_plugin"
 
 # Entry points for GC strategy plugins
 # GC plugins implement context window garbage collection strategies
 [project.entry-points."jaato.gc_plugins"]
-gc_truncate = "shared.plugins.gc_truncate:create_plugin"
-gc_summarize = "shared.plugins.gc_summarize:create_plugin"
-gc_hybrid = "shared.plugins.gc_hybrid:create_plugin"
+gc_truncate = "jaato.plugins.gc_truncate:create_plugin"
+gc_summarize = "jaato.plugins.gc_summarize:create_plugin"
+gc_hybrid = "jaato.plugins.gc_hybrid:create_plugin"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["shared*", "simple-client*"]
+include = ["jaato*", "shared*", "simple-client*"]

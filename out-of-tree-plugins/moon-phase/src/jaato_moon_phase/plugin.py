@@ -31,8 +31,8 @@ class MoonPhasePlugin:
         Returns:
             List of ToolSchema objects declaring available tools.
         """
-        # Import here based on documentation showing this pattern
-        from shared.plugins.model_provider.types import ToolSchema
+        # Import from jaato package (external plugin pattern)
+        from jaato import ToolSchema
 
         return [
             ToolSchema(
