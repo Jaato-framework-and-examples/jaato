@@ -131,14 +131,21 @@ class CalculatorPlugin:
             "calculate": self._calculate
         }
 
-    def _add(self, a: float, b: float) -> str:
+    def _add(self, args: Dict[str, Any]) -> str:
         """
         Add two numbers.
+
+        Args:
+            args: Dict with 'a' and 'b' numbers.
 
         Returns formatted result or error message.
         """
         try:
-            result = a + b
+            a = args.get('a')
+            b = args.get('b')
+            if a is None or b is None:
+                return "Error: Both 'a' and 'b' are required"
+            result = float(a) + float(b)
             return json.dumps({
                 "operation": "addition",
                 "operands": [a, b],
@@ -147,14 +154,21 @@ class CalculatorPlugin:
         except Exception as e:
             return f"Error: {str(e)}"
 
-    def _subtract(self, a: float, b: float) -> str:
+    def _subtract(self, args: Dict[str, Any]) -> str:
         """
         Subtract b from a.
+
+        Args:
+            args: Dict with 'a' and 'b' numbers.
 
         Returns formatted result or error message.
         """
         try:
-            result = a - b
+            a = args.get('a')
+            b = args.get('b')
+            if a is None or b is None:
+                return "Error: Both 'a' and 'b' are required"
+            result = float(a) - float(b)
             return json.dumps({
                 "operation": "subtraction",
                 "operands": [a, b],
@@ -163,14 +177,21 @@ class CalculatorPlugin:
         except Exception as e:
             return f"Error: {str(e)}"
 
-    def _multiply(self, a: float, b: float) -> str:
+    def _multiply(self, args: Dict[str, Any]) -> str:
         """
         Multiply two numbers.
+
+        Args:
+            args: Dict with 'a' and 'b' numbers.
 
         Returns formatted result or error message.
         """
         try:
-            result = a * b
+            a = args.get('a')
+            b = args.get('b')
+            if a is None or b is None:
+                return "Error: Both 'a' and 'b' are required"
+            result = float(a) * float(b)
             return json.dumps({
                 "operation": "multiplication",
                 "operands": [a, b],
@@ -179,13 +200,24 @@ class CalculatorPlugin:
         except Exception as e:
             return f"Error: {str(e)}"
 
-    def _divide(self, a: float, b: float) -> str:
+    def _divide(self, args: Dict[str, Any]) -> str:
         """
         Divide a by b.
+
+        Args:
+            args: Dict with 'a' and 'b' numbers.
 
         Returns formatted result or error message.
         """
         try:
+            a = args.get('a')
+            b = args.get('b')
+            if a is None or b is None:
+                return "Error: Both 'a' and 'b' are required"
+
+            a = float(a)
+            b = float(b)
+
             # Validate input
             if b == 0:
                 return "Error: Division by zero is not allowed"
@@ -201,16 +233,24 @@ class CalculatorPlugin:
         except Exception as e:
             return f"Error: {str(e)}"
 
-    def _calculate(self, expression: str) -> str:
+    def _calculate(self, args: Dict[str, Any]) -> str:
         """
         Evaluate a mathematical expression safely.
+
+        Args:
+            args: Dict with 'expression' string.
 
         Returns formatted result or error message.
         """
         try:
+            expression = args.get('expression')
+
             # Validate input
             if not expression:
                 return "Error: expression required"
+
+            # Ensure expression is a string
+            expression = str(expression)
 
             # Safe eval for math only - restrict builtins to prevent code execution
             # Only allow basic math operations
