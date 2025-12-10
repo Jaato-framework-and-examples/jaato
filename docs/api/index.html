@@ -5,6 +5,300 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>jaato - API Documentation</title>
   <link rel="stylesheet" href="assets/css/style.css">
+  <style>
+    /* Persona card styles */
+    .personas-section {
+      padding: 60px 40px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .personas-intro {
+      text-align: center;
+      margin-bottom: 48px;
+    }
+
+    .personas-intro h2 {
+      font-size: 32px;
+      margin-bottom: 12px;
+      border: none;
+      padding: 0;
+    }
+
+    .personas-intro p {
+      font-size: 18px;
+      color: var(--color-text-secondary);
+      max-width: 600px;
+      margin: 0 auto;
+    }
+
+    .persona-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 24px;
+      margin-top: 48px;
+    }
+
+    .persona-card {
+      background: var(--color-bg);
+      border: 2px solid var(--color-border);
+      border-radius: 12px;
+      padding: 32px;
+      transition: all 0.2s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .persona-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 4px;
+      background: linear-gradient(90deg, var(--persona-color), var(--persona-color-light));
+      transform: scaleX(0);
+      transform-origin: left;
+      transition: transform 0.3s ease;
+    }
+
+    .persona-card:hover::before {
+      transform: scaleX(1);
+    }
+
+    .persona-card:hover {
+      border-color: var(--persona-color);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+      transform: translateY(-4px);
+    }
+
+    /* Persona color variants */
+    .persona-card.persona-user {
+      --persona-color: #635bff;
+      --persona-color-light: #8b84ff;
+    }
+
+    .persona-card.persona-plugin {
+      --persona-color: #10b981;
+      --persona-color-light: #34d399;
+    }
+
+    .persona-card.persona-contributor {
+      --persona-color: #f59e0b;
+      --persona-color-light: #fbbf24;
+    }
+
+    .persona-icon {
+      width: 56px;
+      height: 56px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--persona-color), var(--persona-color-light));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      margin-bottom: 20px;
+    }
+
+    .persona-card h3 {
+      font-size: 24px;
+      margin-bottom: 12px;
+      color: var(--color-text);
+    }
+
+    .persona-card .persona-subtitle {
+      font-size: 14px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--persona-color);
+      margin-bottom: 16px;
+    }
+
+    .persona-card p {
+      color: var(--color-text-secondary);
+      margin-bottom: 24px;
+      line-height: 1.6;
+    }
+
+    .persona-card .persona-what {
+      font-size: 15px;
+      font-weight: 500;
+      color: var(--color-text);
+      margin-bottom: 12px;
+    }
+
+    .persona-card ul {
+      list-style: none;
+      margin: 0 0 24px 0;
+      padding: 0;
+    }
+
+    .persona-card ul li {
+      padding: 6px 0 6px 24px;
+      position: relative;
+      color: var(--color-text-secondary);
+      font-size: 14px;
+    }
+
+    .persona-card ul li::before {
+      content: '→';
+      position: absolute;
+      left: 0;
+      color: var(--persona-color);
+      font-weight: bold;
+    }
+
+    .persona-card .persona-cta {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 24px;
+      background: var(--persona-color);
+      color: white;
+      border-radius: 6px;
+      font-weight: 500;
+      font-size: 15px;
+      transition: all 0.2s;
+      text-decoration: none;
+    }
+
+    .persona-card .persona-cta:hover {
+      background: var(--persona-color-light);
+      transform: translateX(4px);
+      text-decoration: none;
+    }
+
+    .persona-card .persona-cta svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    /* Hero adjustments for persona focus */
+    .hero {
+      padding: 80px 40px 40px;
+    }
+
+    .hero h1 {
+      font-size: 56px;
+      margin-bottom: 16px;
+    }
+
+    .hero .lead {
+      font-size: 20px;
+      color: var(--color-text-secondary);
+      max-width: 700px;
+      margin: 0 auto 32px;
+    }
+
+    /* Remove old hero buttons for cleaner flow to personas */
+    .hero-buttons {
+      display: none;
+    }
+
+    /* Divider */
+    .divider {
+      height: 1px;
+      background: var(--color-border);
+      max-width: 1200px;
+      margin: 60px auto;
+    }
+
+    /* Install tabs */
+    .install-section {
+      padding: 60px 40px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    .install-section h2 {
+      text-align: center;
+      margin-bottom: 32px;
+      font-size: 28px;
+      border: none;
+      padding: 0;
+    }
+
+    .install-tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 24px;
+      border-bottom: 2px solid var(--color-border);
+    }
+
+    .install-tab {
+      padding: 12px 24px;
+      background: none;
+      border: none;
+      border-bottom: 3px solid transparent;
+      color: var(--color-text-secondary);
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-bottom: -2px;
+    }
+
+    .install-tab:hover {
+      color: var(--color-text);
+      background: var(--color-bg-secondary);
+    }
+
+    .install-tab.active {
+      color: var(--color-primary);
+      border-bottom-color: var(--color-primary);
+    }
+
+    .install-content {
+      display: none;
+    }
+
+    .install-content.active {
+      display: block;
+    }
+
+    .install-content p {
+      color: var(--color-text-secondary);
+      margin-bottom: 16px;
+      line-height: 1.6;
+    }
+
+    /* Features section styling */
+    .features-section {
+      padding: 60px 40px;
+      background: var(--color-bg-secondary);
+      border-top: 1px solid var(--color-border);
+    }
+
+    .features-grid {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .features-grid h2 {
+      text-align: center;
+      margin-bottom: 40px;
+      font-size: 32px;
+      border: none;
+      padding: 0;
+    }
+
+    .features-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 32px;
+    }
+
+    .feature-item h3 {
+      margin-top: 0;
+      font-size: 18px;
+    }
+
+    .feature-item p {
+      color: var(--color-text-secondary);
+      margin: 0;
+    }
+  </style>
 </head>
 <body>
   <!-- Header -->
@@ -33,121 +327,222 @@
         function calling, and context management.
       </p>
       <div class="hero-buttons">
-        <a href="getting-started/quickstart.html" class="btn btn-primary">
-          Get Started
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
-        </a>
-        <a href="api-reference/index.html" class="btn btn-secondary">
-          API Reference
-        </a>
+        <!-- Removed - personas are the primary CTA now -->
       </div>
     </section>
 
-    <!-- Quick install -->
-    <section style="padding: 40px; max-width: 800px; margin: 0 auto;">
-      <div class="code-block">
-        <pre><code class="language-bash">git clone https://github.com/apanoia/jaato.git
+    <!-- Personas Section -->
+    <section class="personas-section">
+      <div class="personas-intro">
+        <h2>Choose Your Path</h2>
+        <p>
+          Whether you're building applications, extending functionality, or contributing
+          to the framework itself, we have a guide tailored for you.
+        </p>
+      </div>
+
+      <div class="persona-cards">
+        <!-- Application Developer -->
+        <div class="persona-card persona-user">
+          <div class="persona-icon">📱</div>
+          <div class="persona-subtitle">For Application Developers</div>
+          <h3>Building with jaato</h3>
+          <p>
+            Use jaato as a library to build AI-powered applications with tool execution,
+            multi-turn conversations, and context management.
+          </p>
+
+          <div class="persona-what">You'll learn how to:</div>
+          <ul>
+            <li>Connect to AI providers (Vertex AI, Gemini)</li>
+            <li>Configure and use built-in plugins</li>
+            <li>Manage conversation sessions and context</li>
+            <li>Integrate MCP servers for extended capabilities</li>
+          </ul>
+
+          <a href="getting-started/quickstart.html" class="persona-cta">
+            Get Started
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+          </a>
+        </div>
+
+        <!-- Plugin Developer -->
+        <div class="persona-card persona-plugin">
+          <div class="persona-icon">🔌</div>
+          <div class="persona-subtitle">For Plugin Developers</div>
+          <h3>Extending jaato</h3>
+          <p>
+            Create custom tool plugins to add new capabilities. Build both in-tree plugins
+            and external packages that others can install.
+          </p>
+
+          <div class="persona-what">You'll learn how to:</div>
+          <ul>
+            <li>Implement the ToolPlugin protocol</li>
+            <li>Define tool schemas and executors</li>
+            <li>Package plugins for external distribution</li>
+            <li>Test and document your plugins</li>
+          </ul>
+
+          <a href="guides/tool-plugins.html" class="persona-cta">
+            Build a Plugin
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+          </a>
+        </div>
+
+        <!-- Framework Contributor -->
+        <div class="persona-card persona-contributor">
+          <div class="persona-icon">⚙️</div>
+          <div class="persona-subtitle">For Contributors</div>
+          <h3>Contributing to jaato</h3>
+          <p>
+            Help build the framework itself. Contribute to core functionality, add new
+            provider support, or improve existing features.
+          </p>
+
+          <div class="persona-what">You'll learn about:</div>
+          <ul>
+            <li>Framework architecture and internals</li>
+            <li>Building model provider plugins</li>
+            <li>Implementing GC (garbage collection) strategies</li>
+            <li>Testing and code contribution guidelines</li>
+          </ul>
+
+          <a href="contributing/index.html" class="persona-cta">
+            Start Contributing
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <div class="divider"></div>
+
+    <!-- Install Section with Tabs -->
+    <section class="install-section">
+      <h2>Installation</h2>
+
+      <div class="install-tabs">
+        <button class="install-tab active" onclick="showInstallTab('user')">For Users</button>
+        <button class="install-tab" onclick="showInstallTab('plugin')">For Plugin Developers</button>
+        <button class="install-tab" onclick="showInstallTab('contributor')">For Contributors</button>
+      </div>
+
+      <!-- User installation -->
+      <div id="install-user" class="install-content active">
+        <p>
+          <strong>Application developers</strong> use jaato as a library.
+        </p>
+        <div class="callout callout-warning" style="margin-bottom: 16px; padding: 12px 16px; background: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 4px;">
+          <strong>⚠️ Pre-release:</strong> jaato is currently in alpha. Install from GitHub until the first official PyPI release.
+        </div>
+        <div class="code-block">
+          <pre><code class="language-bash"># Install latest from GitHub (recommended)
+pip install git+https://github.com/apanoia/jaato.git
+
+# Or install a specific commit
+pip install git+https://github.com/apanoia/jaato.git@abc1234
+
+# For development/editable install
+git clone https://github.com/apanoia/jaato.git
 cd jaato
+pip install -e .</code></pre>
+        </div>
+        <p style="margin-top: 16px;">
+          Once released to PyPI, you'll be able to install with: <code style="background: var(--color-bg-secondary); padding: 2px 6px; border-radius: 3px;">pip install jaato</code>
+        </p>
+        <p style="margin-top: 8px;">
+          Then follow the <a href="getting-started/quickstart.html">Quickstart Guide</a> to build your first application.
+        </p>
+      </div>
+
+      <!-- Plugin developer installation -->
+      <div id="install-plugin" class="install-content">
+        <p>
+          <strong>Plugin developers</strong> need jaato installed to develop against the plugin protocol.
+          Start with the out-of-tree plugin template.
+        </p>
+        <div class="callout callout-warning" style="margin-bottom: 16px; padding: 12px 16px; background: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 4px;">
+          <strong>⚠️ Pre-release:</strong> Use git+https:// URLs in your dependencies until PyPI release.
+        </div>
+        <div class="code-block">
+          <pre><code class="language-bash"># First, install jaato
+pip install git+https://github.com/apanoia/jaato.git
+
+# Get the plugin template
+git clone --depth 1 https://github.com/apanoia/jaato.git temp-jaato
+cp -r temp-jaato/out-of-tree-plugins/moon-phase my-plugin
+rm -rf temp-jaato
+cd my-plugin
+
+# Update pyproject.toml to include jaato as a dependency
+# dependencies = ["git+https://github.com/apanoia/jaato.git"]
+
+# Install your plugin in development mode
+pip install -e .</code></pre>
+        </div>
+        <p style="margin-top: 16px;">
+          After PyPI release, you'll use: <code style="background: var(--color-bg-secondary); padding: 2px 6px; border-radius: 3px;">dependencies = ["jaato"]</code>
+        </p>
+        <p style="margin-top: 8px;">
+          See the <a href="guides/tool-plugins.html">Building Plugins Guide</a> for complete documentation.
+        </p>
+      </div>
+
+      <!-- Contributor installation -->
+      <div id="install-contributor" class="install-content">
+        <p>
+          <strong>Framework contributors</strong> should clone the repository to work on jaato itself.
+          This gives you access to all source code, tests, and development tools.
+        </p>
+        <div class="code-block">
+          <pre><code class="language-bash"># Clone the repository
+git clone https://github.com/apanoia/jaato.git
+cd jaato
+
+# Create virtual environment
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt</code></pre>
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run tests to verify setup
+pytest</code></pre>
+        </div>
+        <p style="margin-top: 16px;">
+          Read the <a href="contributing/index.html">Contributor Guide</a> to understand the codebase and contribution workflow.
+        </p>
       </div>
     </section>
 
-    <!-- Quick links -->
-    <section class="quick-links">
-      <a href="getting-started/quickstart.html" class="quick-link-card">
-        <h3>Quickstart</h3>
-        <p>Get up and running with jaato in 5 minutes. Connect to a model, configure tools, and send your first message.</p>
-      </a>
-
-      <a href="core-concepts/client.html" class="quick-link-card">
-        <h3>Core Concepts</h3>
-        <p>Understand the client, plugin system, and tool execution model that powers jaato.</p>
-      </a>
-
-      <a href="api-reference/jaato-client.html" class="quick-link-card">
-        <h3>JaatoClient</h3>
-        <p>The main entry point. Methods for connecting, sending messages, and managing conversation history.</p>
-      </a>
-
-      <a href="api-reference/plugin-registry.html" class="quick-link-card">
-        <h3>PluginRegistry</h3>
-        <p>Discover, register, and expose tool plugins. Manage what capabilities are available to the model.</p>
-      </a>
-
-      <a href="api-reference/types.html" class="quick-link-card">
-        <h3>Type System</h3>
-        <p>Provider-agnostic types for messages, tools, and responses. Build integrations that work across providers.</p>
-      </a>
-
-      <a href="guides/tool-plugins.html" class="quick-link-card">
-        <h3>Building Plugins</h3>
-        <p>Create custom tool plugins to extend jaato with new capabilities. Full protocol reference and examples.</p>
-      </a>
-    </section>
-
-    <!-- Code example -->
-    <section style="padding: 0 40px 60px; max-width: 1000px; margin: 0 auto;">
-      <h2 style="text-align: center; margin-bottom: 24px; border: none; padding: 0;">Hello World</h2>
-      <div class="code-block">
-        <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
-
-# Create and connect client
-client = JaatoClient()
-client.connect(
-    project="my-gcp-project",
-    location="us-central1",
-    model="gemini-2.5-flash"
-)
-
-# Discover and expose plugins
-registry = PluginRegistry(model_name="gemini-2.5-flash")
-registry.discover()
-registry.expose_tool("cli")
-
-# Configure tools
-client.configure_tools(registry)
-
-# Send a message with real-time output
-def on_output(source, text, mode):
-    print(f"[{source}]: {text}")
-
-response = client.send_message(
-    "List the files in the current directory",
-    on_output=on_output
-)
-
-print(f"\nFinal response: {response}")</code></pre>
-      </div>
-    </section>
-
-    <!-- Features grid -->
-    <section style="padding: 40px; background: var(--color-bg-secondary); border-top: 1px solid var(--color-border);">
-      <div style="max-width: 1200px; margin: 0 auto;">
-        <h2 style="text-align: center; margin-bottom: 32px; border: none; padding: 0;">Features</h2>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px;">
-          <div>
-            <h3 style="margin-top: 0;">Multi-Provider Support</h3>
+    <!-- Features section -->
+    <section class="features-section">
+      <div class="features-grid">
+        <h2>Why jaato?</h2>
+        <div class="features-list">
+          <div class="feature-item">
+            <h3>Multi-Provider Support</h3>
             <p>Abstract provider layer supporting Google GenAI, Vertex AI, and designed for easy addition of Anthropic, OpenAI, and others.</p>
           </div>
-          <div>
-            <h3 style="margin-top: 0;">Plugin Architecture</h3>
+          <div class="feature-item">
+            <h3>Plugin Architecture</h3>
             <p>Extensible plugin system for tools, garbage collection strategies, and model providers. Built-in plugins for CLI, MCP, file editing, and more.</p>
           </div>
-          <div>
-            <h3 style="margin-top: 0;">Function Calling</h3>
+          <div class="feature-item">
+            <h3>Function Calling</h3>
             <p>Robust function calling with automatic tool execution loops, permission checking, and real-time output streaming.</p>
           </div>
-          <div>
-            <h3 style="margin-top: 0;">Context Management</h3>
+          <div class="feature-item">
+            <h3>Context Management</h3>
             <p>Built-in garbage collection strategies to handle long conversations. Truncation, summarization, and hybrid approaches.</p>
           </div>
-          <div>
-            <h3 style="margin-top: 0;">Session Persistence</h3>
+          <div class="feature-item">
+            <h3>Session Persistence</h3>
             <p>Save and resume conversation sessions. Auto-resume last session, manage multiple sessions, and replay history.</p>
           </div>
-          <div>
-            <h3 style="margin-top: 0;">MCP Integration</h3>
+          <div class="feature-item">
+            <h3>MCP Integration</h3>
             <p>First-class support for Model Context Protocol servers. Auto-discover tools from connected MCP servers.</p>
           </div>
         </div>
@@ -156,8 +551,22 @@ print(f"\nFinal response: {response}")</code></pre>
   </main>
 
   <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
-
-
   <script src="assets/js/docs.js"></script>
+  <script>
+    // Handle installation tab switching
+    function showInstallTab(persona) {
+      // Hide all tabs and content
+      document.querySelectorAll('.install-tab').forEach(tab => {
+        tab.classList.remove('active');
+      });
+      document.querySelectorAll('.install-content').forEach(content => {
+        content.classList.remove('active');
+      });
+
+      // Show selected tab and content
+      event.currentTarget.classList.add('active');
+      document.getElementById('install-' + persona).classList.add('active');
+    }
+  </script>
 </body>
 </html>
