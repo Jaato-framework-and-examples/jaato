@@ -883,6 +883,14 @@ my-jaato-plugin/
             The <code>[project.entry-points]</code> section allows jaato to
             discover your plugin automatically when installed.
           </div>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Plugin Dependencies</div>
+            Out-of-tree plugins need to declare <code>jaato</code> as a dependency to access
+            the type system (<code>ToolSchema</code>, <code>Message</code>, etc.) and
+            plugin base classes. This allows your plugin to import from <code>shared</code>
+            and work correctly when installed.
+          </div>
         </div>
         <div class="panel-code">
           <div class="code-label">pyproject.toml</div>
@@ -903,6 +911,9 @@ authors = [
 ]
 
 dependencies = [
+    # Required: jaato provides types and base classes
+    "jaato>=1.0.0",
+    # Optional: external dependencies for your plugin
     "requests>=2.28.0",
 ]
 

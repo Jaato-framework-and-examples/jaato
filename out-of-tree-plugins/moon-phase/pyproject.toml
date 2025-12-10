@@ -13,8 +13,12 @@ authors = [
     { name = "External Developer", email = "developer@example.com" }
 ]
 
-# No external dependencies needed - uses only Python standard library
-dependencies = []
+# Required dependencies
+dependencies = [
+    # jaato provides type system (ToolSchema, Message, etc.) and base classes
+    "jaato>=1.0.0",
+]
+# Note: This plugin uses only Python standard library beyond jaato
 
 [project.optional-dependencies]
 dev = [
