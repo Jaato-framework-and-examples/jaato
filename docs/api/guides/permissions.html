@@ -492,8 +492,8 @@ print(f"Auto-approved: {auto}")
                 <td>Prompt in terminal (default)</td>
               </tr>
               <tr>
-                <td><code>callback</code></td>
-                <td>Call a function you provide</td>
+                <td><code>queue</code></td>
+                <td>Queue requests for async handling</td>
               </tr>
               <tr>
                 <td><code>auto_deny</code></td>
@@ -506,56 +506,63 @@ print(f"Auto-approved: {auto}")
             </tbody>
           </table>
 
-          <h3>Custom Channels</h3>
+          <h3>Queue Channel</h3>
           <p>
-            For GUI apps or special workflows, implement a custom ask channel.
+            The <code>queue</code> channel is useful for GUI apps or async workflows.
+            Permission requests are queued and can be processed separately from
+            the main execution flow.
           </p>
         </div>
         <div class="panel-code">
-          <div class="code-label">Configure ask channel</div>
+          <div class="code-label">Console channel (default)</div>
           <div class="code-block">
-            <pre><code class="language-python"># Console channel (default)
+            <pre><code class="language-python"># Console channel prompts in terminal
 perm.initialize({
     "policies": policies,
     "ask_channel": "console"
 })
 
-# Custom callback channel
-def my_ask_handler(tool_name, args, description):
-    """
-    Return True to allow, False to deny.
-    """
-    print(f"Tool: {tool_name}")
-    print(f"Args: {args}")
-    response = input("Allow? (y/n): ")
-    return response.lower() == "y"
-
-perm.initialize({
-    "policies": policies,
-    "ask_channel": "callback",
-    "ask_callback": my_ask_handler
-})</code></pre>
+# User sees:
+# Allow tool "write_file" with args {"path": "config.json"}?
+# [y/n]:</code></pre>
           </div>
 
-          <div class="code-label" style="margin-top: 24px;">GUI integration</div>
+          <div class="code-label" style="margin-top: 24px;">Queue channel</div>
           <div class="code-block">
-            <pre><code class="language-python"># For GUI apps, use async callback
-import asyncio
-
-async def gui_permission_dialog(tool_name, args, desc):
-    """Show dialog and wait for user response."""
-    dialog = PermissionDialog(
-        title=f"Allow {tool_name}?",
-        message=desc,
-        details=str(args)
-    )
-    return await dialog.show_async()
-
+            <pre><code class="language-python"># Queue channel for async/GUI apps
 perm.initialize({
     "policies": policies,
-    "ask_channel": "callback",
-    "ask_callback": gui_permission_dialog,
-    "async_mode": True
+    "ask_channel": "queue"
+})
+
+# Permission requests are queued
+# Your app processes them asynchronously
+
+# Get pending requests
+pending = perm.get_pending_requests()
+for req in pending:
+    print(f"Tool: {req.tool_name}")
+    print(f"Args: {req.args}")
+
+    # Process in your UI, then respond
+    perm.respond_to_request(
+        req.request_id,
+        approved=True  # or False
+    )</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Auto channels for testing</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Auto-allow all (useful for testing)
+perm.initialize({
+    "policies": policies,
+    "ask_channel": "auto_allow"
+})
+
+# Auto-deny all (safe default)
+perm.initialize({
+    "policies": policies,
+    "ask_channel": "auto_deny"
 })</code></pre>
           </div>
         </div>
@@ -724,7 +731,7 @@ for tool, approved in memory.items():
 
 # Ask channels
 "console"       # Terminal prompt
-"callback"      # Custom function
+"queue"         # Async queue for GUI apps
 "auto_deny"     # Deny all asks
 "auto_allow"    # Allow all asks
 
