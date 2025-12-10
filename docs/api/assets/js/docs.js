@@ -120,11 +120,9 @@
     var sidebar = document.querySelector('.sidebar');
     if (!sidebar) return;
 
-    // Remove any existing "On This Page" section first
-    var existing = sidebar.querySelector('.on-this-page');
-    if (existing) {
-      existing.remove();
-    }
+    // Guard against double initialization
+    if (sidebar.getAttribute('data-on-this-page-init')) return;
+    sidebar.setAttribute('data-on-this-page-init', 'true');
 
     // Find all h2 headings with IDs in the main content
     var headings = document.querySelectorAll('.main h2[id]');
