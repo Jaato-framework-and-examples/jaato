@@ -174,6 +174,18 @@ class MyPlugin:
                 <td><code>get_prompt_enrichment()</code></td>
                 <td>Text added to system prompt</td>
               </tr>
+              <tr>
+                <td><code>supports_interactivity()</code></td>
+                <td>Declares if plugin requires user interaction</td>
+              </tr>
+              <tr>
+                <td><code>get_supported_channels()</code></td>
+                <td>Lists compatible interaction channels (console, queue, webhook, file)</td>
+              </tr>
+              <tr>
+                <td><code>set_channel()</code></td>
+                <td>Configure the interaction channel for the plugin</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -565,6 +577,104 @@ class MyPlugin:
 #   1. Plugin runs command
 #   2. Results shown to user only
 #   3. Model never sees the output</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Step 4.5: Interactive Plugins -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="interactive-plugins">Step 4.5: Interactive Plugins (Optional)</h2>
+          <p>
+            Plugins that require user interaction (permissions, questions, progress reporting)
+            should implement the interactivity protocol. This allows clients to verify
+            compatibility and configure the appropriate interaction channel.
+          </p>
+
+          <h3>Channel Types</h3>
+          <ul>
+            <li><strong>console</strong> — Standard terminal stdin/stdout</li>
+            <li><strong>queue</strong> — Callback-based I/O for TUI/rich clients</li>
+            <li><strong>webhook</strong> — HTTP-based remote interaction</li>
+            <li><strong>file</strong> — Filesystem-based communication</li>
+          </ul>
+
+          <h3>When to Use</h3>
+          <p>
+            Implement this protocol if your plugin:
+          </p>
+          <ul>
+            <li>Prompts users for approval (like permission checks)</li>
+            <li>Asks questions requiring user input</li>
+            <li>Presents selection dialogs</li>
+            <li>Reports progress with real-time updates</li>
+          </ul>
+
+          <p>
+            Clients can use <code>supports_interactivity()</code> to check if a plugin
+            requires user interaction, then verify the plugin supports their channel type
+            via <code>get_supported_channels()</code> before loading.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Interactive plugin example</div>
+          <div class="code-block">
+            <pre><code class="language-python">class ProgressPlugin:
+    """Plugin with interactive progress reporting."""
+
+    def __init__(self):
+        self._reporter = None
+
+    # ... tool schemas and executors ...
+
+    def supports_interactivity(self) -> bool:
+        """Declare interactive features."""
+        return True
+
+    def get_supported_channels(self) -> List[str]:
+        """List compatible channels."""
+        return ["console", "queue", "webhook", "file"]
+
+    def set_channel(
+        self,
+        channel_type: str,
+        channel_config: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Configure the interaction channel."""
+        if channel_type not in self.get_supported_channels():
+            raise ValueError(f"Unsupported channel: {channel_type}")
+
+        # Create appropriate reporter/channel
+        if channel_type == "console":
+            config = channel_config or {}
+            # For queue-based clients, config includes:
+            #   - output_callback: (source, text, mode) -> None
+            self._reporter = ConsoleReporter(config)
+        elif channel_type == "webhook":
+            self._reporter = WebhookReporter(channel_config)
+        # ... handle other channel types ...</code></pre>
+          </div>
+
+          <div class="code-label">Client compatibility check</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Rich TUI client checking compatibility
+def load_plugin(plugin: ToolPlugin) -> bool:
+    if plugin.supports_interactivity():
+        supported = plugin.get_supported_channels()
+
+        if "queue" not in supported:
+            print(f"Warning: {plugin.name} doesn't support queue channel")
+            print(f"Supported: {supported}")
+            return False
+
+        # Configure for TUI with callbacks
+        plugin.set_channel("queue", {
+            "output_callback": self.output_callback,
+            "input_queue": self.input_queue,
+            "prompt_callback": self.prompt_callback
+        })
+
+    return True</code></pre>
           </div>
         </div>
       </section>

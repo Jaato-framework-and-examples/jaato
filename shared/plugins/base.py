@@ -397,3 +397,74 @@ class ToolPlugin(Protocol):
     #         -> [CommandCompletion("allow", "Auto-approve"), CommandCompletion("ask", "Prompt")]
     #     """
     #     ...
+    #
+    # Interactive Channel Support:
+    #
+    # def supports_interactivity(self) -> bool:
+    #     """Return True if this plugin has interactive features.
+    #
+    #     Interactive features include permission prompts, user questions,
+    #     selection dialogs, progress reporting, or any other user interaction
+    #     beyond tool execution.
+    #
+    #     Clients can use this to:
+    #     - Warn users about plugins requiring interaction
+    #     - Verify compatibility before loading
+    #     - Choose appropriate initialization
+    #
+    #     Returns:
+    #         True if plugin requires user interaction, False otherwise (default).
+    #     """
+    #     return False
+    #
+    # def get_supported_channels(self) -> List[str]:
+    #     """Return list of channel types this plugin supports.
+    #
+    #     Channel types:
+    #     - "console": Standard terminal input/output (stdin/stdout)
+    #     - "queue": Callback-based I/O for TUI/rich clients
+    #     - "webhook": HTTP-based remote interaction
+    #     - "file": Filesystem-based communication
+    #     - "auto": Automated responses (for testing/non-interactive mode)
+    #
+    #     Only relevant if supports_interactivity() returns True.
+    #
+    #     Returns:
+    #         List of supported channel type strings. Empty list if not interactive.
+    #     """
+    #     return []
+    #
+    # def set_channel(
+    #     self,
+    #     channel_type: str,
+    #     channel_config: Optional[Dict[str, Any]] = None
+    # ) -> None:
+    #     """Set the interaction channel for this plugin.
+    #
+    #     Called by the client to configure the plugin's interaction channel
+    #     based on the client's capabilities (e.g., "queue" for TUI clients,
+    #     "console" for terminal clients).
+    #
+    #     Args:
+    #         channel_type: One of the types from get_supported_channels()
+    #         channel_config: Optional channel-specific configuration
+    #             For "queue" channels:
+    #                 - output_callback: Callable[[str, str, str], None]
+    #                   Called with (source, text, mode) for output
+    #                 - input_queue: queue.Queue[str]
+    #                   Queue to receive user input
+    #                 - prompt_callback: Optional[Callable[[bool], None]]
+    #                   Called with True when waiting for input, False when done
+    #             For "console" channels:
+    #                 - input_func: Callable for input (default: input)
+    #                 - output_func: Callable for output (default: print)
+    #             For "webhook" channels:
+    #                 - endpoint: URL to send requests to
+    #                 - auth_token: Bearer token for authorization
+    #             For "file" channels:
+    #                 - base_path: Directory for request/response files
+    #
+    #     Raises:
+    #         ValueError: If channel_type is not supported
+    #     """
+    #     ...
