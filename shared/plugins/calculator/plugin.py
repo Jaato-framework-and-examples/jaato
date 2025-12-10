@@ -3,6 +3,8 @@
 from typing import Dict, List, Optional, Any, Callable
 from jaato import ToolSchema
 import json
+import ast
+import operator
 
 
 class CalculatorPlugin:
@@ -235,7 +237,7 @@ class CalculatorPlugin:
 
     def _calculate(self, args: Dict[str, Any]) -> str:
         """
-        Evaluate a mathematical expression safely.
+        Evaluate a mathematical expression safely using AST parsing.
 
         Args:
             args: Dict with 'expression' string.
@@ -252,17 +254,8 @@ class CalculatorPlugin:
             # Ensure expression is a string
             expression = str(expression)
 
-            # Safe eval for math only - restrict builtins to prevent code execution
-            # Only allow basic math operations
-            allowed_names = {
-                'abs': abs,
-                'round': round,
-                'min': min,
-                'max': max,
-                'pow': pow,
-            }
-
-            result = eval(expression, {"__builtins__": allowed_names}, {})
+            # Use safe AST-based evaluation instead of eval()
+            result = self._safe_eval(expression)
 
             # Format output clearly
             return json.dumps({
@@ -274,10 +267,92 @@ class CalculatorPlugin:
             return "Error: Division by zero in expression"
         except SyntaxError as e:
             return f"Error: Invalid expression syntax - {e}"
-        except NameError as e:
-            return f"Error: Invalid operation or function in expression - {e}"
+        except ValueError as e:
+            return f"Error: {e}"
         except Exception as e:
             return f"Error: {str(e)}"
+
+    def _safe_eval(self, expression: str) -> float:
+        """
+        Safely evaluate a mathematical expression using AST parsing.
+
+        Only allows numbers, basic arithmetic operators, and safe functions.
+        No arbitrary code execution possible.
+
+        Args:
+            expression: Mathematical expression string.
+
+        Returns:
+            Numeric result of the expression.
+
+        Raises:
+            ValueError: If expression contains disallowed operations.
+        """
+        # Supported binary operators
+        _operators = {
+            ast.Add: operator.add,
+            ast.Sub: operator.sub,
+            ast.Mult: operator.mul,
+            ast.Div: operator.truediv,
+            ast.Pow: operator.pow,
+            ast.Mod: operator.mod,
+            ast.FloorDiv: operator.floordiv,
+            ast.USub: operator.neg,  # Unary minus
+            ast.UAdd: operator.pos,  # Unary plus
+        }
+
+        # Supported functions
+        _functions = {
+            'abs': abs,
+            'round': round,
+            'min': min,
+            'max': max,
+            'pow': pow,
+        }
+
+        def _eval_node(node):
+            """Recursively evaluate an AST node."""
+            if isinstance(node, ast.Constant):  # Python 3.8+
+                if isinstance(node.value, (int, float)):
+                    return node.value
+                raise ValueError(f"Unsupported constant type: {type(node.value).__name__}")
+
+            elif isinstance(node, ast.Num):  # Python 3.7 compatibility
+                return node.n
+
+            elif isinstance(node, ast.BinOp):
+                op_type = type(node.op)
+                if op_type not in _operators:
+                    raise ValueError(f"Unsupported operator: {op_type.__name__}")
+                left = _eval_node(node.left)
+                right = _eval_node(node.right)
+                return _operators[op_type](left, right)
+
+            elif isinstance(node, ast.UnaryOp):
+                op_type = type(node.op)
+                if op_type not in _operators:
+                    raise ValueError(f"Unsupported unary operator: {op_type.__name__}")
+                operand = _eval_node(node.operand)
+                return _operators[op_type](operand)
+
+            elif isinstance(node, ast.Call):
+                if not isinstance(node.func, ast.Name):
+                    raise ValueError("Only simple function calls are allowed")
+                func_name = node.func.id
+                if func_name not in _functions:
+                    raise ValueError(f"Unsupported function: {func_name}")
+                args = [_eval_node(arg) for arg in node.args]
+                return _functions[func_name](*args)
+
+            elif isinstance(node, ast.Expression):
+                return _eval_node(node.body)
+
+            else:
+                raise ValueError(f"Unsupported expression type: {type(node).__name__}")
+
+        # Parse and evaluate
+        tree = ast.parse(expression, mode='eval')
+        return _eval_node(tree)
 
     # ==================== Required Protocol Methods ====================
 
