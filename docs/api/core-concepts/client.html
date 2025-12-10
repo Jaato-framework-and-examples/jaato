@@ -170,40 +170,63 @@ response = client.send_message(
         </div>
         <div class="panel-code">
           <div class="code-label">Message flow</div>
-          <div class="code-block">
-            <pre><code class="language-python"># What happens inside send_message():
-#
-# You: "List files in current directory"
-#      │
-#      ▼
-# ┌─────────────────────────────────┐
-# │         JaatoClient             │
-# │  ┌───────────────────────────┐  │
-# │  │    ModelProvider          │  │
-# │  │    (sends to Gemini)      │  │
-# │  └───────────────────────────┘  │
-# │              │                  │
-# │              ▼                  │
-# │  Model returns: FunctionCall    │
-# │  name="execute_command"         │
-# │  args={"command": "ls"}         │
-# │              │                  │
-# │              ▼                  │
-# │  ┌───────────────────────────┐  │
-# │  │    ToolExecutor           │  │
-# │  │    (runs "ls")            │  │
-# │  └───────────────────────────┘  │
-# │              │                  │
-# │              ▼                  │
-# │  Send result back to model      │
-# │              │                  │
-# │              ▼                  │
-# │  Model returns: "Here are the   │
-# │  files in your directory..."    │
-# └─────────────────────────────────┘
-#      │
-#      ▼
-# Response returned to you</code></pre>
+          <div class="diagram-container" style="padding: 24px; background: rgba(255,255,255,0.03); border-radius: 8px;">
+            <svg viewBox="0 0 320 520" style="width: 100%; max-width: 320px; height: auto;">
+              <defs>
+                <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                  <polygon points="0 0, 10 3.5, 0 7" fill="#8b8b8b"/>
+                </marker>
+              </defs>
+
+              <!-- User input -->
+              <rect x="60" y="10" width="200" height="36" rx="4" fill="#3b3b4f" stroke="#5b5b6f" stroke-width="1"/>
+              <text x="160" y="32" text-anchor="middle" fill="#e4e4e7" font-size="12" font-family="system-ui, sans-serif">You: "List files..."</text>
+
+              <!-- Arrow down -->
+              <line x1="160" y1="46" x2="160" y2="70" stroke="#8b8b8b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+              <!-- JaatoClient container -->
+              <rect x="20" y="80" width="280" height="360" rx="8" fill="none" stroke="#635bff" stroke-width="2"/>
+              <text x="160" y="102" text-anchor="middle" fill="#635bff" font-size="13" font-weight="600" font-family="system-ui, sans-serif">JaatoClient</text>
+
+              <!-- ModelProvider box -->
+              <rect x="50" y="115" width="220" height="50" rx="4" fill="#2d2d3f" stroke="#4b4b5f" stroke-width="1"/>
+              <text x="160" y="138" text-anchor="middle" fill="#a5a5b5" font-size="11" font-family="system-ui, sans-serif">ModelProvider</text>
+              <text x="160" y="154" text-anchor="middle" fill="#7a7a8a" font-size="10" font-family="system-ui, sans-serif">(sends to Gemini)</text>
+
+              <!-- Arrow down -->
+              <line x1="160" y1="165" x2="160" y2="185" stroke="#8b8b8b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+              <!-- FunctionCall response -->
+              <rect x="50" y="195" width="220" height="55" rx="4" fill="#1e1e2e" stroke="#3b3b4f" stroke-width="1"/>
+              <text x="160" y="215" text-anchor="middle" fill="#a5a5b5" font-size="10" font-family="system-ui, sans-serif">Model returns: FunctionCall</text>
+              <text x="160" y="230" text-anchor="middle" fill="#7a7a8a" font-size="9" font-family="var(--font-mono), monospace">name="execute_command"</text>
+              <text x="160" y="243" text-anchor="middle" fill="#7a7a8a" font-size="9" font-family="var(--font-mono), monospace">args={"command": "ls"}</text>
+
+              <!-- Arrow down -->
+              <line x1="160" y1="250" x2="160" y2="270" stroke="#8b8b8b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+              <!-- ToolExecutor box -->
+              <rect x="50" y="280" width="220" height="50" rx="4" fill="#2d2d3f" stroke="#4b4b5f" stroke-width="1"/>
+              <text x="160" y="303" text-anchor="middle" fill="#a5a5b5" font-size="11" font-family="system-ui, sans-serif">ToolExecutor</text>
+              <text x="160" y="319" text-anchor="middle" fill="#7a7a8a" font-size="10" font-family="system-ui, sans-serif">(runs "ls")</text>
+
+              <!-- Arrow down -->
+              <line x1="160" y1="330" x2="160" y2="350" stroke="#8b8b8b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+              <!-- Final response -->
+              <rect x="50" y="360" width="220" height="55" rx="4" fill="#1e1e2e" stroke="#3b3b4f" stroke-width="1"/>
+              <text x="160" y="382" text-anchor="middle" fill="#a5a5b5" font-size="10" font-family="system-ui, sans-serif">Model returns text:</text>
+              <text x="160" y="398" text-anchor="middle" fill="#7a7a8a" font-size="10" font-family="system-ui, sans-serif">"Here are the files</text>
+              <text x="160" y="410" text-anchor="middle" fill="#7a7a8a" font-size="10" font-family="system-ui, sans-serif">in your directory..."</text>
+
+              <!-- Arrow out of container -->
+              <line x1="160" y1="440" x2="160" y2="475" stroke="#8b8b8b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+              <!-- Response returned -->
+              <rect x="60" y="485" width="200" height="30" rx="4" fill="#10b981" fill-opacity="0.15" stroke="#10b981" stroke-width="1"/>
+              <text x="160" y="504" text-anchor="middle" fill="#10b981" font-size="11" font-family="system-ui, sans-serif">Response returned to you</text>
+            </svg>
           </div>
         </div>
       </section>
