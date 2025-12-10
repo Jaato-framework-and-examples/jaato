@@ -448,16 +448,26 @@
 
     if (!highlightQuery) return;
 
+    console.log('[Search Highlight] Query:', highlightQuery);
+
     // Get main content area
     var mainContent = document.querySelector('.main');
-    if (!mainContent) return;
+    if (!mainContent) {
+      console.warn('[Search Highlight] No .main element found');
+      return;
+    }
 
     // Split query into terms
     var terms = highlightQuery.toLowerCase().split(/\s+/).filter(function(term) {
       return term.length > 1; // Ignore single characters
     });
 
-    if (terms.length === 0) return;
+    console.log('[Search Highlight] Search terms:', terms);
+
+    if (terms.length === 0) {
+      console.warn('[Search Highlight] No valid terms after filtering');
+      return;
+    }
 
     // Find and highlight all matching text nodes
     highlightTermsInElement(mainContent, terms);
@@ -465,6 +475,8 @@
     // Get all highlights
     highlightState.matches = document.querySelectorAll('.search-highlight');
     highlightState.totalMatches = highlightState.matches.length;
+
+    console.log('[Search Highlight] Total matches found:', highlightState.totalMatches);
 
     // Always show navigation bar (even if no matches)
     showHighlightNavigation(highlightQuery);
@@ -478,6 +490,8 @@
       setTimeout(function() {
         scrollToCurrentHighlight();
       }, 100);
+    } else {
+      console.warn('[Search Highlight] No matches found for terms:', terms);
     }
   }
 
@@ -630,6 +644,7 @@
   function highlightTermsInElement(element, terms) {
     // Don't highlight in script tags, style tags, or code blocks
     var skipTags = ['SCRIPT', 'STYLE', 'CODE', 'PRE'];
+    var matchCount = 0;
 
     function walkTextNodes(node) {
       if (node.nodeType === 3) { // Text node
@@ -674,6 +689,7 @@
             mark.className = 'search-highlight';
             mark.textContent = match[0];
             fragment.appendChild(mark);
+            matchCount++;
 
             lastIndex = match.index + match[0].length;
           }
@@ -701,6 +717,7 @@
     }
 
     walkTextNodes(element);
+    console.log('[Search Highlight] Created', matchCount, 'highlight elements');
   }
 
   // Mobile menu toggle
