@@ -635,6 +635,127 @@ response = client.send_message(
         </div>
       </section>
 
+      <!-- Step 6: Package with pyproject.toml -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="packaging">Step 6: Package with pyproject.toml</h2>
+          <p>
+            For distributable plugins, create a proper Python package with
+            <code>pyproject.toml</code>. This enables installation via pip
+            and proper dependency management.
+          </p>
+
+          <h3>Project Structure</h3>
+          <pre style="background: var(--color-bg-secondary); padding: 12px; border-radius: 4px; font-size: 13px; color: var(--color-text);">
+my-jaato-plugin/
+├── pyproject.toml
+├── README.md
+├── src/
+│   └── my_plugin/
+│       ├── __init__.py
+│       └── plugin.py
+└── tests/
+    └── test_plugin.py</pre>
+
+          <h3>Key Fields</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Field</th>
+                <th>Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>name</code></td>
+                <td>Package name for pip install</td>
+              </tr>
+              <tr>
+                <td><code>dependencies</code></td>
+                <td>Required packages</td>
+              </tr>
+              <tr>
+                <td><code>entry-points</code></td>
+                <td>Plugin discovery hook</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Entry Points</div>
+            The <code>[project.entry-points]</code> section allows jaato to
+            discover your plugin automatically when installed.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">pyproject.toml</div>
+          <div class="code-block">
+            <pre><code class="language-python">[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jaato-plugin-weather"
+version = "1.0.0"
+description = "Weather tools for jaato"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Your Name", email = "you@example.com" }
+]
+
+dependencies = [
+    "requests>=2.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio",
+]
+
+# Entry point for plugin discovery
+[project.entry-points."jaato.plugins"]
+weather = "my_plugin:create_plugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/my_plugin"]</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Install and use</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Install in development mode
+pip install -e .
+
+# Or install from PyPI (after publishing)
+pip install jaato-plugin-weather
+
+# Plugin is now discoverable
+from shared import PluginRegistry
+
+registry = PluginRegistry(model_name=model)
+registry.discover()  # Finds your plugin!
+registry.expose_tool("weather")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">src/my_plugin/__init__.py</div>
+          <div class="code-block">
+            <pre><code class="language-python">from .plugin import WeatherPlugin
+
+PLUGIN_INFO = {
+    "name": "weather",
+    "description": "Weather information tools",
+    "version": "1.0.0",
+}
+
+def create_plugin():
+    """Entry point for jaato plugin discovery."""
+    return WeatherPlugin()</code></pre>
+          </div>
+        </div>
+      </section>
+
       <!-- Best Practices -->
       <section class="two-panel">
         <div class="panel-explanation">
