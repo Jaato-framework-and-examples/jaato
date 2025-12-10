@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quickstart - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="quickstart.html" class="active">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../api-reference/tool-executor.html">ToolExecutor</a></li>
+          <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Introduction -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Quickstart</h1>
+          <p class="lead">
+            Get up and running with jaato in 5 minutes. This guide covers installation,
+            basic setup, and sending your first message with tool execution.
+          </p>
+
+          <h2 id="requirements">Requirements</h2>
+          <ul>
+            <li>Python 3.10 or higher</li>
+            <li>A Google Cloud project with Vertex AI enabled</li>
+            <li>Service account credentials (or application default credentials)</li>
+          </ul>
+          <p>
+            See the <a href="../../gcp-setup.md">GCP Setup Guide</a> for detailed
+            instructions on configuring your Google Cloud project.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Check Python version</div>
+          <div class="code-block">
+            <pre><code class="language-bash">python3 --version
+# Python 3.10+</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Installation -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="installation">Installation</h2>
+          <p>
+            Clone the repository and set up a virtual environment. All dependencies
+            are listed in <code>requirements.txt</code>.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Terminal</div>
+          <div class="code-block">
+            <pre><code class="language-bash">git clone https://github.com/apanoia/jaato.git
+cd jaato
+
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Environment -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="environment">Environment Setup</h2>
+          <p>
+            Create a <code>.env</code> file with your GCP project configuration.
+            The client uses these values to connect to Vertex AI.
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">PROJECT_ID</span>
+              <span class="param-type">string</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Your Google Cloud project ID</div>
+            </li>
+            <li>
+              <span class="param-name">LOCATION</span>
+              <span class="param-type">string</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Vertex AI region (e.g., <code>us-central1</code>)</div>
+            </li>
+            <li>
+              <span class="param-name">MODEL_NAME</span>
+              <span class="param-type">string</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Model to use (e.g., <code>gemini-2.5-flash</code>)</div>
+            </li>
+            <li>
+              <span class="param-name">GOOGLE_APPLICATION_CREDENTIALS</span>
+              <span class="param-type">string</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Path to service account JSON key file</div>
+            </li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">.env</div>
+          <div class="code-block">
+            <pre><code class="language-bash">PROJECT_ID=my-gcp-project
+LOCATION=us-central1
+MODEL_NAME=gemini-2.5-flash
+
+# Optional: explicit credentials path
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Basic usage -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="basic-usage">Basic Usage</h2>
+          <p>
+            The simplest way to use jaato is to create a client, connect to a model,
+            and send a message. Without tools configured, the model responds with
+            text only.
+          </p>
+
+          <h3>Steps</h3>
+          <ol>
+            <li>Import <code>JaatoClient</code> from <code>shared</code></li>
+            <li>Create a client instance</li>
+            <li>Connect with your project, location, and model</li>
+            <li>Use <code>generate()</code> for simple text completion</li>
+          </ol>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Note</div>
+            <code>generate()</code> is for simple one-shot completions.
+            For multi-turn conversations with tool use, see <code>send_message()</code> below.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">basic_example.py</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient
+
+# Create client (defaults to google_genai provider)
+client = JaatoClient()
+
+# Connect to model
+client.connect(
+    project="my-gcp-project",
+    location="us-central1",
+    model="gemini-2.5-flash"
+)
+
+# Simple generation (no tools)
+response = client.generate("What is 2 + 2?")
+print(response)  # "4"</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- With tools -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="with-tools">Adding Tools</h2>
+          <p>
+            jaato becomes powerful when you give the model access to tools.
+            The <code>PluginRegistry</code> discovers and manages tool plugins.
+          </p>
+
+          <h3>Steps</h3>
+          <ol>
+            <li>Create a <code>PluginRegistry</code> with the model name</li>
+            <li>Call <code>discover()</code> to find available plugins</li>
+            <li>Use <code>expose_tool()</code> to enable specific plugins</li>
+            <li>Call <code>configure_tools()</code> on the client</li>
+            <li>Use <code>send_message()</code> with an output callback</li>
+          </ol>
+
+          <h3>Output Callback</h3>
+          <p>
+            The callback receives three arguments for each output event:
+          </p>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">source</span>
+              <span class="param-type">str</span>
+              <div class="param-desc"><code>"model"</code> for model output, plugin name for tool output</div>
+            </li>
+            <li>
+              <span class="param-name">text</span>
+              <span class="param-type">str</span>
+              <div class="param-desc">The output text</div>
+            </li>
+            <li>
+              <span class="param-name">mode</span>
+              <span class="param-type">str</span>
+              <div class="param-desc"><code>"write"</code> for new block, <code>"append"</code> to continue</div>
+            </li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">with_tools.py</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
+
+client = JaatoClient()
+client.connect(
+    project="my-gcp-project",
+    location="us-central1",
+    model="gemini-2.5-flash"
+)
+
+# Discover and expose plugins
+registry = PluginRegistry(model_name="gemini-2.5-flash")
+registry.discover()
+
+# Expose the CLI plugin for shell commands
+registry.expose_tool("cli")
+
+# Configure tools on the client
+client.configure_tools(registry)
+
+# Define output callback
+def on_output(source, text, mode):
+    prefix = f"[{source}] " if mode == "write" else ""
+    print(f"{prefix}{text}", end="")
+
+# Send message - model can now use CLI tools
+response = client.send_message(
+    "List Python files in the current directory",
+    on_output=on_output
+)
+
+print(f"\n\nFinal: {response}")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Output</div>
+          <div class="code-block">
+            <pre><code class="language-bash">[model] I'll list the Python files for you.
+[cli] cli_mcp_harness.py
+test_vertex.py
+...
+[model] I found several Python files in the directory.
+
+Final: I found several Python files...</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Multi-turn -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="multi-turn">Multi-turn Conversations</h2>
+          <p>
+            The client maintains conversation history internally. Each call to
+            <code>send_message()</code> adds to the history, enabling multi-turn
+            conversations with context.
+          </p>
+
+          <h3>History Management</h3>
+          <ul>
+            <li><code>get_history()</code> - retrieve conversation history</li>
+            <li><code>reset_session()</code> - clear history and start fresh</li>
+            <li><code>reset_session(history)</code> - reset with modified history</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">multi_turn.py</div>
+          <div class="code-block">
+            <pre><code class="language-python"># First message
+response = client.send_message(
+    "What files are in this directory?",
+    on_output=on_output
+)
+
+# Follow-up (client remembers context)
+response = client.send_message(
+    "Which one is the largest?",
+    on_output=on_output
+)
+
+# Check history
+history = client.get_history()
+print(f"Conversation has {len(history)} messages")
+
+# Start fresh
+client.reset_session()</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Next steps -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="next-steps">Next Steps</h2>
+          <p>
+            Now that you have the basics working, explore these topics to get
+            the most out of jaato:
+          </p>
+
+          <ul>
+            <li><a href="../api-reference/jaato-client.html">JaatoClient API</a> - Full method reference</li>
+            <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a> - Managing plugins</li>
+            <li><a href="../guides/tool-plugins.html">Building Plugins</a> - Create custom tools</li>
+            <li><a href="../guides/mcp-integration.html">MCP Integration</a> - Connect MCP servers</li>
+            <li><a href="../guides/permissions.html">Permissions</a> - Control tool execution</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Available built-in plugins</div>
+          <div class="code-block">
+            <pre><code class="language-python"># List available plugins
+registry = PluginRegistry()
+registry.discover()
+
+for name in registry.list_available():
+    print(name)
+
+# Common plugins:
+# - cli: Execute shell commands
+# - mcp: Model Context Protocol tools
+# - file_edit: File editing
+# - todo: Task management
+# - web_search: Web search
+# - permission: Permission control</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>
