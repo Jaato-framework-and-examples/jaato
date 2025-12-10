@@ -115,7 +115,7 @@ class PTDisplay:
 
     def _has_plan(self) -> bool:
         """Check if plan panel should be visible."""
-        return self._plan_panel.has_plan
+        return self._plan_panel.is_visible
 
     def _get_status_bar_content(self):
         """Get status bar content as formatted text."""
@@ -265,6 +265,13 @@ class PTDisplay:
             """Handle F1 - toggle plan panel collapse/expand."""
             if self._plan_panel.has_plan:
                 self._plan_panel.toggle_collapsed()
+                self._app.invalidate()
+
+        @kb.add("c-f1")
+        def handle_ctrl_f1(event):
+            """Handle Ctrl+F1 - toggle plan panel visibility."""
+            if self._plan_panel.has_plan:
+                self._plan_panel.toggle_hidden()
                 self._app.invalidate()
 
         # Status bar at top (always visible, 1 line)

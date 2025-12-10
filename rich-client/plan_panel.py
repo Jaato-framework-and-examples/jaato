@@ -35,6 +35,7 @@ class PlanPanel:
     def __init__(self):
         self._plan_data: Optional[Dict[str, Any]] = None
         self._collapsed: bool = False
+        self._hidden: bool = False
         self._prev_in_progress_count: int = 0
 
     def update_plan(self, plan_data: Dict[str, Any]) -> None:
@@ -59,16 +60,26 @@ class PlanPanel:
         """Clear the current plan."""
         self._plan_data = None
         self._collapsed = False
+        self._hidden = False
         self._prev_in_progress_count = 0
 
     def toggle_collapsed(self) -> None:
         """Toggle between collapsed and expanded view (F1)."""
         self._collapsed = not self._collapsed
 
+    def toggle_hidden(self) -> None:
+        """Toggle panel visibility (Ctrl+F1)."""
+        self._hidden = not self._hidden
+
     @property
     def has_plan(self) -> bool:
         """Check if there's an active plan to display."""
         return self._plan_data is not None
+
+    @property
+    def is_visible(self) -> bool:
+        """Check if panel should be visible (has plan and not hidden)."""
+        return self._plan_data is not None and not self._hidden
 
     def render(self) -> Panel:
         """Render the plan panel.
