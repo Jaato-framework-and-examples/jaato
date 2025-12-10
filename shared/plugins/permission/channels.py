@@ -821,10 +821,12 @@ class QueueChannel(ConsoleChannel):
                 # Timeout
                 if request.default_on_timeout == "allow":
                     return ChannelResponse(
+                        request_id=request.request_id,
                         decision=ChannelDecision.ALLOW,
                         reason="Timeout - default allow",
                     )
                 return ChannelResponse(
+                    request_id=request.request_id,
                     decision=ChannelDecision.TIMEOUT,
                     reason=f"No response within {request.timeout_seconds}s",
                 )
@@ -833,26 +835,54 @@ class QueueChannel(ConsoleChannel):
             response_lower = response_text.strip().lower()
 
             if response_lower in ('y', 'yes'):
-                decision = ChannelDecision.ALLOW
+                return ChannelResponse(
+                    request_id=request.request_id,
+                    decision=ChannelDecision.ALLOW,
+                    reason="User approved",
+                )
             elif response_lower in ('n', 'no'):
-                decision = ChannelDecision.DENY
+                return ChannelResponse(
+                    request_id=request.request_id,
+                    decision=ChannelDecision.DENY,
+                    reason="User denied",
+                )
             elif response_lower in ('a', 'always'):
-                decision = ChannelDecision.ALLOW_SESSION
+                pattern = self._create_remember_pattern(request)
+                return ChannelResponse(
+                    request_id=request.request_id,
+                    decision=ChannelDecision.ALLOW_SESSION,
+                    reason="User approved for session",
+                    remember=True,
+                    remember_pattern=pattern,
+                )
             elif response_lower == 'never':
-                decision = ChannelDecision.DENY_SESSION
+                pattern = self._create_remember_pattern(request)
+                return ChannelResponse(
+                    request_id=request.request_id,
+                    decision=ChannelDecision.DENY_SESSION,
+                    reason="User denied for session",
+                    remember=True,
+                    remember_pattern=pattern,
+                )
             elif response_lower == 'once':
-                decision = ChannelDecision.ALLOW_ONCE
+                return ChannelResponse(
+                    request_id=request.request_id,
+                    decision=ChannelDecision.ALLOW_ONCE,
+                    reason="User approved once",
+                )
             elif response_lower == 'all':
-                decision = ChannelDecision.ALLOW_ALL
+                return ChannelResponse(
+                    request_id=request.request_id,
+                    decision=ChannelDecision.ALLOW_ALL,
+                    reason="User pre-approved all future requests",
+                )
             else:
                 # Invalid input - treat as deny
-                decision = ChannelDecision.DENY
                 return ChannelResponse(
-                    decision=decision,
+                    request_id=request.request_id,
+                    decision=ChannelDecision.DENY,
                     reason=f"Invalid response: {response_text}",
                 )
-
-            return ChannelResponse(decision=decision)
 
         finally:
             # Signal that we're done waiting
