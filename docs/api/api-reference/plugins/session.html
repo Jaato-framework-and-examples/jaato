@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Session Plugin - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="cli.html">CLI</a></li>
+          <li><a href="mcp.html">MCP</a></li>
+          <li><a href="file-edit.html">File Edit</a></li>
+          <li><a href="todo.html">Todo</a></li>
+          <li><a href="web-search.html">Web Search</a></li>
+          <li><a href="permission.html">Permission</a></li>
+          <li><a href="session.html" class="active">Session</a></li>
+          <li><a href="other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Session Plugin</h1>
+          <p class="lead">
+            Session persistence for conversation history. Save and resume
+            sessions across client restarts with auto-save, checkpointing,
+            and session management.
+          </p>
+
+          <table>
+            <tbody>
+              <tr>
+                <td><strong>Name</strong></td>
+                <td><code>session</code></td>
+              </tr>
+              <tr>
+                <td><strong>Type</strong></td>
+                <td>Client-configured Plugin</td>
+              </tr>
+              <tr>
+                <td><strong>User Commands</strong></td>
+                <td><code>save</code>, <code>resume</code>, <code>sessions</code></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h2 id="features">Features</h2>
+          <ul>
+            <li><strong>Auto-save</strong>: Save on exit, interval, or after N turns</li>
+            <li><strong>Auto-resume</strong>: Optionally resume last session on startup</li>
+            <li><strong>Session descriptions</strong>: Model-generated names for easy identification</li>
+            <li><strong>Session limits</strong>: Automatic cleanup of old sessions</li>
+            <li><strong>Token accounting</strong>: Track token usage per session</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Basic usage</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.session import FileSessionPlugin
+from shared.plugins.session.base import SessionConfig
+
+# Create session plugin with config
+session_plugin = FileSessionPlugin()
+session_plugin.initialize(SessionConfig(
+    storage_path='.jaato/sessions',
+    auto_save_on_exit=True,
+    checkpoint_after_turns=5,
+))
+
+# Configure on client
+client.configure_session(session_plugin=session_plugin)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">User commands</div>
+          <div class="code-block">
+            <pre><code class="language-text">> save
+Session saved: 20240115_143022
+
+> sessions
+Available sessions:
+  20240115_143022 - "Refactoring auth module"
+  20240114_091500 - "Setting up CI/CD"
+  20240113_160000 (unnamed)
+
+> resume 20240114_091500
+Session resumed: 20240114_091500</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">SessionConfig</h2>
+
+          <h3>Storage Settings</h3>
+          <table>
+            <thead>
+              <tr><th>Parameter</th><th>Type</th><th>Default</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>storage_path</code></td><td><code>str</code></td><td><code>".jaato/sessions"</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3>Auto-save Settings</h3>
+          <table>
+            <thead>
+              <tr><th>Parameter</th><th>Type</th><th>Default</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>auto_save_on_exit</code></td><td><code>bool</code></td><td><code>True</code></td></tr>
+              <tr><td><code>auto_save_interval</code></td><td><code>int | None</code></td><td><code>None</code></td></tr>
+              <tr><td><code>checkpoint_after_turns</code></td><td><code>int | None</code></td><td><code>None</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3>Resume Settings</h3>
+          <table>
+            <thead>
+              <tr><th>Parameter</th><th>Type</th><th>Default</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>auto_resume_last</code></td><td><code>bool</code></td><td><code>False</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3>Naming Settings</h3>
+          <table>
+            <thead>
+              <tr><th>Parameter</th><th>Type</th><th>Default</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>request_description_after_turns</code></td><td><code>int</code></td><td><code>3</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3>Cleanup Settings</h3>
+          <table>
+            <thead>
+              <tr><th>Parameter</th><th>Type</th><th>Default</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>max_sessions</code></td><td><code>int</code></td><td><code>20</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Configuration examples</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Minimal: just save on exit
+config = SessionConfig()
+
+# Aggressive checkpointing
+config = SessionConfig(
+    auto_save_on_exit=True,
+    auto_save_interval=60,      # Every minute
+    checkpoint_after_turns=3,   # After every 3 turns
+)
+
+# Auto-resume workflow
+config = SessionConfig(
+    auto_resume_last=True,
+    auto_save_on_exit=True,
+)
+
+# Long-running sessions
+config = SessionConfig(
+    max_sessions=100,
+    request_description_after_turns=5,
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Session State -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="session-state">SessionState</h2>
+          <p>
+            Complete state saved for each session:
+          </p>
+
+          <table>
+            <thead>
+              <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>session_id</code></td><td><code>str</code></td><td>Timestamp-based ID</td></tr>
+              <tr><td><code>history</code></td><td><code>List[Message]</code></td><td>Conversation history</td></tr>
+              <tr><td><code>created_at</code></td><td><code>datetime</code></td><td>Session creation time</td></tr>
+              <tr><td><code>updated_at</code></td><td><code>datetime</code></td><td>Last save time</td></tr>
+              <tr><td><code>description</code></td><td><code>str | None</code></td><td>Model-generated name</td></tr>
+              <tr><td><code>turn_count</code></td><td><code>int</code></td><td>Number of turns</td></tr>
+              <tr><td><code>turn_accounting</code></td><td><code>List[Dict]</code></td><td>Token usage per turn</td></tr>
+              <tr><td><code>user_inputs</code></td><td><code>List[str]</code></td><td>Original prompts</td></tr>
+              <tr><td><code>project</code></td><td><code>str | None</code></td><td>GCP project ID</td></tr>
+              <tr><td><code>location</code></td><td><code>str | None</code></td><td>Vertex AI location</td></tr>
+              <tr><td><code>model</code></td><td><code>str | None</code></td><td>Model name</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Session file structure</div>
+          <div class="code-block">
+            <pre><code class="language-text">.jaato/
+  sessions/
+    20240115_143022.json
+    20240114_091500.json
+    20240113_160000.json</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Session JSON format</div>
+          <div class="code-block">
+            <pre><code class="language-json">{
+  "session_id": "20240115_143022",
+  "description": "Refactoring auth module",
+  "created_at": "2024-01-15T14:30:22",
+  "updated_at": "2024-01-15T15:45:00",
+  "turn_count": 12,
+  "turn_accounting": [
+    {"prompt": 150, "output": 200, "total": 350},
+    {"prompt": 500, "output": 1200, "total": 1700}
+  ],
+  "project": "my-project",
+  "location": "us-central1",
+  "model": "gemini-2.5-flash",
+  "history": [...]
+}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- User Commands -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="user-commands">User Commands</h2>
+
+          <h3>save</h3>
+          <p>Save current session with optional description.</p>
+          <pre><code>save [description]</code></pre>
+
+          <h3>resume</h3>
+          <p>Resume a previously saved session by ID.</p>
+          <pre><code>resume &lt;session_id&gt;</code></pre>
+
+          <h3>sessions</h3>
+          <p>List all saved sessions with metadata.</p>
+          <pre><code>sessions</code></pre>
+
+          <div class="callout callout-info">
+            <div class="callout-title">User Input Restoration</div>
+            When resuming a session, the plugin can restore original user
+            inputs to the prompt history for readline/up-arrow navigation.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Command examples</div>
+          <div class="code-block">
+            <pre><code class="language-text">> save "Working on auth refactor"
+Session saved: 20240115_143022
+Description: "Working on auth refactor"
+
+> sessions
+Available sessions:
+  1. 20240115_143022 - "Working on auth refactor" (12 turns)
+  2. 20240114_091500 - "Setting up CI/CD" (8 turns)
+  3. 20240113_160000 (unnamed, 3 turns)
+
+> resume 20240114_091500
+Resuming session: 20240114_091500
+Description: "Setting up CI/CD"
+Turns: 8
+Model: gemini-2.5-flash
+
+Session resumed successfully.</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>

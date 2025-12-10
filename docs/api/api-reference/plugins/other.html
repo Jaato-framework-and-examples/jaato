@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Other Plugins - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="cli.html">CLI</a></li>
+          <li><a href="mcp.html">MCP</a></li>
+          <li><a href="file-edit.html">File Edit</a></li>
+          <li><a href="todo.html">Todo</a></li>
+          <li><a href="web-search.html">Web Search</a></li>
+          <li><a href="permission.html">Permission</a></li>
+          <li><a href="session.html">Session</a></li>
+          <li><a href="other.html" class="active">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Other Plugins</h1>
+          <p class="lead">
+            Additional built-in plugins for specialized functionality including
+            clarification workflows, reference handling, multimodal support,
+            subagent orchestration, and background task management.
+          </p>
+        </div>
+        <div class="panel-code"></div>
+      </section>
+
+      <!-- Clarification Plugin -->
+      <section class="two-panel" id="clarification">
+        <div class="panel-explanation">
+          <h2>Clarification Plugin</h2>
+          <p>
+            Structured question-and-answer workflow for gathering information
+            from the user before proceeding with a task.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Name</strong></td><td><code>clarification</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>askClarification</code></td></tr>
+              <tr><td><strong>Auto-approved</strong></td><td>Yes</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Question Types</h3>
+          <ul>
+            <li><code>single_choice</code>: Select one option from a list</li>
+            <li><code>multiple_choice</code>: Select multiple options</li>
+            <li><code>free_text</code>: Open-ended text response</li>
+          </ul>
+
+          <h3>Use Cases</h3>
+          <ul>
+            <li>Disambiguating vague requests</li>
+            <li>Gathering missing parameters</li>
+            <li>Confirming before destructive operations</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Usage example</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Model asks for clarification
+askClarification(
+    question="Which environment should I deploy to?",
+    question_type="single_choice",
+    options=["development", "staging", "production"]
+)
+
+# Response
+{
+  "answer": "staging",
+  "question_type": "single_choice"
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Multiple choice</div>
+          <div class="code-block">
+            <pre><code class="language-python">askClarification(
+    question="Which tests should I run?",
+    question_type="multiple_choice",
+    options=["unit", "integration", "e2e", "performance"]
+)
+
+# Response
+{
+  "answer": ["unit", "integration"],
+  "question_type": "multiple_choice"
+}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- References Plugin -->
+      <section class="two-panel" id="references">
+        <div class="panel-explanation">
+          <h2>References Plugin</h2>
+          <p>
+            Handle <code>@file</code> and <code>@url</code> references in prompts,
+            loading content and making it available to the model.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Name</strong></td><td><code>references</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>loadReference</code></td></tr>
+              <tr><td><strong>Subscribes to</strong></td><td>Prompt enrichment</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Reference Types</h3>
+          <ul>
+            <li><code>LOCAL</code>: Local files (<code>@./path/to/file.py</code>)</li>
+            <li><code>URL</code>: Web URLs (<code>@https://example.com</code>)</li>
+            <li><code>MCP</code>: MCP resources (<code>@mcp://server/resource</code>)</li>
+            <li><code>INLINE</code>: Inline content injection</li>
+          </ul>
+
+          <h3>Prompt Enrichment</h3>
+          <p>
+            When a prompt contains <code>@references</code>, the plugin:
+          </p>
+          <ol>
+            <li>Detects references in the prompt</li>
+            <li>Loads the referenced content</li>
+            <li>Injects content into the prompt context</li>
+            <li>Removes the @ prefix from the prompt text</li>
+          </ol>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Reference syntax</div>
+          <div class="code-block">
+            <pre><code class="language-text"># Local file reference
+Explain this code: @./src/main.py
+
+# URL reference
+Summarize this article: @https://example.com/blog/post
+
+# Multiple references
+Compare @./old.py and @./new.py</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Configuration</div>
+          <div class="code-block">
+            <pre><code class="language-python">registry.expose_tool('references', config={
+    'base_path': '/home/user/project',
+    'allowed_schemes': ['file', 'https'],
+})</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Multimodal Plugin -->
+      <section class="two-panel" id="multimodal">
+        <div class="panel-explanation">
+          <h2>Multimodal Plugin</h2>
+          <p>
+            Image loading for multimodal model interactions. Enables the model
+            to analyze images referenced in prompts or loaded on demand.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Name</strong></td><td><code>multimodal</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>loadImage</code></td></tr>
+              <tr><td><strong>Model Requirements</strong></td><td><code>gemini-3-*</code>, <code>gemini-3.5-*</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3>Configuration</h3>
+          <table>
+            <tbody>
+              <tr><td><code>base_path</code></td><td>Base directory for relative paths</td></tr>
+              <tr><td><code>max_image_size_mb</code></td><td>Maximum image size in MB</td></tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Model Requirements</div>
+            This plugin requires Gemini 3+ for multimodal function responses.
+            It will be skipped on incompatible models.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Usage</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Reference image in prompt
+"What's in this image? @./screenshot.png"
+
+# Model loads image explicitly
+loadImage(path="./diagram.png")
+
+# Response includes image data
+{
+  "path": "./diagram.png",
+  "mime_type": "image/png",
+  "_multimodal": true,
+  "image_data": "base64..."
+}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Subagent Plugin -->
+      <section class="two-panel" id="subagent">
+        <div class="panel-explanation">
+          <h2>Subagent Plugin</h2>
+          <p>
+            Spawn child agents with configurable profiles for delegating
+            specialized tasks.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Name</strong></td><td><code>subagent</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>spawnAgent</code>, <code>queryAgent</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3>Agent Profiles</h3>
+          <p>
+            Predefined configurations for common agent types:
+          </p>
+          <ul>
+            <li><strong>research</strong>: Web search and analysis</li>
+            <li><strong>code-review</strong>: Code analysis and suggestions</li>
+            <li><strong>documentation</strong>: Technical writing</li>
+          </ul>
+
+          <h3>Inline Configuration</h3>
+          <p>
+            Custom agent configurations can be provided inline for
+            specialized use cases.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Spawning agents</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Use predefined profile
+spawnAgent(
+    profile="research",
+    task="Find best practices for Python async"
+)
+
+# Custom inline config
+spawnAgent(
+    config={
+        "model": "gemini-2.5-flash",
+        "tools": ["web_search", "readFile"],
+        "system_prompt": "You are a research assistant..."
+    },
+    task="Analyze competitor products"
+)
+
+# Query agent results
+queryAgent(agent_id="agent_abc123")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Background Plugin -->
+      <section class="two-panel" id="background">
+        <div class="panel-explanation">
+          <h2>Background Plugin</h2>
+          <p>
+            Manage long-running background tasks. Check status, retrieve
+            output, and cancel tasks.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Name</strong></td><td><code>background</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>checkBackgroundTask</code>, <code>getBackgroundOutput</code>, <code>cancelBackgroundTask</code>, <code>listBackgroundTasks</code></td></tr>
+              <tr><td><strong>Auto-approved</strong></td><td>All (read-only management)</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Integration with CLI Plugin</h3>
+          <p>
+            When the CLI plugin auto-backgrounds a long-running command,
+            this plugin provides tools to monitor and manage it.
+          </p>
+
+          <h3>Task Lifecycle</h3>
+          <ol>
+            <li>CLI command exceeds threshold -> backgrounded</li>
+            <li>Returns task handle immediately</li>
+            <li>Model uses background plugin to check status</li>
+            <li>Retrieve output when complete</li>
+          </ol>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Background task management</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Check task status
+checkBackgroundTask(task_id="cli_abc123")
+
+# Response
+{
+  "task_id": "cli_abc123",
+  "status": "running",
+  "elapsed_seconds": 45
+}
+
+# Get output when complete
+getBackgroundOutput(task_id="cli_abc123")
+
+# Response
+{
+  "task_id": "cli_abc123",
+  "status": "completed",
+  "result": {
+    "stdout": "Build completed successfully...",
+    "returncode": 0
+  }
+}
+
+# List all tasks
+listBackgroundTasks()
+
+# Cancel a task
+cancelBackgroundTask(task_id="cli_abc123")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- GC Plugins -->
+      <section class="two-panel" id="gc">
+        <div class="panel-explanation">
+          <h2>GC Plugins</h2>
+          <p>
+            Garbage collection plugins manage context window limits by
+            removing or summarizing old conversation history.
+          </p>
+
+          <h3>gc_truncate</h3>
+          <p>
+            Simple truncation strategy. Removes oldest messages when
+            context exceeds limit.
+          </p>
+
+          <h3>gc_summarize</h3>
+          <p>
+            Summarization strategy. Compresses old messages into a summary
+            to preserve context while reducing tokens.
+          </p>
+
+          <h3>gc_hybrid</h3>
+          <p>
+            Combined approach. Summarizes old messages, then truncates
+            if still over limit.
+          </p>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Client-Configured</div>
+            GC plugins are configured directly on the client via
+            <code>configure_gc()</code>, not through the registry.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">GC configuration</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc_truncate import TruncateGCPlugin
+
+gc_plugin = TruncateGCPlugin()
+gc_plugin.initialize({
+    'max_tokens': 100000,
+    'target_tokens': 80000,  # After GC
+    'preserve_system': True,
+    'preserve_recent_turns': 3,
+})
+
+client.configure_gc(gc_plugin=gc_plugin)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Summarization GC</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc_summarize import SummarizeGCPlugin
+
+gc_plugin = SummarizeGCPlugin()
+gc_plugin.initialize({
+    'max_tokens': 100000,
+    'summarize_threshold': 80000,
+    'summary_model': 'gemini-2.5-flash',
+})
+
+client.configure_gc(gc_plugin=gc_plugin)</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>jaato - API Documentation</title>
+  <link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="getting-started/quickstart.html">Quickstart</a>
+      <a href="api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Main content (no sidebar on landing page) -->
+  <main class="main" style="margin-left: 0;">
+    <!-- Hero -->
+    <section class="hero">
+      <h1>jaato</h1>
+      <p class="lead">
+        Multi-provider AI orchestration framework with plugin-based tool execution,
+        function calling, and context management.
+      </p>
+      <div class="hero-buttons">
+        <a href="getting-started/quickstart.html" class="btn btn-primary">
+          Get Started
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+        </a>
+        <a href="api-reference/index.html" class="btn btn-secondary">
+          API Reference
+        </a>
+      </div>
+    </section>
+
+    <!-- Quick install -->
+    <section style="padding: 40px; max-width: 800px; margin: 0 auto;">
+      <div class="code-block">
+        <pre><code class="language-bash">git clone https://github.com/apanoia/jaato.git
+cd jaato
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt</code></pre>
+      </div>
+    </section>
+
+    <!-- Quick links -->
+    <section class="quick-links">
+      <a href="getting-started/quickstart.html" class="quick-link-card">
+        <h3>Quickstart</h3>
+        <p>Get up and running with jaato in 5 minutes. Connect to a model, configure tools, and send your first message.</p>
+      </a>
+
+      <a href="core-concepts/client.html" class="quick-link-card">
+        <h3>Core Concepts</h3>
+        <p>Understand the client, plugin system, and tool execution model that powers jaato.</p>
+      </a>
+
+      <a href="api-reference/jaato-client.html" class="quick-link-card">
+        <h3>JaatoClient</h3>
+        <p>The main entry point. Methods for connecting, sending messages, and managing conversation history.</p>
+      </a>
+
+      <a href="api-reference/plugin-registry.html" class="quick-link-card">
+        <h3>PluginRegistry</h3>
+        <p>Discover, register, and expose tool plugins. Manage what capabilities are available to the model.</p>
+      </a>
+
+      <a href="api-reference/types.html" class="quick-link-card">
+        <h3>Type System</h3>
+        <p>Provider-agnostic types for messages, tools, and responses. Build integrations that work across providers.</p>
+      </a>
+
+      <a href="guides/tool-plugins.html" class="quick-link-card">
+        <h3>Building Plugins</h3>
+        <p>Create custom tool plugins to extend jaato with new capabilities. Full protocol reference and examples.</p>
+      </a>
+    </section>
+
+    <!-- Code example -->
+    <section style="padding: 0 40px 60px; max-width: 1000px; margin: 0 auto;">
+      <h2 style="text-align: center; margin-bottom: 24px; border: none; padding: 0;">Hello World</h2>
+      <div class="code-block">
+        <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
+
+# Create and connect client
+client = JaatoClient()
+client.connect(
+    project="my-gcp-project",
+    location="us-central1",
+    model="gemini-2.5-flash"
+)
+
+# Discover and expose plugins
+registry = PluginRegistry(model_name="gemini-2.5-flash")
+registry.discover()
+registry.expose_tool("cli")
+
+# Configure tools
+client.configure_tools(registry)
+
+# Send a message with real-time output
+def on_output(source, text, mode):
+    print(f"[{source}]: {text}")
+
+response = client.send_message(
+    "List the files in the current directory",
+    on_output=on_output
+)
+
+print(f"\nFinal response: {response}")</code></pre>
+      </div>
+    </section>
+
+    <!-- Features grid -->
+    <section style="padding: 40px; background: var(--color-bg-secondary); border-top: 1px solid var(--color-border);">
+      <div style="max-width: 1200px; margin: 0 auto;">
+        <h2 style="text-align: center; margin-bottom: 32px; border: none; padding: 0;">Features</h2>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px;">
+          <div>
+            <h3 style="margin-top: 0;">Multi-Provider Support</h3>
+            <p>Abstract provider layer supporting Google GenAI, Vertex AI, and designed for easy addition of Anthropic, OpenAI, and others.</p>
+          </div>
+          <div>
+            <h3 style="margin-top: 0;">Plugin Architecture</h3>
+            <p>Extensible plugin system for tools, garbage collection strategies, and model providers. Built-in plugins for CLI, MCP, file editing, and more.</p>
+          </div>
+          <div>
+            <h3 style="margin-top: 0;">Function Calling</h3>
+            <p>Robust function calling with automatic tool execution loops, permission checking, and real-time output streaming.</p>
+          </div>
+          <div>
+            <h3 style="margin-top: 0;">Context Management</h3>
+            <p>Built-in garbage collection strategies to handle long conversations. Truncation, summarization, and hybrid approaches.</p>
+          </div>
+          <div>
+            <h3 style="margin-top: 0;">Session Persistence</h3>
+            <p>Save and resume conversation sessions. Auto-resume last session, manage multiple sessions, and replay history.</p>
+          </div>
+          <div>
+            <h3 style="margin-top: 0;">MCP Integration</h3>
+            <p>First-class support for Model Context Protocol servers. Auto-discover tools from connected MCP servers.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="assets/js/docs.js"></script>
+</body>
+</html>
