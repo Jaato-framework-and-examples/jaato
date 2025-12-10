@@ -120,6 +120,9 @@
     var sidebar = document.querySelector('.sidebar');
     if (!sidebar) return;
 
+    // Skip if already has an "On This Page" section
+    if (sidebar.querySelector('.on-this-page')) return;
+
     // Find all h2 headings with IDs in the main content
     var headings = document.querySelectorAll('.panel-explanation h2[id]');
     if (headings.length < 2) return; // Don't show for pages with few sections
