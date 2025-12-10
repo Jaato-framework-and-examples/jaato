@@ -360,7 +360,8 @@
     results.forEach(function(result, index) {
       var resultEl = document.createElement('a');
       resultEl.className = 'search-result';
-      resultEl.href = basePath + result.url;
+      // Add search query to URL for highlighting on target page
+      resultEl.href = basePath + result.url + '?highlight=' + encodeURIComponent(query);
       resultEl.setAttribute('data-index', index);
 
       var titleEl = document.createElement('div');
@@ -433,6 +434,113 @@
     return div.innerHTML;
   }
 
+  // Highlight search terms on page load
+  function initSearchHighlight() {
+    // Check if there's a highlight parameter in URL
+    var urlParams = new URLSearchParams(window.location.search);
+    var highlightQuery = urlParams.get('highlight');
+
+    if (!highlightQuery) return;
+
+    // Get main content area
+    var mainContent = document.querySelector('.main');
+    if (!mainContent) return;
+
+    // Split query into terms
+    var terms = highlightQuery.toLowerCase().split(/\s+/).filter(function(term) {
+      return term.length > 1; // Ignore single characters
+    });
+
+    if (terms.length === 0) return;
+
+    // Find and highlight all matching text nodes
+    highlightTermsInElement(mainContent, terms);
+
+    // Scroll to first highlight after a brief delay
+    setTimeout(function() {
+      var firstHighlight = document.querySelector('.search-highlight');
+      if (firstHighlight) {
+        firstHighlight.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 100);
+  }
+
+  function highlightTermsInElement(element, terms) {
+    // Don't highlight in script tags, style tags, or code blocks
+    var skipTags = ['SCRIPT', 'STYLE', 'CODE', 'PRE'];
+
+    function walkTextNodes(node) {
+      if (node.nodeType === 3) { // Text node
+        var parent = node.parentNode;
+        if (parent && skipTags.indexOf(parent.tagName) !== -1) {
+          return;
+        }
+
+        var text = node.textContent;
+        var lowerText = text.toLowerCase();
+        var hasMatch = false;
+
+        // Check if any term matches
+        for (var i = 0; i < terms.length; i++) {
+          if (lowerText.indexOf(terms[i]) !== -1) {
+            hasMatch = true;
+            break;
+          }
+        }
+
+        if (hasMatch) {
+          // Create highlighted version
+          var fragment = document.createDocumentFragment();
+          var lastIndex = 0;
+
+          // Build regex pattern from all terms
+          var pattern = terms.map(function(term) {
+            return term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // Escape regex chars
+          }).join('|');
+
+          var regex = new RegExp('(' + pattern + ')', 'gi');
+          var match;
+
+          while ((match = regex.exec(text)) !== null) {
+            // Add text before match
+            if (match.index > lastIndex) {
+              fragment.appendChild(document.createTextNode(text.substring(lastIndex, match.index)));
+            }
+
+            // Add highlighted match
+            var mark = document.createElement('mark');
+            mark.className = 'search-highlight';
+            mark.textContent = match[0];
+            fragment.appendChild(mark);
+
+            lastIndex = match.index + match[0].length;
+          }
+
+          // Add remaining text
+          if (lastIndex < text.length) {
+            fragment.appendChild(document.createTextNode(text.substring(lastIndex)));
+          }
+
+          // Replace text node with highlighted version
+          if (fragment.childNodes.length > 0) {
+            parent.replaceChild(fragment, node);
+          }
+        }
+      } else if (node.nodeType === 1 && node.childNodes) { // Element node
+        // Don't process script, style, code blocks
+        if (skipTags.indexOf(node.tagName) === -1) {
+          // Process child nodes (iterate backwards to avoid issues with DOM changes)
+          var children = Array.prototype.slice.call(node.childNodes);
+          for (var i = 0; i < children.length; i++) {
+            walkTextNodes(children[i]);
+          }
+        }
+      }
+    }
+
+    walkTextNodes(element);
+  }
+
   // Mobile menu toggle
   function initMobileMenu() {
     var menuBtn = document.querySelector('.mobile-menu-btn');
@@ -454,6 +562,7 @@
     initHeadingAnchors();
     initOnThisPage();
     initSearch();
+    initSearchHighlight();
     initMobileMenu();
   }
 
