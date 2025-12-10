@@ -13,7 +13,7 @@ from shared.plugins.gc.utils import (
     create_gc_notification_message,
     get_preserved_indices,
 )
-from shared.plugins.model_provider.types import Message, Part, Role, FunctionCall, ToolResult
+from jaato import Message, Part, Role, FunctionCall, ToolResult
 
 
 def make_message(role: str, text: str) -> Message:

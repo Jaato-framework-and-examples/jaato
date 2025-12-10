@@ -1,6 +1,6 @@
 # shared/plugins/calculator/plugin.py
 
-from shared.plugins.model_provider.types import ToolSchema
+from jaato import ToolSchema
 import json
 
 
