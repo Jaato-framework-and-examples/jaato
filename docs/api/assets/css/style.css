@@ -280,11 +280,14 @@ p {
   background: rgba(255, 255, 255, 0.05);
 }
 
-.code-block code {
+.code-block pre code {
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.5;
   color: #e4e4e7;
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
 }
 
 /* Inline code */
