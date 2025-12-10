@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Building Plugins - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="tool-plugins.html" class="active">Building Plugins</a></li>
+          <li><a href="mcp-integration.html">MCP Integration</a></li>
+          <li><a href="permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/index.html">Overview</a></li>
+          <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Introduction -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Building Plugins</h1>
+          <p class="lead">
+            Learn how to create custom tool plugins that extend jaato's capabilities.
+            Plugins can expose tools to the model, provide user commands, or both.
+          </p>
+
+          <h2 id="overview">Overview</h2>
+          <p>
+            A plugin is a Python module that follows a simple protocol. At minimum,
+            it provides:
+          </p>
+          <ul>
+            <li><strong>Tool schemas</strong> — What tools are available</li>
+            <li><strong>Executors</strong> — Functions that run the tools</li>
+          </ul>
+          <p>
+            Optionally, plugins can also provide user commands, auto-approved tools,
+            and prompt enrichment.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Plugin structure</div>
+          <div class="code-block">
+            <pre><code class="language-python"># shared/plugins/my_plugin/
+#   __init__.py
+#   plugin.py
+
+# __init__.py
+from .plugin import create_plugin
+
+# plugin.py
+class MyPlugin:
+    def initialize(self, config):
+        """Called once with configuration."""
+        pass
+
+    def get_tool_schemas(self):
+        """Return list of ToolSchema."""
+        return [...]
+
+    def get_executors(self):
+        """Return dict of name -> callable."""
+        return {...}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Step 1: Create Plugin Class -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="create-class">Step 1: Create the Plugin Class</h2>
+          <p>
+            Start by creating a new directory under <code>shared/plugins/</code>
+            with your plugin name. Then create the main plugin class.
+          </p>
+
+          <h3>Required Methods</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Returns</th>
+                <th>Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>initialize(config)</code></td>
+                <td><code>None</code></td>
+                <td>Setup with configuration dict</td>
+              </tr>
+              <tr>
+                <td><code>get_tool_schemas()</code></td>
+                <td><code>List[ToolSchema]</code></td>
+                <td>Declare available tools</td>
+              </tr>
+              <tr>
+                <td><code>get_executors()</code></td>
+                <td><code>Dict[str, Callable]</code></td>
+                <td>Map tool names to functions</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Optional Methods</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>get_user_commands()</code></td>
+                <td>Commands users can invoke directly</td>
+              </tr>
+              <tr>
+                <td><code>get_auto_approved_tools()</code></td>
+                <td>Tools that skip permission checks</td>
+              </tr>
+              <tr>
+                <td><code>get_prompt_enrichment()</code></td>
+                <td>Text added to system prompt</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Basic plugin class</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.types import ToolSchema
+
+class WeatherPlugin:
+    """Plugin that provides weather information."""
+
+    def __init__(self):
+        self.api_key = None
+        self.default_units = "celsius"
+
+    def initialize(self, config: dict):
+        """
+        Called by registry with configuration.
+
+        Args:
+            config: Dict with plugin settings
+        """
+        self.api_key = config.get("api_key")
+        self.default_units = config.get(
+            "units",
+            "celsius"
+        )
+
+    def get_tool_schemas(self):
+        """Declare the tools this plugin provides."""
+        return [
+            ToolSchema(
+                name="get_weather",
+                description="Get current weather for a city",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string",
+                            "description": "City name"
+                        },
+                        "units": {
+                            "type": "string",
+                            "enum": ["celsius", "fahrenheit"],
+                            "description": "Temperature units"
+                        }
+                    },
+                    "required": ["city"]
+                }
+            )
+        ]
+
+    def get_executors(self):
+        """Map tool names to executor functions."""
+        return {
+            "get_weather": self._get_weather
+        }
+
+    def _get_weather(self, city: str, units: str = None):
+        """Execute the get_weather tool."""
+        units = units or self.default_units
+        # Implementation here...
+        return f"Weather in {city}: 22°C, Sunny"</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Step 2: Define Tool Schemas -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="tool-schemas">Step 2: Define Tool Schemas</h2>
+          <p>
+            Tool schemas tell the model what tools are available and how to use them.
+            Use clear descriptions—the model relies on these to decide when to use your tool.
+          </p>
+
+          <h3>ToolSchema Fields</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Field</th>
+                <th>Type</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>name</code></td>
+                <td><code>str</code></td>
+                <td>Unique tool identifier</td>
+              </tr>
+              <tr>
+                <td><code>description</code></td>
+                <td><code>str</code></td>
+                <td>What the tool does (model reads this)</td>
+              </tr>
+              <tr>
+                <td><code>parameters</code></td>
+                <td><code>dict</code></td>
+                <td>JSON Schema for parameters</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Write Good Descriptions</div>
+            The model uses descriptions to decide when to call your tool.
+            Be specific: instead of "searches files", say "searches file contents
+            using regex patterns, returns matching lines with context".
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Schema examples</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.types import ToolSchema
+
+# Simple tool with required parameter
+search_schema = ToolSchema(
+    name="search_files",
+    description="""
+    Search file contents using regex patterns.
+    Returns matching lines with file path and
+    line numbers. Use for finding code, config
+    values, or text patterns.
+    """,
+    parameters={
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Regex pattern to search"
+            },
+            "path": {
+                "type": "string",
+                "description": "Directory to search in"
+            },
+            "file_types": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "File extensions: ['.py', '.js']"
+            }
+        },
+        "required": ["pattern"]
+    }
+)
+
+# Tool with enum parameter
+format_schema = ToolSchema(
+    name="format_code",
+    description="Format source code file",
+    parameters={
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "Path to file"
+            },
+            "style": {
+                "type": "string",
+                "enum": ["black", "autopep8", "yapf"],
+                "description": "Formatter to use"
+            }
+        },
+        "required": ["file_path", "style"]
+    }
+)
+
+# Tool with no parameters
+list_schema = ToolSchema(
+    name="list_todos",
+    description="List all pending todo items",
+    parameters={
+        "type": "object",
+        "properties": {}
+    }
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Step 3: Implement Executors -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="executors">Step 3: Implement Executors</h2>
+          <p>
+            Executors are the functions that actually run when the model calls your tool.
+            They receive the parameters from the model and return a result string.
+          </p>
+
+          <h3>Executor Requirements</h3>
+          <ul>
+            <li>Function signature must match schema parameters</li>
+            <li>Return a string (the result shown to the model)</li>
+            <li>Handle errors gracefully—return error messages, don't raise</li>
+            <li>Keep execution time reasonable</li>
+          </ul>
+
+          <h3>Return Values</h3>
+          <p>
+            The return value is sent back to the model as the tool result.
+            Format it clearly—the model needs to understand and use this output.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Executor implementation</div>
+          <div class="code-block">
+            <pre><code class="language-python">import subprocess
+import json
+
+class MyPlugin:
+    def get_executors(self):
+        return {
+            "search_files": self._search_files,
+            "run_tests": self._run_tests,
+        }
+
+    def _search_files(
+        self,
+        pattern: str,
+        path: str = ".",
+        file_types: list = None
+    ) -> str:
+        """
+        Search for pattern in files.
+
+        Returns formatted results or error message.
+        """
+        try:
+            cmd = ["grep", "-rn", pattern, path]
+
+            if file_types:
+                for ft in file_types:
+                    cmd.extend(["--include", f"*{ft}"])
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0:
+                return result.stdout or "No matches found"
+            elif result.returncode == 1:
+                return "No matches found"
+            else:
+                return f"Error: {result.stderr}"
+
+        except subprocess.TimeoutExpired:
+            return "Error: Search timed out"
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    def _run_tests(
+        self,
+        test_path: str = None,
+        verbose: bool = False
+    ) -> str:
+        """Run pytest and return results."""
+        try:
+            cmd = ["pytest"]
+            if test_path:
+                cmd.append(test_path)
+            if verbose:
+                cmd.append("-v")
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+
+            # Return both stdout and stderr
+            output = result.stdout
+            if result.stderr:
+                output += f"\n\nStderr:\n{result.stderr}"
+
+            return output
+
+        except Exception as e:
+            return f"Error running tests: {e}"</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Step 4: Add User Commands -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="user-commands">Step 4: Add User Commands (Optional)</h2>
+          <p>
+            User commands let users invoke functionality directly without going
+            through the model. Useful for quick actions or when you want
+            deterministic behavior.
+          </p>
+
+          <h3>UserCommand Fields</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Field</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>name</code></td>
+                <td>Command name (e.g., "search")</td>
+              </tr>
+              <tr>
+                <td><code>description</code></td>
+                <td>Help text for the command</td>
+              </tr>
+              <tr>
+                <td><code>share_with_model</code></td>
+                <td>Add output to conversation history?</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">share_with_model</div>
+            <p>
+              <code>share_with_model=True</code>: Output goes to history, model sees it
+            </p>
+            <p>
+              <code>share_with_model=False</code>: Output only shown to user
+            </p>
+            <p>
+              This does NOT expose the command as a model tool.
+            </p>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Adding user commands</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.base import UserCommand
+
+class MyPlugin:
+    def get_user_commands(self):
+        """Define commands users can invoke directly."""
+        return [
+            UserCommand(
+                "search",
+                "Search files: /search <pattern>",
+                share_with_model=True
+            ),
+            UserCommand(
+                "clear_cache",
+                "Clear plugin cache",
+                share_with_model=False
+            ),
+        ]
+
+    def execute_user_command(
+        self,
+        command_name: str,
+        args: dict
+    ) -> tuple:
+        """
+        Execute a user command.
+
+        Returns:
+            (result, share_with_model)
+        """
+        if command_name == "search":
+            pattern = args.get("query", "")
+            result = self._search_files(pattern)
+            return (result, True)
+
+        elif command_name == "clear_cache":
+            self._cache = {}
+            return ("Cache cleared", False)
+
+        return (f"Unknown command: {command_name}", False)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">User invokes command</div>
+          <div class="code-block">
+            <pre><code class="language-python"># User types: /search TODO
+#
+# With share_with_model=True:
+#   1. Plugin runs search
+#   2. Results shown to user
+#   3. Results added to conversation history
+#   4. Model can reference results in next turn
+
+# With share_with_model=False:
+#   1. Plugin runs command
+#   2. Results shown to user only
+#   3. Model never sees the output</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Step 5: Register Plugin -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="register">Step 5: Register the Plugin</h2>
+          <p>
+            Finally, create the factory function and register your plugin
+            so it can be discovered by the registry.
+          </p>
+
+          <h3>Factory Function</h3>
+          <p>
+            The <code>create_plugin()</code> function is called by the registry
+            during discovery. It should return a new instance of your plugin.
+          </p>
+
+          <h3>Plugin Metadata</h3>
+          <p>
+            Add a <code>PLUGIN_INFO</code> dict to help with discovery and
+            provide metadata about your plugin.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">__init__.py</div>
+          <div class="code-block">
+            <pre><code class="language-python"># shared/plugins/weather/__init__.py
+
+from .plugin import WeatherPlugin
+
+PLUGIN_INFO = {
+    "name": "weather",
+    "description": "Weather information tools",
+    "version": "1.0.0",
+    "author": "Your Name",
+}
+
+def create_plugin():
+    """Factory function called by registry."""
+    return WeatherPlugin()</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Using your plugin</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
+
+# Create client and registry
+client = JaatoClient()
+client.connect(project, location, model)
+
+registry = PluginRegistry(model_name=model)
+registry.discover()
+
+# Expose your plugin
+registry.expose_tool("weather")
+
+# Configure client with tools
+client.configure_tools(registry)
+
+# Now the model can use get_weather
+response = client.send_message(
+    "What's the weather in Tokyo?",
+    on_output=lambda s, t, m: print(t, end="")
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Best Practices -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="best-practices">Best Practices</h2>
+
+          <h3>Error Handling</h3>
+          <p>
+            Never let exceptions propagate from executors. Always catch and return
+            meaningful error messages.
+          </p>
+
+          <h3>Timeouts</h3>
+          <p>
+            Long-running operations should have timeouts. The model is waiting
+            for your result.
+          </p>
+
+          <h3>Clear Output</h3>
+          <p>
+            Format output so the model can parse and use it. JSON works well
+            for structured data.
+          </p>
+
+          <h3>Minimal Dependencies</h3>
+          <p>
+            Keep external dependencies minimal. If you need them, document
+            them clearly.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Error handling pattern</div>
+          <div class="code-block">
+            <pre><code class="language-python">def _my_executor(self, param: str) -> str:
+    """Always return a string, never raise."""
+    try:
+        # Validate input
+        if not param:
+            return "Error: parameter required"
+
+        # Do the work with timeout
+        result = self._do_work(param, timeout=30)
+
+        # Format output clearly
+        return json.dumps({
+            "status": "success",
+            "data": result
+        }, indent=2)
+
+    except TimeoutError:
+        return "Error: operation timed out"
+    except ValueError as e:
+        return f"Error: invalid input - {e}"
+    except Exception as e:
+        # Log for debugging, return generic message
+        logging.error(f"Executor failed: {e}")
+        return f"Error: {str(e)}"</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Structured output</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Good: structured, parseable
+def _search(self, query: str) -> str:
+    results = self._do_search(query)
+    return json.dumps({
+        "query": query,
+        "count": len(results),
+        "results": [
+            {"file": r.file, "line": r.line, "text": r.text}
+            for r in results[:10]
+        ]
+    }, indent=2)
+
+# Also good: clear text format
+def _search(self, query: str) -> str:
+    results = self._do_search(query)
+    lines = [f"Found {len(results)} matches for '{query}':"]
+    for r in results[:10]:
+        lines.append(f"  {r.file}:{r.line}: {r.text}")
+    return "\n".join(lines)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Next Steps -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="next-steps">Next Steps</h2>
+          <p>
+            Now that you know how to build plugins, explore these related topics:
+          </p>
+          <ul>
+            <li><a href="../core-concepts/plugins.html">Plugins</a> — Deep dive into the plugin system</li>
+            <li><a href="../core-concepts/tools.html">Tools</a> — How tool execution works</li>
+            <li><a href="mcp-integration.html">MCP Integration</a> — Use existing MCP servers</li>
+            <li><a href="permissions.html">Permissions</a> — Control what tools can do</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Complete plugin example</div>
+          <div class="code-block">
+            <pre><code class="language-python"># shared/plugins/calculator/__init__.py
+from .plugin import CalculatorPlugin
+
+PLUGIN_INFO = {
+    "name": "calculator",
+    "description": "Math operations",
+}
+
+def create_plugin():
+    return CalculatorPlugin()
+
+# shared/plugins/calculator/plugin.py
+from shared.plugins.model_provider.types import ToolSchema
+
+class CalculatorPlugin:
+    def initialize(self, config):
+        self.precision = config.get("precision", 2)
+
+    def get_tool_schemas(self):
+        return [
+            ToolSchema(
+                name="calculate",
+                description="Evaluate math expression",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "expression": {
+                            "type": "string",
+                            "description": "Math expression"
+                        }
+                    },
+                    "required": ["expression"]
+                }
+            )
+        ]
+
+    def get_executors(self):
+        return {"calculate": self._calculate}
+
+    def _calculate(self, expression: str) -> str:
+        try:
+            # Safe eval for math only
+            result = eval(expression, {"__builtins__": {}})
+            return f"{expression} = {round(result, self.precision)}"
+        except Exception as e:
+            return f"Error: {e}"</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>
