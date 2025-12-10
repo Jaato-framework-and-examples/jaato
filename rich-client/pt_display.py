@@ -634,10 +634,17 @@ class PTDisplay:
         return getattr(self, '_pager_active', False)
 
     def start_spinner(self) -> None:
-        """Start the spinner animation to show model is thinking."""
+        """Start the spinner animation to show model is thinking.
+
+        Thread-safe: can be called from background threads.
+        """
         self._output_buffer.start_spinner()
         self._spinner_timer_active = True
-        self._advance_spinner()
+        # Schedule spinner advance in main event loop (thread-safe)
+        if self._app and self._app.is_running:
+            self._app.loop.call_soon_threadsafe(self._advance_spinner)
+        else:
+            self._advance_spinner()
 
     def stop_spinner(self) -> None:
         """Stop the spinner animation."""

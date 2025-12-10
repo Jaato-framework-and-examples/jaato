@@ -151,6 +151,8 @@ class ClarificationPlugin:
 
 You have access to a `request_clarification` tool that allows you to ask the user questions when you need more information.
 
+**IMPORTANT**: When you need to ask the user a question, you MUST use the `request_clarification` tool. Do NOT ask questions directly in your text response - always use the tool instead. This ensures a consistent user experience and proper input handling.
+
 ### When to use:
 - When the user's request is ambiguous
 - When you need to choose between multiple valid approaches

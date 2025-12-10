@@ -318,7 +318,10 @@ class RichClient:
             self._trace(f"prompt_callback: waiting={waiting}")
             if self._display:
                 self._display.set_waiting_for_channel_input(waiting)
-                if not waiting:
+                if waiting:
+                    # Channel waiting for user input - stop spinner
+                    self._display.stop_spinner()
+                else:
                     # Channel finished - start spinner while model continues
                     self._display.start_spinner()
 
