@@ -282,6 +282,11 @@ a:hover {
   white-space: nowrap;
 }
 
+.highlight-no-matches {
+  color: rgba(255, 255, 255, 0.85);
+  font-style: italic;
+}
+
 .highlight-nav-buttons {
   display: flex;
   gap: 8px;

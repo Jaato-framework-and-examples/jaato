@@ -466,13 +466,13 @@
     highlightState.matches = document.querySelectorAll('.search-highlight');
     highlightState.totalMatches = highlightState.matches.length;
 
+    // Always show navigation bar (even if no matches)
+    showHighlightNavigation(highlightQuery);
+
     if (highlightState.totalMatches > 0) {
       // Mark first as current
       highlightState.currentIndex = 0;
       highlightState.matches[0].classList.add('current');
-
-      // Show navigation bar
-      showHighlightNavigation(highlightQuery);
 
       // Scroll to first highlight after a brief delay
       setTimeout(function() {
@@ -485,15 +485,27 @@
     // Create navigation bar
     var nav = document.createElement('div');
     nav.className = 'highlight-nav';
+
+    var counterHtml = '';
+    var buttonsHtml = '';
+
+    if (highlightState.totalMatches > 0) {
+      counterHtml = '<span class="highlight-nav-counter">' +
+        '<span class="current-index">1</span> of <span class="total-matches">' + highlightState.totalMatches + '</span>' +
+        '</span>';
+      buttonsHtml =
+        '<button class="highlight-nav-btn" id="highlight-prev" title="Previous match (P or ↑)">↑</button>' +
+        '<button class="highlight-nav-btn" id="highlight-next" title="Next match (N or ↓)">↓</button>';
+    } else {
+      counterHtml = '<span class="highlight-nav-counter highlight-no-matches">No matches found on this page</span>';
+    }
+
     nav.innerHTML =
       '<div class="highlight-nav-content">' +
         '<span class="highlight-nav-query">Highlighting: <strong>' + escapeHtml(query) + '</strong></span>' +
-        '<span class="highlight-nav-counter">' +
-          '<span class="current-index">1</span> of <span class="total-matches">' + highlightState.totalMatches + '</span>' +
-        '</span>' +
+        counterHtml +
         '<div class="highlight-nav-buttons">' +
-          '<button class="highlight-nav-btn" id="highlight-prev" title="Previous match (P or ↑)">↑</button>' +
-          '<button class="highlight-nav-btn" id="highlight-next" title="Next match (N or ↓)">↓</button>' +
+          buttonsHtml +
           '<button class="highlight-nav-btn" id="highlight-close" title="Close (ESC)">✕</button>' +
         '</div>' +
       '</div>';
@@ -501,12 +513,24 @@
     document.body.appendChild(nav);
 
     // Add event listeners
-    document.getElementById('highlight-prev').addEventListener('click', navigateToPrevHighlight);
-    document.getElementById('highlight-next').addEventListener('click', navigateToNextHighlight);
+    if (highlightState.totalMatches > 0) {
+      document.getElementById('highlight-prev').addEventListener('click', navigateToPrevHighlight);
+      document.getElementById('highlight-next').addEventListener('click', navigateToNextHighlight);
+    }
     document.getElementById('highlight-close').addEventListener('click', closeHighlightNavigation);
 
-    // Keyboard shortcuts
-    document.addEventListener('keydown', handleHighlightNavigation);
+    // Keyboard shortcuts (only if we have matches)
+    if (highlightState.totalMatches > 0) {
+      document.addEventListener('keydown', handleHighlightNavigation);
+    } else {
+      // Only listen for ESC to close
+      document.addEventListener('keydown', function handleEsc(e) {
+        if (e.key === 'Escape') {
+          closeHighlightNavigation();
+          document.removeEventListener('keydown', handleEsc);
+        }
+      });
+    }
   }
 
   function handleHighlightNavigation(e) {
