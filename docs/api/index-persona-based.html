@@ -431,15 +431,17 @@
       <!-- User installation -->
       <div id="install-user" class="install-content active">
         <p>
-          <strong>Application developers</strong> use jaato as a library. Install directly from GitHub
-          using pip (PyPI distribution coming soon).
+          <strong>Application developers</strong> use jaato as a library.
         </p>
+        <div class="callout callout-warning" style="margin-bottom: 16px; padding: 12px 16px; background: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 4px;">
+          <strong>⚠️ Pre-release:</strong> jaato is currently in alpha. Install from GitHub until the first official PyPI release.
+        </div>
         <div class="code-block">
-          <pre><code class="language-bash"># Install from GitHub
+          <pre><code class="language-bash"># Install latest from GitHub (recommended)
 pip install git+https://github.com/apanoia/jaato.git
 
-# Or install a specific version/tag
-pip install git+https://github.com/apanoia/jaato.git@v0.1.0
+# Or install a specific commit
+pip install git+https://github.com/apanoia/jaato.git@abc1234
 
 # For development/editable install
 git clone https://github.com/apanoia/jaato.git
@@ -447,6 +449,9 @@ cd jaato
 pip install -e .</code></pre>
         </div>
         <p style="margin-top: 16px;">
+          Once released to PyPI, you'll be able to install with: <code style="background: var(--color-bg-secondary); padding: 2px 6px; border-radius: 3px;">pip install jaato</code>
+        </p>
+        <p style="margin-top: 8px;">
           Then follow the <a href="getting-started/quickstart.html">Quickstart Guide</a> to build your first application.
         </p>
       </div>
@@ -457,6 +462,9 @@ pip install -e .</code></pre>
           <strong>Plugin developers</strong> need jaato installed to develop against the plugin protocol.
           Start with the out-of-tree plugin template.
         </p>
+        <div class="callout callout-warning" style="margin-bottom: 16px; padding: 12px 16px; background: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 4px;">
+          <strong>⚠️ Pre-release:</strong> Use git+https:// URLs in your dependencies until PyPI release.
+        </div>
         <div class="code-block">
           <pre><code class="language-bash"># First, install jaato
 pip install git+https://github.com/apanoia/jaato.git
@@ -474,6 +482,9 @@ cd my-plugin
 pip install -e .</code></pre>
         </div>
         <p style="margin-top: 16px;">
+          After PyPI release, you'll use: <code style="background: var(--color-bg-secondary); padding: 2px 6px; border-radius: 3px;">dependencies = ["jaato"]</code>
+        </p>
+        <p style="margin-top: 8px;">
           See the <a href="guides/tool-plugins.html">Building Plugins Guide</a> for complete documentation.
         </p>
       </div>
