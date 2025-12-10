@@ -344,7 +344,7 @@ class JaatoClient:
     def send_message(
         self,
         message: str,
-        on_output: OutputCallback
+        on_output: Optional[OutputCallback] = None
     ) -> str:
         """Send a message to the model.
 
@@ -361,11 +361,12 @@ class JaatoClient:
 
         Args:
             message: The user's message text.
-            on_output: Callback for real-time output from model and plugins.
+            on_output: Optional callback for real-time output from model and plugins.
                 Signature: (source: str, text: str, mode: str) -> None
                 - source: "model" for model responses, plugin name for plugins
                 - text: The output text
                 - mode: "write" for new block, "append" to continue
+                If None, output is not streamed but still returned.
 
         Returns:
             The final model response text (after all function calls resolved).
@@ -430,13 +431,13 @@ class JaatoClient:
     def _run_chat_loop(
         self,
         message: str,
-        on_output: OutputCallback
+        on_output: Optional[OutputCallback]
     ) -> str:
         """Internal function calling loop using provider.send_message().
 
         Args:
             message: The user's message text.
-            on_output: Callback for real-time output.
+            on_output: Optional callback for real-time output.
                 Invoked with (source, text, mode) each time the model produces
                 text during the function calling loop.
 
@@ -469,7 +470,7 @@ class JaatoClient:
             function_calls = list(response.function_calls) if response.function_calls else []
             while function_calls:
                 # Emit any text produced alongside function calls
-                if response.text:
+                if response.text and on_output:
                     on_output("model", response.text, "write")
 
                 tool_results: List[ToolResult] = []
@@ -1015,7 +1016,7 @@ class JaatoClient:
             function_calls = list(response.function_calls) if response.function_calls else []
             while function_calls:
                 # Emit any text produced alongside function calls
-                if response.text:
+                if response.text and on_output:
                     on_output("model", response.text, "write")
 
                 tool_results: List[ToolResult] = []

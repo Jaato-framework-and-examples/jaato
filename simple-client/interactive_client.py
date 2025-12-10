@@ -569,15 +569,22 @@ def main():
         sys.exit(1)
 
     try:
+        # Define callback for real-time output display (used by -p and -i modes)
+        def display_output(source: str, text: str, mode: str) -> None:
+            if source == "model":
+                print(client._presenter.format_model_output(text))
+            else:
+                print(text)
+
         if args.prompt:
             # Single prompt mode - run and exit
-            response = client.run_prompt(args.prompt)
+            response = client.run_prompt(args.prompt, on_output=display_output)
             print(client._presenter.format_model_output(response))
         elif args.initial_prompt:
             # Initial prompt mode - show banner first, run prompt, then continue interactively
             client._presenter.print_banner(has_completion=client._input_handler.has_completion)
             readline.add_history(args.initial_prompt)
-            response = client.run_prompt(args.initial_prompt)
+            response = client.run_prompt(args.initial_prompt, on_output=display_output)
             print(client._presenter.format_model_output(response))
             client.run_interactive(clear_history=False, show_banner=False)
         else:
