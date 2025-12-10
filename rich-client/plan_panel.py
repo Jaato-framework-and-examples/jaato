@@ -34,6 +34,9 @@ class PlanPanel:
 
     def __init__(self):
         self._plan_data: Optional[Dict[str, Any]] = None
+        self._collapsed: bool = False
+        self._hidden: bool = False
+        self._prev_started: bool = False
 
     def update_plan(self, plan_data: Dict[str, Any]) -> None:
         """Update the plan data to render.
@@ -41,16 +44,43 @@ class PlanPanel:
         Args:
             plan_data: Plan status dict with title, status, steps, progress.
         """
+        # Auto-collapse when plan transitions from not-started to started
+        current_started = plan_data.get("started", False)
+        if current_started and not self._prev_started:
+            self._collapsed = True
+
+        self._prev_started = current_started
         self._plan_data = plan_data
 
     def clear(self) -> None:
         """Clear the current plan."""
         self._plan_data = None
+        self._collapsed = False
+        self._hidden = False
+        self._prev_started = False
+
+    def toggle_collapsed(self) -> None:
+        """Toggle between collapsed and expanded view (F1)."""
+        self._collapsed = not self._collapsed
+
+    def toggle_hidden(self) -> None:
+        """Toggle panel visibility (Ctrl+F1)."""
+        self._hidden = not self._hidden
 
     @property
     def has_plan(self) -> bool:
         """Check if there's an active plan to display."""
         return self._plan_data is not None
+
+    @property
+    def is_visible(self) -> bool:
+        """Check if panel should be visible (has plan and not hidden)."""
+        return self._plan_data is not None and not self._hidden
+
+    @property
+    def is_collapsed(self) -> bool:
+        """Check if panel is in collapsed view."""
+        return self._collapsed
 
     def render(self) -> Panel:
         """Render the plan panel.
@@ -81,27 +111,61 @@ class PlanPanel:
         progress = plan.get("progress", {})
         steps = plan.get("steps", [])
 
-        # Build the content
-        elements = []
-
-        # Progress bar
-        progress_bar = self._render_progress_bar(progress)
-        elements.append(progress_bar)
-        elements.append(Text(""))  # Spacer
-
-        # Steps table
-        if steps:
-            steps_table = self._render_steps_table(steps)
-            elements.append(steps_table)
-
         # Get status display
         emoji, status_text, color = self.PLAN_STATUS_DISPLAY.get(
             status, ("📋", status.upper(), "white")
         )
 
-        panel_title = f"[bold]{emoji} {title}[/bold]"
+        # Build panel title with F1 hint
+        panel_title = f"[bold]{emoji} {title}[/bold] [dim]\\[F1][/dim]"
         if status != "pending":
             panel_title += f" [{color}]({status_text})[/{color}]"
+
+        # Determine what to show based on state
+        in_progress_count = progress.get("in_progress", 0)
+        pending_count = progress.get("pending", 0)
+        total = progress.get("total", 0)
+        completed_count = progress.get("completed", 0)
+        failed_count = progress.get("failed", 0)
+
+        # Check if plan is complete (no pending, no in_progress)
+        is_complete = (status == "completed" or
+                       (total > 0 and in_progress_count == 0 and pending_count == 0))
+
+        # Check if all tasks are still pending (none started yet)
+        all_pending = (total > 0 and pending_count == total)
+
+        # Build the content
+        elements = []
+
+        if is_complete:
+            # Completed view: just show completion summary, no task list
+            summary = plan.get("summary", "")
+            done_text = Text()
+            done_text.append(f"✓ {completed_count}/{total} completed", style="green")
+            if failed_count > 0:
+                done_text.append(f", {failed_count} failed", style="red")
+            elements.append(done_text)
+            if summary:
+                elements.append(Text(""))
+                elements.append(Text(summary, style="dim italic"))
+        elif all_pending or not self._collapsed:
+            # Expanded view: show progress bar and all steps
+            progress_bar = self._render_progress_bar(progress)
+            elements.append(progress_bar)
+            elements.append(Text(""))  # Spacer
+            if steps:
+                steps_table = self._render_steps_table(steps)
+                elements.append(steps_table)
+        else:
+            # Collapsed view: show progress bar and current step only
+            progress_bar = self._render_progress_bar(progress)
+            elements.append(progress_bar)
+            elements.append(Text(""))  # Spacer
+            if steps:
+                current_step = self._render_current_step(steps)
+                if current_step:
+                    elements.append(current_step)
 
         return Panel(
             Group(*elements),
@@ -144,8 +208,67 @@ class PlanPanel:
         result.append_text(stats)
         return result
 
-    def _render_steps_table(self, steps: List[Dict[str, Any]]) -> Table:
-        """Render the steps as a compact table."""
+    def _render_current_step(self, steps: List[Dict[str, Any]]) -> Optional[Text]:
+        """Render the current in-progress step and previous step for collapsed view."""
+        # Sort by sequence
+        sorted_steps = sorted(steps, key=lambda s: s.get("sequence", 0))
+
+        # Find current step (first in_progress) and its index
+        current_idx = None
+        for i, step in enumerate(sorted_steps):
+            if step.get("status") == "in_progress":
+                current_idx = i
+                break
+
+        if current_idx is None:
+            return None
+
+        text = Text()
+
+        # Show previous step if exists (dimmed, with result/error)
+        if current_idx > 0:
+            prev_step = sorted_steps[current_idx - 1]
+            prev_seq = prev_step.get("sequence", "?")
+            prev_desc = prev_step.get("description", "")
+            prev_status = prev_step.get("status", "pending")
+            prev_result = prev_step.get("result", "")
+            prev_error = prev_step.get("error", "")
+            prev_symbol, _ = self.STATUS_SYMBOLS.get(prev_status, ("○", "dim"))
+
+            text.append(prev_symbol, style="dim")
+            text.append(f" {prev_seq}. ", style="dim")
+            text.append(prev_desc, style="dim")
+            text.append("\n")
+
+            # Show result/error line for previous step
+            if prev_status == "completed" and prev_result:
+                text.append("     → ", style="dim")
+                text.append(prev_result, style="dim green")
+                text.append("\n")
+            elif prev_status == "failed" and prev_error:
+                text.append("     ✗ ", style="dim")
+                text.append(prev_error, style="dim red")
+                text.append("\n")
+
+        # Show current step (bold)
+        current_step = sorted_steps[current_idx]
+        seq = current_step.get("sequence", "?")
+        desc = current_step.get("description", "")
+        symbol, style = self.STATUS_SYMBOLS.get("in_progress", ("◐", "blue"))
+
+        text.append(symbol, style=style)
+        text.append(f" {seq}. ", style="dim")
+        text.append(desc, style="bold")
+
+        return text
+
+    def _render_steps_table(self, steps: List[Dict[str, Any]], max_rows: int = 8) -> Table:
+        """Render the steps as a compact table, bottom-aligned.
+
+        Args:
+            steps: List of step dicts with sequence, description, status, etc.
+            max_rows: Maximum rows to display (approximation - each step is 1-2 rows).
+        """
         table = Table(
             show_header=False,
             show_edge=False,
@@ -167,7 +290,16 @@ class PlanPanel:
                 current_step_seq = step.get("sequence")
                 break
 
-        for step in sorted_steps:
+        # Bottom-align: show only the last N steps if there are too many
+        # Account for result/error lines (completed/failed steps take 2 rows)
+        visible_steps = sorted_steps
+        if len(sorted_steps) > max_rows:
+            # Estimate how many steps we can show (assume ~1.5 rows per step on average)
+            # to account for result lines
+            estimated_capacity = max(4, int(max_rows / 1.5))
+            visible_steps = sorted_steps[-estimated_capacity:]
+
+        for step in visible_steps:
             seq = step.get("sequence", "?")
             desc = step.get("description", "")
             step_status = step.get("status", "pending")

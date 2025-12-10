@@ -303,7 +303,8 @@ Keyboard shortcuts:
         elif hasattr(part, 'function_response') and part.function_response:
             fr = part.function_response
             name = getattr(fr, 'name', 'unknown')
-            response = getattr(fr, 'response', {})
+            # ToolResult uses 'result' attribute, not 'response'
+            response = getattr(fr, 'result', None) or getattr(fr, 'response', {})
 
             # Extract and display permission info first
             if isinstance(response, dict):

@@ -115,7 +115,7 @@ class PTDisplay:
 
     def _has_plan(self) -> bool:
         """Check if plan panel should be visible."""
-        return self._plan_panel.has_plan
+        return self._plan_panel.is_visible
 
     def _get_status_bar_content(self):
         """Get status bar content as formatted text."""
@@ -260,6 +260,20 @@ class PTDisplay:
             """Handle Down arrow - history/completion navigation."""
             event.current_buffer.auto_down()
 
+        @kb.add("f1")
+        def handle_f1(event):
+            """Handle F1 - toggle plan panel collapse/expand."""
+            if self._plan_panel.has_plan:
+                self._plan_panel.toggle_collapsed()
+                self._app.invalidate()
+
+        @kb.add("c-f1")
+        def handle_ctrl_f1(event):
+            """Handle Ctrl+F1 - toggle plan panel visibility."""
+            if self._plan_panel.has_plan:
+                self._plan_panel.toggle_hidden()
+                self._app.invalidate()
+
         # Status bar at top (always visible, 1 line)
         status_bar = Window(
             FormattedTextControl(self._get_status_bar_content),
@@ -268,10 +282,16 @@ class PTDisplay:
         )
 
         # Plan panel (conditional - hidden when no plan)
+        # Height is dynamic: smaller when collapsed
+        def get_plan_height():
+            if self._plan_panel.is_collapsed:
+                return 7  # Compact: title + progress bar + prev step + current step + borders
+            return self._plan_height
+
         plan_window = ConditionalContainer(
             Window(
                 FormattedTextControl(self._get_plan_content),
-                height=self._plan_height,
+                height=get_plan_height,
             ),
             filter=Condition(self._has_plan),
         )
@@ -370,7 +390,11 @@ class PTDisplay:
         if self._app and self._app.is_running:
             self._app.exit()
 
-    def run_input_loop(self, on_input: Callable[[str], None]) -> None:
+    def run_input_loop(
+        self,
+        on_input: Callable[[str], None],
+        initial_prompt: Optional[str] = None
+    ) -> None:
         """Run the input loop.
 
         This is a blocking call that runs the prompt_toolkit Application.
@@ -378,8 +402,19 @@ class PTDisplay:
 
         Args:
             on_input: Callback called with user input text.
+            initial_prompt: Optional prompt to auto-submit once event loop is running.
         """
         self._input_callback = on_input
+
+        if initial_prompt:
+            # Pre-fill the input buffer and schedule auto-submit
+            self.set_input_text(initial_prompt)
+
+            def auto_submit():
+                self.submit_input()
+
+            self._app.pre_run_callables = [auto_submit]
+
         self._app.run()
 
     # Status bar methods
@@ -441,6 +476,35 @@ class PTDisplay:
         """Clear the output buffer."""
         self._output_buffer.clear()
         self.refresh()
+
+    def add_to_history(self, text: str) -> None:
+        """Add text to input history.
+
+        Args:
+            text: The text to add to history.
+        """
+        if text and self._input_buffer and self._input_buffer.history:
+            self._input_buffer.history.append_string(text)
+
+    def set_input_text(self, text: str) -> None:
+        """Set the input buffer text (pre-fill input).
+
+        Args:
+            text: The text to set in the input buffer.
+        """
+        if self._input_buffer:
+            self._input_buffer.text = text
+            self._input_buffer.cursor_position = len(text)
+
+    def submit_input(self) -> None:
+        """Submit the current input buffer content (simulate Enter key)."""
+        if self._input_buffer:
+            text = self._input_buffer.text.strip()
+            if text and self._input_buffer.history:
+                self._input_buffer.history.append_string(text)
+            self._input_buffer.reset()
+            if self._input_callback:
+                self._input_callback(text)
 
     def show_lines(self, lines: list, page_size: int = None) -> None:
         """Show content, automatically paginating if needed.

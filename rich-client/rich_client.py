@@ -13,6 +13,7 @@ import os
 import sys
 import pathlib
 import threading
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 # Add project root to path for imports
@@ -556,6 +557,8 @@ class RichClient:
                 self._display.append_output("user", user_input, "write")
             self._channel_input_queue.put(user_input)
             self._trace(f"Input routed to channel queue: {user_input}")
+            # Restart spinner while waiting for model to continue
+            self._display.start_spinner()
             return
 
         if not user_input:
@@ -634,9 +637,15 @@ class RichClient:
         self._setup_live_reporter()
         self._setup_queue_channels()
 
+        # Load release name from file
+        release_name = "Jaato Rich TUI Client"
+        release_file = pathlib.Path(__file__).parent / "release_name.txt"
+        if release_file.exists():
+            release_name = release_file.read_text().strip()
+
         # Add welcome messages
         self._display.add_system_message(
-            "Rich TUI Client - Sticky Plan Display",
+            release_name,
             style="bold cyan"
         )
         if self._input_handler.has_completion:
@@ -650,16 +659,13 @@ class RichClient:
         )
         self._display.add_system_message("", style="dim")
 
-        # Handle initial prompt if provided
-        if initial_prompt:
-            self._handle_input(initial_prompt)
-
-        # Validate TTY
+        # Validate TTY and start display
         self._display.start()
 
         try:
             # Run the prompt_toolkit input loop
-            self._display.run_input_loop(self._handle_input)
+            # Initial prompt (if provided) is auto-submitted once event loop starts
+            self._display.run_input_loop(self._handle_input, initial_prompt=initial_prompt)
         except (EOFError, KeyboardInterrupt):
             pass
 
@@ -690,7 +696,10 @@ class RichClient:
         self._display.show_lines(lines)
 
     def _show_history(self) -> None:
-        """Show conversation history in output panel."""
+        """Show conversation history in output panel.
+
+        Matches the simple-client format exactly.
+        """
         if not self._display or not self._jaato:
             return
 
@@ -702,13 +711,15 @@ class RichClient:
         total_turns = len(turn_boundaries)
 
         lines = [
-            ("─" * 50, "dim"),
-            (f"Conversation History: {count} message(s), {total_turns} turn(s)", "bold"),
-            ("Tip: Use 'backtoturn <turn_id>' to revert to a specific turn", "dim"),
+            ("=" * 60, ""),
+            (f"  Conversation History: {count} message(s), {total_turns} turn(s)", "bold"),
+            ("  Tip: Use 'backtoturn <turn_id>' to revert to a specific turn", "dim"),
+            ("=" * 60, ""),
         ]
 
         if count == 0:
             lines.append(("  (empty)", "dim"))
+            lines.append(("", ""))
             self._display.show_lines(lines)
             return
 
@@ -722,22 +733,34 @@ class RichClient:
             is_user_text = (role == 'user' and parts and
                            hasattr(parts[0], 'text') and parts[0].text)
 
+            # Print turn header if this starts a new turn
             if is_user_text:
                 current_turn += 1
-                lines.append((f"─ TURN {current_turn} ─", "cyan"))
+                lines.append(("", ""))
+                lines.append(("─" * 60, ""))
+                # Show timestamp in turn header if available
+                turn_idx = current_turn - 1
+                if turn_idx < len(turn_accounting) and 'start_time' in turn_accounting[turn_idx]:
+                    start_time = turn_accounting[turn_idx]['start_time']
+                    try:
+                        dt = datetime.fromisoformat(start_time)
+                        time_str = dt.strftime('%H:%M:%S')
+                        lines.append((f"  ▶ TURN {current_turn}  [{time_str}]", "cyan"))
+                    except (ValueError, TypeError):
+                        lines.append((f"  ▶ TURN {current_turn}", "cyan"))
+                else:
+                    lines.append((f"  ▶ TURN {current_turn}", "cyan"))
+                lines.append(("─" * 60, ""))
 
             role_label = "USER" if role == 'user' else "MODEL" if role == 'model' else role.upper()
+            lines.append(("", ""))
+            lines.append((f"  [{role_label}]", "bold"))
 
-            for part in parts:
-                if hasattr(part, 'text') and part.text:
-                    text = part.text[:100] + "..." if len(part.text) > 100 else part.text
-                    lines.append((f"  [{role_label}] {text}", "dim"))
-                elif hasattr(part, 'function_call') and part.function_call:
-                    fc = part.function_call
-                    lines.append((f"  [{role_label}] → {fc.name}(...)", "dim yellow"))
-                elif hasattr(part, 'function_response') and part.function_response:
-                    fr = part.function_response
-                    lines.append((f"  [{role_label}] ← {fr.name} response", "dim green"))
+            if not parts:
+                lines.append(("  (no content)", "dim"))
+            else:
+                for part in parts:
+                    self._format_part(part, lines)
 
             # Show token accounting at end of turn
             is_last = (i == len(history) - 1)
@@ -751,20 +774,97 @@ class RichClient:
 
             if (is_last or next_is_user_text) and turn_index < len(turn_accounting):
                 turn = turn_accounting[turn_index]
-                lines.append((f"    tokens: {turn['prompt']} in / {turn['output']} out", "dim"))
+                lines.append((f"  ─── tokens: {turn['prompt']} in / {turn['output']} out / {turn['total']} total", "dim"))
+                if 'duration_seconds' in turn and turn['duration_seconds'] is not None:
+                    duration = turn['duration_seconds']
+                    lines.append((f"  ─── duration: {duration:.2f}s", "dim"))
+                    func_calls = turn.get('function_calls', [])
+                    if func_calls:
+                        fc_total = sum(fc['duration_seconds'] for fc in func_calls)
+                        model_time = duration - fc_total
+                        lines.append((f"      model: {model_time:.2f}s, tools: {fc_total:.2f}s ({len(func_calls)} call(s))", "dim"))
+                        for fc in func_calls:
+                            lines.append((f"        - {fc['name']}: {fc['duration_seconds']:.2f}s", "dim"))
                 turn_index += 1
 
         # Print totals
         if turn_accounting:
             total_prompt = sum(t['prompt'] for t in turn_accounting)
             total_output = sum(t['output'] for t in turn_accounting)
-            lines.append(("─" * 50, "dim"))
-            lines.append((
-                f"Total: {total_prompt} prompt + {total_output} output = {total_prompt + total_output} tokens",
-                "bold"
-            ))
+            total_all = sum(t['total'] for t in turn_accounting)
+            total_duration = sum(t.get('duration_seconds', 0) or 0 for t in turn_accounting)
+            total_fc_time = sum(
+                sum(fc['duration_seconds'] for fc in t.get('function_calls', []))
+                for t in turn_accounting
+            )
+            lines.append(("", ""))
+            lines.append(("=" * 60, ""))
+            lines.append((f"  Total: {total_prompt} in / {total_output} out / {total_all} total ({total_turns} turns)", "bold"))
+            if total_duration > 0:
+                total_model_time = total_duration - total_fc_time
+                lines.append((f"  Time:  {total_duration:.2f}s total (model: {total_model_time:.2f}s, tools: {total_fc_time:.2f}s)", ""))
+            lines.append(("=" * 60, ""))
 
+        lines.append(("", ""))
         self._display.show_lines(lines)
+
+    def _format_part(self, part: Any, lines: List[tuple]) -> None:
+        """Format a single content part for history display.
+
+        Args:
+            part: A content part (text, function_call, or function_response).
+            lines: List to append formatted lines to.
+        """
+        # Text content
+        if hasattr(part, 'text') and part.text:
+            text = part.text
+            if len(text) > 500:
+                text = text[:500] + f"... [{len(part.text)} chars total]"
+            lines.append((f"  {text}", ""))
+
+        # Function call
+        elif hasattr(part, 'function_call') and part.function_call:
+            fc = part.function_call
+            name = getattr(fc, 'name', 'unknown')
+            args = getattr(fc, 'args', {})
+            args_str = str(args)
+            if len(args_str) > 200:
+                args_str = args_str[:200] + "..."
+            lines.append((f"  📤 CALL: {name}({args_str})", "yellow"))
+
+        # Function response
+        elif hasattr(part, 'function_response') and part.function_response:
+            fr = part.function_response
+            name = getattr(fr, 'name', 'unknown')
+            # ToolResult uses 'result' attribute, not 'response'
+            response = getattr(fr, 'result', None) or getattr(fr, 'response', {})
+
+            # Extract and display permission info first
+            if isinstance(response, dict):
+                perm = response.get('_permission')
+                if perm:
+                    decision = perm.get('decision', '?')
+                    reason = perm.get('reason', '')
+                    method = perm.get('method', '')
+                    icon = '✓' if decision == 'allowed' else '✗'
+                    style = "green" if decision == 'allowed' else "red"
+                    lines.append((f"  {icon} Permission: {decision} via {method}", style))
+                    if reason:
+                        lines.append((f"    Reason: {reason}", "dim"))
+
+            # Filter out _permission from display response
+            if isinstance(response, dict):
+                display_response = {k: v for k, v in response.items() if k != '_permission'}
+            else:
+                display_response = response
+
+            resp_str = str(display_response)
+            if len(resp_str) > 300:
+                resp_str = resp_str[:300] + "..."
+            lines.append((f"  📥 RESULT: {name} → {resp_str}", "green"))
+
+        else:
+            lines.append((f"  (unknown part: {type(part).__name__})", "dim"))
 
     def _show_context(self) -> None:
         """Show context/token usage in output panel."""
