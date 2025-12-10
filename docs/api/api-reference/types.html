@@ -90,7 +90,7 @@
         <div class="panel-code">
           <div class="code-label">Import all types</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import (
+            <pre><code class="language-python">from jaato import (
     # Enums
     Role,
     FinishReason,
@@ -187,7 +187,7 @@
         <div class="panel-code">
           <div class="code-label">Using enums</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import Role, FinishReason, Message
+            <pre><code class="language-python">from jaato import Role, FinishReason, Message
 
 # Create message with role
 msg = Message.from_text(Role.USER, "Hello!")
@@ -251,7 +251,7 @@ elif response.finish_reason == FinishReason.STOP:
         <div class="panel-code">
           <div class="code-label">Working with messages</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import Message, Part, Role
+            <pre><code class="language-python">from jaato import Message, Part, Role
 
 # Create a text message
 msg = Message.from_text(Role.USER, "Hello!")
@@ -342,7 +342,7 @@ for msg in history:
         <div class="panel-code">
           <div class="code-label">Creating parts</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import Part, FunctionCall, ToolResult
+            <pre><code class="language-python">from jaato import Part, FunctionCall, ToolResult
 
 # Text part
 text_part = Part.from_text("Hello world")
@@ -427,7 +427,7 @@ image_part = Part(
         <div class="panel-code">
           <div class="code-label">Defining tool schemas</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import ToolSchema
+            <pre><code class="language-python">from jaato import ToolSchema
 
 # Simple tool
 weather_tool = ToolSchema(
@@ -512,7 +512,7 @@ search_tool = ToolSchema(
         <div class="panel-code">
           <div class="code-label">Working with function calls</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import FunctionCall
+            <pre><code class="language-python">from jaato import FunctionCall
 
 # Create a function call
 call = FunctionCall(
@@ -583,7 +583,7 @@ if response.function_calls:
         <div class="panel-code">
           <div class="code-label">Creating tool results</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import ToolResult, Attachment
+            <pre><code class="language-python">from jaato import ToolResult, Attachment
 
 # Successful result
 result = ToolResult(
@@ -698,7 +698,7 @@ screenshot_result = ToolResult(
         <div class="panel-code">
           <div class="code-label">Working with responses</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import FinishReason
+            <pre><code class="language-python">from jaato import FinishReason
 
 # Response handling
 response = provider.send_message("Hello")
@@ -793,7 +793,7 @@ if response.usage:
         <div class="panel-code">
           <div class="code-label">Creating attachments</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import Attachment, Part, Message, Role
+            <pre><code class="language-python">from jaato import Attachment, Part, Message, Role
 
 # From file
 with open("image.png", "rb") as f:
