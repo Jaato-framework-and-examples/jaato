@@ -298,9 +298,7 @@ class OutputBuffer:
                     output.append(f"[{line.source}] ", style="dim yellow")
                 output.append(line.text, style="dim")
             elif line.source == "permission":
-                # Permission prompts - use special styling
-                if line.is_turn_start:
-                    output.append("[permission] ", style="bold yellow")
+                # Permission prompts - no prefix needed, they self-identify with [askPermission]
                 # Highlight specific keywords in permission prompts
                 text = line.text
                 if "[askPermission]" in text:
@@ -311,7 +309,7 @@ class OutputBuffer:
                 elif "Options:" in text:
                     # Highlight options line
                     output.append(text, style="cyan")
-                elif text.startswith("===") or text.startswith("─"):
+                elif text.startswith("===") or text.startswith("─") or text.startswith("="):
                     # Separators
                     output.append(text, style="dim")
                 else:
