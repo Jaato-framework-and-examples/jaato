@@ -158,36 +158,53 @@ class MyPlugin:
             <thead>
               <tr>
                 <th>Method</th>
+                <th>Returns</th>
                 <th>Purpose</th>
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td><code>get_user_commands()</code></td>
-                <td>Commands users can invoke directly</td>
+                <td><code>List[UserCommand]</code></td>
+                <td>Commands users can invoke directly (see Step 4)</td>
               </tr>
               <tr>
                 <td><code>get_auto_approved_tools()</code></td>
-                <td>Tools that skip permission checks</td>
+                <td><code>List[str]</code></td>
+                <td>Tool names that skip permission checks</td>
               </tr>
               <tr>
                 <td><code>get_prompt_enrichment()</code></td>
-                <td>Text added to system prompt</td>
+                <td><code>str</code></td>
+                <td>Text added to system prompt to guide the model</td>
               </tr>
               <tr>
                 <td><code>supports_interactivity()</code></td>
-                <td>Declares if plugin requires user interaction</td>
+                <td><code>bool</code></td>
+                <td>Declares if plugin requires user interaction (see Step 4.5)</td>
               </tr>
               <tr>
                 <td><code>get_supported_channels()</code></td>
-                <td>Lists compatible interaction channels (console, queue, webhook, file)</td>
+                <td><code>List[str]</code></td>
+                <td>Compatible channels: console, queue, webhook, file (see Step 4.5)</td>
               </tr>
               <tr>
                 <td><code>set_channel()</code></td>
-                <td>Configure the interaction channel for the plugin</td>
+                <td><code>None</code></td>
+                <td>Configure the interaction channel for the plugin (see Step 4.5)</td>
               </tr>
             </tbody>
           </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">When to Use Optional Methods</div>
+            <ul style="margin: 8px 0 0 0; padding-left: 20px;">
+              <li><strong>get_user_commands()</strong> — Your plugin provides commands users type directly (e.g., <code>/search</code>)</li>
+              <li><strong>get_auto_approved_tools()</strong> — Your tools are safe to run without asking permission (read-only operations)</li>
+              <li><strong>get_prompt_enrichment()</strong> — The model needs context about when/how to use your tools</li>
+              <li><strong>Interactivity methods</strong> — Your plugin asks questions or shows progress to users</li>
+            </ul>
+          </div>
         </div>
         <div class="panel-code">
           <div class="code-label">Basic plugin class</div>
@@ -250,6 +267,29 @@ class WeatherPlugin:
         # Implementation here...
         return f"Weather in {city}: 22°C, Sunny"</code></pre>
           </div>
+
+          <div class="code-label" style="margin-top: 24px;">Optional method examples</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Auto-approved tools (safe, read-only operations)
+def get_auto_approved_tools(self):
+    """List tools that don't need permission prompts."""
+    return [
+        "get_weather",  # Read-only, safe
+        "list_cities"   # Just lists data
+    ]
+    # Don't auto-approve: delete, modify, execute
+
+
+# Prompt enrichment (guide the model)
+def get_prompt_enrichment(self):
+    """Add context to help model use tools correctly."""
+    return """
+You have access to weather tools. Use get_weather
+to check current conditions for any city worldwide.
+Temperature units can be celsius or fahrenheit.
+Always specify the city name clearly.
+"""</code></pre>
+          </div>
         </div>
       </section>
 
@@ -296,6 +336,53 @@ class WeatherPlugin:
             Be specific: instead of "searches files", say "searches file contents
             using regex patterns, returns matching lines with context".
           </div>
+
+          <h3>Parameter Type Mapping</h3>
+          <p>
+            JSON Schema types in <code>parameters</code> map to Python types in your
+            executor function signatures. Use this table as a reference:
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>JSON Schema Type</th>
+                <th>Python Type</th>
+                <th>Example Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>"string"</code></td>
+                <td><code>str</code></td>
+                <td><code>"hello"</code></td>
+              </tr>
+              <tr>
+                <td><code>"number"</code></td>
+                <td><code>float</code></td>
+                <td><code>3.14</code></td>
+              </tr>
+              <tr>
+                <td><code>"integer"</code></td>
+                <td><code>int</code></td>
+                <td><code>42</code></td>
+              </tr>
+              <tr>
+                <td><code>"boolean"</code></td>
+                <td><code>bool</code></td>
+                <td><code>True</code></td>
+              </tr>
+              <tr>
+                <td><code>"array"</code></td>
+                <td><code>list</code></td>
+                <td><code>[1, 2, 3]</code></td>
+              </tr>
+              <tr>
+                <td><code>"object"</code></td>
+                <td><code>dict</code></td>
+                <td><code>{"key": "value"}</code></td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <div class="panel-code">
           <div class="code-label">Schema examples</div>
@@ -862,6 +949,163 @@ PLUGIN_INFO = {
 def create_plugin():
     """Entry point for jaato plugin discovery."""
     return WeatherPlugin()</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Step 7: Testing Your Plugin -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="testing">Step 7: Testing Your Plugin</h2>
+          <p>
+            Before integrating your plugin into the main system, test it
+            standalone to verify correctness. This ensures your plugin
+            works independently of the jaato client.
+          </p>
+
+          <h3>Testing Approach</h3>
+          <ol>
+            <li>Import your plugin using the factory function</li>
+            <li>Initialize with test configuration</li>
+            <li>Verify tool schemas are correctly defined</li>
+            <li>Test each executor with valid inputs</li>
+            <li>Test error handling with invalid inputs</li>
+            <li>Verify output format and content</li>
+          </ol>
+
+          <h3>What to Test</h3>
+          <ul>
+            <li><strong>Schema Validation</strong> — Correct names, descriptions, parameters</li>
+            <li><strong>Executor Mapping</strong> — All schemas have matching executors</li>
+            <li><strong>Happy Path</strong> — Valid inputs produce expected outputs</li>
+            <li><strong>Error Cases</strong> — Invalid inputs return error messages (not exceptions)</li>
+            <li><strong>Configuration</strong> — initialize() properly sets config values</li>
+            <li><strong>Edge Cases</strong> — Boundary conditions, empty inputs, special characters</li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Environment Setup</div>
+            If your test needs dependencies, create a virtual environment first:
+            <pre style="margin-top: 8px; background: var(--color-bg-secondary); padding: 8px; border-radius: 4px; font-size: 13px;">python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt</pre>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">test_my_plugin.py</div>
+          <div class="code-block">
+            <pre><code class="language-python">#!/usr/bin/env python3
+"""Test script for my plugin."""
+
+import json
+
+
+def test_plugin():
+    """Test plugin implementation."""
+    print("Testing My Plugin")
+    print("=" * 60)
+
+    # Test 1: Import and create
+    print("\n[1] Importing plugin...")
+    from shared.plugins.my_plugin import create_plugin, PLUGIN_INFO
+    plugin = create_plugin()
+    print(f"✓ Created: {PLUGIN_INFO['name']}")
+
+    # Test 2: Initialize
+    print("\n[2] Initializing...")
+    plugin.initialize({"precision": 3})
+    print("✓ Initialized with config")
+
+    # Test 3: Get schemas
+    print("\n[3] Getting tool schemas...")
+    schemas = plugin.get_tool_schemas()
+    print(f"✓ Found {len(schemas)} tools")
+    for schema in schemas:
+        print(f"  - {schema.name}")
+
+    # Test 4: Get executors
+    print("\n[4] Getting executors...")
+    executors = plugin.get_executors()
+    assert len(executors) == len(schemas), \
+        "Executor count must match schema count"
+    print(f"✓ All {len(executors)} executors present")
+
+    # Test 5: Test valid input
+    print("\n[5] Testing valid input...")
+    result = plugin._my_tool("valid_input")
+    print(f"✓ Result: {result[:50]}...")
+
+    # Verify it's valid JSON (if using JSON format)
+    try:
+        data = json.loads(result)
+        assert "result" in data
+        print("✓ Valid JSON structure")
+    except json.JSONDecodeError:
+        print("  (Plain text result)")
+
+    # Test 6: Test error handling
+    print("\n[6] Testing error handling...")
+    error_result = plugin._my_tool("")  # Invalid
+    assert "Error" in error_result or "error" in error_result.lower()
+    print(f"✓ Error handled: {error_result[:50]}...")
+
+    # Test 7: Test edge cases
+    print("\n[7] Testing edge cases...")
+    edge_result = plugin._my_tool("   ")  # Whitespace
+    assert isinstance(edge_result, str)
+    print("✓ Edge case handled")
+
+    print("\n" + "=" * 60)
+    print("All tests passed! ✓")
+    return True
+
+
+if __name__ == "__main__":
+    import sys
+    success = test_plugin()
+    sys.exit(0 if success else 1)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Run tests</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># With virtual environment
+.venv/bin/python test_my_plugin.py
+
+# Or use pytest for more features
+.venv/bin/pytest test_my_plugin.py -v</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Example output</div>
+          <div class="code-block">
+            <pre><code class="language-bash">Testing My Plugin
+============================================================
+
+[1] Importing plugin...
+✓ Created: my_plugin
+
+[2] Initializing...
+✓ Initialized with config
+
+[3] Getting tool schemas...
+✓ Found 2 tools
+  - my_tool
+  - another_tool
+
+[4] Getting executors...
+✓ All 2 executors present
+
+[5] Testing valid input...
+✓ Result: {"result": "success", "data": "output"}...
+✓ Valid JSON structure
+
+[6] Testing error handling...
+✓ Error handled: Error: parameter required...
+
+[7] Testing edge cases...
+✓ Edge case handled
+
+============================================================
+All tests passed! ✓</code></pre>
           </div>
         </div>
       </section>
