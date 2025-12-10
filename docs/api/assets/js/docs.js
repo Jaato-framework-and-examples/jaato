@@ -120,11 +120,14 @@
     var sidebar = document.querySelector('.sidebar');
     if (!sidebar) return;
 
-    // Skip if already has an "On This Page" section
-    if (sidebar.querySelector('.on-this-page')) return;
+    // Remove any existing "On This Page" section first
+    var existing = sidebar.querySelector('.on-this-page');
+    if (existing) {
+      existing.remove();
+    }
 
     // Find all h2 headings with IDs in the main content
-    var headings = document.querySelectorAll('.panel-explanation h2[id]');
+    var headings = document.querySelectorAll('.main h2[id]');
     if (headings.length < 2) return; // Don't show for pages with few sections
 
     // Create the "On This Page" section
@@ -155,15 +158,22 @@
     var headerHeight = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--header-height')) || 60;
 
     function updateActiveLink() {
-      var scrollPos = window.scrollY + headerHeight + 20; // Offset for better UX
       var currentId = null;
 
-      // Find the heading that's currently in view
-      headings.forEach(function(heading) {
-        if (heading.offsetTop <= scrollPos) {
-          currentId = heading.id;
+      // Use getBoundingClientRect for accurate viewport-relative positions
+      // Find the last heading that has scrolled past the top of the viewport
+      for (var i = 0; i < headings.length; i++) {
+        var rect = headings[i].getBoundingClientRect();
+        // Consider heading "active" when it's at or above the header + some offset
+        if (rect.top <= headerHeight + 50) {
+          currentId = headings[i].id;
         }
-      });
+      }
+
+      // If nothing matched yet, use the first heading
+      if (!currentId && headings.length > 0) {
+        currentId = headings[0].id;
+      }
 
       // Update active states
       links.forEach(function(link) {
