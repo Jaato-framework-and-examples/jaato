@@ -5,25 +5,33 @@ This plugin provides tools to calculate moon phases for any given date.
 
 from datetime import datetime, timezone
 import math
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 
 class MoonPhasePlugin:
     """Plugin that calculates moon phases."""
 
-    name = "moon_phase"
+    @property
+    def name(self) -> str:
+        """Unique identifier for this plugin."""
+        return "moon_phase"
 
     def __init__(self):
         self.precision = 2
 
-    def initialize(self, config: Dict[str, Any]):
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize plugin with configuration.
 
         Args:
             config: Configuration dictionary with optional keys:
                 - precision: Number of decimal places for illumination (default: 2)
         """
-        self.precision = config.get("precision", 2)
+        if config:
+            self.precision = config.get("precision", 2)
+
+    def shutdown(self) -> None:
+        """Cleanup when plugin is disabled."""
+        pass  # Nothing to clean up
 
     def get_tool_schemas(self) -> List:
         """Return tool schemas for this plugin.
@@ -187,3 +195,17 @@ class MoonPhasePlugin:
             return "Last Quarter"
         else:  # 292.5 <= angle < 337.5
             return "Waning Crescent"
+
+    # ==================== Required Protocol Methods ====================
+
+    def get_system_instructions(self) -> Optional[str]:
+        """Instructions for the model about moon phase tools."""
+        return None  # Tool description is self-explanatory
+
+    def get_auto_approved_tools(self) -> List[str]:
+        """Moon phase calculation is a safe, read-only operation."""
+        return ["calculate_moon_phase"]
+
+    def get_user_commands(self) -> List:
+        """Moon phase plugin provides model tools only, no user commands."""
+        return []
