@@ -637,9 +637,15 @@ class RichClient:
         self._setup_live_reporter()
         self._setup_queue_channels()
 
+        # Load release name from file
+        release_name = "Jaato Rich TUI Client"
+        release_file = pathlib.Path(__file__).parent / "release_name.txt"
+        if release_file.exists():
+            release_name = release_file.read_text().strip()
+
         # Add welcome messages
         self._display.add_system_message(
-            "Rich TUI Client - Sticky Plan Display",
+            release_name,
             style="bold cyan"
         )
         if self._input_handler.has_completion:
