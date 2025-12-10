@@ -281,18 +281,25 @@
   function getBasePath() {
     // Determine base path based on current location
     var path = window.location.pathname;
-    var depth = (path.match(/\//g) || []).length - 2; // -2 for /docs/ and /api/
 
-    if (path.endsWith('/docs/api/') || path.endsWith('/docs/api/index.html')) {
+    // Remove filename from path to get directory
+    var dir = path.substring(0, path.lastIndexOf('/'));
+
+    // Count directory depth (number of slashes after removing leading slash)
+    var cleanDir = dir.replace(/^\//, ''); // Remove leading slash
+    var depth = cleanDir === '' ? 0 : (cleanDir.match(/\//g) || []).length + 1;
+
+    // If at root (index.html), no traversal needed
+    if (depth === 0) {
       return './';
     }
 
-    // For pages in subdirectories
+    // Build relative path to go up to root
     var base = '';
     for (var i = 0; i < depth; i++) {
       base += '../';
     }
-    return base || './';
+    return base;
   }
 
   function performSearch(query) {
