@@ -115,6 +115,79 @@
     });
   }
 
+  // Generate "On This Page" navigation and track scroll
+  function initOnThisPage() {
+    var sidebar = document.querySelector('.sidebar');
+    if (!sidebar) return;
+
+    // Find all h2 headings with IDs in the main content
+    var headings = document.querySelectorAll('.panel-explanation h2[id]');
+    if (headings.length < 2) return; // Don't show for pages with few sections
+
+    // Create the "On This Page" section
+    var section = document.createElement('div');
+    section.className = 'sidebar-section on-this-page';
+    section.innerHTML = '<div class="sidebar-title">On This Page</div>';
+
+    var nav = document.createElement('ul');
+    nav.className = 'sidebar-nav on-this-page-nav';
+
+    headings.forEach(function(heading) {
+      var li = document.createElement('li');
+      var link = document.createElement('a');
+      link.href = '#' + heading.id;
+      link.textContent = heading.textContent.replace(/#$/, '').trim(); // Remove anchor #
+      link.setAttribute('data-target', heading.id);
+      li.appendChild(link);
+      nav.appendChild(li);
+    });
+
+    section.appendChild(nav);
+
+    // Insert at the top of sidebar
+    sidebar.insertBefore(section, sidebar.firstChild);
+
+    // Scroll spy: track which section is currently visible
+    var links = nav.querySelectorAll('a');
+    var headerHeight = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--header-height')) || 60;
+
+    function updateActiveLink() {
+      var scrollPos = window.scrollY + headerHeight + 20; // Offset for better UX
+      var currentId = null;
+
+      // Find the heading that's currently in view
+      headings.forEach(function(heading) {
+        if (heading.offsetTop <= scrollPos) {
+          currentId = heading.id;
+        }
+      });
+
+      // Update active states
+      links.forEach(function(link) {
+        if (link.getAttribute('data-target') === currentId) {
+          link.classList.add('active');
+        } else {
+          link.classList.remove('active');
+        }
+      });
+    }
+
+    // Throttle scroll events for performance
+    var ticking = false;
+    window.addEventListener('scroll', function() {
+      if (!ticking) {
+        window.requestAnimationFrame(function() {
+          updateActiveLink();
+          ticking = false;
+        });
+        ticking = true;
+      }
+    });
+
+    // Initial update
+    updateActiveLink();
+  }
+
   // Search functionality (basic)
   function initSearch() {
     var searchInput = document.querySelector('.header-search input');
@@ -168,6 +241,7 @@
     initSidebarNav();
     initAnchorLinks();
     initHeadingAnchors();
+    initOnThisPage();
     initSearch();
     initMobileMenu();
   }
