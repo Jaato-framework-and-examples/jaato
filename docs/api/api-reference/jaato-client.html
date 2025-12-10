@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JaatoClient - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="jaato-client.html" class="active">JaatoClient</a></li>
+          <li><a href="plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="tool-executor.html">ToolExecutor</a></li>
+          <li><a href="types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">On this page</div>
+        <ul class="sidebar-nav">
+          <li><a href="#constructor">Constructor</a></li>
+          <li><a href="#connection">Connection</a></li>
+          <li><a href="#tool-configuration">Tool Configuration</a></li>
+          <li><a href="#messaging">Messaging</a></li>
+          <li><a href="#history">History</a></li>
+          <li><a href="#gc">Garbage Collection</a></li>
+          <li><a href="#sessions">Sessions</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Header -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>JaatoClient</h1>
+          <p class="lead">
+            The main entry point for the jaato framework. Provides a unified interface
+            for connecting to AI providers, configuring tools, and managing multi-turn
+            conversations.
+          </p>
+
+          <div class="method-signature">
+            <span class="token-keyword">from</span> shared <span class="token-keyword">import</span> JaatoClient
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick example</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
+
+client = JaatoClient()
+client.connect(
+    project="my-project",
+    location="us-central1",
+    model="gemini-2.5-flash"
+)
+
+registry = PluginRegistry(model_name="gemini-2.5-flash")
+registry.discover()
+registry.expose_tool("cli")
+client.configure_tools(registry)
+
+response = client.send_message(
+    "List files in current directory",
+    on_output=lambda s, t, m: print(t, end="")
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Constructor -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="constructor">Constructor</h2>
+
+          <h3>__init__</h3>
+          <div class="method-signature">
+            <span class="method-name">JaatoClient</span>(<span class="param">provider_name</span>: <span class="type">str</span> = <span class="token-string">"google_genai"</span>)
+          </div>
+
+          <p>Creates a new JaatoClient instance with the specified provider.</p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">provider_name</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                The model provider to use. Currently supported: <code>"google_genai"</code>.
+              </div>
+              <div class="param-default">Default: <code>"google_genai"</code></div>
+            </li>
+          </ul>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">JaatoClient</div>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Create client</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Default provider (Google GenAI)
+client = JaatoClient()
+
+# Explicit provider
+client = JaatoClient(provider_name="google_genai")
+
+# Future: other providers
+# client = JaatoClient(provider_name="anthropic")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Connection -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="connection">Connection</h2>
+
+          <h3>connect</h3>
+          <div class="method-signature">
+            <span class="method-name">connect</span>(<span class="param">project</span>: <span class="type">str</span>, <span class="param">location</span>: <span class="type">str</span>, <span class="param">model</span>: <span class="type">str</span>) -> <span class="type">None</span>
+          </div>
+
+          <p>Establishes a connection to the AI provider with the specified configuration.</p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">project</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Google Cloud project ID</div>
+            </li>
+            <li>
+              <span class="param-name">location</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Vertex AI region (e.g., <code>us-central1</code>, <code>global</code>)</div>
+            </li>
+            <li>
+              <span class="param-name">model</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Model name (e.g., <code>gemini-2.5-flash</code>)</div>
+            </li>
+          </ul>
+
+          <h3 id="is-connected">is_connected <span class="badge badge-property">property</span></h3>
+          <p>Returns <code>True</code> if the client is connected to a provider.</p>
+
+          <h3 id="model-name">model_name <span class="badge badge-property">property</span></h3>
+          <p>Returns the current model name, or <code>None</code> if not connected.</p>
+
+          <h3>list_available_models</h3>
+          <div class="method-signature">
+            <span class="method-name">list_available_models</span>(<span class="param">prefix</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>) -> <span class="type">List[str]</span>
+          </div>
+          <p>Lists available models from the provider, optionally filtered by prefix.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Connection</div>
+          <div class="code-block">
+            <pre><code class="language-python">client = JaatoClient()
+
+# Connect to Vertex AI
+client.connect(
+    project="my-gcp-project",
+    location="us-central1",
+    model="gemini-2.5-flash"
+)
+
+# Check connection
+if client.is_connected:
+    print(f"Connected to {client.model_name}")
+
+# List available models
+models = client.list_available_models(prefix="gemini")
+for model in models:
+    print(model)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Using environment variables</div>
+          <div class="code-block">
+            <pre><code class="language-python">import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+client = JaatoClient()
+client.connect(
+    project=os.getenv("PROJECT_ID"),
+    location=os.getenv("LOCATION"),
+    model=os.getenv("MODEL_NAME")
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tool Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="tool-configuration">Tool Configuration</h2>
+
+          <h3>configure_tools</h3>
+          <div class="method-signature">
+            <span class="method-name">configure_tools</span>(<br>
+            &nbsp;&nbsp;<span class="param">registry</span>: <span class="type">PluginRegistry</span>,<br>
+            &nbsp;&nbsp;<span class="param">permission_plugin</span>: <span class="type">Optional[PermissionPlugin]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">ledger</span>: <span class="type">Optional[TokenLedger]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+
+          <p>
+            Configures the client with tools from a plugin registry. This is the
+            recommended way to set up tools.
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">registry</span>
+              <span class="param-type">PluginRegistry</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Registry containing exposed tool plugins</div>
+            </li>
+            <li>
+              <span class="param-name">permission_plugin</span>
+              <span class="param-type">PermissionPlugin</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Plugin for permission checking before tool execution</div>
+            </li>
+            <li>
+              <span class="param-name">ledger</span>
+              <span class="param-type">TokenLedger</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Token accounting ledger</div>
+            </li>
+          </ul>
+
+          <h3>configure_custom_tools</h3>
+          <div class="method-signature">
+            <span class="method-name">configure_custom_tools</span>(<br>
+            &nbsp;&nbsp;<span class="param">tools</span>: <span class="type">List[ToolSchema]</span>,<br>
+            &nbsp;&nbsp;<span class="param">executors</span>: <span class="type">Dict[str, Callable]</span>,<br>
+            &nbsp;&nbsp;<span class="param">ledger</span>: <span class="type">Optional[TokenLedger]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">system_instruction</span>: <span class="type">Optional[str]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+
+          <p>
+            Configures tools directly without using a registry. Useful for custom
+            tool implementations.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Using PluginRegistry</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import (
+    JaatoClient,
+    PluginRegistry,
+    PermissionPlugin,
+    TokenLedger
+)
+
+client = JaatoClient()
+client.connect(project, location, model)
+
+# Setup registry
+registry = PluginRegistry(model_name=model)
+registry.discover()
+registry.expose_tool("cli")
+registry.expose_tool("file_edit")
+
+# Optional: permission control
+perm = PermissionPlugin()
+perm.initialize({"config_path": "perms.json"})
+
+# Optional: token accounting
+ledger = TokenLedger()
+
+# Configure
+client.configure_tools(
+    registry,
+    permission_plugin=perm,
+    ledger=ledger
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Custom tools</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import ToolSchema
+
+# Define custom tool
+def get_weather(city: str) -> str:
+    return f"Weather in {city}: Sunny, 72F"
+
+tools = [
+    ToolSchema(
+        name="get_weather",
+        description="Get current weather",
+        parameters={
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"}
+            },
+            "required": ["city"]
+        }
+    )
+]
+
+executors = {"get_weather": get_weather}
+
+client.configure_custom_tools(
+    tools=tools,
+    executors=executors
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Messaging -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="messaging">Messaging</h2>
+
+          <h3>send_message</h3>
+          <div class="method-signature">
+            <span class="method-name">send_message</span>(<br>
+            &nbsp;&nbsp;<span class="param">message</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">on_output</span>: <span class="type">OutputCallback</span><br>
+            ) -> <span class="type">str</span>
+          </div>
+
+          <p>
+            Sends a message and returns the final response. Handles the full tool
+            execution loop internally, calling the output callback for real-time streaming.
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">message</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">The user message to send</div>
+            </li>
+            <li>
+              <span class="param-name">on_output</span>
+              <span class="param-type">OutputCallback</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">
+                Callback function: <code>(source: str, text: str, mode: str) -> None</code>
+              </div>
+            </li>
+          </ul>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">str - The final response text</div>
+          </div>
+
+          <h3>send_message_with_parts</h3>
+          <div class="method-signature">
+            <span class="method-name">send_message_with_parts</span>(<br>
+            &nbsp;&nbsp;<span class="param">parts</span>: <span class="type">List[Part]</span>,<br>
+            &nbsp;&nbsp;<span class="param">on_output</span>: <span class="type">OutputCallback</span><br>
+            ) -> <span class="type">str</span>
+          </div>
+
+          <p>Sends a multimodal message with multiple parts (text, images, etc.).</p>
+
+          <h3>generate</h3>
+          <div class="method-signature">
+            <span class="method-name">generate</span>(<br>
+            &nbsp;&nbsp;<span class="param">prompt</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">ledger</span>: <span class="type">Optional[TokenLedger]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">str</span>
+          </div>
+
+          <p>
+            Simple one-shot generation without tools or conversation history.
+            Useful for quick completions.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">send_message</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Output callback
+def on_output(source, text, mode):
+    """
+    source: "model", plugin name, or "system"
+    text: output text
+    mode: "write" (new) or "append" (continue)
+    """
+    if mode == "write":
+        print(f"\n[{source}]", end=" ")
+    print(text, end="")
+
+# Send message
+response = client.send_message(
+    "What files are in this directory?",
+    on_output=on_output
+)
+
+print(f"\n\nFinal: {response}")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Multimodal message</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import Part, Attachment
+
+# Create parts with image
+parts = [
+    Part.from_text("What's in this image?"),
+    Part(inline_data=Attachment(
+        mime_type="image/png",
+        data=open("image.png", "rb").read()
+    ))
+]
+
+response = client.send_message_with_parts(
+    parts,
+    on_output=on_output
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Simple generation</div>
+          <div class="code-block">
+            <pre><code class="language-python"># One-shot, no tools, no history
+result = client.generate("What is 2 + 2?")
+print(result)  # "4"</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- History -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="history">History Management</h2>
+
+          <h3>get_history</h3>
+          <div class="method-signature">
+            <span class="method-name">get_history</span>() -> <span class="type">List[Message]</span>
+          </div>
+          <p>Returns the full conversation history as a list of <code>Message</code> objects.</p>
+
+          <h3>reset_session</h3>
+          <div class="method-signature">
+            <span class="method-name">reset_session</span>(<span class="param">history</span>: <span class="type">Optional[List[Message]]</span> = <span class="type">None</span>) -> <span class="type">None</span>
+          </div>
+          <p>
+            Clears the current session. Optionally initializes with a new history.
+          </p>
+
+          <h3>get_turn_accounting</h3>
+          <div class="method-signature">
+            <span class="method-name">get_turn_accounting</span>() -> <span class="type">List[Dict[str, Any]]</span>
+          </div>
+          <p>Returns per-turn statistics including token counts and timing.</p>
+
+          <h3>get_turn_boundaries</h3>
+          <div class="method-signature">
+            <span class="method-name">get_turn_boundaries</span>() -> <span class="type">List[int]</span>
+          </div>
+          <p>Returns indices marking the start of each turn in the history.</p>
+
+          <h3>revert_to_turn</h3>
+          <div class="method-signature">
+            <span class="method-name">revert_to_turn</span>(<span class="param">turn_id</span>: <span class="type">int</span>) -> <span class="type">Dict[str, Any]</span>
+          </div>
+          <p>Reverts the conversation to a specific turn, removing subsequent messages.</p>
+
+          <h3>get_context_limit</h3>
+          <div class="method-signature">
+            <span class="method-name">get_context_limit</span>() -> <span class="type">int</span>
+          </div>
+          <p>Returns the model's context window size in tokens.</p>
+
+          <h3>get_context_usage</h3>
+          <div class="method-signature">
+            <span class="method-name">get_context_usage</span>() -> <span class="type">Dict[str, Any]</span>
+          </div>
+          <p>Returns current context usage statistics.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Working with history</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Get conversation history
+history = client.get_history()
+for msg in history:
+    print(f"{msg.role}: {msg.text[:50]}...")
+
+# Check turn info
+turns = client.get_turn_boundaries()
+print(f"Conversation has {len(turns)} turns")
+
+# Get per-turn stats
+accounting = client.get_turn_accounting()
+for turn in accounting:
+    print(f"Turn {turn['turn_id']}: "
+          f"{turn['tokens']} tokens")
+
+# Revert to earlier turn
+client.revert_to_turn(2)
+
+# Clear and start fresh
+client.reset_session()
+
+# Reset with custom history
+client.reset_session(history=custom_history)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Context management</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Check context limits
+limit = client.get_context_limit()
+usage = client.get_context_usage()
+
+print(f"Limit: {limit} tokens")
+print(f"Used: {usage['total_tokens']} tokens")
+print(f"Available: {limit - usage['total_tokens']}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Garbage Collection -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="gc">Garbage Collection</h2>
+
+          <p>
+            For long conversations, GC plugins help manage context window limits
+            by automatically removing or summarizing older messages.
+          </p>
+
+          <h3>set_gc_plugin</h3>
+          <div class="method-signature">
+            <span class="method-name">set_gc_plugin</span>(<br>
+            &nbsp;&nbsp;<span class="param">plugin</span>: <span class="type">GCPlugin</span>,<br>
+            &nbsp;&nbsp;<span class="param">config</span>: <span class="type">Optional[GCConfig]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+          <p>Enables automatic garbage collection with the specified plugin.</p>
+
+          <h3>remove_gc_plugin</h3>
+          <div class="method-signature">
+            <span class="method-name">remove_gc_plugin</span>() -> <span class="type">None</span>
+          </div>
+          <p>Disables garbage collection.</p>
+
+          <h3>manual_gc</h3>
+          <div class="method-signature">
+            <span class="method-name">manual_gc</span>() -> <span class="type">GCResult</span>
+          </div>
+          <p>Manually triggers garbage collection and returns the result.</p>
+
+          <h3>get_gc_history</h3>
+          <div class="method-signature">
+            <span class="method-name">get_gc_history</span>() -> <span class="type">List[GCResult]</span>
+          </div>
+          <p>Returns the history of GC operations performed.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Setup GC</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc_truncate import (
+    create_plugin as create_gc
+)
+from shared.plugins.gc import GCConfig
+
+# Create GC plugin
+gc_plugin = create_gc()
+gc_plugin.initialize({
+    "preserve_recent_turns": 10
+})
+
+# Configure with threshold
+config = GCConfig(
+    threshold_percent=75.0,
+    check_before_send=True
+)
+
+client.set_gc_plugin(gc_plugin, config)
+
+# Manual GC
+result = client.manual_gc()
+print(f"Freed {result.tokens_freed} tokens")
+
+# Check GC history
+for gc in client.get_gc_history():
+    print(f"GC at turn {gc.turn}: "
+          f"{gc.tokens_freed} freed")
+
+# Disable GC
+client.remove_gc_plugin()</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Sessions -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="sessions">Session Persistence</h2>
+
+          <p>
+            Session plugins enable saving and resuming conversations across
+            application restarts.
+          </p>
+
+          <h3>set_session_plugin</h3>
+          <div class="method-signature">
+            <span class="method-name">set_session_plugin</span>(<br>
+            &nbsp;&nbsp;<span class="param">plugin</span>: <span class="type">SessionPlugin</span>,<br>
+            &nbsp;&nbsp;<span class="param">config</span>: <span class="type">Optional[SessionConfig]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+
+          <h3>save_session</h3>
+          <div class="method-signature">
+            <span class="method-name">save_session</span>(<br>
+            &nbsp;&nbsp;<span class="param">session_id</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">user_inputs</span>: <span class="type">Optional[List[str]]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">str</span>
+          </div>
+          <p>Saves the current session and returns the session ID.</p>
+
+          <h3>resume_session</h3>
+          <div class="method-signature">
+            <span class="method-name">resume_session</span>(<span class="param">session_id</span>: <span class="type">str</span>) -> <span class="type">SessionState</span>
+          </div>
+          <p>Loads a previously saved session.</p>
+
+          <h3>list_sessions</h3>
+          <div class="method-signature">
+            <span class="method-name">list_sessions</span>() -> <span class="type">List[SessionInfo]</span>
+          </div>
+          <p>Returns a list of all saved sessions.</p>
+
+          <h3>delete_session</h3>
+          <div class="method-signature">
+            <span class="method-name">delete_session</span>(<span class="param">session_id</span>: <span class="type">str</span>) -> <span class="type">bool</span>
+          </div>
+          <p>Deletes a saved session.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Session persistence</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.session import (
+    create_plugin as create_session
+)
+from shared.plugins.session import SessionConfig
+
+# Setup session plugin
+session = create_session()
+session.initialize({
+    "storage_path": ".jaato/sessions"
+})
+
+config = SessionConfig(
+    auto_resume_last=True
+)
+
+client.set_session_plugin(session, config)
+
+# ... have conversation ...
+
+# Save session
+session_id = client.save_session()
+print(f"Saved: {session_id}")
+
+# Later: resume
+client.resume_session(session_id)
+
+# List all sessions
+for info in client.list_sessions():
+    print(f"{info.id}: {info.created_at}")
+
+# Delete old session
+client.delete_session(old_session_id)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- User Commands -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="user-commands">User Commands</h2>
+
+          <p>
+            Plugins can expose user-facing commands that can be executed
+            during a conversation.
+          </p>
+
+          <h3>get_user_commands</h3>
+          <div class="method-signature">
+            <span class="method-name">get_user_commands</span>() -> <span class="type">Dict[str, UserCommand]</span>
+          </div>
+          <p>Returns all available user commands from exposed plugins.</p>
+
+          <h3>execute_user_command</h3>
+          <div class="method-signature">
+            <span class="method-name">execute_user_command</span>(<br>
+            &nbsp;&nbsp;<span class="param">command_name</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">args</span>: <span class="type">Optional[Dict]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">tuple[Any, bool]</span>
+          </div>
+          <p>Executes a user command and returns (result, share_with_model).</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">User commands</div>
+          <div class="code-block">
+            <pre><code class="language-python"># List available commands
+commands = client.get_user_commands()
+for name, cmd in commands.items():
+    print(f"/{name}: {cmd.description}")
+
+# Execute a command
+result, share = client.execute_user_command(
+    "todo_list",
+    args={"filter": "pending"}
+)
+
+print(result)
+
+# If share is True, add result to conversation
+if share:
+    client.send_message(
+        f"Command result: {result}",
+        on_output=on_output
+    )</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>

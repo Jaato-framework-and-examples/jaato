@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>API Reference - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html" class="active">Overview</a></li>
+          <li><a href="jaato-client.html">JaatoClient</a></li>
+          <li><a href="plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="tool-executor.html">ToolExecutor</a></li>
+          <li><a href="types.html">Types</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>API Reference</h1>
+          <p class="lead">
+            Complete reference documentation for all jaato classes, methods, and types.
+          </p>
+
+          <h2 id="core-classes">Core Classes</h2>
+
+          <h3><a href="jaato-client.html">JaatoClient</a></h3>
+          <p>
+            The main entry point for the framework. Handles connection to AI providers,
+            tool configuration, message sending, and conversation history management.
+          </p>
+
+          <h3><a href="plugin-registry.html">PluginRegistry</a></h3>
+          <p>
+            Discovers and manages plugins. Controls which tools are exposed to the model
+            and provides access to tool schemas and executors.
+          </p>
+
+          <h3><a href="tool-executor.html">ToolExecutor</a></h3>
+          <p>
+            Executes tool calls with permission checking and auto-backgrounding support.
+            Maps tool names to callable functions.
+          </p>
+
+          <h2 id="type-system">Type System</h2>
+
+          <h3><a href="types.html">Provider-Agnostic Types</a></h3>
+          <p>
+            Abstract types that work across all AI providers. Includes <code>Message</code>,
+            <code>Part</code>, <code>ToolSchema</code>, <code>ProviderResponse</code>, and more.
+          </p>
+
+          <h2 id="plugins">Built-in Plugins</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Plugin</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>cli</code></td>
+                <td>Execute shell commands</td>
+              </tr>
+              <tr>
+                <td><code>mcp</code></td>
+                <td>Model Context Protocol server tools</td>
+              </tr>
+              <tr>
+                <td><code>file_edit</code></td>
+                <td>File editing capabilities</td>
+              </tr>
+              <tr>
+                <td><code>permission</code></td>
+                <td>Permission control for tool execution</td>
+              </tr>
+              <tr>
+                <td><code>todo</code></td>
+                <td>Task/todo list management</td>
+              </tr>
+              <tr>
+                <td><code>web_search</code></td>
+                <td>Web search functionality</td>
+              </tr>
+              <tr>
+                <td><code>session</code></td>
+                <td>Session persistence</td>
+              </tr>
+              <tr>
+                <td><code>gc_truncate</code></td>
+                <td>Context truncation GC strategy</td>
+              </tr>
+              <tr>
+                <td><code>gc_summarize</code></td>
+                <td>Summarization GC strategy</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h2 id="imports">Import Patterns</h2>
+          <p>
+            All public APIs are exported from the <code>shared</code> module.
+            Use the pattern shown on the right for clean imports.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Recommended imports</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import (
+    # Core client
+    JaatoClient,
+
+    # Plugin system
+    PluginRegistry,
+    PermissionPlugin,
+
+    # Tool execution
+    ToolExecutor,
+
+    # Token accounting
+    TokenLedger,
+
+    # Type system
+    Message,
+    Part,
+    Role,
+    ToolSchema,
+    ToolResult,
+    FunctionCall,
+    ProviderResponse,
+    TokenUsage,
+    FinishReason,
+    Attachment,
+
+    # Provider abstraction
+    ModelProviderPlugin,
+    ProviderConfig,
+    load_provider,
+    discover_providers,
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Quick reference</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Minimal setup
+from shared import JaatoClient, PluginRegistry
+
+client = JaatoClient()
+client.connect(project, location, model)
+
+registry = PluginRegistry(model_name=model)
+registry.discover()
+registry.expose_tool("cli")
+
+client.configure_tools(registry)
+
+response = client.send_message(
+    "Hello!",
+    on_output=lambda s, t, m: print(t)
+)</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>

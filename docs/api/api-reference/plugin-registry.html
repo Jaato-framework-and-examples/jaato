@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PluginRegistry - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="jaato-client.html">JaatoClient</a></li>
+          <li><a href="plugin-registry.html" class="active">PluginRegistry</a></li>
+          <li><a href="tool-executor.html">ToolExecutor</a></li>
+          <li><a href="types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">On this page</div>
+        <ul class="sidebar-nav">
+          <li><a href="#constructor">Constructor</a></li>
+          <li><a href="#discovery">Discovery</a></li>
+          <li><a href="#exposure">Exposure</a></li>
+          <li><a href="#retrieval">Retrieval</a></li>
+          <li><a href="#enrichment">Prompt Enrichment</a></li>
+          <li><a href="#model-requirements">Model Requirements</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Header -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>PluginRegistry</h1>
+          <p class="lead">
+            Discovers, manages, and exposes tool plugins. The registry acts as the
+            central hub for all plugin operations, controlling which tools are
+            available to the model.
+          </p>
+
+          <div class="method-signature">
+            <span class="token-keyword">from</span> shared <span class="token-keyword">import</span> PluginRegistry
+          </div>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Plugin Lifecycle</div>
+            <ol>
+              <li><strong>Discover</strong> - Find available plugins</li>
+              <li><strong>Expose</strong> - Enable specific plugins</li>
+              <li><strong>Configure</strong> - Pass to JaatoClient</li>
+            </ol>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick example</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import PluginRegistry
+
+# Create registry with model name
+registry = PluginRegistry(
+    model_name="gemini-2.5-flash"
+)
+
+# Discover available plugins
+registry.discover()
+
+# List what's available
+print(registry.list_available())
+# ['cli', 'mcp', 'file_edit', 'todo', ...]
+
+# Expose specific plugins
+registry.expose_tool("cli")
+registry.expose_tool("file_edit")
+
+# Check what's exposed
+print(registry.list_exposed())
+# ['cli', 'file_edit']
+
+# Get tools for the model
+schemas = registry.get_exposed_tool_schemas()
+executors = registry.get_exposed_executors()</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Constructor -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="constructor">Constructor</h2>
+
+          <h3>__init__</h3>
+          <div class="method-signature">
+            <span class="method-name">PluginRegistry</span>(<span class="param">model_name</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>)
+          </div>
+
+          <p>
+            Creates a new plugin registry. The model name is used to check plugin
+            compatibility via model requirements.
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">model_name</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Model name for checking plugin requirements. Some plugins only
+                work with specific models.
+              </div>
+            </li>
+          </ul>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">PluginRegistry</div>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Create registry</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Without model (no requirement checking)
+registry = PluginRegistry()
+
+# With model name
+registry = PluginRegistry(
+    model_name="gemini-2.5-flash"
+)
+
+# Update model later
+registry.set_model_name("gemini-2.5-pro")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Discovery -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="discovery">Discovery</h2>
+
+          <h3>discover</h3>
+          <div class="method-signature">
+            <span class="method-name">discover</span>(<br>
+            &nbsp;&nbsp;<span class="param">plugin_kind</span>: <span class="type">str</span> = <span class="token-string">"tool"</span>,<br>
+            &nbsp;&nbsp;<span class="param">include_directory</span>: <span class="type">bool</span> = <span class="type">True</span><br>
+            ) -> <span class="type">List[str]</span>
+          </div>
+
+          <p>
+            Scans for available plugins and returns their names. Does not expose
+            them automatically.
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">plugin_kind</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Type of plugins to discover: <code>"tool"</code>, <code>"gc"</code>, or <code>"model_provider"</code>
+              </div>
+              <div class="param-default">Default: <code>"tool"</code></div>
+            </li>
+            <li>
+              <span class="param-name">include_directory</span>
+              <span class="param-type">bool</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Include plugins from the plugins directory</div>
+              <div class="param-default">Default: <code>True</code></div>
+            </li>
+          </ul>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">List[str] - Names of discovered plugins</div>
+          </div>
+
+          <h3>list_available</h3>
+          <div class="method-signature">
+            <span class="method-name">list_available</span>() -> <span class="type">List[str]</span>
+          </div>
+          <p>Returns names of all discovered (available) plugins.</p>
+
+          <h3>list_exposed</h3>
+          <div class="method-signature">
+            <span class="method-name">list_exposed</span>() -> <span class="type">List[str]</span>
+          </div>
+          <p>Returns names of all currently exposed plugins.</p>
+
+          <h3>is_exposed</h3>
+          <div class="method-signature">
+            <span class="method-name">is_exposed</span>(<span class="param">name</span>: <span class="type">str</span>) -> <span class="type">bool</span>
+          </div>
+          <p>Checks if a plugin is currently exposed.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Discovering plugins</div>
+          <div class="code-block">
+            <pre><code class="language-python">registry = PluginRegistry(model_name="gemini-2.5-flash")
+
+# Discover tool plugins
+tools = registry.discover(plugin_kind="tool")
+print(f"Found {len(tools)} tool plugins:")
+for name in tools:
+    print(f"  - {name}")
+
+# Discover GC plugins
+gc_plugins = registry.discover(plugin_kind="gc")
+print(f"Found {len(gc_plugins)} GC plugins")
+
+# Check availability
+available = registry.list_available()
+print(f"Available: {available}")
+
+# After exposing some
+registry.expose_tool("cli")
+print(f"Exposed: {registry.list_exposed()}")
+print(f"CLI exposed: {registry.is_exposed('cli')}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Exposure -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="exposure">Exposure</h2>
+
+          <p>
+            Exposing a plugin makes its tools available to the model. You can
+            expose plugins individually or all at once.
+          </p>
+
+          <h3>expose_tool</h3>
+          <div class="method-signature">
+            <span class="method-name">expose_tool</span>(<br>
+            &nbsp;&nbsp;<span class="param">name</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">config</span>: <span class="type">Optional[Dict]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">bool</span>
+          </div>
+
+          <p>Exposes a single plugin by name with optional configuration.</p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">name</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Name of the plugin to expose</div>
+            </li>
+            <li>
+              <span class="param-name">config</span>
+              <span class="param-type">Dict</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Plugin-specific configuration</div>
+            </li>
+          </ul>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">bool - True if successfully exposed</div>
+          </div>
+
+          <h3>unexpose_tool</h3>
+          <div class="method-signature">
+            <span class="method-name">unexpose_tool</span>(<span class="param">name</span>: <span class="type">str</span>) -> <span class="type">None</span>
+          </div>
+          <p>Stops exposing a plugin's tools.</p>
+
+          <h3>expose_all</h3>
+          <div class="method-signature">
+            <span class="method-name">expose_all</span>(<span class="param">config</span>: <span class="type">Optional[Dict[str, Dict]]</span> = <span class="type">None</span>) -> <span class="type">None</span>
+          </div>
+          <p>Exposes all discovered plugins, optionally with per-plugin config.</p>
+
+          <h3>unexpose_all</h3>
+          <div class="method-signature">
+            <span class="method-name">unexpose_all</span>() -> <span class="type">None</span>
+          </div>
+          <p>Stops exposing all plugins.</p>
+
+          <h3>register_plugin</h3>
+          <div class="method-signature">
+            <span class="method-name">register_plugin</span>(<br>
+            &nbsp;&nbsp;<span class="param">plugin</span>: <span class="type">ToolPlugin</span>,<br>
+            &nbsp;&nbsp;<span class="param">expose</span>: <span class="type">bool</span> = <span class="type">False</span>,<br>
+            &nbsp;&nbsp;<span class="param">enrichment_only</span>: <span class="type">bool</span> = <span class="type">False</span>,<br>
+            &nbsp;&nbsp;<span class="param">config</span>: <span class="type">Optional[Dict]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+          <p>Manually registers a plugin instance (for custom plugins).</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Exposing plugins</div>
+          <div class="code-block">
+            <pre><code class="language-python">registry = PluginRegistry(model_name="gemini-2.5-flash")
+registry.discover()
+
+# Expose individual plugins
+registry.expose_tool("cli")
+registry.expose_tool("file_edit")
+
+# Expose with configuration
+registry.expose_tool("cli", config={
+    "extra_paths": ["/usr/local/bin"],
+    "max_output_chars": 10000
+})
+
+# Unexpose a plugin
+registry.unexpose_tool("cli")
+
+# Expose all at once
+registry.expose_all()
+
+# Expose all with per-plugin config
+registry.expose_all(config={
+    "cli": {"max_output_chars": 5000},
+    "mcp": {"servers": ["Atlassian"]}
+})
+
+# Unexpose everything
+registry.unexpose_all()</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Register custom plugin</div>
+          <div class="code-block">
+            <pre><code class="language-python">from my_plugins import CustomPlugin
+
+# Create and register
+plugin = CustomPlugin()
+registry.register_plugin(
+    plugin,
+    expose=True,  # Expose immediately
+    config={"api_key": "..."}
+)
+
+# Register for enrichment only
+# (no tools, just prompt modification)
+registry.register_plugin(
+    enrichment_plugin,
+    expose=False,
+    enrichment_only=True
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Retrieval -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="retrieval">Retrieval</h2>
+
+          <p>
+            After exposing plugins, use these methods to get tool schemas and
+            executors for the client.
+          </p>
+
+          <h3>get_exposed_tool_schemas</h3>
+          <div class="method-signature">
+            <span class="method-name">get_exposed_tool_schemas</span>() -> <span class="type">List[ToolSchema]</span>
+          </div>
+          <p>Returns all tool schemas from exposed plugins.</p>
+
+          <h3>get_exposed_executors</h3>
+          <div class="method-signature">
+            <span class="method-name">get_exposed_executors</span>() -> <span class="type">Dict[str, Callable]</span>
+          </div>
+          <p>Returns a mapping of tool names to executor functions.</p>
+
+          <h3>get_plugin</h3>
+          <div class="method-signature">
+            <span class="method-name">get_plugin</span>(<span class="param">name</span>: <span class="type">str</span>) -> <span class="type">Optional[ToolPlugin]</span>
+          </div>
+          <p>Returns a plugin instance by name.</p>
+
+          <h3>get_plugin_for_tool</h3>
+          <div class="method-signature">
+            <span class="method-name">get_plugin_for_tool</span>(<span class="param">tool_name</span>: <span class="type">str</span>) -> <span class="type">Optional[ToolPlugin]</span>
+          </div>
+          <p>Returns the plugin that provides a specific tool.</p>
+
+          <h3>get_system_instructions</h3>
+          <div class="method-signature">
+            <span class="method-name">get_system_instructions</span>() -> <span class="type">Optional[str]</span>
+          </div>
+          <p>Returns combined system instructions from all exposed plugins.</p>
+
+          <h3>get_auto_approved_tools</h3>
+          <div class="method-signature">
+            <span class="method-name">get_auto_approved_tools</span>() -> <span class="type">List[str]</span>
+          </div>
+          <p>Returns list of tools that don't require permission approval.</p>
+
+          <h3>get_exposed_user_commands</h3>
+          <div class="method-signature">
+            <span class="method-name">get_exposed_user_commands</span>() -> <span class="type">List[UserCommand]</span>
+          </div>
+          <p>Returns user-facing commands from exposed plugins.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Getting tools and executors</div>
+          <div class="code-block">
+            <pre><code class="language-python">registry.expose_tool("cli")
+registry.expose_tool("file_edit")
+
+# Get all tool schemas
+schemas = registry.get_exposed_tool_schemas()
+for schema in schemas:
+    print(f"{schema.name}: {schema.description}")
+
+# Get executors
+executors = registry.get_exposed_executors()
+print(f"Tools: {list(executors.keys())}")
+
+# Get system instructions
+instructions = registry.get_system_instructions()
+if instructions:
+    print(f"System: {instructions[:100]}...")
+
+# Get auto-approved tools
+auto_approved = registry.get_auto_approved_tools()
+print(f"Auto-approved: {auto_approved}")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Plugin lookup</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Get plugin by name
+cli_plugin = registry.get_plugin("cli")
+if cli_plugin:
+    print(f"CLI plugin: {cli_plugin.name}")
+
+# Find which plugin provides a tool
+plugin = registry.get_plugin_for_tool("execute_command")
+if plugin:
+    print(f"execute_command from: {plugin.name}")
+
+# Get user commands
+commands = registry.get_exposed_user_commands()
+for cmd in commands:
+    print(f"/{cmd.name}: {cmd.description}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Prompt Enrichment -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="enrichment">Prompt Enrichment</h2>
+
+          <p>
+            Plugins can subscribe to prompt enrichment to modify user prompts
+            before they're sent to the model. Useful for context injection.
+          </p>
+
+          <h3>get_prompt_enrichment_subscribers</h3>
+          <div class="method-signature">
+            <span class="method-name">get_prompt_enrichment_subscribers</span>() -> <span class="type">List[ToolPlugin]</span>
+          </div>
+          <p>Returns plugins that have subscribed to prompt enrichment.</p>
+
+          <h3>enrich_prompt</h3>
+          <div class="method-signature">
+            <span class="method-name">enrich_prompt</span>(<span class="param">prompt</span>: <span class="type">str</span>) -> <span class="type">PromptEnrichmentResult</span>
+          </div>
+          <p>
+            Runs the prompt through all enrichment subscribers and returns
+            the modified prompt with metadata.
+          </p>
+
+          <div class="callout callout-info">
+            <div class="callout-title">PromptEnrichmentResult</div>
+            Contains: <code>prompt</code> (modified), <code>original_prompt</code>,
+            <code>enrichments</code> (list of applied enrichments)
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Prompt enrichment</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Check subscribers
+subscribers = registry.get_prompt_enrichment_subscribers()
+print(f"Enrichment plugins: {len(subscribers)}")
+
+# Enrich a prompt
+result = registry.enrich_prompt(
+    "What files are in this directory?"
+)
+
+print(f"Original: {result.original_prompt}")
+print(f"Enriched: {result.prompt}")
+print(f"Applied: {result.enrichments}")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Enrichment plugin example</div>
+          <div class="code-block">
+            <pre><code class="language-python">class ContextPlugin:
+    name = "context"
+
+    def subscribes_to_prompt_enrichment(self):
+        return True
+
+    def enrich_prompt(self, prompt):
+        # Add current directory context
+        cwd = os.getcwd()
+        enriched = f"[CWD: {cwd}]\n{prompt}"
+        return PromptEnrichmentResult(
+            prompt=enriched,
+            original_prompt=prompt,
+            enrichments=["added_cwd"]
+        )
+
+# Register for enrichment only
+registry.register_plugin(
+    ContextPlugin(),
+    enrichment_only=True
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Model Requirements -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="model-requirements">Model Requirements</h2>
+
+          <p>
+            Plugins can declare model requirements (glob patterns) to indicate
+            which models they support. The registry tracks skipped plugins.
+          </p>
+
+          <h3>set_model_name</h3>
+          <div class="method-signature">
+            <span class="method-name">set_model_name</span>(<span class="param">model_name</span>: <span class="type">str</span>) -> <span class="type">None</span>
+          </div>
+          <p>Updates the model name for requirement checking.</p>
+
+          <h3>get_model_name</h3>
+          <div class="method-signature">
+            <span class="method-name">get_model_name</span>() -> <span class="type">Optional[str]</span>
+          </div>
+          <p>Returns the current model name.</p>
+
+          <h3>list_skipped_plugins</h3>
+          <div class="method-signature">
+            <span class="method-name">list_skipped_plugins</span>() -> <span class="type">Dict[str, List[str]]</span>
+          </div>
+          <p>
+            Returns plugins that were skipped due to model requirements,
+            with their required patterns.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Model requirements</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Set model during creation
+registry = PluginRegistry(model_name="gemini-2.5-flash")
+
+# Or update later
+registry.set_model_name("gemini-2.5-pro")
+
+# Check current model
+print(f"Model: {registry.get_model_name()}")
+
+# After discovery, check skipped plugins
+registry.discover()
+skipped = registry.list_skipped_plugins()
+
+for plugin, requirements in skipped.items():
+    print(f"{plugin} requires: {requirements}")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Plugin with requirements</div>
+          <div class="code-block">
+            <pre><code class="language-python">class GeminiOnlyPlugin:
+    name = "gemini_only"
+
+    def get_model_requirements(self):
+        # Only works with Gemini models
+        return ["gemini-*"]
+
+    def get_tool_schemas(self):
+        return [...]
+
+# This plugin will be skipped if model
+# doesn't match "gemini-*" pattern</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>

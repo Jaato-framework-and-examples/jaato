@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Types - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="jaato-client.html">JaatoClient</a></li>
+          <li><a href="plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="tool-executor.html">ToolExecutor</a></li>
+          <li><a href="types.html" class="active">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">On this page</div>
+        <ul class="sidebar-nav">
+          <li><a href="#enums">Enums</a></li>
+          <li><a href="#message">Message</a></li>
+          <li><a href="#part">Part</a></li>
+          <li><a href="#tool-schema">ToolSchema</a></li>
+          <li><a href="#function-call">FunctionCall</a></li>
+          <li><a href="#tool-result">ToolResult</a></li>
+          <li><a href="#provider-response">ProviderResponse</a></li>
+          <li><a href="#attachment">Attachment</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Header -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Type System</h1>
+          <p class="lead">
+            Provider-agnostic types that abstract away SDK-specific implementations.
+            Use these types throughout your code to support multiple AI providers.
+          </p>
+
+          <div class="method-signature">
+            <span class="token-keyword">from</span> shared <span class="token-keyword">import</span> Message, Part, Role, ToolSchema, ...
+          </div>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Provider Independence</div>
+            These types are defined in <code>shared/plugins/model_provider/types.py</code>
+            and work identically regardless of which AI provider you're using.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Import all types</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import (
+    # Enums
+    Role,
+    FinishReason,
+
+    # Message types
+    Message,
+    Part,
+
+    # Tool types
+    ToolSchema,
+    FunctionCall,
+    ToolResult,
+
+    # Response types
+    ProviderResponse,
+    TokenUsage,
+
+    # Attachments
+    Attachment,
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Enums -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="enums">Enums</h2>
+
+          <h3>Role</h3>
+          <p>Identifies the sender of a message in the conversation.</p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Value</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>Role.USER</code></td>
+                <td>Message from the user</td>
+              </tr>
+              <tr>
+                <td><code>Role.MODEL</code></td>
+                <td>Message from the AI model</td>
+              </tr>
+              <tr>
+                <td><code>Role.TOOL</code></td>
+                <td>Tool execution result</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>FinishReason</h3>
+          <p>Indicates why the model stopped generating.</p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Value</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>FinishReason.STOP</code></td>
+                <td>Natural completion</td>
+              </tr>
+              <tr>
+                <td><code>FinishReason.MAX_TOKENS</code></td>
+                <td>Hit token limit</td>
+              </tr>
+              <tr>
+                <td><code>FinishReason.TOOL_USE</code></td>
+                <td>Model wants to use a tool</td>
+              </tr>
+              <tr>
+                <td><code>FinishReason.SAFETY</code></td>
+                <td>Safety filter triggered</td>
+              </tr>
+              <tr>
+                <td><code>FinishReason.ERROR</code></td>
+                <td>Error occurred</td>
+              </tr>
+              <tr>
+                <td><code>FinishReason.UNKNOWN</code></td>
+                <td>Unknown reason</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Using enums</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import Role, FinishReason, Message
+
+# Create message with role
+msg = Message.from_text(Role.USER, "Hello!")
+
+# Check role
+if msg.role == Role.MODEL:
+    print("From model")
+
+# Check finish reason
+response = client.send_message(...)
+if response.finish_reason == FinishReason.TOOL_USE:
+    print("Model wants to use a tool")
+elif response.finish_reason == FinishReason.STOP:
+    print("Natural completion")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Message -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="message">Message</h2>
+          <p>
+            Represents a single message in the conversation. Contains a role
+            and one or more parts.
+          </p>
+
+          <h3>Properties</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">role</span>
+              <span class="param-type">Role</span>
+              <div class="param-desc">Who sent the message</div>
+            </li>
+            <li>
+              <span class="param-name">parts</span>
+              <span class="param-type">List[Part]</span>
+              <div class="param-desc">Content parts of the message</div>
+            </li>
+            <li>
+              <span class="param-name">text</span>
+              <span class="param-type">Optional[str]</span>
+              <span class="badge badge-property">property</span>
+              <div class="param-desc">Extracted text content (convenience)</div>
+            </li>
+            <li>
+              <span class="param-name">function_calls</span>
+              <span class="param-type">List[FunctionCall]</span>
+              <span class="badge badge-property">property</span>
+              <div class="param-desc">Extracted function calls (convenience)</div>
+            </li>
+          </ul>
+
+          <h3>Class Methods</h3>
+
+          <div class="method-signature">
+            <span class="method-name">Message.from_text</span>(<span class="param">role</span>: <span class="type">Role</span>, <span class="param">text</span>: <span class="type">str</span>) -> <span class="type">Message</span>
+          </div>
+          <p>Creates a simple text message.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Working with messages</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import Message, Part, Role
+
+# Create a text message
+msg = Message.from_text(Role.USER, "Hello!")
+
+# Create with multiple parts
+msg = Message(
+    role=Role.USER,
+    parts=[
+        Part.from_text("What's in this image?"),
+        Part(inline_data=Attachment(...))
+    ]
+)
+
+# Access properties
+print(f"Role: {msg.role}")
+print(f"Text: {msg.text}")
+
+# Get function calls from model message
+for call in msg.function_calls:
+    print(f"Call: {call.name}({call.args})")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Working with history</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Get conversation history
+history = client.get_history()
+
+for msg in history:
+    if msg.role == Role.USER:
+        print(f"User: {msg.text}")
+    elif msg.role == Role.MODEL:
+        if msg.function_calls:
+            for call in msg.function_calls:
+                print(f"Tool: {call.name}")
+        else:
+            print(f"Model: {msg.text}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Part -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="part">Part</h2>
+          <p>
+            A single piece of content within a message. Can be text, a function
+            call, a function response, or inline data (images, etc.).
+          </p>
+
+          <h3>Properties</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">text</span>
+              <span class="param-type">Optional[str]</span>
+              <div class="param-desc">Text content</div>
+            </li>
+            <li>
+              <span class="param-name">function_call</span>
+              <span class="param-type">Optional[FunctionCall]</span>
+              <div class="param-desc">Function call from model</div>
+            </li>
+            <li>
+              <span class="param-name">function_response</span>
+              <span class="param-type">Optional[ToolResult]</span>
+              <div class="param-desc">Tool execution result</div>
+            </li>
+            <li>
+              <span class="param-name">inline_data</span>
+              <span class="param-type">Optional[Attachment]</span>
+              <div class="param-desc">Binary data (images, etc.)</div>
+            </li>
+          </ul>
+
+          <h3>Class Methods</h3>
+
+          <div class="method-signature">
+            <span class="method-name">Part.from_text</span>(<span class="param">text</span>: <span class="type">str</span>) -> <span class="type">Part</span>
+          </div>
+
+          <div class="method-signature">
+            <span class="method-name">Part.from_function_call</span>(<span class="param">call</span>: <span class="type">FunctionCall</span>) -> <span class="type">Part</span>
+          </div>
+
+          <div class="method-signature">
+            <span class="method-name">Part.from_function_response</span>(<span class="param">result</span>: <span class="type">ToolResult</span>) -> <span class="type">Part</span>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Creating parts</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import Part, FunctionCall, ToolResult
+
+# Text part
+text_part = Part.from_text("Hello world")
+
+# Function call part
+call = FunctionCall(
+    id="call_123",
+    name="get_weather",
+    args={"city": "NYC"}
+)
+call_part = Part.from_function_call(call)
+
+# Function response part
+result = ToolResult(
+    call_id="call_123",
+    name="get_weather",
+    result="Sunny, 72F"
+)
+response_part = Part.from_function_response(result)
+
+# Inline data (image)
+image_part = Part(
+    inline_data=Attachment(
+        mime_type="image/png",
+        data=image_bytes
+    )
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Checking part type</div>
+          <div class="code-block">
+            <pre><code class="language-python">for part in message.parts:
+    if part.text:
+        print(f"Text: {part.text}")
+    elif part.function_call:
+        print(f"Call: {part.function_call.name}")
+    elif part.function_response:
+        print(f"Result: {part.function_response.result}")
+    elif part.inline_data:
+        print(f"Data: {part.inline_data.mime_type}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- ToolSchema -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="tool-schema">ToolSchema</h2>
+          <p>
+            Declares a tool that the model can invoke. Used by plugins to
+            describe their available tools.
+          </p>
+
+          <h3>Properties</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">name</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Unique tool name (used for invocation)</div>
+            </li>
+            <li>
+              <span class="param-name">description</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Human-readable description for the model</div>
+            </li>
+            <li>
+              <span class="param-name">parameters</span>
+              <span class="param-type">Dict</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">JSON Schema for parameters</div>
+            </li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">JSON Schema</div>
+            The <code>parameters</code> field follows JSON Schema format with
+            <code>type</code>, <code>properties</code>, and <code>required</code> fields.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Defining tool schemas</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import ToolSchema
+
+# Simple tool
+weather_tool = ToolSchema(
+    name="get_weather",
+    description="Get current weather for a city",
+    parameters={
+        "type": "object",
+        "properties": {
+            "city": {
+                "type": "string",
+                "description": "City name"
+            },
+            "units": {
+                "type": "string",
+                "enum": ["celsius", "fahrenheit"],
+                "description": "Temperature units"
+            }
+        },
+        "required": ["city"]
+    }
+)
+
+# Tool with complex parameters
+search_tool = ToolSchema(
+    name="search_files",
+    description="Search for files matching criteria",
+    parameters={
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Glob pattern"
+            },
+            "max_results": {
+                "type": "integer",
+                "description": "Maximum results",
+                "default": 10
+            },
+            "include_hidden": {
+                "type": "boolean",
+                "default": False
+            }
+        },
+        "required": ["pattern"]
+    }
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- FunctionCall -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="function-call">FunctionCall</h2>
+          <p>
+            Represents a tool invocation requested by the model. Contains
+            the tool name and arguments.
+          </p>
+
+          <h3>Properties</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">id</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Unique identifier for this call</div>
+            </li>
+            <li>
+              <span class="param-name">name</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Name of the tool to invoke</div>
+            </li>
+            <li>
+              <span class="param-name">args</span>
+              <span class="param-type">Dict[str, Any]</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Arguments for the tool</div>
+            </li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Working with function calls</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import FunctionCall
+
+# Create a function call
+call = FunctionCall(
+    id="call_abc123",
+    name="get_weather",
+    args={"city": "New York", "units": "fahrenheit"}
+)
+
+# Access properties
+print(f"ID: {call.id}")
+print(f"Name: {call.name}")
+print(f"Args: {call.args}")
+
+# Extract from model response
+response = client.send_message(...)
+if response.function_calls:
+    for call in response.function_calls:
+        print(f"Model wants to call: {call.name}")
+        print(f"With args: {call.args}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- ToolResult -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="tool-result">ToolResult</h2>
+          <p>
+            Contains the result of executing a tool. Sent back to the model
+            after tool execution.
+          </p>
+
+          <h3>Properties</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">call_id</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">ID of the function call this responds to</div>
+            </li>
+            <li>
+              <span class="param-name">name</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Name of the tool that was executed</div>
+            </li>
+            <li>
+              <span class="param-name">result</span>
+              <span class="param-type">Any</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">The tool's output (usually string or dict)</div>
+            </li>
+            <li>
+              <span class="param-name">is_error</span>
+              <span class="param-type">bool</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Whether this is an error result</div>
+              <div class="param-default">Default: <code>False</code></div>
+            </li>
+            <li>
+              <span class="param-name">attachments</span>
+              <span class="param-type">List[Attachment]</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Binary attachments (images, etc.)</div>
+            </li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Creating tool results</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import ToolResult, Attachment
+
+# Successful result
+result = ToolResult(
+    call_id="call_abc123",
+    name="get_weather",
+    result="Sunny, 72°F in New York"
+)
+
+# Error result
+error_result = ToolResult(
+    call_id="call_xyz789",
+    name="read_file",
+    result="File not found: /path/to/file",
+    is_error=True
+)
+
+# Result with attachment
+screenshot_result = ToolResult(
+    call_id="call_screenshot",
+    name="take_screenshot",
+    result="Screenshot captured",
+    attachments=[
+        Attachment(
+            mime_type="image/png",
+            data=screenshot_bytes,
+            display_name="screenshot.png"
+        )
+    ]
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- ProviderResponse -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="provider-response">ProviderResponse</h2>
+          <p>
+            Unified response from any AI provider. Contains the response content,
+            usage stats, and finish reason.
+          </p>
+
+          <h3>Properties</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">text</span>
+              <span class="param-type">Optional[str]</span>
+              <div class="param-desc">Text response from the model</div>
+            </li>
+            <li>
+              <span class="param-name">function_calls</span>
+              <span class="param-type">List[FunctionCall]</span>
+              <div class="param-desc">Tool calls requested by the model</div>
+            </li>
+            <li>
+              <span class="param-name">usage</span>
+              <span class="param-type">Optional[TokenUsage]</span>
+              <div class="param-desc">Token usage statistics</div>
+            </li>
+            <li>
+              <span class="param-name">finish_reason</span>
+              <span class="param-type">FinishReason</span>
+              <div class="param-desc">Why generation stopped</div>
+            </li>
+            <li>
+              <span class="param-name">raw</span>
+              <span class="param-type">Any</span>
+              <div class="param-desc">Raw provider-specific response object</div>
+            </li>
+            <li>
+              <span class="param-name">structured_output</span>
+              <span class="param-type">Optional[Any]</span>
+              <div class="param-desc">Parsed structured output (if requested)</div>
+            </li>
+          </ul>
+
+          <h3>Convenience Properties</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">has_function_calls</span>
+              <span class="param-type">bool</span>
+              <span class="badge badge-property">property</span>
+              <div class="param-desc">True if response contains function calls</div>
+            </li>
+            <li>
+              <span class="param-name">has_structured_output</span>
+              <span class="param-type">bool</span>
+              <span class="badge badge-property">property</span>
+              <div class="param-desc">True if response has structured output</div>
+            </li>
+          </ul>
+
+          <h3>TokenUsage</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">prompt_tokens</span>
+              <span class="param-type">int</span>
+              <div class="param-desc">Tokens in the input</div>
+            </li>
+            <li>
+              <span class="param-name">output_tokens</span>
+              <span class="param-type">int</span>
+              <div class="param-desc">Tokens in the output</div>
+            </li>
+            <li>
+              <span class="param-name">total_tokens</span>
+              <span class="param-type">int</span>
+              <div class="param-desc">Total tokens used</div>
+            </li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Working with responses</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import FinishReason
+
+# Response handling
+response = provider.send_message("Hello")
+
+# Check for text
+if response.text:
+    print(f"Response: {response.text}")
+
+# Check for function calls
+if response.has_function_calls:
+    for call in response.function_calls:
+        print(f"Tool: {call.name}")
+
+# Check finish reason
+if response.finish_reason == FinishReason.STOP:
+    print("Completed normally")
+elif response.finish_reason == FinishReason.MAX_TOKENS:
+    print("Hit token limit")
+
+# Token usage
+if response.usage:
+    print(f"Prompt: {response.usage.prompt_tokens}")
+    print(f"Output: {response.usage.output_tokens}")
+    print(f"Total: {response.usage.total_tokens}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Attachment -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="attachment">Attachment</h2>
+          <p>
+            Binary data attachment for multimodal content. Used for images,
+            files, and other non-text data.
+          </p>
+
+          <h3>Properties</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">mime_type</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">MIME type (e.g., <code>image/png</code>)</div>
+            </li>
+            <li>
+              <span class="param-name">data</span>
+              <span class="param-type">bytes</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Raw binary data</div>
+            </li>
+            <li>
+              <span class="param-name">display_name</span>
+              <span class="param-type">Optional[str]</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Human-readable name</div>
+            </li>
+          </ul>
+
+          <h3>Common MIME Types</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>MIME</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>PNG image</td>
+                <td><code>image/png</code></td>
+              </tr>
+              <tr>
+                <td>JPEG image</td>
+                <td><code>image/jpeg</code></td>
+              </tr>
+              <tr>
+                <td>GIF image</td>
+                <td><code>image/gif</code></td>
+              </tr>
+              <tr>
+                <td>WebP image</td>
+                <td><code>image/webp</code></td>
+              </tr>
+              <tr>
+                <td>PDF document</td>
+                <td><code>application/pdf</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Creating attachments</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import Attachment, Part, Message, Role
+
+# From file
+with open("image.png", "rb") as f:
+    image_data = f.read()
+
+attachment = Attachment(
+    mime_type="image/png",
+    data=image_data,
+    display_name="screenshot.png"
+)
+
+# Use in message
+message = Message(
+    role=Role.USER,
+    parts=[
+        Part.from_text("What's in this image?"),
+        Part(inline_data=attachment)
+    ]
+)
+
+# Send multimodal message
+response = client.send_message_with_parts(
+    message.parts,
+    on_output=on_output
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">In tool results</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Tool that returns an image
+def take_screenshot():
+    screenshot = capture_screen()
+    return ToolResult(
+        call_id=call.id,
+        name="take_screenshot",
+        result="Screenshot captured",
+        attachments=[
+            Attachment(
+                mime_type="image/png",
+                data=screenshot,
+                display_name="screen.png"
+            )
+        ]
+    )</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>
