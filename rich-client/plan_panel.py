@@ -36,7 +36,7 @@ class PlanPanel:
         self._plan_data: Optional[Dict[str, Any]] = None
         self._collapsed: bool = False
         self._hidden: bool = False
-        self._prev_in_progress_count: int = 0
+        self._prev_started: bool = False
 
     def update_plan(self, plan_data: Dict[str, Any]) -> None:
         """Update the plan data to render.
@@ -44,16 +44,12 @@ class PlanPanel:
         Args:
             plan_data: Plan status dict with title, status, steps, progress.
         """
-        # Check for auto-collapse: collapse when a new task starts
-        progress = plan_data.get("progress", {})
-        current_in_progress = progress.get("in_progress", 0)
-
-        # Auto-collapse when first task becomes in_progress,
-        # or when a new task starts (after user may have expanded)
-        if current_in_progress > 0 and current_in_progress != self._prev_in_progress_count:
+        # Auto-collapse when plan transitions from not-started to started
+        current_started = plan_data.get("started", False)
+        if current_started and not self._prev_started:
             self._collapsed = True
 
-        self._prev_in_progress_count = current_in_progress
+        self._prev_started = current_started
         self._plan_data = plan_data
 
     def clear(self) -> None:
@@ -61,7 +57,7 @@ class PlanPanel:
         self._plan_data = None
         self._collapsed = False
         self._hidden = False
-        self._prev_in_progress_count = 0
+        self._prev_started = False
 
     def toggle_collapsed(self) -> None:
         """Toggle between collapsed and expanded view (F1)."""
@@ -208,30 +204,58 @@ class PlanPanel:
         return result
 
     def _render_current_step(self, steps: List[Dict[str, Any]]) -> Optional[Text]:
-        """Render only the current in-progress step for collapsed view."""
+        """Render the current in-progress step and previous step for collapsed view."""
         # Sort by sequence
         sorted_steps = sorted(steps, key=lambda s: s.get("sequence", 0))
 
-        # Find current step (first in_progress)
-        current_step = None
-        for step in sorted_steps:
+        # Find current step (first in_progress) and its index
+        current_idx = None
+        for i, step in enumerate(sorted_steps):
             if step.get("status") == "in_progress":
-                current_step = step
+                current_idx = i
                 break
 
-        if not current_step:
+        if current_idx is None:
             return None
 
+        text = Text()
+
+        # Show previous step if exists (dimmed, with result/error)
+        if current_idx > 0:
+            prev_step = sorted_steps[current_idx - 1]
+            prev_seq = prev_step.get("sequence", "?")
+            prev_desc = prev_step.get("description", "")
+            prev_status = prev_step.get("status", "pending")
+            prev_result = prev_step.get("result", "")
+            prev_error = prev_step.get("error", "")
+            prev_symbol, _ = self.STATUS_SYMBOLS.get(prev_status, ("○", "dim"))
+
+            text.append(prev_symbol, style="dim")
+            text.append(f" {prev_seq}. ", style="dim")
+            text.append(prev_desc, style="dim")
+            text.append("\n")
+
+            # Show result/error line for previous step
+            if prev_status == "completed" and prev_result:
+                text.append("     → ", style="dim")
+                text.append(prev_result, style="dim green")
+                text.append("\n")
+            elif prev_status == "failed" and prev_error:
+                text.append("     ✗ ", style="dim")
+                text.append(prev_error, style="dim red")
+                text.append("\n")
+
+        # Show current step (bold)
+        current_step = sorted_steps[current_idx]
         seq = current_step.get("sequence", "?")
         desc = current_step.get("description", "")
         symbol, style = self.STATUS_SYMBOLS.get("in_progress", ("◐", "blue"))
 
-        result = Text()
-        result.append(symbol, style=style)
-        result.append(f" {seq}. ", style="dim")
-        result.append(desc, style="bold")
+        text.append(symbol, style=style)
+        text.append(f" {seq}. ", style="dim")
+        text.append(desc, style="bold")
 
-        return result
+        return text
 
     def _render_steps_table(self, steps: List[Dict[str, Any]]) -> Table:
         """Render the steps as a compact table."""

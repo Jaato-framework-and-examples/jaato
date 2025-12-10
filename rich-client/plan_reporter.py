@@ -69,6 +69,7 @@ class LivePlanReporter(TodoReporter):
             "plan_id": plan.plan_id,
             "title": plan.title,
             "status": plan.status.value,
+            "started": plan.started,
             "steps": steps,
             "progress": plan.get_progress(),
             "summary": plan.summary,
