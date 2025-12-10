@@ -840,9 +840,29 @@ if instructions:
             output is added to conversation history:
           </p>
           <ul>
-            <li><code>True</code>: Output goes to history, model can see/use it</li>
-            <li><code>False</code>: Output only shown to user</li>
+            <li><code>True</code>: Output goes to history, model can see/use it on subsequent turns</li>
+            <li><code>False</code>: Output only shown to user, model never sees it</li>
           </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Important: share_with_model != Tool Exposure</div>
+            <p>
+              The <code>share_with_model</code> flag does <strong>not</strong> expose the command
+              as a tool. Tool exposure requires declaring the capability in <code>get_tool_schemas()</code>.
+            </p>
+            <p>
+              These are independent declarations:
+            </p>
+            <ul>
+              <li>A user command with <code>share_with_model=True</code> is <strong>not</strong> automatically a tool</li>
+              <li>A tool is <strong>not</strong> automatically a user command</li>
+              <li>For dual exposure, you must declare both explicitly</li>
+            </ul>
+            <p>
+              Think of <code>share_with_model</code> as: "when the user runs this command, should the
+              model know about it?" — not "should this also be a tool".
+            </p>
+          </div>
 
           <h3>Auto-Approval</h3>
           <p>
