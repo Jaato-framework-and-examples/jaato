@@ -435,6 +435,12 @@
   }
 
   // Highlight search terms on page load
+  var highlightState = {
+    currentIndex: 0,
+    totalMatches: 0,
+    matches: []
+  };
+
   function initSearchHighlight() {
     // Check if there's a highlight parameter in URL
     var urlParams = new URLSearchParams(window.location.search);
@@ -456,13 +462,145 @@
     // Find and highlight all matching text nodes
     highlightTermsInElement(mainContent, terms);
 
-    // Scroll to first highlight after a brief delay
-    setTimeout(function() {
-      var firstHighlight = document.querySelector('.search-highlight');
-      if (firstHighlight) {
-        firstHighlight.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
-    }, 100);
+    // Get all highlights
+    highlightState.matches = document.querySelectorAll('.search-highlight');
+    highlightState.totalMatches = highlightState.matches.length;
+
+    if (highlightState.totalMatches > 0) {
+      // Mark first as current
+      highlightState.currentIndex = 0;
+      highlightState.matches[0].classList.add('current');
+
+      // Show navigation bar
+      showHighlightNavigation(highlightQuery);
+
+      // Scroll to first highlight after a brief delay
+      setTimeout(function() {
+        scrollToCurrentHighlight();
+      }, 100);
+    }
+  }
+
+  function showHighlightNavigation(query) {
+    // Create navigation bar
+    var nav = document.createElement('div');
+    nav.className = 'highlight-nav';
+    nav.innerHTML =
+      '<div class="highlight-nav-content">' +
+        '<span class="highlight-nav-query">Highlighting: <strong>' + escapeHtml(query) + '</strong></span>' +
+        '<span class="highlight-nav-counter">' +
+          '<span class="current-index">1</span> of <span class="total-matches">' + highlightState.totalMatches + '</span>' +
+        '</span>' +
+        '<div class="highlight-nav-buttons">' +
+          '<button class="highlight-nav-btn" id="highlight-prev" title="Previous match (P or ↑)">↑</button>' +
+          '<button class="highlight-nav-btn" id="highlight-next" title="Next match (N or ↓)">↓</button>' +
+          '<button class="highlight-nav-btn" id="highlight-close" title="Close (ESC)">✕</button>' +
+        '</div>' +
+      '</div>';
+
+    document.body.appendChild(nav);
+
+    // Add event listeners
+    document.getElementById('highlight-prev').addEventListener('click', navigateToPrevHighlight);
+    document.getElementById('highlight-next').addEventListener('click', navigateToNextHighlight);
+    document.getElementById('highlight-close').addEventListener('click', closeHighlightNavigation);
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', handleHighlightNavigation);
+  }
+
+  function handleHighlightNavigation(e) {
+    // Don't interfere if user is typing in an input
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+    if (e.key === 'n' || e.key === 'N' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      navigateToNextHighlight();
+    } else if (e.key === 'p' || e.key === 'P' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      navigateToPrevHighlight();
+    } else if (e.key === 'Escape') {
+      closeHighlightNavigation();
+    }
+  }
+
+  function navigateToNextHighlight() {
+    if (highlightState.totalMatches === 0) return;
+
+    // Remove current class from current match
+    highlightState.matches[highlightState.currentIndex].classList.remove('current');
+
+    // Move to next (wrap around)
+    highlightState.currentIndex = (highlightState.currentIndex + 1) % highlightState.totalMatches;
+
+    // Add current class to new match
+    highlightState.matches[highlightState.currentIndex].classList.add('current');
+
+    // Update counter
+    updateHighlightCounter();
+
+    // Scroll to match
+    scrollToCurrentHighlight();
+  }
+
+  function navigateToPrevHighlight() {
+    if (highlightState.totalMatches === 0) return;
+
+    // Remove current class from current match
+    highlightState.matches[highlightState.currentIndex].classList.remove('current');
+
+    // Move to previous (wrap around)
+    highlightState.currentIndex = (highlightState.currentIndex - 1 + highlightState.totalMatches) % highlightState.totalMatches;
+
+    // Add current class to new match
+    highlightState.matches[highlightState.currentIndex].classList.add('current');
+
+    // Update counter
+    updateHighlightCounter();
+
+    // Scroll to match
+    scrollToCurrentHighlight();
+  }
+
+  function updateHighlightCounter() {
+    var counter = document.querySelector('.current-index');
+    if (counter) {
+      counter.textContent = highlightState.currentIndex + 1;
+    }
+  }
+
+  function scrollToCurrentHighlight() {
+    var current = highlightState.matches[highlightState.currentIndex];
+    if (current) {
+      current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+
+  function closeHighlightNavigation() {
+    // Remove navigation bar
+    var nav = document.querySelector('.highlight-nav');
+    if (nav) {
+      nav.remove();
+    }
+
+    // Remove all highlights
+    highlightState.matches.forEach(function(match) {
+      var text = document.createTextNode(match.textContent);
+      match.parentNode.replaceChild(text, match);
+    });
+
+    // Remove keyboard listener
+    document.removeEventListener('keydown', handleHighlightNavigation);
+
+    // Clear state
+    highlightState.matches = [];
+    highlightState.totalMatches = 0;
+    highlightState.currentIndex = 0;
+
+    // Clean up URL (remove highlight parameter)
+    var url = new URL(window.location);
+    url.searchParams.delete('highlight');
+    window.history.replaceState({}, '', url);
   }
 
   function highlightTermsInElement(element, terms) {
