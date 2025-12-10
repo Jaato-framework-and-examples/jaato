@@ -206,6 +206,29 @@ a:hover {
   background: transparent;
 }
 
+/* Search term highlighting on pages */
+.search-highlight {
+  background: rgba(255, 235, 59, 0.5);
+  color: inherit;
+  padding: 2px 0;
+  border-radius: 2px;
+  font-weight: 500;
+  transition: background 0.3s;
+}
+
+.search-highlight:first-of-type {
+  animation: pulse-highlight 1s ease-in-out;
+}
+
+@keyframes pulse-highlight {
+  0%, 100% {
+    background: rgba(255, 235, 59, 0.5);
+  }
+  50% {
+    background: rgba(255, 235, 59, 0.9);
+  }
+}
+
 /* Layout */
 .layout {
   display: flex;
