@@ -228,12 +228,86 @@ client = JaatoClient(provider_name="google_genai")
         </div>
       </section>
 
+      <!-- Plugin Discovery -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="discovery">Plugin Discovery</h2>
+          <p>
+            Plugins are discovered via two mechanisms:
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Use Case</th>
+                <th>Location</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Entry Points</strong></td>
+                <td>External packages, production</td>
+                <td><code>pyproject.toml</code></td>
+              </tr>
+              <tr>
+                <td><strong>Directory</strong></td>
+                <td>Built-ins, development</td>
+                <td><code>shared/plugins/</code></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Entry Points (Recommended)</h3>
+          <p>
+            External packages register plugins via Python entry points in
+            <code>pyproject.toml</code>. This is the recommended approach for
+            distributing plugins.
+          </p>
+
+          <h3>Directory Scanning</h3>
+          <p>
+            For development and built-in plugins, the registry scans
+            <code>shared/plugins/</code> for modules with a
+            <code>create_plugin()</code> factory function.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">pyproject.toml entry point</div>
+          <div class="code-block">
+            <pre><code class="language-python"># In pyproject.toml of external package
+[project.entry-points."jaato.plugins"]
+my_plugin = "my_package.plugins:create_plugin"
+
+# The entry point must reference a factory function
+# that returns a ToolPlugin instance</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Discovery options</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import PluginRegistry
+
+registry = PluginRegistry()
+
+# Both entry points + directory (default)
+registry.discover()
+
+# Entry points only (installed packages)
+registry.discover(include_directory=False)
+
+# Check what was found
+print(registry.list_available())
+# ['cli', 'mcp', 'my_plugin', ...]</code></pre>
+          </div>
+        </div>
+      </section>
+
       <!-- Plugin Registry -->
       <section class="two-panel">
         <div class="panel-explanation">
           <h2 id="registry">The Plugin Registry</h2>
           <p>
-            The <code>PluginRegistry</code> is the central manager for plugins.
+            The <code>PluginRegistry</code> is the central manager for tool plugins.
             It handles discovery, registration, and exposure.
           </p>
 
@@ -660,16 +734,194 @@ if instructions:
         </div>
       </section>
 
+      <!-- Model Tools vs User Commands -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="tools-vs-commands">Model Tools vs User Commands</h2>
+          <p>
+            Plugins can provide two types of capabilities:
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Capability</th>
+                <th>Invoked By</th>
+                <th>Declared Via</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Model Tools</strong></td>
+                <td>AI model (function calling)</td>
+                <td><code>get_tool_schemas()</code></td>
+              </tr>
+              <tr>
+                <td><strong>User Commands</strong></td>
+                <td>User directly (bypasses model)</td>
+                <td><code>get_user_commands()</code></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>When to Use Which?</h3>
+          <ul>
+            <li><strong>Model tools</strong>: When the AI should decide when to use it</li>
+            <li><strong>User commands</strong>: For direct control, admin tasks, or quick actions</li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Who is "User"?</div>
+            "User" means whoever is directly interfacing with the client — this could
+            be a human operator OR another AI agent in agent-to-agent scenarios.
+            User commands bypass the model's function calling and execute directly.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Model tools vs user commands</div>
+          <div class="code-block">
+            <pre><code class="language-python">class SearchPlugin:
+    name = "search"
+
+    def get_tool_schemas(self):
+        # MODEL TOOLS: AI decides when to use
+        return [
+            ToolSchema(
+                name="search_index",
+                description="Search the index",
+                parameters={...}
+            )
+        ]
+
+    def get_user_commands(self):
+        # USER COMMANDS: User invokes directly
+        return [
+            UserCommand(
+                "search",
+                "Search directly",
+                share_with_model=True
+            ),
+            UserCommand(
+                "reindex",
+                "Rebuild index",
+                share_with_model=False
+            )
+        ]</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Execution flow</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Model tool flow:
+# User → "Find X" → Model → FunctionCall("search_index")
+#      → Executor → Result → Model → Response
+
+# User command flow:
+# User → "/search X" → Executor → Result → User
+#                   (model not involved)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Dual Exposure -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="dual-exposure">Dual Exposure: Same Capability, Two Interfaces</h2>
+          <p>
+            Sometimes you want the same capability available both ways:
+          </p>
+          <ul>
+            <li>As a <strong>model tool</strong> the AI can invoke</li>
+            <li>As a <strong>user command</strong> for direct access</li>
+          </ul>
+
+          <h3>share_with_model</h3>
+          <p>
+            The <code>share_with_model</code> flag controls whether user command
+            output is added to conversation history:
+          </p>
+          <ul>
+            <li><code>True</code>: Output goes to history, model can see/use it</li>
+            <li><code>False</code>: Output only shown to user</li>
+          </ul>
+
+          <h3>Auto-Approval</h3>
+          <p>
+            User commands typically should be auto-approved since the user
+            invokes them directly. List them in <code>get_auto_approved_tools()</code>
+            to avoid unexpected permission prompts.
+          </p>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Don't Forget Auto-Approval</div>
+            If a user command isn't in <code>get_auto_approved_tools()</code>,
+            the permission system will prompt for approval — confusing since
+            the user explicitly requested it.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Dual exposure example</div>
+          <div class="code-block">
+            <pre><code class="language-python">class TodoPlugin:
+    name = "todo"
+
+    def get_tool_schemas(self):
+        # Model can add/list todos
+        return [
+            ToolSchema(name="add_todo", ...),
+            ToolSchema(name="list_todos", ...),
+        ]
+
+    def get_user_commands(self):
+        # User can also do it directly
+        return [
+            UserCommand(
+                "todo_add",
+                "Add a todo",
+                share_with_model=True  # Model sees what was added
+            ),
+            UserCommand(
+                "todo_list",
+                "List todos",
+                share_with_model=True  # Model sees the list
+            ),
+            UserCommand(
+                "todo_clear",
+                "Clear all todos",
+                share_with_model=False  # Admin only
+            )
+        ]
+
+    def get_auto_approved_tools(self):
+        # User commands don't need permission prompts
+        return ["todo_add", "todo_list", "todo_clear"]</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">share_with_model in action</div>
+          <div class="code-block">
+            <pre><code class="language-python"># share_with_model=True:
+# User: /todo_list
+# → Shows list to user
+# → Adds to conversation history
+# → Model: "I see you have 3 pending todos..."
+
+# share_with_model=False:
+# User: /todo_clear
+# → Clears todos
+# → Shows "Cleared" to user
+# → NOT in history, model doesn't know</code></pre>
+          </div>
+        </div>
+      </section>
+
       <!-- User Commands -->
       <section class="two-panel">
         <div class="panel-explanation">
-          <h2 id="user-commands">User Commands</h2>
+          <h2 id="user-commands">UserCommand Reference</h2>
           <p>
-            Plugins can expose commands that users can invoke directly,
-            separate from AI tool calls.
+            The <code>UserCommand</code> type declares a user-facing command.
           </p>
 
-          <h3>UserCommand</h3>
+          <h3>Fields</h3>
           <ul class="param-list">
             <li>
               <span class="param-name">name</span>
@@ -679,70 +931,96 @@ if instructions:
             <li>
               <span class="param-name">description</span>
               <span class="param-type">str</span>
-              <div class="param-desc">Help text</div>
+              <div class="param-desc">Help text for autocomplete</div>
             </li>
             <li>
               <span class="param-name">share_with_model</span>
               <span class="param-type">bool</span>
-              <div class="param-desc">Add result to conversation</div>
+              <div class="param-desc">Add output to conversation history (default: False)</div>
             </li>
             <li>
               <span class="param-name">parameters</span>
               <span class="param-type">List[CommandParameter]</span>
-              <div class="param-desc">Optional parameters</div>
+              <div class="param-desc">Optional parameter definitions</div>
+            </li>
+          </ul>
+
+          <h3>CommandParameter</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">name</span>
+              <span class="param-type">str</span>
+              <div class="param-desc">Parameter name</div>
+            </li>
+            <li>
+              <span class="param-name">description</span>
+              <span class="param-type">str</span>
+              <div class="param-desc">Help text</div>
+            </li>
+            <li>
+              <span class="param-name">required</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">Is this parameter required?</div>
+            </li>
+            <li>
+              <span class="param-name">capture_rest</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">Capture all remaining args (last param only)</div>
             </li>
           </ul>
         </div>
         <div class="panel-code">
-          <div class="code-label">Define user commands</div>
+          <div class="code-label">Define user commands with parameters</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared.plugins.base import UserCommand
+            <pre><code class="language-python">from shared.plugins.base import (
+    UserCommand,
+    CommandParameter
+)
 
-class TodoPlugin:
-    name = "todo"
+def get_user_commands(self):
+    return [
+        # Simple command, no parameters
+        UserCommand(
+            name="status",
+            description="Show status"
+        ),
 
-    def get_user_commands(self):
-        return [
-            UserCommand(
-                name="list_todos",
-                description="Show all todos",
-                share_with_model=False
-            ),
-            UserCommand(
-                name="add_todo",
-                description="Add a new todo",
-                share_with_model=True,
-                parameters=[
-                    CommandParameter(
-                        name="text",
-                        description="Todo text",
-                        required=True
-                    )
-                ]
-            )
-        ]</code></pre>
+        # Command with parameters
+        UserCommand(
+            name="search",
+            description="Search for pattern",
+            share_with_model=True,
+            parameters=[
+                CommandParameter(
+                    name="pattern",
+                    description="Search pattern",
+                    required=True
+                ),
+                CommandParameter(
+                    name="description",
+                    description="Optional notes",
+                    capture_rest=True  # Gets remaining args
+                )
+            ]
+        )
+    ]</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Execute user commands</div>
           <div class="code-block">
-            <pre><code class="language-python"># Get available commands
+            <pre><code class="language-python"># List available commands
 commands = client.get_user_commands()
-
 for name, cmd in commands.items():
     print(f"/{name}: {cmd.description}")
 
 # Execute a command
-result, share = client.execute_user_command(
-    "list_todos"
-)
-print(result)
+result, share = client.execute_user_command("status")
 
-# Execute with parameters
+# With arguments
 result, share = client.execute_user_command(
-    "add_todo",
-    args={"text": "Review PR #123"}
-)
-print(result)</code></pre>
+    "search",
+    args={"pattern": "TODO", "description": "Find todos"}
+)</code></pre>
           </div>
         </div>
       </section>
