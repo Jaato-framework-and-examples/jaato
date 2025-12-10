@@ -454,20 +454,23 @@ pip install -e .</code></pre>
       <!-- Plugin developer installation -->
       <div id="install-plugin" class="install-content">
         <p>
-          <strong>Plugin developers</strong> building external plugins only need jaato as a dependency.
+          <strong>Plugin developers</strong> need jaato installed to develop against the plugin protocol.
           Start with the out-of-tree plugin template.
         </p>
         <div class="code-block">
-          <pre><code class="language-bash"># Get the template (clone just for this)
+          <pre><code class="language-bash"># First, install jaato
+pip install git+https://github.com/apanoia/jaato.git
+
+# Get the plugin template
 git clone --depth 1 https://github.com/apanoia/jaato.git temp-jaato
 cp -r temp-jaato/out-of-tree-plugins/moon-phase my-plugin
 rm -rf temp-jaato
 cd my-plugin
 
-# Update pyproject.toml dependencies to include jaato
+# Update pyproject.toml to include jaato as a dependency
 # dependencies = ["git+https://github.com/apanoia/jaato.git"]
 
-# Install in development mode
+# Install your plugin in development mode
 pip install -e .</code></pre>
         </div>
         <p style="margin-top: 16px;">
