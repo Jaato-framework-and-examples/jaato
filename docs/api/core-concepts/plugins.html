@@ -131,6 +131,103 @@ print(f"Providers: {providers}")</code></pre>
         </div>
       </section>
 
+      <!-- Registry vs Direct Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="registry-vs-direct">Registry vs Direct Configuration</h2>
+          <p>
+            Not all plugins are managed through the <code>PluginRegistry</code>.
+            There's an important distinction:
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Management</th>
+                <th>Plugin Types</th>
+                <th>How to Enable</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Registry</strong></td>
+                <td>Tool plugins</td>
+                <td><code>registry.expose_tool()</code></td>
+              </tr>
+              <tr>
+                <td><strong>Client</strong></td>
+                <td>GC, Session, Permission</td>
+                <td><code>client.set_*_plugin()</code></td>
+              </tr>
+              <tr>
+                <td><strong>Constructor</strong></td>
+                <td>Model Providers</td>
+                <td><code>JaatoClient(provider_name=)</code></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Why the Difference?</h3>
+          <p>
+            Tool plugins provide capabilities to the model and can be mixed
+            and matched freely. GC, session, and permission plugins affect
+            client behavior directly and require explicit configuration.
+          </p>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Common Mistake</div>
+            Don't look for GC or session plugins in the registry's
+            <code>list_available()</code>. They need to be created and
+            attached to the client directly.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Tool plugins (via registry)</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Tool plugins: discover → expose → configure
+registry = PluginRegistry(model_name="gemini-2.5-flash")
+registry.discover()
+registry.expose_tool("cli")
+registry.expose_tool("file_edit")
+
+client.configure_tools(registry)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Other plugins (direct on client)</div>
+          <div class="code-block">
+            <pre><code class="language-python"># GC plugin: create → initialize → set
+from shared.plugins.gc_truncate import create_plugin
+
+gc = create_plugin()
+gc.initialize({"preserve_recent_turns": 5})
+client.set_gc_plugin(gc)
+
+# Session plugin: create → initialize → set
+from shared.plugins.session import create_plugin
+
+session = create_plugin()
+session.initialize({"storage_path": ".sessions"})
+client.set_session_plugin(session)
+
+# Permission plugin: passed to configure_tools
+from shared import PermissionPlugin
+
+perm = PermissionPlugin()
+perm.initialize({"config_path": "perms.json"})
+client.configure_tools(registry, permission_plugin=perm)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Provider (at construction)</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Provider selected when creating client
+client = JaatoClient(provider_name="google_genai")
+
+# Cannot be changed after construction
+# Create a new client for different provider</code></pre>
+          </div>
+        </div>
+      </section>
+
       <!-- Plugin Registry -->
       <section class="two-panel">
         <div class="panel-explanation">
