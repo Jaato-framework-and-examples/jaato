@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Plugins - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="client.html">Client</a></li>
+          <li><a href="plugins.html" class="active">Plugins</a></li>
+          <li><a href="tools.html">Tools</a></li>
+          <li><a href="providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../api-reference/tool-executor.html">ToolExecutor</a></li>
+          <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Introduction -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Plugins</h1>
+          <p class="lead">
+            Plugins are the extension mechanism of jaato. They provide tools,
+            garbage collection strategies, and model provider implementations.
+          </p>
+
+          <h2 id="plugin-types">Plugin Types</h2>
+          <p>
+            jaato has three categories of plugins:
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Purpose</th>
+                <th>Examples</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Tool</strong></td>
+                <td>Provide capabilities the model can invoke</td>
+                <td>cli, mcp, file_edit, todo</td>
+              </tr>
+              <tr>
+                <td><strong>GC</strong></td>
+                <td>Manage context window limits</td>
+                <td>gc_truncate, gc_summarize</td>
+              </tr>
+              <tr>
+                <td><strong>Provider</strong></td>
+                <td>Connect to AI services</td>
+                <td>google_genai</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p>
+            This page focuses on <strong>Tool Plugins</strong>, which are the
+            most common type you'll work with.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Plugin discovery</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import PluginRegistry
+
+registry = PluginRegistry(model_name="gemini-2.5-flash")
+
+# Discover each type
+tools = registry.discover(plugin_kind="tool")
+gc = registry.discover(plugin_kind="gc")
+providers = registry.discover(plugin_kind="model_provider")
+
+print(f"Tool plugins: {tools}")
+print(f"GC plugins: {gc}")
+print(f"Providers: {providers}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Plugin Registry -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="registry">The Plugin Registry</h2>
+          <p>
+            The <code>PluginRegistry</code> is the central manager for plugins.
+            It handles discovery, registration, and exposure.
+          </p>
+
+          <h3>Key Concepts</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Term</th>
+                <th>Meaning</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Discovered</strong></td>
+                <td>Found and available for use</td>
+              </tr>
+              <tr>
+                <td><strong>Registered</strong></td>
+                <td>Loaded into the registry</td>
+              </tr>
+              <tr>
+                <td><strong>Exposed</strong></td>
+                <td>Tools are available to the model</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p>
+            Discovery finds plugins, but they're not active until exposed.
+            This gives you control over what capabilities the model has.
+          </p>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Why Expose?</div>
+            Separating discovery from exposure lets you inspect available
+            plugins before deciding which to enable. You might want different
+            tools for different tasks.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Registry workflow</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import PluginRegistry
+
+registry = PluginRegistry(model_name="gemini-2.5-flash")
+
+# Step 1: Discover what's available
+registry.discover()
+print(f"Available: {registry.list_available()}")
+# ['cli', 'mcp', 'file_edit', 'todo', ...]
+
+# Step 2: Expose what you need
+registry.expose_tool("cli")
+registry.expose_tool("file_edit")
+
+print(f"Exposed: {registry.list_exposed()}")
+# ['cli', 'file_edit']
+
+# Step 3: Check if specific plugin is exposed
+if registry.is_exposed("cli"):
+    print("CLI tools are active")
+
+# Step 4: Get tools for the client
+schemas = registry.get_exposed_tool_schemas()
+executors = registry.get_exposed_executors()</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Built-in Plugins -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="built-in">Built-in Tool Plugins</h2>
+          <p>
+            jaato includes several tool plugins out of the box:
+          </p>
+
+          <h3>cli</h3>
+          <p>
+            Execute shell commands. Supports auto-backgrounding for long-running
+            commands.
+          </p>
+
+          <h3>mcp</h3>
+          <p>
+            Connect to Model Context Protocol servers. Auto-discovers tools from
+            MCP servers defined in <code>.mcp.json</code>.
+          </p>
+
+          <h3>file_edit</h3>
+          <p>
+            Read, write, and edit files. Supports diff-based editing for
+            precise changes.
+          </p>
+
+          <h3>todo</h3>
+          <p>
+            Manage task lists. Persistent storage with filtering and status
+            tracking.
+          </p>
+
+          <h3>web_search</h3>
+          <p>
+            Search the web. Returns structured search results.
+          </p>
+
+          <h3>permission</h3>
+          <p>
+            Control tool execution permissions. Approve/deny tool calls based
+            on rules.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Using built-in plugins</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Expose with default config
+registry.expose_tool("cli")
+registry.expose_tool("file_edit")
+registry.expose_tool("todo")
+
+# Expose with custom config
+registry.expose_tool("cli", config={
+    "extra_paths": ["/opt/bin"],
+    "max_output_chars": 10000,
+    "auto_background_threshold": 5.0
+})
+
+# Expose MCP with specific servers
+registry.expose_tool("mcp", config={
+    "servers": ["Atlassian", "GitHub"]
+})
+
+# Expose all at once
+registry.expose_all()
+
+# Expose all with per-plugin config
+registry.expose_all(config={
+    "cli": {"max_output_chars": 5000},
+    "todo": {"storage_path": ".tasks.json"}
+})</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Check available tools</div>
+          <div class="code-block">
+            <pre><code class="language-python"># List tools from exposed plugins
+schemas = registry.get_exposed_tool_schemas()
+
+for schema in schemas:
+    print(f"{schema.name}")
+    print(f"  {schema.description}")
+    print()
+
+# Example output:
+# execute_command
+#   Execute a shell command
+#
+# read_file
+#   Read contents of a file
+#
+# edit_file
+#   Edit a file with diff</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Plugin Protocol -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="protocol">Tool Plugin Protocol</h2>
+          <p>
+            Tool plugins implement a simple protocol. At minimum, they provide:
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">name</span>
+              <span class="param-type">str</span>
+              <div class="param-desc">Unique identifier for the plugin</div>
+            </li>
+            <li>
+              <span class="param-name">get_tool_schemas()</span>
+              <span class="param-type">List[ToolSchema]</span>
+              <div class="param-desc">Declare available tools</div>
+            </li>
+            <li>
+              <span class="param-name">get_executors()</span>
+              <span class="param-type">Dict[str, Callable]</span>
+              <div class="param-desc">Map tool names to functions</div>
+            </li>
+          </ul>
+
+          <h3>Optional Methods</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">initialize(config)</span>
+              <div class="param-desc">Setup with configuration</div>
+            </li>
+            <li>
+              <span class="param-name">shutdown()</span>
+              <div class="param-desc">Cleanup resources</div>
+            </li>
+            <li>
+              <span class="param-name">get_system_instructions()</span>
+              <div class="param-desc">Add to system prompt</div>
+            </li>
+            <li>
+              <span class="param-name">get_auto_approved_tools()</span>
+              <div class="param-desc">Tools that don't need permission</div>
+            </li>
+            <li>
+              <span class="param-name">get_model_requirements()</span>
+              <div class="param-desc">Required model patterns</div>
+            </li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Minimal plugin</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import ToolSchema
+
+class WeatherPlugin:
+    name = "weather"
+
+    def get_tool_schemas(self):
+        return [
+            ToolSchema(
+                name="get_weather",
+                description="Get weather for a city",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"}
+                    },
+                    "required": ["city"]
+                }
+            )
+        ]
+
+    def get_executors(self):
+        return {
+            "get_weather": self._get_weather
+        }
+
+    def _get_weather(self, city: str) -> str:
+        # Implementation here
+        return f"Weather in {city}: Sunny, 72°F"</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Full-featured plugin</div>
+          <div class="code-block">
+            <pre><code class="language-python">class AdvancedPlugin:
+    name = "advanced"
+
+    def initialize(self, config):
+        self.api_key = config.get("api_key")
+
+    def shutdown(self):
+        # Cleanup connections
+        pass
+
+    def get_tool_schemas(self):
+        return [...]
+
+    def get_executors(self):
+        return {...}
+
+    def get_system_instructions(self):
+        return "Use advanced_tool for X..."
+
+    def get_auto_approved_tools(self):
+        return ["safe_tool"]
+
+    def get_model_requirements(self):
+        return ["gemini-*"]  # Gemini only</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Registration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="registration">Registering Custom Plugins</h2>
+          <p>
+            You can register custom plugins manually using
+            <code>register_plugin()</code>.
+          </p>
+
+          <h3>Parameters</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">plugin</span>
+              <span class="param-type">ToolPlugin</span>
+              <div class="param-desc">Your plugin instance</div>
+            </li>
+            <li>
+              <span class="param-name">expose</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">Expose immediately (default: False)</div>
+            </li>
+            <li>
+              <span class="param-name">enrichment_only</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">Only use for prompt enrichment</div>
+            </li>
+            <li>
+              <span class="param-name">config</span>
+              <span class="param-type">Dict</span>
+              <div class="param-desc">Plugin configuration</div>
+            </li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Register custom plugin</div>
+          <div class="code-block">
+            <pre><code class="language-python">from my_plugins import WeatherPlugin
+
+registry = PluginRegistry(model_name="gemini-2.5-flash")
+registry.discover()  # Discover built-ins
+
+# Register custom plugin
+weather = WeatherPlugin()
+registry.register_plugin(
+    weather,
+    expose=True,
+    config={"api_key": "..."}
+)
+
+# Now available alongside built-ins
+print(registry.list_exposed())
+# ['cli', 'weather']</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Enrichment-only plugin</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Plugin that modifies prompts but
+# doesn't provide tools
+class ContextPlugin:
+    name = "context"
+
+    def subscribes_to_prompt_enrichment(self):
+        return True
+
+    def enrich_prompt(self, prompt):
+        cwd = os.getcwd()
+        return PromptEnrichmentResult(
+            prompt=f"[CWD: {cwd}]\n{prompt}",
+            original_prompt=prompt,
+            enrichments=["added_cwd"]
+        )
+
+    def get_tool_schemas(self):
+        return []  # No tools
+
+# Register for enrichment only
+registry.register_plugin(
+    ContextPlugin(),
+    enrichment_only=True
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- System Instructions -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="system-instructions">System Instructions</h2>
+          <p>
+            Plugins can contribute to the system prompt via
+            <code>get_system_instructions()</code>. The registry combines
+            instructions from all exposed plugins.
+          </p>
+
+          <p>
+            Use system instructions to:
+          </p>
+          <ul>
+            <li>Explain when to use your tools</li>
+            <li>Provide usage guidelines</li>
+            <li>Set behavioral constraints</li>
+          </ul>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Keep It Concise</div>
+            System instructions consume context tokens. Keep them focused
+            and avoid redundancy with tool descriptions.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">System instructions</div>
+          <div class="code-block">
+            <pre><code class="language-python">class DatabasePlugin:
+    name = "database"
+
+    def get_system_instructions(self):
+        return """
+When working with the database:
+- Always use transactions for writes
+- Prefer query_database over raw_sql
+- Never expose connection strings
+""".strip()
+
+    def get_tool_schemas(self):
+        return [
+            ToolSchema(
+                name="query_database",
+                description="Run a safe query",
+                parameters={...}
+            )
+        ]</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Get combined instructions</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Get all system instructions
+instructions = registry.get_system_instructions()
+
+if instructions:
+    print("Combined system prompt:")
+    print(instructions)
+
+# The client uses this automatically
+# when configuring tools</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- User Commands -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="user-commands">User Commands</h2>
+          <p>
+            Plugins can expose commands that users can invoke directly,
+            separate from AI tool calls.
+          </p>
+
+          <h3>UserCommand</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">name</span>
+              <span class="param-type">str</span>
+              <div class="param-desc">Command name (e.g., "list_todos")</div>
+            </li>
+            <li>
+              <span class="param-name">description</span>
+              <span class="param-type">str</span>
+              <div class="param-desc">Help text</div>
+            </li>
+            <li>
+              <span class="param-name">share_with_model</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">Add result to conversation</div>
+            </li>
+            <li>
+              <span class="param-name">parameters</span>
+              <span class="param-type">List[CommandParameter]</span>
+              <div class="param-desc">Optional parameters</div>
+            </li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Define user commands</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.base import UserCommand
+
+class TodoPlugin:
+    name = "todo"
+
+    def get_user_commands(self):
+        return [
+            UserCommand(
+                name="list_todos",
+                description="Show all todos",
+                share_with_model=False
+            ),
+            UserCommand(
+                name="add_todo",
+                description="Add a new todo",
+                share_with_model=True,
+                parameters=[
+                    CommandParameter(
+                        name="text",
+                        description="Todo text",
+                        required=True
+                    )
+                ]
+            )
+        ]</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Execute user commands</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Get available commands
+commands = client.get_user_commands()
+
+for name, cmd in commands.items():
+    print(f"/{name}: {cmd.description}")
+
+# Execute a command
+result, share = client.execute_user_command(
+    "list_todos"
+)
+print(result)
+
+# Execute with parameters
+result, share = client.execute_user_command(
+    "add_todo",
+    args={"text": "Review PR #123"}
+)
+print(result)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Model Requirements -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="model-requirements">Model Requirements</h2>
+          <p>
+            Some plugins only work with specific models. Use
+            <code>get_model_requirements()</code> to specify required models
+            using glob patterns.
+          </p>
+
+          <p>
+            If the current model doesn't match, the plugin is skipped during
+            discovery.
+          </p>
+
+          <h3>Pattern Examples</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Pattern</th>
+                <th>Matches</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>gemini-*</code></td>
+                <td>All Gemini models</td>
+              </tr>
+              <tr>
+                <td><code>gemini-2.5-*</code></td>
+                <td>Gemini 2.5 family</td>
+              </tr>
+              <tr>
+                <td><code>*-pro</code></td>
+                <td>Any "pro" model</td>
+              </tr>
+              <tr>
+                <td><code>claude-*</code></td>
+                <td>Claude models</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Model requirements</div>
+          <div class="code-block">
+            <pre><code class="language-python">class GeminiOnlyPlugin:
+    name = "gemini_features"
+
+    def get_model_requirements(self):
+        # Only works with Gemini
+        return ["gemini-*"]
+
+    def get_tool_schemas(self):
+        return [...]
+
+# Check skipped plugins
+registry = PluginRegistry(model_name="claude-3")
+registry.discover()
+
+skipped = registry.list_skipped_plugins()
+for name, requirements in skipped.items():
+    print(f"{name} requires: {requirements}")
+# gemini_features requires: ['gemini-*']</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Next Steps -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="next-steps">Next Steps</h2>
+          <ul>
+            <li><a href="tools.html">Tools</a> — How tool execution works</li>
+            <li><a href="../guides/tool-plugins.html">Building Plugins</a> — Step-by-step guide</li>
+            <li><a href="../api-reference/plugin-registry.html">PluginRegistry API</a> — Full reference</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Plugin directory structure</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Built-in plugins location:
+# shared/plugins/
+#   ├── cli/
+#   │   ├── __init__.py
+#   │   └── plugin.py
+#   ├── mcp/
+#   │   ├── __init__.py
+#   │   └── plugin.py
+#   ├── file_edit/
+#   ├── todo/
+#   ├── web_search/
+#   ├── permission/
+#   ├── session/
+#   ├── gc_truncate/
+#   ├── gc_summarize/
+#   └── model_provider/
+#       ├── google_genai/
+#       └── types.py</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>
