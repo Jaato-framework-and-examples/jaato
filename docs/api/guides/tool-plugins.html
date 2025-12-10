@@ -252,6 +252,13 @@ class MyPlugin:
               plugin detects <code>@image.png</code> references in prompts and adds context
               about the <code>viewImage</code> tool availability.
             </p>
+            <p style="margin-top: 12px;">
+              <strong>How it works:</strong> The framework checks if a plugin implements
+              <code>subscribes_to_prompt_enrichment()</code> and returns <code>True</code>.
+              If so, the framework will call <code>enrich_prompt(prompt)</code> before
+              sending each user message to the model. Both methods must be implemented
+              for enrichment to work.
+            </p>
           </div>
         </div>
         <div class="panel-code">
