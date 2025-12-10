@@ -282,10 +282,16 @@ class PTDisplay:
         )
 
         # Plan panel (conditional - hidden when no plan)
+        # Height is dynamic: smaller when collapsed
+        def get_plan_height():
+            if self._plan_panel.is_collapsed:
+                return 7  # Compact: title + progress bar + prev step + current step + borders
+            return self._plan_height
+
         plan_window = ConditionalContainer(
             Window(
                 FormattedTextControl(self._get_plan_content),
-                height=self._plan_height,
+                height=get_plan_height,
             ),
             filter=Condition(self._has_plan),
         )

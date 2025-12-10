@@ -77,6 +77,11 @@ class PlanPanel:
         """Check if panel should be visible (has plan and not hidden)."""
         return self._plan_data is not None and not self._hidden
 
+    @property
+    def is_collapsed(self) -> bool:
+        """Check if panel is in collapsed view."""
+        return self._collapsed
+
     def render(self) -> Panel:
         """Render the plan panel.
 
@@ -257,8 +262,13 @@ class PlanPanel:
 
         return text
 
-    def _render_steps_table(self, steps: List[Dict[str, Any]]) -> Table:
-        """Render the steps as a compact table."""
+    def _render_steps_table(self, steps: List[Dict[str, Any]], max_rows: int = 8) -> Table:
+        """Render the steps as a compact table, bottom-aligned.
+
+        Args:
+            steps: List of step dicts with sequence, description, status, etc.
+            max_rows: Maximum rows to display (approximation - each step is 1-2 rows).
+        """
         table = Table(
             show_header=False,
             show_edge=False,
@@ -280,7 +290,16 @@ class PlanPanel:
                 current_step_seq = step.get("sequence")
                 break
 
-        for step in sorted_steps:
+        # Bottom-align: show only the last N steps if there are too many
+        # Account for result/error lines (completed/failed steps take 2 rows)
+        visible_steps = sorted_steps
+        if len(sorted_steps) > max_rows:
+            # Estimate how many steps we can show (assume ~1.5 rows per step on average)
+            # to account for result lines
+            estimated_capacity = max(4, int(max_rows / 1.5))
+            visible_steps = sorted_steps[-estimated_capacity:]
+
+        for step in visible_steps:
             seq = step.get("sequence", "?")
             desc = step.get("description", "")
             step_status = step.get("status", "pending")
