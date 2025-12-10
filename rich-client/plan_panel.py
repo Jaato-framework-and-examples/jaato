@@ -34,6 +34,8 @@ class PlanPanel:
 
     def __init__(self):
         self._plan_data: Optional[Dict[str, Any]] = None
+        self._collapsed: bool = False
+        self._prev_in_progress_count: int = 0
 
     def update_plan(self, plan_data: Dict[str, Any]) -> None:
         """Update the plan data to render.
@@ -41,11 +43,27 @@ class PlanPanel:
         Args:
             plan_data: Plan status dict with title, status, steps, progress.
         """
+        # Check for auto-collapse: collapse when a new task starts
+        progress = plan_data.get("progress", {})
+        current_in_progress = progress.get("in_progress", 0)
+
+        # Auto-collapse when first task becomes in_progress,
+        # or when a new task starts (after user may have expanded)
+        if current_in_progress > 0 and current_in_progress != self._prev_in_progress_count:
+            self._collapsed = True
+
+        self._prev_in_progress_count = current_in_progress
         self._plan_data = plan_data
 
     def clear(self) -> None:
         """Clear the current plan."""
         self._plan_data = None
+        self._collapsed = False
+        self._prev_in_progress_count = 0
+
+    def toggle_collapsed(self) -> None:
+        """Toggle between collapsed and expanded view (F1)."""
+        self._collapsed = not self._collapsed
 
     @property
     def has_plan(self) -> bool:
@@ -81,27 +99,61 @@ class PlanPanel:
         progress = plan.get("progress", {})
         steps = plan.get("steps", [])
 
-        # Build the content
-        elements = []
-
-        # Progress bar
-        progress_bar = self._render_progress_bar(progress)
-        elements.append(progress_bar)
-        elements.append(Text(""))  # Spacer
-
-        # Steps table
-        if steps:
-            steps_table = self._render_steps_table(steps)
-            elements.append(steps_table)
-
         # Get status display
         emoji, status_text, color = self.PLAN_STATUS_DISPLAY.get(
             status, ("📋", status.upper(), "white")
         )
 
-        panel_title = f"[bold]{emoji} {title}[/bold]"
+        # Build panel title with F1 hint
+        panel_title = f"[bold]{emoji} {title}[/bold] [dim]\\[F1][/dim]"
         if status != "pending":
             panel_title += f" [{color}]({status_text})[/{color}]"
+
+        # Determine what to show based on state
+        in_progress_count = progress.get("in_progress", 0)
+        pending_count = progress.get("pending", 0)
+        total = progress.get("total", 0)
+        completed_count = progress.get("completed", 0)
+        failed_count = progress.get("failed", 0)
+
+        # Check if plan is complete (no pending, no in_progress)
+        is_complete = (status == "completed" or
+                       (total > 0 and in_progress_count == 0 and pending_count == 0))
+
+        # Check if all tasks are still pending (none started yet)
+        all_pending = (total > 0 and pending_count == total)
+
+        # Build the content
+        elements = []
+
+        if is_complete:
+            # Completed view: just show completion summary, no task list
+            summary = plan.get("summary", "")
+            done_text = Text()
+            done_text.append(f"✓ {completed_count}/{total} completed", style="green")
+            if failed_count > 0:
+                done_text.append(f", {failed_count} failed", style="red")
+            elements.append(done_text)
+            if summary:
+                elements.append(Text(""))
+                elements.append(Text(summary, style="dim italic"))
+        elif all_pending or not self._collapsed:
+            # Expanded view: show progress bar and all steps
+            progress_bar = self._render_progress_bar(progress)
+            elements.append(progress_bar)
+            elements.append(Text(""))  # Spacer
+            if steps:
+                steps_table = self._render_steps_table(steps)
+                elements.append(steps_table)
+        else:
+            # Collapsed view: show progress bar and current step only
+            progress_bar = self._render_progress_bar(progress)
+            elements.append(progress_bar)
+            elements.append(Text(""))  # Spacer
+            if steps:
+                current_step = self._render_current_step(steps)
+                if current_step:
+                    elements.append(current_step)
 
         return Panel(
             Group(*elements),
@@ -142,6 +194,32 @@ class PlanPanel:
         result = Text()
         result.append_text(bar)
         result.append_text(stats)
+        return result
+
+    def _render_current_step(self, steps: List[Dict[str, Any]]) -> Optional[Text]:
+        """Render only the current in-progress step for collapsed view."""
+        # Sort by sequence
+        sorted_steps = sorted(steps, key=lambda s: s.get("sequence", 0))
+
+        # Find current step (first in_progress)
+        current_step = None
+        for step in sorted_steps:
+            if step.get("status") == "in_progress":
+                current_step = step
+                break
+
+        if not current_step:
+            return None
+
+        seq = current_step.get("sequence", "?")
+        desc = current_step.get("description", "")
+        symbol, style = self.STATUS_SYMBOLS.get("in_progress", ("◐", "blue"))
+
+        result = Text()
+        result.append(symbol, style=style)
+        result.append(f" {seq}. ", style="dim")
+        result.append(desc, style="bold")
+
         return result
 
     def _render_steps_table(self, steps: List[Dict[str, Any]]) -> Table:

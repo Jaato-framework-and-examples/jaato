@@ -260,6 +260,13 @@ class PTDisplay:
             """Handle Down arrow - history/completion navigation."""
             event.current_buffer.auto_down()
 
+        @kb.add("f1")
+        def handle_f1(event):
+            """Handle F1 - toggle plan panel collapse/expand."""
+            if self._plan_panel.has_plan:
+                self._plan_panel.toggle_collapsed()
+                self._app.invalidate()
+
         # Status bar at top (always visible, 1 line)
         status_bar = Window(
             FormattedTextControl(self._get_status_bar_content),
