@@ -36,43 +36,11 @@
     });
   }
 
-  // Syntax highlighting (basic)
+  // Syntax highlighting disabled - the naive regex approach corrupts HTML
+  // by matching keywords inside already-replaced class attributes.
+  // Consider using a proper library like Prism.js or highlight.js instead.
   function highlightCode() {
-    document.querySelectorAll('code.language-python').forEach(function(block) {
-      var html = block.innerHTML;
-
-      // Order matters - do comments first, then strings, then others
-      var patterns = [
-        // Comments
-        { regex: /(#.*)$/gm, class: 'token-comment' },
-        // Triple-quoted strings
-        { regex: /("""[\s\S]*?"""|'''[\s\S]*?''')/g, class: 'token-string' },
-        // Double-quoted strings
-        { regex: /("(?:[^"\\]|\\.)*")/g, class: 'token-string' },
-        // Single-quoted strings
-        { regex: /('(?:[^'\\]|\\.)*')/g, class: 'token-string' },
-        // Keywords
-        { regex: /\b(from|import|class|def|return|if|else|elif|for|while|try|except|finally|with|as|yield|lambda|and|or|not|in|is|True|False|None|async|await)\b/g, class: 'token-keyword' },
-        // Built-ins
-        { regex: /\b(print|len|range|str|int|float|list|dict|set|tuple|bool|type|isinstance|hasattr|getattr|setattr|open|super|self)\b/g, class: 'token-builtin' },
-        // Numbers
-        { regex: /\b(\d+\.?\d*)\b/g, class: 'token-number' },
-        // Function definitions
-        { regex: /\b(def\s+)(\w+)/g, replace: '<span class="token-keyword">$1</span><span class="token-function">$2</span>' },
-        // Class definitions
-        { regex: /\b(class\s+)(\w+)/g, replace: '<span class="token-keyword">$1</span><span class="token-class">$2</span>' },
-      ];
-
-      patterns.forEach(function(pattern) {
-        if (pattern.replace) {
-          html = html.replace(pattern.regex, pattern.replace);
-        } else {
-          html = html.replace(pattern.regex, '<span class="' + pattern.class + '">$1</span>');
-        }
-      });
-
-      block.innerHTML = html;
-    });
+    // Disabled
   }
 
   // Active sidebar navigation
