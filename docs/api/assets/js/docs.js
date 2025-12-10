@@ -167,28 +167,65 @@
     updateActiveLink();
   }
 
-  // Search functionality (basic)
+  // Search functionality with Lunr.js
+  var searchState = {
+    index: null,
+    documents: null,
+    loaded: false,
+    resultsContainer: null
+  };
+
   function initSearch() {
     var searchInput = document.querySelector('.header-search input');
     if (!searchInput) return;
 
-    searchInput.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') {
-        var query = this.value.trim().toLowerCase();
-        if (query) {
-          // For now, just scroll to first match on page
-          var content = document.querySelector('.main');
-          if (!content) return;
+    // Create results container
+    var searchContainer = document.querySelector('.header-search');
+    searchState.resultsContainer = document.createElement('div');
+    searchState.resultsContainer.className = 'search-results';
+    searchContainer.appendChild(searchState.resultsContainer);
 
-          // Simple text search in headings
-          var headings = content.querySelectorAll('h1, h2, h3');
-          for (var i = 0; i < headings.length; i++) {
-            if (headings[i].textContent.toLowerCase().includes(query)) {
-              headings[i].scrollIntoView({ behavior: 'smooth', block: 'start' });
-              break;
-            }
-          }
-        }
+    // Load search index
+    loadSearchIndex();
+
+    // Handle input changes (debounced)
+    var searchTimeout;
+    searchInput.addEventListener('input', function() {
+      clearTimeout(searchTimeout);
+      var query = this.value.trim();
+
+      if (query.length < 2) {
+        hideSearchResults();
+        return;
+      }
+
+      searchTimeout = setTimeout(function() {
+        performSearch(query);
+      }, 300);
+    });
+
+    // Handle focus
+    searchInput.addEventListener('focus', function() {
+      if (this.value.trim().length >= 2) {
+        performSearch(this.value.trim());
+      }
+    });
+
+    // Handle keyboard navigation
+    searchInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') {
+        hideSearchResults();
+        this.blur();
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        focusFirstResult();
+      }
+    });
+
+    // Hide results when clicking outside
+    document.addEventListener('click', function(e) {
+      if (!searchContainer.contains(e.target)) {
+        hideSearchResults();
       }
     });
 
@@ -199,6 +236,194 @@
         searchInput.focus();
       }
     });
+  }
+
+  function loadSearchIndex() {
+    if (searchState.loaded) return;
+
+    // Check if Lunr is available
+    if (typeof lunr === 'undefined') {
+      console.warn('Lunr.js not loaded. Search functionality disabled.');
+      return;
+    }
+
+    // Determine base path for loading index
+    var basePath = getBasePath();
+
+    fetch(basePath + 'assets/js/search-index.json')
+      .then(function(response) {
+        if (!response.ok) throw new Error('Failed to load search index');
+        return response.json();
+      })
+      .then(function(documents) {
+        searchState.documents = documents;
+
+        // Build Lunr index
+        searchState.index = lunr(function() {
+          this.ref('id');
+          this.field('title', { boost: 10 });
+          this.field('headings', { boost: 5 });
+          this.field('content');
+
+          documents.forEach(function(doc) {
+            this.add(doc);
+          }, this);
+        });
+
+        searchState.loaded = true;
+        console.log('Search index loaded:', documents.length, 'documents');
+      })
+      .catch(function(error) {
+        console.error('Error loading search index:', error);
+      });
+  }
+
+  function getBasePath() {
+    // Determine base path based on current location
+    var path = window.location.pathname;
+    var depth = (path.match(/\//g) || []).length - 2; // -2 for /docs/ and /api/
+
+    if (path.endsWith('/docs/api/') || path.endsWith('/docs/api/index.html')) {
+      return './';
+    }
+
+    // For pages in subdirectories
+    var base = '';
+    for (var i = 0; i < depth; i++) {
+      base += '../';
+    }
+    return base || './';
+  }
+
+  function performSearch(query) {
+    if (!searchState.loaded || !searchState.index) {
+      showSearchResults([{ title: 'Loading index...', snippet: 'Please wait...' }], query, true);
+      return;
+    }
+
+    try {
+      // Perform search with wildcards for partial matching
+      var searchQuery = query.split(/\s+/).map(function(term) {
+        return term + '*';
+      }).join(' ');
+
+      var results = searchState.index.search(searchQuery);
+
+      // Limit to top 10 results
+      results = results.slice(0, 10);
+
+      // Enrich results with document data
+      var enrichedResults = results.map(function(result) {
+        var doc = searchState.documents.find(function(d) {
+          return d.id === result.ref;
+        });
+        return {
+          title: doc.title,
+          url: doc.url,
+          section: doc.section,
+          snippet: doc.snippet,
+          score: result.score
+        };
+      });
+
+      showSearchResults(enrichedResults, query);
+    } catch (error) {
+      console.error('Search error:', error);
+      showSearchResults([{ title: 'Search error', snippet: 'Please try a different query' }], query, true);
+    }
+  }
+
+  function showSearchResults(results, query, isMessage) {
+    var container = searchState.resultsContainer;
+    container.innerHTML = '';
+    container.style.display = 'block';
+
+    if (results.length === 0) {
+      container.innerHTML = '<div class="search-result search-no-results">No results found for "' + escapeHtml(query) + '"</div>';
+      return;
+    }
+
+    if (isMessage) {
+      container.innerHTML = '<div class="search-result">' + results[0].title + '</div>';
+      return;
+    }
+
+    var basePath = getBasePath();
+
+    results.forEach(function(result, index) {
+      var resultEl = document.createElement('a');
+      resultEl.className = 'search-result';
+      resultEl.href = basePath + result.url;
+      resultEl.setAttribute('data-index', index);
+
+      var titleEl = document.createElement('div');
+      titleEl.className = 'search-result-title';
+      titleEl.textContent = result.title;
+
+      var sectionEl = document.createElement('div');
+      sectionEl.className = 'search-result-section';
+      sectionEl.textContent = result.section;
+
+      var snippetEl = document.createElement('div');
+      snippetEl.className = 'search-result-snippet';
+      snippetEl.textContent = result.snippet;
+
+      resultEl.appendChild(titleEl);
+      resultEl.appendChild(sectionEl);
+      resultEl.appendChild(snippetEl);
+
+      // Handle keyboard navigation
+      resultEl.addEventListener('keydown', function(e) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          focusNextResult(index);
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          focusPrevResult(index);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          hideSearchResults();
+          document.querySelector('.header-search input').focus();
+        }
+      });
+
+      container.appendChild(resultEl);
+    });
+  }
+
+  function hideSearchResults() {
+    if (searchState.resultsContainer) {
+      searchState.resultsContainer.style.display = 'none';
+    }
+  }
+
+  function focusFirstResult() {
+    var firstResult = searchState.resultsContainer.querySelector('.search-result');
+    if (firstResult && firstResult.focus) {
+      firstResult.focus();
+    }
+  }
+
+  function focusNextResult(currentIndex) {
+    var results = searchState.resultsContainer.querySelectorAll('.search-result');
+    if (currentIndex < results.length - 1) {
+      results[currentIndex + 1].focus();
+    }
+  }
+
+  function focusPrevResult(currentIndex) {
+    if (currentIndex > 0) {
+      var results = searchState.resultsContainer.querySelectorAll('.search-result');
+      results[currentIndex - 1].focus();
+    } else {
+      document.querySelector('.header-search input').focus();
+    }
+  }
+
+  function escapeHtml(text) {
+    var div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   }
 
   // Mobile menu toggle

@@ -175,8 +175,8 @@ class MyPlugin:
               </tr>
               <tr>
                 <td><code>get_executors()</code></td>
-                <td><code>Dict[str, Callable[[Dict], Any]]</code></td>
-                <td>Map tool names to functions (each receives a dict of args)</td>
+                <td><code>Dict[str, Callable]</code></td>
+                <td>Map tool names to functions</td>
               </tr>
               <tr>
                 <td><code>get_system_instructions()</code></td>
@@ -308,11 +308,7 @@ class WeatherPlugin:
         ]
 
     def get_executors(self) -> Dict[str, Callable]:
-        """Map tool names to executor functions.
-
-        IMPORTANT: Each executor receives a single dict argument
-        containing all parameters, not keyword arguments.
-        """
+        """Map tool names to executor functions."""
         return {"get_weather": self._get_weather}
 
     def get_system_instructions(self) -> Optional[str]:
@@ -327,13 +323,8 @@ class WeatherPlugin:
         """User-invokable commands."""
         return []  # No user commands
 
-    def _get_weather(self, args: Dict[str, Any]):
-        """Execute the get_weather tool.
-
-        Args:
-            args: Dict with tool parameters (e.g., {"city": "London"})
-        """
-        city = args.get("city", "Unknown")
+    def _get_weather(self, city: str):
+        """Execute the get_weather tool."""
         return f"Weather in {city}: 22°C, Sunny"</code></pre>
           </div>
 
@@ -1351,6 +1342,9 @@ class CalculatorPlugin:
       </section>
     </main>
   </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+
 
   <script src="../assets/js/docs.js"></script>
 </body>
