@@ -313,7 +313,12 @@ class SubagentPlugin:
                 "You have access to a subagent system that allows you to delegate "
                 "tasks to specialized subagents. By default, subagents inherit your "
                 "current plugin configuration. Use inline_config only to override "
-                "specific properties like max_turns or system_instructions."
+                "specific properties like max_turns or system_instructions.\n\n"
+                "IMPORTANT: Subagents support multi-turn conversations. When spawn_subagent "
+                "returns an agent_id, you can send follow-up messages using continue_subagent "
+                "instead of spawning a new subagent. This preserves context and avoids "
+                "redundant initialization. Use list_active_subagents to see available sessions. "
+                "Sessions auto-close after max_turns or can be closed manually with close_subagent."
             )
 
         profile_descriptions = []
@@ -330,14 +335,19 @@ class SubagentPlugin:
             "Available subagent profiles:\n"
             f"{profiles_text}\n\n"
             "Use spawn_subagent with a profile name and task to delegate work. "
-            "Without a profile, subagents inherit your current plugin configuration."
+            "Without a profile, subagents inherit your current plugin configuration.\n\n"
+            "IMPORTANT: Subagents support multi-turn conversations. When spawn_subagent "
+            "returns an agent_id, you can send follow-up messages using continue_subagent "
+            "instead of spawning a new subagent. This preserves context and avoids "
+            "redundant initialization. Use list_active_subagents to see available sessions. "
+            "Sessions auto-close after max_turns or can be closed manually with close_subagent."
         )
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved."""
-        # list_subagent_profiles is safe and can be auto-approved
-        # spawn_subagent should require permission unless the profile is auto_approved
-        return ['list_subagent_profiles']
+        # Read-only tools are safe and can be auto-approved
+        # spawn_subagent and continue_subagent should require permission unless auto_approved
+        return ['list_subagent_profiles', 'list_active_subagents']
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for direct invocation.
