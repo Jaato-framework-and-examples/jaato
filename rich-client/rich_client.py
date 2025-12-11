@@ -208,21 +208,30 @@ class RichClient:
         # Check CA bundle
         active_bundle = active_cert_bundle(verbose=False)
 
-        # Check required vars
-        required_vars = ["PROJECT_ID", "LOCATION", "MODEL_NAME"]
-        missing = [v for v in required_vars if not os.environ.get(v)]
-        if missing:
-            print(f"Error: Missing required environment variables: {', '.join(missing)}")
+        # Check required vars - MODEL_NAME always required
+        model_name = os.environ.get("MODEL_NAME")
+        if not model_name:
+            print("Error: Missing required environment variable: MODEL_NAME")
             return False
 
-        project_id = os.environ["PROJECT_ID"]
-        location = os.environ["LOCATION"]
-        model_name = os.environ["MODEL_NAME"]
+        # Check auth method: API key (AI Studio) or Vertex AI
+        api_key = os.environ.get("GOOGLE_GENAI_API_KEY")
+        project_id = os.environ.get("PROJECT_ID")
+        location = os.environ.get("LOCATION")
+
+        if not api_key and (not project_id or not location):
+            print("Error: Set GOOGLE_GENAI_API_KEY for AI Studio, or PROJECT_ID and LOCATION for Vertex AI")
+            return False
 
         # Initialize JaatoClient
         try:
             self._jaato = JaatoClient()
-            self._jaato.connect(project_id, location, model_name)
+            if api_key:
+                # AI Studio mode - just need model
+                self._jaato.connect(model=model_name)
+            else:
+                # Vertex AI mode
+                self._jaato.connect(project_id, location, model_name)
         except Exception as e:
             print(f"Error: Failed to connect: {e}")
             return False
