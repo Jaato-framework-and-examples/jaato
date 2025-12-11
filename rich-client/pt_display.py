@@ -113,6 +113,21 @@ class PTDisplay:
         self._app: Optional[Application] = None
         self._build_app()
 
+    def _update_dimensions(self) -> bool:
+        """Check if terminal size changed and update components if so.
+
+        Returns:
+            True if dimensions changed, False otherwise.
+        """
+        new_width, new_height = shutil.get_terminal_size()
+        if new_width != self._width or new_height != self._height:
+            self._width = new_width
+            self._height = new_height
+            self._output_buffer.set_width(self._width - 4)
+            self._renderer.set_width(self._width)
+            return True
+        return False
+
     def _has_plan(self) -> bool:
         """Check if plan panel should be visible."""
         return self._plan_panel.is_visible
@@ -152,6 +167,8 @@ class PTDisplay:
 
     def _get_scroll_page_size(self) -> int:
         """Get the number of lines to scroll per page (half the visible height)."""
+        # Ensure dimensions are current
+        self._update_dimensions()
         available_height = self._height - 2  # minus input row and status bar
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
@@ -167,6 +184,9 @@ class PTDisplay:
 
     def _get_output_content(self):
         """Get rendered output content as ANSI for prompt_toolkit."""
+        # Check for terminal resize and update dimensions if needed
+        self._update_dimensions()
+
         self._output_buffer._flush_current_block()
 
         # Calculate available height for output
@@ -515,6 +535,9 @@ class PTDisplay:
         """
         if not lines:
             return
+
+        # Ensure dimensions are current
+        self._update_dimensions()
 
         # Calculate page size based on available height
         if page_size is None:
