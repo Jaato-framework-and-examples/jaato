@@ -2,15 +2,21 @@
 
 This plugin allows the parent model to spawn subagents with their own
 tool configurations, enabling task delegation and specialization.
+
+The plugin uses the shared JaatoRuntime to create lightweight sessions
+for subagents, avoiding redundant provider connections.
 """
 
 import logging
 import os
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .config import SubagentConfig, SubagentProfile, SubagentResult
 from ..base import UserCommand, CommandCompletion
 from ..model_provider.types import ToolSchema
+
+if TYPE_CHECKING:
+    from ...jaato_runtime import JaatoRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +83,8 @@ class SubagentPlugin:
         self._registry_class = None
         self._client_class = None
         self._permission_plugin = None  # Optional permission plugin for subagents
+        # Runtime reference for efficient session creation
+        self._runtime: Optional['JaatoRuntime'] = None
 
     @property
     def name(self) -> str:
@@ -293,10 +301,28 @@ class SubagentPlugin:
         if self._config:
             self._config.add_profile(profile)
 
+    def set_runtime(self, runtime: 'JaatoRuntime') -> None:
+        """Set the runtime reference for efficient session creation.
+
+        When a runtime is set, subagents will use runtime.create_session()
+        instead of creating new JaatoClient instances, sharing the provider
+        connection and plugin configuration.
+
+        Args:
+            runtime: JaatoRuntime instance from the parent agent.
+        """
+        self._runtime = runtime
+
+        # Also update config from runtime if needed
+        if self._config and runtime.project and runtime.location:
+            self._config.project = runtime.project
+            self._config.location = runtime.location
+
     def set_connection(self, project: str, location: str, model: str) -> None:
         """Set the connection parameters for subagents.
 
         Call this to configure the GCP connection if not provided in config.
+        Note: If set_runtime() is called, this is automatically populated.
 
         Args:
             project: GCP project ID.
@@ -471,6 +497,10 @@ class SubagentPlugin:
     def _run_subagent(self, profile: SubagentProfile, prompt: str) -> SubagentResult:
         """Run a subagent with the given profile and prompt.
 
+        If a runtime is available (set via set_runtime()), creates a lightweight
+        session sharing the provider connection. Otherwise, falls back to creating
+        a new JaatoClient (legacy behavior).
+
         Args:
             profile: SubagentProfile defining the subagent's configuration.
             prompt: The prompt to send to the subagent.
@@ -478,11 +508,102 @@ class SubagentPlugin:
         Returns:
             SubagentResult with the subagent's response.
         """
-        if not self._config or not self._registry_class or not self._client_class:
+        if not self._config:
             return SubagentResult(
                 success=False,
                 response='',
                 error='Plugin not properly initialized'
+            )
+
+        # Use runtime-based session creation if available (preferred)
+        if self._runtime:
+            return self._run_subagent_with_runtime(profile, prompt)
+
+        # Fall back to legacy JaatoClient creation
+        return self._run_subagent_legacy(profile, prompt)
+
+    def _run_subagent_with_runtime(
+        self,
+        profile: SubagentProfile,
+        prompt: str
+    ) -> SubagentResult:
+        """Run a subagent using the shared runtime.
+
+        Creates a lightweight session from the runtime, sharing the provider
+        connection and avoiding redundant initialization.
+
+        Args:
+            profile: SubagentProfile defining the subagent's configuration.
+            prompt: The prompt to send to the subagent.
+
+        Returns:
+            SubagentResult with the subagent's response.
+        """
+        # Use profile's model or default
+        model = profile.model or self._config.default_model
+
+        try:
+            # Create session from runtime with profile's configuration
+            session = self._runtime.create_session(
+                model=model,
+                tools=profile.plugins if profile.plugins else None,
+                system_instructions=profile.system_instructions
+            )
+
+            # Set agent context for permission checks
+            session.set_agent_context(
+                agent_type="subagent",
+                agent_name=profile.name
+            )
+
+            # Run the conversation (subagent output is not streamed)
+            response = session.send_message(prompt, on_output=lambda src, txt, mode: None)
+
+            # Get token usage
+            usage = session.get_context_usage()
+            token_usage = {
+                'prompt_tokens': usage.get('prompt_tokens', 0),
+                'output_tokens': usage.get('output_tokens', 0),
+                'total_tokens': usage.get('total_tokens', 0),
+            }
+
+            return SubagentResult(
+                success=True,
+                response=response,
+                turns_used=usage.get('turns', 1),
+                token_usage=token_usage,
+            )
+
+        except Exception as e:
+            logger.exception("Subagent execution error (runtime mode)")
+            return SubagentResult(
+                success=False,
+                response='',
+                error=str(e)
+            )
+
+    def _run_subagent_legacy(
+        self,
+        profile: SubagentProfile,
+        prompt: str
+    ) -> SubagentResult:
+        """Run a subagent using legacy JaatoClient creation.
+
+        This is the fallback when no runtime is available. Creates a new
+        JaatoClient with its own provider connection.
+
+        Args:
+            profile: SubagentProfile defining the subagent's configuration.
+            prompt: The prompt to send to the subagent.
+
+        Returns:
+            SubagentResult with the subagent's response.
+        """
+        if not self._registry_class or not self._client_class:
+            return SubagentResult(
+                success=False,
+                response='',
+                error='Plugin not properly initialized (missing classes)'
             )
 
         # Validate connection config
@@ -567,7 +688,7 @@ class SubagentPlugin:
             )
 
         except Exception as e:
-            logger.exception("Subagent execution error")
+            logger.exception("Subagent execution error (legacy mode)")
             return SubagentResult(
                 success=False,
                 response='',
