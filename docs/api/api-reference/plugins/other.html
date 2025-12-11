@@ -157,6 +157,112 @@ askClarification(
         </div>
       </section>
 
+      <!-- Memory Plugin -->
+      <section class="two-panel" id="memory">
+        <div class="panel-explanation">
+          <h2>Memory Plugin</h2>
+          <p>
+            Model self-curated persistent memory across sessions. The model can
+            store valuable explanations and insights, then retrieve them in future
+            sessions to build a persistent knowledge base.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Name</strong></td><td><code>memory</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>store_memory</code>, <code>retrieve_memories</code>, <code>list_memory_tags</code></td></tr>
+              <tr><td><strong>Subscribes to</strong></td><td>Prompt enrichment</td></tr>
+              <tr><td><strong>Auto-approved</strong></td><td>Yes</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Two-Phase Retrieval</h3>
+          <ol>
+            <li><strong>Prompt Enrichment</strong>: Plugin injects lightweight hints about available memories</li>
+            <li><strong>Model Decision</strong>: Model decides whether to retrieve full content</li>
+          </ol>
+
+          <h3>Configuration</h3>
+          <table>
+            <tbody>
+              <tr><td><code>storage_path</code></td><td>Path to JSONL storage file (default: <code>.jaato/memories.jsonl</code>)</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Use Cases</h3>
+          <ul>
+            <li>Remember architecture explanations across sessions</li>
+            <li>Build project-specific knowledge base over time</li>
+            <li>Reduce redundant explanations of the same topics</li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Self-Curated</div>
+            The model decides what to store and when to retrieve.
+            Only substantial, reusable information should be stored - not ephemeral responses.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Model stores memory</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Session 1: Model provides comprehensive explanation
+# then stores it
+store_memory(
+    content="The Runtime/Session split allows...",
+    description="jaato Runtime/Session architecture",
+    tags=["architecture", "runtime", "session", "subagents"]
+)
+
+# Response
+{
+  "status": "success",
+  "memory_id": "mem_20231211_143022",
+  "message": "Stored memory: jaato Runtime/Session architecture"
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Prompt enrichment and retrieval</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Session 2: User asks related question
+# Plugin enriches prompt with hint:
+
+💡 **Available Memories** (use retrieve_memories to access):
+  - [architecture, runtime, session, subagents]: jaato Runtime/Session architecture
+
+# Model sees hint, retrieves memory
+retrieve_memories(
+    tags=["subagents", "runtime"],
+    limit=3
+)
+
+# Response
+{
+  "status": "success",
+  "count": 1,
+  "memories": [{
+    "id": "mem_20231211_143022",
+    "description": "jaato Runtime/Session architecture",
+    "content": "The Runtime/Session split allows...",
+    "tags": ["architecture", "runtime", "session", "subagents"],
+    "stored": "2023-12-11T14:30:22",
+    "usage_count": 3
+  }]
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Configuration</div>
+          <div class="code-block">
+            <pre><code class="language-python">registry.expose_tool('memory', config={
+    'storage_path': '.jaato/memories.jsonl',
+})
+
+# Default storage location: .jaato/memories.jsonl
+# Add to .gitignore for private knowledge
+# Or commit for team-shared knowledge base</code></pre>
+          </div>
+        </div>
+      </section>
+
       <!-- References Plugin -->
       <section class="two-panel" id="references">
         <div class="panel-explanation">

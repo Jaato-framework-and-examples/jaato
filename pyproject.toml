@@ -50,6 +50,7 @@ multimodal = "shared.plugins.multimodal:create_plugin"
 permission = "shared.plugins.permission:create_plugin"
 todo = "shared.plugins.todo:create_plugin"
 references = "shared.plugins.references:create_plugin"
+memory = "shared.plugins.memory:create_plugin"
 calculator = "shared.plugins.calculator:create_plugin"
 
 # Entry points for GC strategy plugins
