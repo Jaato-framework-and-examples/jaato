@@ -10,6 +10,7 @@ via get_runtime() to create additional sessions.
 """
 
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from datetime import datetime
 
 from .jaato_runtime import JaatoRuntime
 from .jaato_session import JaatoSession
@@ -29,6 +30,7 @@ DEFAULT_PROVIDER = "google_genai"
 if TYPE_CHECKING:
     from .plugins.registry import PluginRegistry
     from .plugins.permission import PermissionPlugin
+    from .plugins.subagent.ui_hooks import AgentUIHooks
 
 
 class JaatoClient:
@@ -86,6 +88,10 @@ class JaatoClient:
         self._project: Optional[str] = None
         self._location: Optional[str] = None
 
+        # UI hooks for agent lifecycle events
+        self._ui_hooks: Optional['AgentUIHooks'] = None
+        self._agent_id: str = "main"
+
     @property
     def is_connected(self) -> bool:
         """Check if client is connected to the model provider."""
@@ -129,6 +135,33 @@ class JaatoClient:
         if not self._session:
             raise RuntimeError("Client not configured. Call configure_tools() first.")
         return self._session
+
+    def set_ui_hooks(self, hooks: 'AgentUIHooks') -> None:
+        """Set UI hooks for agent lifecycle events.
+
+        This enables rich terminal UIs (like rich-client) to track the main agent's
+        lifecycle, output, and accounting data.
+
+        Args:
+            hooks: Implementation of AgentUIHooks protocol.
+        """
+        self._ui_hooks = hooks
+
+        # Notify about main agent creation
+        if self._ui_hooks:
+            self._ui_hooks.on_agent_created(
+                agent_id=self._agent_id,
+                agent_name="main",
+                agent_type="main",
+                profile_name=None,
+                parent_agent_id=None,
+                icon_lines=None,  # Uses default main icon
+                created_at=datetime.now()
+            )
+            self._ui_hooks.on_agent_status_changed(
+                agent_id=self._agent_id,
+                status="active"
+            )
 
     def list_available_models(self, prefix: Optional[str] = None) -> List[str]:
         """List models from the provider.
@@ -263,7 +296,58 @@ class JaatoClient:
         """
         if not self._session:
             raise RuntimeError("Tools not configured. Call configure_tools() first.")
-        return self._session.send_message(message, on_output)
+
+        # Wrap output callback to route through UI hooks
+        def wrapped_output_callback(source: str, text: str, mode: str) -> None:
+            # Call UI hooks if present
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_output(
+                    agent_id=self._agent_id,
+                    source=source,
+                    text=text,
+                    mode=mode
+                )
+            # Call user's callback if provided
+            if on_output:
+                on_output(source, text, mode)
+
+        response = self._session.send_message(message, wrapped_output_callback)
+
+        # After turn completes, update UI hooks with accounting data
+        if self._ui_hooks:
+            # Get turn accounting for the latest turn
+            turn_accounting = self._session.get_turn_accounting()
+            if turn_accounting:
+                last_turn = turn_accounting[-1]
+                self._ui_hooks.on_agent_turn_completed(
+                    agent_id=self._agent_id,
+                    turn_number=len(turn_accounting) - 1,
+                    prompt_tokens=last_turn.get('prompt', 0),
+                    output_tokens=last_turn.get('output', 0),
+                    total_tokens=last_turn.get('total', 0),
+                    duration_seconds=last_turn.get('duration_seconds', 0),
+                    function_calls=last_turn.get('function_calls', [])
+                )
+
+            # Update context usage
+            usage = self._session.get_context_usage()
+            self._ui_hooks.on_agent_context_updated(
+                agent_id=self._agent_id,
+                total_tokens=usage.get('total_tokens', 0),
+                prompt_tokens=usage.get('prompt_tokens', 0),
+                output_tokens=usage.get('output_tokens', 0),
+                turns=usage.get('turns', 0),
+                percent_used=usage.get('percent_used', 0)
+            )
+
+            # Update history
+            history = self._session.get_history()
+            self._ui_hooks.on_agent_history_updated(
+                agent_id=self._agent_id,
+                history=history
+            )
+
+        return response
 
     def get_history(self) -> List[Message]:
         """Get current conversation history.
