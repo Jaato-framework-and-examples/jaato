@@ -49,12 +49,14 @@ class TestMCPPluginFunctionDeclarations:
         assert schemas == []
 
     def test_get_executors_empty(self):
-        """Without MCP servers, should return empty dict."""
+        """Without MCP servers, should only return the mcp user command executor."""
         plugin = MCPToolPlugin()
         plugin._initialized = True  # Skip actual initialization
         executors = plugin.get_executors()
 
-        assert executors == {}
+        # Only the 'mcp' user command executor should be present
+        assert 'mcp' in executors
+        assert len(executors) == 1
 
 
 class TestMCPPluginSystemInstructions:

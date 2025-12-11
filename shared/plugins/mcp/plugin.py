@@ -95,11 +95,13 @@ class MCPToolPlugin:
         return schemas
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return executor mappings for all discovered MCP tools."""
+        """Return executor mappings for all discovered MCP tools and user commands."""
         if not self._initialized:
             self.initialize()
 
         executors = {}
+
+        # Executors for MCP model tools
         for tools in self._tool_cache.values():
             for tool in tools:
                 # Create a closure that captures the tool name
@@ -108,6 +110,11 @@ class MCPToolPlugin:
                         return self._execute(toolname, args)
                     return executor
                 executors[tool.name] = make_executor(tool.name)
+
+        # Executor for 'mcp' user command
+        def mcp_command_executor(args: Dict[str, Any]) -> str:
+            return self.execute_user_command('mcp', args)
+        executors['mcp'] = mcp_command_executor
 
         return executors
 
