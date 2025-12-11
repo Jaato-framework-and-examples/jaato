@@ -394,22 +394,32 @@ def from_sdk_response(resp) -> ProviderResponse:
             <li>
               <span class="param-name">project</span>
               <span class="param-type">str</span>
-              <div class="param-desc">Cloud project ID (Google, etc.)</div>
+              <div class="param-desc">Cloud project ID (required for Vertex AI)</div>
             </li>
             <li>
               <span class="param-name">location</span>
               <span class="param-type">str</span>
-              <div class="param-desc">Region/location</div>
+              <div class="param-desc">Region/location (required for Vertex AI)</div>
             </li>
             <li>
               <span class="param-name">api_key</span>
               <span class="param-type">str</span>
-              <div class="param-desc">API key (if applicable)</div>
+              <div class="param-desc">API key for Google AI Studio</div>
             </li>
             <li>
               <span class="param-name">credentials_path</span>
               <span class="param-type">str</span>
-              <div class="param-desc">Path to credentials file</div>
+              <div class="param-desc">Path to service account JSON file</div>
+            </li>
+            <li>
+              <span class="param-name">use_vertex_ai</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">True for Vertex AI, False for AI Studio (default: True)</div>
+            </li>
+            <li>
+              <span class="param-name">auth_method</span>
+              <span class="param-type">str</span>
+              <div class="param-desc">Auth method: auto, api_key, service_account_file, adc</div>
             </li>
             <li>
               <span class="param-name">extra</span>
@@ -417,50 +427,86 @@ def from_sdk_response(resp) -> ProviderResponse:
               <div class="param-desc">Provider-specific options</div>
             </li>
           </ul>
+
+          <h3>Authentication Methods</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Endpoint</th>
+                <th>Use Case</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>api_key</code></td>
+                <td>AI Studio</td>
+                <td>Personal development</td>
+              </tr>
+              <tr>
+                <td><code>adc</code></td>
+                <td>Vertex AI</td>
+                <td>Local development</td>
+              </tr>
+              <tr>
+                <td><code>service_account_file</code></td>
+                <td>Vertex AI</td>
+                <td>CI/CD, production</td>
+              </tr>
+              <tr>
+                <td><code>auto</code></td>
+                <td>Either</td>
+                <td>Auto-detect credentials</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <div class="panel-code">
-          <div class="code-label">Configuration options</div>
+          <div class="code-label">AI Studio (API key)</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import ProviderConfig
+            <pre><code class="language-python">from shared import ProviderConfig, load_provider
 
-# Via JaatoClient (recommended)
-client = JaatoClient()
-client.connect(
-    project="my-project",
-    location="us-central1",
-    model="gemini-2.5-flash"
-)
-
-# Direct provider configuration
-from shared import load_provider
-
+# Simple API key authentication
 provider = load_provider("google_genai")
 provider.initialize(ProviderConfig(
-    project="my-project",
+    api_key="your-api-key",
+    use_vertex_ai=False,
+    auth_method="api_key"
+))
+provider.connect("gemini-2.5-flash")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Vertex AI (GCP)</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import ProviderConfig, load_provider
+
+# Vertex AI with ADC or service account
+provider = load_provider("google_genai")
+provider.initialize(ProviderConfig(
+    project="my-gcp-project",
     location="us-central1",
-    credentials_path="/path/to/key.json",
-    extra={
-        "timeout": 60,
-        "retry_count": 3
-    }
+    use_vertex_ai=True,
+    auth_method="adc"  # or "service_account_file"
 ))
 provider.connect("gemini-2.5-flash")</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Environment variables</div>
           <div class="code-block">
-            <pre><code class="language-python"># Google GenAI provider uses:
+            <pre><code class="language-python"># AI Studio:
+GOOGLE_GENAI_API_KEY=your-api-key
 
-# PROJECT_ID - GCP project
-# LOCATION - Vertex AI region
-# MODEL_NAME - Default model
-# GOOGLE_APPLICATION_CREDENTIALS - SA key
+# Vertex AI:
+JAATO_GOOGLE_PROJECT=my-gcp-project
+JAATO_GOOGLE_LOCATION=us-central1
+GOOGLE_APPLICATION_CREDENTIALS=/path/key.json
 
-# Example .env file:
-PROJECT_ID=my-gcp-project
-LOCATION=us-central1
-MODEL_NAME=gemini-2.5-flash
-GOOGLE_APPLICATION_CREDENTIALS=/path/key.json</code></pre>
+# Optional overrides:
+JAATO_GOOGLE_AUTH_METHOD=auto
+JAATO_GOOGLE_USE_VERTEX=true
+
+# Legacy (still supported):
+PROJECT_ID, LOCATION, GOOGLE_CLOUD_PROJECT</code></pre>
           </div>
         </div>
       </section>

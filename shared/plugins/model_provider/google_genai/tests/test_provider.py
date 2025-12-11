@@ -1,11 +1,159 @@
-"""Tests for GoogleGenAIProvider structured output support."""
+"""Tests for GoogleGenAIProvider."""
 
 import json
 import pytest
 from unittest.mock import MagicMock, patch
 
 from ..provider import GoogleGenAIProvider
+from ...base import ProviderConfig
 from ...types import ProviderResponse, TokenUsage, FinishReason
+from ..errors import (
+    CredentialsNotFoundError,
+    CredentialsInvalidError,
+    CredentialsPermissionError,
+    ProjectConfigurationError,
+)
+
+
+def create_mock_client():
+    """Create a mock genai.Client with list_models support."""
+    mock_client = MagicMock()
+    # Mock models.list() for connectivity verification
+    mock_client.models.list.return_value = [MagicMock(name="gemini-2.5-flash")]
+    return mock_client
+
+
+class TestAuthentication:
+    """Tests for authentication and initialization."""
+
+    @patch('google.genai.Client')
+    def test_initialize_with_api_key(self, mock_client_class):
+        """Should use AI Studio endpoint with API key."""
+        mock_client_class.return_value = create_mock_client()
+
+        provider = GoogleGenAIProvider()
+        provider.initialize(ProviderConfig(
+            api_key="test-api-key",
+            use_vertex_ai=False,
+            auth_method="api_key"
+        ))
+
+        # Should create client with api_key, not vertexai
+        mock_client_class.assert_called_once_with(api_key="test-api-key")
+        assert provider._use_vertex_ai is False
+        assert provider._auth_method == "api_key"
+
+    @patch('google.genai.Client')
+    def test_initialize_with_vertex_ai(self, mock_client_class):
+        """Should use Vertex AI endpoint with project/location."""
+        mock_client_class.return_value = create_mock_client()
+
+        provider = GoogleGenAIProvider()
+        provider.initialize(ProviderConfig(
+            project="test-project",
+            location="us-central1",
+            use_vertex_ai=True,
+            auth_method="adc"
+        ))
+
+        # Should create client with vertexai=True
+        mock_client_class.assert_called_once_with(
+            vertexai=True,
+            project="test-project",
+            location="us-central1"
+        )
+        assert provider._use_vertex_ai is True
+        assert provider._project == "test-project"
+        assert provider._location == "us-central1"
+
+    def test_initialize_vertex_ai_missing_project_raises(self):
+        """Should raise ProjectConfigurationError if project missing."""
+        provider = GoogleGenAIProvider()
+
+        with pytest.raises(ProjectConfigurationError) as exc_info:
+            provider.initialize(ProviderConfig(
+                location="us-central1",
+                use_vertex_ai=True,
+                auth_method="adc"
+            ))
+
+        assert "Project ID is required" in str(exc_info.value)
+
+    def test_initialize_vertex_ai_missing_location_raises(self):
+        """Should raise ProjectConfigurationError if location missing."""
+        provider = GoogleGenAIProvider()
+
+        with pytest.raises(ProjectConfigurationError) as exc_info:
+            provider.initialize(ProviderConfig(
+                project="test-project",
+                use_vertex_ai=True,
+                auth_method="adc"
+            ))
+
+        assert "Location is required" in str(exc_info.value)
+
+    def test_initialize_api_key_missing_raises(self):
+        """Should raise CredentialsNotFoundError if API key missing."""
+        provider = GoogleGenAIProvider()
+
+        with pytest.raises(CredentialsNotFoundError) as exc_info:
+            provider.initialize(ProviderConfig(
+                use_vertex_ai=False,
+                auth_method="api_key"
+            ))
+
+        assert "api_key" in str(exc_info.value)
+
+    @patch('google.genai.Client')
+    def test_verify_connectivity_permission_error(self, mock_client_class):
+        """Should wrap permission errors with actionable message."""
+        mock_client = MagicMock()
+        mock_client.models.list.side_effect = Exception("403 Permission denied")
+        mock_client_class.return_value = mock_client
+
+        provider = GoogleGenAIProvider()
+
+        with pytest.raises(CredentialsPermissionError):
+            provider.initialize(ProviderConfig(
+                project="test-project",
+                location="us-central1",
+                use_vertex_ai=True,
+                auth_method="adc"
+            ))
+
+    @patch.dict('os.environ', {
+        'GOOGLE_GENAI_API_KEY': 'env-api-key'
+    }, clear=True)
+    @patch('google.genai.Client')
+    def test_initialize_auto_detects_api_key_from_env(self, mock_client_class):
+        """Should auto-detect API key from environment."""
+        mock_client_class.return_value = create_mock_client()
+
+        provider = GoogleGenAIProvider()
+        provider.initialize(ProviderConfig(auth_method="auto"))
+
+        # Should use AI Studio with env API key
+        mock_client_class.assert_called_once_with(api_key="env-api-key")
+        assert provider._use_vertex_ai is False
+
+    @patch.dict('os.environ', {
+        'JAATO_GOOGLE_PROJECT': 'env-project',
+        'JAATO_GOOGLE_LOCATION': 'europe-west1'
+    }, clear=True)
+    @patch('google.genai.Client')
+    def test_initialize_auto_detects_vertex_from_env(self, mock_client_class):
+        """Should auto-detect Vertex AI config from environment."""
+        mock_client_class.return_value = create_mock_client()
+
+        provider = GoogleGenAIProvider()
+        provider.initialize(ProviderConfig(auth_method="auto"))
+
+        # Should use Vertex AI with env config
+        mock_client_class.assert_called_once_with(
+            vertexai=True,
+            project="env-project",
+            location="europe-west1"
+        )
 
 
 class TestStructuredOutput:
@@ -34,7 +182,7 @@ class TestStructuredOutput:
     def test_send_message_with_response_schema(self, mock_client_class):
         """send_message should pass response_schema to SDK config."""
         # Setup mock
-        mock_client = MagicMock()
+        mock_client = create_mock_client()
         mock_client_class.return_value = mock_client
 
         mock_chat = MagicMock()
@@ -53,9 +201,13 @@ class TestStructuredOutput:
         )
         mock_chat.send_message.return_value = mock_response
 
-        # Create and configure provider
+        # Create and configure provider with explicit config
         provider = GoogleGenAIProvider()
-        provider.initialize()
+        provider.initialize(ProviderConfig(
+            api_key="test-key",
+            use_vertex_ai=False,
+            auth_method="api_key"
+        ))
         provider.connect('gemini-2.5-flash')
         provider.create_session()
 
@@ -87,7 +239,7 @@ class TestStructuredOutput:
     def test_send_message_without_response_schema(self, mock_client_class):
         """send_message without schema should not set structured_output."""
         # Setup mock
-        mock_client = MagicMock()
+        mock_client = create_mock_client()
         mock_client_class.return_value = mock_client
 
         mock_chat = MagicMock()
@@ -108,7 +260,11 @@ class TestStructuredOutput:
 
         # Create and configure provider
         provider = GoogleGenAIProvider()
-        provider.initialize()
+        provider.initialize(ProviderConfig(
+            api_key="test-key",
+            use_vertex_ai=False,
+            auth_method="api_key"
+        ))
         provider.connect('gemini-2.5-flash')
         provider.create_session()
 
@@ -128,7 +284,7 @@ class TestStructuredOutput:
     def test_send_message_handles_invalid_json(self, mock_client_class):
         """send_message should handle invalid JSON gracefully."""
         # Setup mock
-        mock_client = MagicMock()
+        mock_client = create_mock_client()
         mock_client_class.return_value = mock_client
 
         mock_chat = MagicMock()
@@ -149,7 +305,11 @@ class TestStructuredOutput:
 
         # Create and configure provider
         provider = GoogleGenAIProvider()
-        provider.initialize()
+        provider.initialize(ProviderConfig(
+            api_key="test-key",
+            use_vertex_ai=False,
+            auth_method="api_key"
+        ))
         provider.connect('gemini-2.5-flash')
         provider.create_session()
 
@@ -165,7 +325,7 @@ class TestStructuredOutput:
     def test_send_tool_results_with_response_schema(self, mock_client_class):
         """send_tool_results should support response_schema."""
         # Setup mock
-        mock_client = MagicMock()
+        mock_client = create_mock_client()
         mock_client_class.return_value = mock_client
 
         mock_chat = MagicMock()
@@ -188,7 +348,11 @@ class TestStructuredOutput:
 
         # Create and configure provider
         provider = GoogleGenAIProvider()
-        provider.initialize()
+        provider.initialize(ProviderConfig(
+            api_key="test-key",
+            use_vertex_ai=False,
+            auth_method="api_key"
+        ))
         provider.connect('gemini-2.5-flash')
         provider.create_session()
 
