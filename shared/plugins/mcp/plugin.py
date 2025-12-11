@@ -838,8 +838,9 @@ Examples:
                 """Connect to a server and return (success, error_message)."""
                 cmd = spec.get('command', 'unknown')
                 args = spec.get('args', [])
+                args_str = ' '.join(str(a) for a in args) if args else ''
                 self._log_event(LOG_INFO, "Connecting to server", server=name,
-                              details=f"command: {cmd} {' '.join(args)}")
+                              details=f"command: {cmd} {args_str}".strip())
                 try:
                     await mgr.connect(
                         name,
@@ -876,7 +877,9 @@ Examples:
             manager = MCPClientManager()
             async with manager:
                 # Initial connection to all configured servers
-                for name, spec in servers.items():
+                server_list = list(servers.items())
+                for idx, (name, spec) in enumerate(server_list, 1):
+                    self._log_event(LOG_DEBUG, f"Processing server {idx}/{len(server_list)}", server=name)
                     await connect_server(manager, name, spec)
 
                 # Cache tools and log summary
