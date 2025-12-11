@@ -640,7 +640,15 @@ class PTDisplay:
 
     def clear_output(self) -> None:
         """Clear the output buffer."""
-        self._output_buffer.clear()
+        # Use selected agent's buffer if registry present
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if buffer:
+                buffer.clear()
+            else:
+                self._output_buffer.clear()
+        else:
+            self._output_buffer.clear()
         self.refresh()
 
     def add_to_history(self, text: str) -> None:
@@ -693,15 +701,23 @@ class PTDisplay:
             # Account for panel borders
             page_size = max(5, available - 4)
 
+        # Use selected agent's buffer if registry present
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if not buffer:
+                buffer = self._output_buffer
+        else:
+            buffer = self._output_buffer
+
         # Check if pagination is needed
         if len(lines) <= page_size:
             # No pagination needed - just display all lines
             for text, style in lines:
-                self._output_buffer.add_system_message(text, style)
-            self._output_buffer.add_system_message("", style="dim")  # Trailing blank
+                buffer.add_system_message(text, style)
+            buffer.add_system_message("", style="dim")  # Trailing blank
             self.refresh()
         else:
-            # Start pager mode
+            # Start pager mode (note: pager still uses self._output_buffer for now)
             self._start_pager(lines, page_size)
 
     def _start_pager(self, lines: list, page_size: int) -> None:
