@@ -389,4 +389,5 @@ class OutputBuffer:
             title=title,
             border_style="blue",
             height=height,  # Constrain panel to exact height
+            width=width,  # Constrain panel to exact width (preserves right border)
         )

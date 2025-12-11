@@ -244,12 +244,14 @@ class PTDisplay:
         output_width_ratio = 0.7 if self._agent_panel else 1.0
         panel_width = int(self._width * output_width_ratio)
 
-        # Render output panel
+        # Render output panel with correct width for word wrapping
         panel = output_buffer.render_panel(
             height=available_height,
             width=panel_width,
         )
-        return to_formatted_text(ANSI(self._renderer.render(panel)))
+        # Create a renderer with the correct width for this panel
+        output_renderer = RichRenderer(panel_width)
+        return to_formatted_text(ANSI(output_renderer.render(panel)))
 
     def _get_agent_panel_content(self):
         """Get rendered agent panel content as ANSI for prompt_toolkit."""
@@ -261,9 +263,14 @@ class PTDisplay:
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
 
-        # Render agent panel
+        # Calculate agent panel width (30% of terminal)
+        agent_panel_width = int(self._width * 0.3)
+
+        # Render agent panel with correct width
         panel = self._agent_panel.render(available_height)
-        return to_formatted_text(ANSI(self._renderer.render(panel)))
+        # Create a renderer with the correct width for this panel
+        agent_renderer = RichRenderer(agent_panel_width)
+        return to_formatted_text(ANSI(agent_renderer.render(panel)))
 
     def _build_app(self) -> None:
         """Build the prompt_toolkit application."""
@@ -568,16 +575,32 @@ class PTDisplay:
 
     def append_output(self, source: str, text: str, mode: str) -> None:
         """Append output to the scrolling panel."""
-        self._output_buffer.append(source, text, mode)
+        # Use selected agent's buffer if registry present, otherwise use default
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if not buffer:
+                buffer = self._output_buffer
+        else:
+            buffer = self._output_buffer
+
+        buffer.append(source, text, mode)
         # Auto-scroll to bottom when new output arrives
-        self._output_buffer.scroll_to_bottom()
+        buffer.scroll_to_bottom()
         self.refresh()
 
     def add_system_message(self, message: str, style: str = "dim") -> None:
         """Add a system message to the output."""
-        self._output_buffer.add_system_message(message, style)
+        # Use selected agent's buffer if registry present, otherwise use default
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if not buffer:
+                buffer = self._output_buffer
+        else:
+            buffer = self._output_buffer
+
+        buffer.add_system_message(message, style)
         # Auto-scroll to bottom when new output arrives
-        self._output_buffer.scroll_to_bottom()
+        buffer.scroll_to_bottom()
         self.refresh()
 
     def clear_output(self) -> None:

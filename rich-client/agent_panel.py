@@ -72,7 +72,7 @@ class AgentPanel:
         # Create panel
         panel = Panel(
             agent_group,
-            title="[bold]Agents[/bold]",
+            title="[bold]Agents[/bold] [dim](F2: cycle)[/dim]",
             border_style="cyan",
             width=self._panel_width,
             padding=(0, 1)
