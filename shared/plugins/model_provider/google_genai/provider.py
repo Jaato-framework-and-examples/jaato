@@ -9,6 +9,7 @@ Authentication methods:
 - API Key: For AI Studio, simple development use
 - ADC (Application Default Credentials): For Vertex AI, local development
 - Service Account File: For Vertex AI, production/CI use
+- Impersonation: For Vertex AI, act as another service account
 """
 
 import json
@@ -43,6 +44,7 @@ from .errors import (
     CredentialsInvalidError,
     CredentialsPermissionError,
     ProjectConfigurationError,
+    ImpersonationError,
 )
 from .env import (
     resolve_auth_method,
@@ -51,6 +53,7 @@ from .env import (
     resolve_credentials_path,
     resolve_project,
     resolve_location,
+    resolve_target_service_account,
     get_checked_credential_locations,
 )
 
@@ -212,6 +215,9 @@ class GoogleGenAIProvider:
         project = config.project or resolve_project()
         location = config.location or resolve_location()
 
+        # Resolve target service account (for impersonation)
+        target_service_account = config.target_service_account or resolve_target_service_account()
+
         return ProviderConfig(
             project=project,
             location=location,
@@ -219,6 +225,7 @@ class GoogleGenAIProvider:
             credentials_path=credentials_path,
             use_vertex_ai=use_vertex_ai,
             auth_method=auth_method,
+            target_service_account=target_service_account,
             credentials=config.credentials,
             extra=config.extra,
         )
@@ -232,6 +239,7 @@ class GoogleGenAIProvider:
         Raises:
             CredentialsNotFoundError: Missing required credentials.
             ProjectConfigurationError: Missing project/location for Vertex AI.
+            ImpersonationError: Missing target service account for impersonation.
         """
         if config.use_vertex_ai:
             # Vertex AI requires project and location
@@ -262,6 +270,14 @@ class GoogleGenAIProvider:
                         checked_locations=[f"{creds_path} (file not found)"],
                         suggestion=f"Verify the file exists: {creds_path}",
                     )
+
+            # For impersonation, verify target service account is set
+            if config.auth_method == "impersonation":
+                if not config.target_service_account:
+                    raise ImpersonationError(
+                        target_service_account=None,
+                        reason="Target service account is required for impersonation",
+                    )
         else:
             # AI Studio requires API key
             if not config.api_key:
@@ -281,20 +297,33 @@ class GoogleGenAIProvider:
 
         Raises:
             CredentialsInvalidError: If credentials are rejected.
+            ImpersonationError: If impersonation fails.
         """
         try:
             if config.use_vertex_ai:
-                # Vertex AI mode
-                return genai.Client(
-                    vertexai=True,
-                    project=config.project,
-                    location=config.location,
-                )
+                # Vertex AI mode - check for impersonation
+                if config.auth_method == "impersonation":
+                    credentials = self._create_impersonated_credentials(config)
+                    return genai.Client(
+                        vertexai=True,
+                        project=config.project,
+                        location=config.location,
+                        credentials=credentials,
+                    )
+                else:
+                    # Standard Vertex AI auth (ADC or service account file)
+                    return genai.Client(
+                        vertexai=True,
+                        project=config.project,
+                        location=config.location,
+                    )
             else:
                 # AI Studio mode with API key
                 return genai.Client(
                     api_key=config.api_key,
                 )
+        except ImpersonationError:
+            raise
         except Exception as e:
             error_msg = str(e).lower()
             if "api key" in error_msg or "invalid" in error_msg:
@@ -304,6 +333,75 @@ class GoogleGenAIProvider:
                     credentials_source="api_key" if config.api_key else "environment",
                 ) from e
             raise
+
+    def _create_impersonated_credentials(self, config: ProviderConfig):
+        """Create impersonated credentials for service account impersonation.
+
+        Args:
+            config: Configuration with target_service_account set.
+
+        Returns:
+            Impersonated credentials object.
+
+        Raises:
+            ImpersonationError: If impersonation fails.
+        """
+        try:
+            import google.auth
+            from google.auth import impersonated_credentials
+
+            # Get source credentials (ADC or from service account file)
+            if config.credentials_path:
+                # Use service account file as source
+                from google.oauth2 import service_account
+                source_credentials = service_account.Credentials.from_service_account_file(
+                    config.credentials_path,
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                )
+            else:
+                # Use ADC as source
+                source_credentials, _ = google.auth.default(
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                )
+
+            # Create impersonated credentials
+            target_credentials = impersonated_credentials.Credentials(
+                source_credentials=source_credentials,
+                target_principal=config.target_service_account,
+                target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+
+            return target_credentials
+
+        except Exception as e:
+            error_msg = str(e).lower()
+
+            # Try to get source principal for better error messages
+            source_principal = None
+            try:
+                import google.auth
+                creds, _ = google.auth.default()
+                if hasattr(creds, 'service_account_email'):
+                    source_principal = f"serviceAccount:{creds.service_account_email}"
+                elif hasattr(creds, '_service_account_email'):
+                    source_principal = f"serviceAccount:{creds._service_account_email}"
+            except Exception:
+                pass
+
+            if "permission" in error_msg or "403" in error_msg or "token creator" in error_msg:
+                raise ImpersonationError(
+                    target_service_account=config.target_service_account,
+                    source_principal=source_principal,
+                    reason="Source principal lacks Service Account Token Creator role",
+                    original_error=str(e),
+                ) from e
+            else:
+                raise ImpersonationError(
+                    target_service_account=config.target_service_account,
+                    source_principal=source_principal,
+                    reason="Failed to create impersonated credentials",
+                    original_error=str(e),
+                ) from e
 
     def _verify_connectivity(self) -> None:
         """Verify connectivity by making a lightweight API call.

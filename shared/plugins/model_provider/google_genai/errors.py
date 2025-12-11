@@ -229,3 +229,79 @@ class ProjectConfigurationError(JaatoAuthError):
         ])
 
         return "\n".join(lines)
+
+
+class ImpersonationError(JaatoAuthError):
+    """Service account impersonation failed.
+
+    Raised when impersonation is configured but fails due to missing
+    target service account, permission issues, or other impersonation errors.
+    """
+
+    def __init__(
+        self,
+        target_service_account: Optional[str] = None,
+        source_principal: Optional[str] = None,
+        reason: Optional[str] = None,
+        original_error: Optional[str] = None,
+    ):
+        self.target_service_account = target_service_account
+        self.source_principal = source_principal
+        self.reason = reason
+        self.original_error = original_error
+
+        message = self._format_message()
+        super().__init__(message)
+
+    def _format_message(self) -> str:
+        if not self.target_service_account:
+            # Missing target service account
+            lines = [
+                "Service account impersonation requires a target service account.",
+                "",
+                "To fix:",
+                "  Set JAATO_GOOGLE_TARGET_SERVICE_ACCOUNT=your-sa@project.iam.gserviceaccount.com",
+            ]
+            return "\n".join(lines)
+
+        lines = ["Service account impersonation failed."]
+        lines.append(f"Target: {self.target_service_account}")
+
+        if self.source_principal:
+            lines.append(f"Source: {self.source_principal}")
+
+        if self.reason:
+            lines.append(f"Reason: {self.reason}")
+
+        if self.original_error:
+            lines.append(f"Error: {self.original_error}")
+
+        lines.extend([
+            "",
+            "To fix, grant the Service Account Token Creator role:",
+        ])
+
+        if self.source_principal and self.target_service_account:
+            lines.extend([
+                f"  gcloud iam service-accounts add-iam-policy-binding \\",
+                f"    {self.target_service_account} \\",
+                f"    --member='{self.source_principal}' \\",
+                f"    --role='roles/iam.serviceAccountTokenCreator'",
+            ])
+        else:
+            lines.append("  Grant 'roles/iam.serviceAccountTokenCreator' to the source principal")
+
+        lines.extend([
+            "",
+            "Also ensure the target service account has 'roles/aiplatform.user':",
+        ])
+
+        if self.target_service_account:
+            sa_email = self.target_service_account
+            lines.extend([
+                f"  gcloud projects add-iam-policy-binding YOUR_PROJECT \\",
+                f"    --member='serviceAccount:{sa_email}' \\",
+                f"    --role='roles/aiplatform.user'",
+            ])
+
+        return "\n".join(lines)

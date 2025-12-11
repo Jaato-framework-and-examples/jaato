@@ -27,7 +27,7 @@ OutputCallback = Callable[[str, str, str], None]
 
 
 # Authentication method type for Google GenAI provider
-GoogleAuthMethod = Literal["auto", "api_key", "service_account_file", "adc"]
+GoogleAuthMethod = Literal["auto", "api_key", "service_account_file", "adc", "impersonation"]
 
 
 @dataclass
@@ -50,6 +50,9 @@ class ProviderConfig:
             - "api_key": Use API key (Google AI Studio)
             - "service_account_file": Use service account JSON file
             - "adc": Use Application Default Credentials
+            - "impersonation": Use service account impersonation
+        target_service_account: Target service account email for impersonation.
+            Required when auth_method is "impersonation".
         credentials: Pre-built credentials object (advanced usage).
             When provided, this takes precedence over other auth methods.
         extra: Provider-specific additional configuration.
@@ -60,6 +63,7 @@ class ProviderConfig:
     credentials_path: Optional[str] = None
     use_vertex_ai: bool = True
     auth_method: GoogleAuthMethod = "auto"
+    target_service_account: Optional[str] = None
     credentials: Optional[Any] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 

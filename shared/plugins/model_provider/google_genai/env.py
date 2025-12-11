@@ -16,7 +16,7 @@ import os
 from typing import Literal, Optional, Tuple
 
 # Auth method type
-AuthMethod = Literal["auto", "api_key", "service_account_file", "adc"]
+AuthMethod = Literal["auto", "api_key", "service_account_file", "adc", "impersonation"]
 
 # ============================================================
 # Environment Variable Names
@@ -30,6 +30,7 @@ ENV_GOOGLE_AUTH_METHOD = "JAATO_GOOGLE_AUTH_METHOD"
 ENV_GOOGLE_USE_VERTEX = "JAATO_GOOGLE_USE_VERTEX"
 ENV_GOOGLE_PROJECT = "JAATO_GOOGLE_PROJECT"
 ENV_GOOGLE_LOCATION = "JAATO_GOOGLE_LOCATION"
+ENV_GOOGLE_TARGET_SERVICE_ACCOUNT = "JAATO_GOOGLE_TARGET_SERVICE_ACCOUNT"
 
 # Google standard (industry convention)
 ENV_GOOGLE_API_KEY = "GOOGLE_GENAI_API_KEY"
@@ -70,18 +71,21 @@ def resolve_auth_method() -> AuthMethod:
     2. Infer from available credentials:
        - GOOGLE_GENAI_API_KEY present → api_key
        - GOOGLE_APPLICATION_CREDENTIALS present → service_account_file
+       - JAATO_GOOGLE_TARGET_SERVICE_ACCOUNT present → impersonation
        - Otherwise → auto (ADC)
 
     Returns:
         The resolved authentication method.
     """
     explicit = os.environ.get(ENV_GOOGLE_AUTH_METHOD, "").lower()
-    if explicit in ("api_key", "service_account_file", "adc", "auto"):
+    if explicit in ("api_key", "service_account_file", "adc", "auto", "impersonation"):
         return explicit  # type: ignore
 
     # Infer from available credentials
     if os.environ.get(ENV_GOOGLE_API_KEY):
         return "api_key"
+    if os.environ.get(ENV_GOOGLE_TARGET_SERVICE_ACCOUNT):
+        return "impersonation"
     if os.environ.get(ENV_GOOGLE_APP_CREDENTIALS):
         return "service_account_file"
 
@@ -164,6 +168,15 @@ def resolve_location() -> Optional[str]:
     )
 
 
+def resolve_target_service_account() -> Optional[str]:
+    """Resolve target service account for impersonation from environment.
+
+    Returns:
+        Target service account email if found, None otherwise.
+    """
+    return os.environ.get(ENV_GOOGLE_TARGET_SERVICE_ACCOUNT)
+
+
 def resolve_model_name() -> Optional[str]:
     """Resolve model name from environment.
 
@@ -193,7 +206,7 @@ def get_checked_credential_locations(auth_method: AuthMethod) -> list[str]:
         else:
             locations.append(f"{ENV_GOOGLE_API_KEY}: not set")
 
-    if auth_method in ("auto", "adc", "service_account_file"):
+    if auth_method in ("auto", "adc", "service_account_file", "impersonation"):
         creds_path = os.environ.get(ENV_GOOGLE_APP_CREDENTIALS)
         if creds_path:
             if os.path.exists(creds_path):
@@ -203,7 +216,7 @@ def get_checked_credential_locations(auth_method: AuthMethod) -> list[str]:
         else:
             locations.append(f"{ENV_GOOGLE_APP_CREDENTIALS}: not set")
 
-    if auth_method in ("auto", "adc"):
+    if auth_method in ("auto", "adc", "impersonation"):
         # Check default ADC locations
         adc_path = os.path.expanduser("~/.config/gcloud/application_default_credentials.json")
         if os.path.exists(adc_path):
@@ -213,6 +226,13 @@ def get_checked_credential_locations(auth_method: AuthMethod) -> list[str]:
 
         # Note about metadata server
         locations.append("GCE metadata server: checked at runtime by SDK")
+
+    if auth_method == "impersonation":
+        target_sa = os.environ.get(ENV_GOOGLE_TARGET_SERVICE_ACCOUNT)
+        if target_sa:
+            locations.append(f"{ENV_GOOGLE_TARGET_SERVICE_ACCOUNT}: {target_sa}")
+        else:
+            locations.append(f"{ENV_GOOGLE_TARGET_SERVICE_ACCOUNT}: not set")
 
     return locations
 
@@ -225,11 +245,12 @@ def load_google_config_from_env() -> Tuple[
     Optional[str],
     Optional[str],
     Optional[str],
+    Optional[str],
 ]:
     """Load all Google GenAI configuration from environment.
 
     Returns:
-        Tuple of (auth_method, use_vertex, api_key, credentials_path, project, location, model_name)
+        Tuple of (auth_method, use_vertex, api_key, credentials_path, project, location, model_name, target_service_account)
     """
     return (
         resolve_auth_method(),
@@ -239,4 +260,5 @@ def load_google_config_from_env() -> Tuple[
         resolve_project(),
         resolve_location(),
         resolve_model_name(),
+        resolve_target_service_account(),
     )
