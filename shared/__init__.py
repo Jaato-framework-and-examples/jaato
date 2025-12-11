@@ -17,8 +17,10 @@ from .token_accounting import TokenLedger, generate_with_ledger
 # Tool execution
 from .ai_tool_runner import ToolExecutor
 
-# Core client
+# Core client and runtime
 from .jaato_client import JaatoClient
+from .jaato_runtime import JaatoRuntime
+from .jaato_session import JaatoSession
 
 # Plugin system
 from .plugins.registry import PluginRegistry
@@ -54,8 +56,10 @@ __all__ = [
     "generate_with_ledger",
     # Tool execution
     "ToolExecutor",
-    # Core client
+    # Core client and runtime
     "JaatoClient",
+    "JaatoRuntime",
+    "JaatoSession",
     # Plugin system
     "PluginRegistry",
     "PermissionPlugin",
