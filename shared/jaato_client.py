@@ -147,14 +147,25 @@ class JaatoClient:
 
         return self._provider.list_models(prefix=prefix)
 
-    def connect(self, project: str, location: str, model: str) -> None:
+    def connect(
+        self,
+        project: Optional[str] = None,
+        location: Optional[str] = None,
+        model: Optional[str] = None
+    ) -> None:
         """Connect to the AI model provider.
 
+        For AI Studio (API key): Only model is required.
+        For Vertex AI: project, location, and model are all required.
+
         Args:
-            project: Cloud project ID (e.g., GCP project).
-            location: Provider region (e.g., 'us-central1', 'global').
-            model: Model name (e.g., 'gemini-2.0-flash').
+            project: Cloud project ID (required for Vertex AI).
+            location: Provider region (required for Vertex AI).
+            model: Model name (e.g., 'gemini-2.5-flash').
         """
+        if not model:
+            raise ValueError("model is required")
+
         # Load and initialize the provider
         config = ProviderConfig(project=project, location=location)
         self._provider = load_provider(self._provider_name, config)
