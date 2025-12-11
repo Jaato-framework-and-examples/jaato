@@ -4,6 +4,7 @@ Manages a ring buffer of output lines for display in the scrolling
 region of the TUI.
 """
 
+import textwrap
 from collections import deque
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -239,7 +240,14 @@ class OutputBuffer:
         """
         self._flush_current_block()
 
+        # If buffer is empty but spinner is active, show only spinner
         if not self._lines:
+            if self._spinner_active:
+                output = Text()
+                frame = self.SPINNER_FRAMES[self._spinner_index]
+                output.append(f"Model> {frame} ", style="bold cyan")
+                output.append("thinking...", style="dim italic")
+                return output
             return Text("Waiting for output...", style="dim italic")
 
         # Update width if provided
@@ -275,78 +283,134 @@ class OutputBuffer:
         else:
             lines_to_show = all_lines
 
-        # Build output text
+        # Build output text with wrapping
         output = Text()
+
+        # Calculate available width for content (accounting for prefixes)
+        wrap_width = self._console_width if self._console_width > 20 else 80
 
         for i, line in enumerate(lines_to_show):
             if i > 0:
                 output.append("\n")
 
+            # Wrap text to fit console width
+            def wrap_text(text: str, prefix_width: int = 0) -> List[str]:
+                """Wrap text to console width, accounting for prefix."""
+                available = max(20, wrap_width - prefix_width)
+                if len(text) <= available:
+                    return [text]
+                # Use textwrap for clean word-based wrapping
+                return textwrap.wrap(text, width=available, break_long_words=True, break_on_hyphens=False)
+
             if line.source == "system":
                 # System messages use their style directly
-                output.append(line.text, style=line.style)
+                wrapped = wrap_text(line.text)
+                for j, wrapped_line in enumerate(wrapped):
+                    if j > 0:
+                        output.append("\n")
+                    output.append(wrapped_line, style=line.style)
             elif line.source == "user":
                 # User input - show with You> prefix on turn start
-                if line.is_turn_start:
-                    output.append("You> ", style="bold green")
-                output.append(line.text)
+                prefix_width = 5 if line.is_turn_start else 0  # "You> " = 5 chars
+                wrapped = wrap_text(line.text, prefix_width)
+                for j, wrapped_line in enumerate(wrapped):
+                    if j > 0:
+                        output.append("\n")
+                    if j == 0 and line.is_turn_start:
+                        output.append("You> ", style="bold green")
+                    elif j > 0 and line.is_turn_start:
+                        output.append("     ")  # Indent continuation lines
+                    output.append(wrapped_line)
             elif line.source == "model":
                 # Model output - only show prefix on turn start
-                if line.is_turn_start:
-                    output.append("Model> ", style="bold cyan")
-                output.append(line.text)
+                prefix_width = 7 if line.is_turn_start else 0  # "Model> " = 7 chars
+                wrapped = wrap_text(line.text, prefix_width)
+                for j, wrapped_line in enumerate(wrapped):
+                    if j > 0:
+                        output.append("\n")
+                    if j == 0 and line.is_turn_start:
+                        output.append("Model> ", style="bold cyan")
+                    elif j > 0 and line.is_turn_start:
+                        output.append("       ")  # Indent continuation lines
+                    output.append(wrapped_line)
             elif line.source == "tool":
                 # Tool output
-                if line.is_turn_start:
-                    output.append(f"[{line.source}] ", style="dim yellow")
-                output.append(line.text, style="dim")
+                prefix_width = len(f"[{line.source}] ") if line.is_turn_start else 0
+                wrapped = wrap_text(line.text, prefix_width)
+                for j, wrapped_line in enumerate(wrapped):
+                    if j > 0:
+                        output.append("\n")
+                    if j == 0 and line.is_turn_start:
+                        output.append(f"[{line.source}] ", style="dim yellow")
+                    elif j > 0 and line.is_turn_start:
+                        output.append(" " * (len(f"[{line.source}] ")))  # Indent continuation
+                    output.append(wrapped_line, style="dim")
             elif line.source == "permission":
-                # Permission prompts - no prefix needed, they self-identify with [askPermission]
-                # Text may contain ANSI escape codes (e.g., for diff coloring)
-                # Use Text.from_ansi() to preserve them
+                # Permission prompts - wrap but preserve ANSI codes
                 text = line.text
                 if "[askPermission]" in text:
-                    # Color the label
                     text = text.replace("[askPermission]", "")
-                    output.append("[askPermission] ", style="bold yellow")
-                    output.append_text(Text.from_ansi(text))
-                elif "Options:" in text:
-                    # Highlight options line
-                    output.append_text(Text.from_ansi(text, style="cyan"))
-                elif text.startswith("===") or text.startswith("─") or text.startswith("="):
-                    # Separators
-                    output.append(text, style="dim")
+                    wrapped = wrap_text(text, 16)  # "[askPermission] " = 16 chars
+                    for j, wrapped_line in enumerate(wrapped):
+                        if j > 0:
+                            output.append("\n                ")  # Indent continuation
+                        if j == 0:
+                            output.append("[askPermission] ", style="bold yellow")
+                        output.append_text(Text.from_ansi(wrapped_line))
+                elif "Options:" in text or text.startswith(("===", "─", "=")) or "Enter choice" in text:
+                    # Special lines - wrap normally
+                    wrapped = wrap_text(text)
+                    for j, wrapped_line in enumerate(wrapped):
+                        if j > 0:
+                            output.append("\n")
+                        if "Options:" in text:
+                            output.append_text(Text.from_ansi(wrapped_line, style="cyan"))
+                        elif text.startswith(("===", "─", "=")):
+                            output.append(wrapped_line, style="dim")
+                        else:
+                            output.append_text(Text.from_ansi(wrapped_line, style="cyan"))
                 else:
-                    # Preserve any ANSI codes in the text (e.g., diff coloring)
-                    output.append_text(Text.from_ansi(text))
+                    # Preserve ANSI codes with wrapping
+                    wrapped = wrap_text(text)
+                    for j, wrapped_line in enumerate(wrapped):
+                        if j > 0:
+                            output.append("\n")
+                        output.append_text(Text.from_ansi(wrapped_line))
             elif line.source == "clarification":
-                # Clarification prompts - no prefix needed, they self-identify
-                # Text may contain ANSI escape codes, use Text.from_ansi() to preserve them
+                # Clarification prompts - wrap but preserve ANSI codes
                 text = line.text
-                if "Clarification Needed" in text:
-                    output.append_text(Text.from_ansi(text, style="bold cyan"))
-                elif text.startswith("===") or text.startswith("─") or text.startswith("="):
-                    # Separators
-                    output.append(text, style="dim")
-                elif "Enter choice" in text:
-                    output.append_text(Text.from_ansi(text, style="cyan"))
-                elif text.strip().startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.")):
-                    # Numbered options
-                    output.append_text(Text.from_ansi(text, style="cyan"))
-                elif "Question" in text and "/" in text:
-                    # Question counter like "Question 1/1"
-                    output.append_text(Text.from_ansi(text, style="bold"))
-                elif "[*required]" in text:
-                    text = text.replace("[*required]", "")
-                    output.append_text(Text.from_ansi(text))
-                    output.append("[*required]", style="yellow")
-                else:
-                    output.append_text(Text.from_ansi(text))
+                wrapped = wrap_text(text)
+                for j, wrapped_line in enumerate(wrapped):
+                    if j > 0:
+                        output.append("\n")
+                    if "Clarification Needed" in wrapped_line:
+                        output.append_text(Text.from_ansi(wrapped_line, style="bold cyan"))
+                    elif wrapped_line.startswith(("===", "─", "=")):
+                        output.append(wrapped_line, style="dim")
+                    elif "Enter choice" in wrapped_line:
+                        output.append_text(Text.from_ansi(wrapped_line, style="cyan"))
+                    elif wrapped_line.strip().startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.")):
+                        output.append_text(Text.from_ansi(wrapped_line, style="cyan"))
+                    elif "Question" in wrapped_line and "/" in wrapped_line:
+                        output.append_text(Text.from_ansi(wrapped_line, style="bold"))
+                    elif "[*required]" in wrapped_line:
+                        wrapped_line = wrapped_line.replace("[*required]", "")
+                        output.append_text(Text.from_ansi(wrapped_line))
+                        output.append("[*required]", style="yellow")
+                    else:
+                        output.append_text(Text.from_ansi(wrapped_line))
             else:
-                # Other plugin output - preserve any ANSI codes
-                if line.is_turn_start:
-                    output.append(f"[{line.source}] ", style="dim magenta")
-                output.append_text(Text.from_ansi(line.text))
+                # Other plugin output - wrap and preserve ANSI codes
+                prefix_width = len(f"[{line.source}] ") if line.is_turn_start else 0
+                wrapped = wrap_text(line.text, prefix_width)
+                for j, wrapped_line in enumerate(wrapped):
+                    if j > 0:
+                        output.append("\n")
+                    if j == 0 and line.is_turn_start:
+                        output.append(f"[{line.source}] ", style="dim magenta")
+                    elif j > 0 and line.is_turn_start:
+                        output.append(" " * (len(f"[{line.source}] ")))  # Indent continuation
+                    output.append_text(Text.from_ansi(wrapped_line))
 
         # Add spinner at the bottom if active
         if self._spinner_active:
