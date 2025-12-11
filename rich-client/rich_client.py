@@ -744,19 +744,6 @@ class RichClient:
             agent_registry=self._agent_registry
         )
 
-        # Create the main agent in the registry
-        from agent_icons import get_icon
-        main_icon = get_icon("main")
-        self._agent_registry.create_agent(
-            agent_id="main",
-            name="main",
-            agent_type="main",
-            profile_name=None,
-            parent_agent_id=None,
-            icon_lines=main_icon,
-            created_at=datetime.now()
-        )
-
         # Set model info in status bar
         self._display.set_model_info(self._model_provider, self._model_name)
 
@@ -765,6 +752,7 @@ class RichClient:
         self._setup_queue_channels()
 
         # Register UI hooks with jaato client and subagent plugin
+        # This will create the main agent in the registry via set_ui_hooks()
         self._setup_agent_hooks()
 
         # Load release name from file
