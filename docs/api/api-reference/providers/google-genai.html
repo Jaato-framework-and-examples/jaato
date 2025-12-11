@@ -205,6 +205,7 @@ client.connect(
           <p>
             Simplest authentication. Get a key from
             <a href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio</a>.
+            See the <a href="#api-key">API Key section</a> below for details.
           </p>
           <ul>
             <li>Free tier available</li>
@@ -289,6 +290,113 @@ provider.initialize(ProviderConfig(
     use_vertex_ai=True,
     auth_method="impersonation"
 ))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- API Key Deep Dive -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="api-key">Google AI Studio API Key Authentication</h2>
+          <p>
+            Authentication using a Google AI Studio API key is a simple, project-based identification method.
+            Unlike the robust, user-identity-focused methods of OAuth or the service account methods of ADC/impersonation,
+            the API key acts as a simple, long-lived secret token to link API calls to a specific Google Cloud project
+            for the purpose of billing and quota tracking.
+          </p>
+
+          <h3>Key Characteristics</h3>
+          <dl>
+            <dt><strong>Project Identification, Not User Identification</strong></dt>
+            <dd>
+              The API key identifies which project is making the API call, not who
+              (which specific user or service account) is making it.
+            </dd>
+            <dt><strong>Simple Mechanism</strong></dt>
+            <dd>
+              You include the API key directly in your API requests. The Google AI SDKs automate this
+              by looking for the <code>GOOGLE_GENAI_API_KEY</code> environment variable.
+            </dd>
+            <dt><strong>Ease of Use</strong></dt>
+            <dd>
+              It is the easiest form of authentication to set up, ideal for prototyping, testing, and
+              public applications. You can generate keys quickly in the
+              <a href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio dashboard</a>.
+            </dd>
+            <dt><strong>Limited Scope</strong></dt>
+            <dd>
+              API keys are generally used for accessing specific, project-bound AI services
+              (like the Generative Language API) but do not grant broad IAM permissions across
+              your entire Google Cloud environment.
+            </dd>
+          </dl>
+
+          <h3>Security Considerations</h3>
+          <p>
+            API keys are less secure than token-based methods because they are long-lived
+            and can be easily exposed if hardcoded in source code or client-side applications.
+          </p>
+          <ul>
+            <li>Treat API keys like passwords - never commit them to source control</li>
+            <li>Use environment variables or secret managers to store keys</li>
+            <li>Add API or IP address restrictions in the Google Cloud Console</li>
+            <li>Rotate keys periodically</li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Recommendation</div>
+            For production-level, enterprise applications that require robust security,
+            granular access control, and compliance features, use
+            <a href="#adc">Application Default Credentials (ADC)</a> or
+            <a href="#impersonation">service account impersonation</a> within Vertex AI.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Get your API key</div>
+          <div class="code-block">
+            <pre><code class="language-text">1. Go to https://aistudio.google.com/apikey
+2. Click "Create API Key"
+3. Copy the generated key
+4. Store securely (never commit to git)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Setup environment variable</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># In your .env file (add to .gitignore)
+GOOGLE_GENAI_API_KEY=AIza...your-api-key
+
+# Or export directly (session only)
+export GOOGLE_GENAI_API_KEY=AIza...your-api-key</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Use API key in code</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient, ProviderConfig
+
+client = JaatoClient()
+
+# Explicit API key config
+client.connect_with_config(ProviderConfig(
+    api_key="AIza...",  # or from env var
+    use_vertex_ai=False,
+    auth_method="api_key"
+), model="gemini-2.5-flash")
+
+# Or auto-detect from GOOGLE_GENAI_API_KEY env var
+client = JaatoClient()
+client.connect(model="gemini-2.5-flash")
+# Provider auto-detects API key from environment</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Rate limits</div>
+          <div class="code-block">
+            <pre><code class="language-text">Free tier limits (as of 2025):
+- 15 RPM (requests per minute)
+- 1,500 RPD (requests per day)
+- 1M TPM (tokens per minute)
+
+Some models (e.g., gemini-3-pro) are
+not available in the free tier.</code></pre>
           </div>
         </div>
       </section>
