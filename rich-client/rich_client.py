@@ -12,6 +12,7 @@ Requires an interactive TTY. For non-TTY environments, use simple-client.
 import os
 import sys
 import pathlib
+import tempfile
 import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
@@ -297,7 +298,8 @@ class RichClient:
     def _trace(self, msg: str) -> None:
         """Write trace message to file for debugging."""
         import datetime
-        with open("/tmp/rich_client_trace.log", "a") as f:
+        trace_path = os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        with open(trace_path, "a") as f:
             ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
             f.write(f"[{ts}] {msg}\n")
             f.flush()
