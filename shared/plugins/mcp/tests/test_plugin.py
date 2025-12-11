@@ -593,3 +593,176 @@ class TestMCPPluginRegistryLoading:
                 assert "Test" in registry["mcpServers"]
             finally:
                 os.chdir(old_cwd)
+
+
+class TestMCPPluginLogging:
+    """Tests for interaction logging."""
+
+    def test_log_event_adds_entry(self):
+        """Log event should add entry to log."""
+        from ..plugin import LOG_INFO
+        plugin = MCPToolPlugin()
+        plugin._log_event(LOG_INFO, "Test event", server="TestServer", details="Test details")
+
+        assert len(plugin._log) == 1
+        entry = plugin._log[0]
+        assert entry.level == LOG_INFO
+        assert entry.event == "Test event"
+        assert entry.server == "TestServer"
+        assert entry.details == "Test details"
+
+    def test_log_event_thread_safe(self):
+        """Log event should be thread-safe."""
+        from ..plugin import LOG_INFO
+        import threading
+
+        plugin = MCPToolPlugin()
+        threads = []
+
+        def log_events():
+            for i in range(100):
+                plugin._log_event(LOG_INFO, f"Event {i}")
+
+        # Create multiple threads
+        for _ in range(5):
+            t = threading.Thread(target=log_events)
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        # All 500 events should be logged
+        assert len(plugin._log) == 500
+
+    def test_log_entry_format(self):
+        """Log entry format should be readable."""
+        from ..plugin import LOG_INFO, LogEntry
+        from datetime import datetime
+
+        entry = LogEntry(
+            timestamp=datetime(2024, 1, 15, 10, 30, 45, 123456),
+            level=LOG_INFO,
+            server="TestServer",
+            event="Connection established",
+            details="3 tools discovered"
+        )
+
+        formatted = entry.format()
+        assert "10:30:45.123" in formatted
+        assert "[INFO]" in formatted
+        assert "[TestServer]" in formatted
+        assert "Connection established" in formatted
+        assert "3 tools discovered" in formatted
+
+    def test_log_entry_format_no_timestamp(self):
+        """Log entry format without timestamp."""
+        from ..plugin import LOG_INFO, LogEntry
+        from datetime import datetime
+
+        entry = LogEntry(
+            timestamp=datetime.now(),
+            level=LOG_INFO,
+            server=None,
+            event="Test event",
+            details=None
+        )
+
+        formatted = entry.format(include_timestamp=False)
+        assert "[INFO]" in formatted
+        assert "Test event" in formatted
+        assert ":" not in formatted.split("[INFO]")[0]  # No timestamp before level
+
+    def test_cmd_logs_empty(self):
+        """Logs command with no entries should return informative message."""
+        plugin = MCPToolPlugin()
+        result = plugin._cmd_logs('')
+
+        assert "No log entries" in result
+
+    def test_cmd_logs_with_entries(self):
+        """Logs command should display log entries."""
+        from ..plugin import LOG_INFO
+        plugin = MCPToolPlugin()
+        plugin._log_event(LOG_INFO, "Test event 1", server="Server1")
+        plugin._log_event(LOG_INFO, "Test event 2", server="Server2")
+
+        result = plugin._cmd_logs('')
+
+        assert "MCP Interaction Log" in result
+        assert "2 entries" in result
+        assert "Test event 1" in result
+        assert "Test event 2" in result
+
+    def test_cmd_logs_filter_by_server(self):
+        """Logs command should filter by server name."""
+        from ..plugin import LOG_INFO
+        plugin = MCPToolPlugin()
+        plugin._config_cache = {
+            'mcpServers': {
+                'Server1': {'command': 'test1'},
+                'Server2': {'command': 'test2'}
+            }
+        }
+        plugin._log_event(LOG_INFO, "Event for server 1", server="Server1")
+        plugin._log_event(LOG_INFO, "Event for server 2", server="Server2")
+        plugin._log_event(LOG_INFO, "Another event for server 1", server="Server1")
+
+        result = plugin._cmd_logs('Server1')
+
+        assert "Server1" in result
+        assert "Event for server 1" in result
+        assert "Another event for server 1" in result
+        assert "Event for server 2" not in result
+
+    def test_cmd_logs_filter_unknown_server(self):
+        """Logs command with unknown server should return error."""
+        from ..plugin import LOG_INFO
+        plugin = MCPToolPlugin()
+        plugin._config_cache = {'mcpServers': {'KnownServer': {'command': 'test'}}}
+        # Add a log entry so the function doesn't return early
+        plugin._log_event(LOG_INFO, "Some event", server="KnownServer")
+
+        result = plugin._cmd_logs('UnknownServer')
+
+        assert "Unknown server" in result
+
+    def test_cmd_logs_clear(self):
+        """Logs clear command should clear all entries."""
+        from ..plugin import LOG_INFO
+        plugin = MCPToolPlugin()
+        plugin._log_event(LOG_INFO, "Test event 1")
+        plugin._log_event(LOG_INFO, "Test event 2")
+
+        result = plugin._cmd_logs('clear')
+
+        assert "Cleared 2 log entries" in result
+        assert len(plugin._log) == 0
+
+    def test_logs_max_entries(self):
+        """Log should respect MAX_LOG_ENTRIES limit."""
+        from ..plugin import LOG_INFO, MAX_LOG_ENTRIES
+        plugin = MCPToolPlugin()
+
+        # Add more than max entries
+        for i in range(MAX_LOG_ENTRIES + 100):
+            plugin._log_event(LOG_INFO, f"Event {i}")
+
+        assert len(plugin._log) == MAX_LOG_ENTRIES
+
+    def test_logs_completions(self):
+        """Completions for logs should include clear and server names."""
+        plugin = MCPToolPlugin()
+        plugin._config_cache = {
+            'mcpServers': {
+                'Server1': {'command': 'test1'},
+                'Server2': {'command': 'test2'}
+            }
+        }
+
+        completions = plugin.get_command_completions('mcp', ['logs', ''])
+        values = [c.value for c in completions]
+
+        assert 'clear' in values
+        assert 'Server1' in values
+        assert 'Server2' in values

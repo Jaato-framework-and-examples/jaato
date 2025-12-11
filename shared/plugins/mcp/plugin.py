@@ -7,6 +7,9 @@ import queue
 import sys
 import threading
 import time
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional, Tuple
 
 from ..base import UserCommand, CommandParameter, CommandCompletion
@@ -20,6 +23,38 @@ MSG_SERVER_STATUS = 'server_status'
 MSG_CONNECT_SERVER = 'connect_server'
 MSG_DISCONNECT_SERVER = 'disconnect_server'
 MSG_RELOAD_CONFIG = 'reload_config'
+
+# Log entry levels
+LOG_INFO = 'INFO'
+LOG_DEBUG = 'DEBUG'
+LOG_ERROR = 'ERROR'
+LOG_WARN = 'WARN'
+
+# Maximum log entries to keep
+MAX_LOG_ENTRIES = 500
+
+
+@dataclass
+class LogEntry:
+    """A single log entry for MCP interactions."""
+    timestamp: datetime
+    level: str
+    server: Optional[str]
+    event: str
+    details: Optional[str] = None
+
+    def format(self, include_timestamp: bool = True) -> str:
+        """Format the log entry as a string."""
+        parts = []
+        if include_timestamp:
+            parts.append(self.timestamp.strftime('%H:%M:%S.%f')[:-3])
+        parts.append(f"[{self.level}]")
+        if self.server:
+            parts.append(f"[{self.server}]")
+        parts.append(self.event)
+        if self.details:
+            parts.append(f"- {self.details}")
+        return ' '.join(parts)
 
 
 class MCPToolPlugin:
@@ -45,6 +80,34 @@ class MCPToolPlugin:
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}  # server -> error message
+        # Interaction log
+        self._log: deque = deque(maxlen=MAX_LOG_ENTRIES)
+        self._log_lock = threading.Lock()
+
+    def _log_event(
+        self,
+        level: str,
+        event: str,
+        server: Optional[str] = None,
+        details: Optional[str] = None
+    ) -> None:
+        """Add an entry to the interaction log.
+
+        Args:
+            level: Log level (LOG_INFO, LOG_DEBUG, LOG_ERROR, LOG_WARN)
+            event: Brief description of the event
+            server: Optional server name this event relates to
+            details: Optional additional details
+        """
+        entry = LogEntry(
+            timestamp=datetime.now(),
+            level=level,
+            server=server,
+            event=event,
+            details=details
+        )
+        with self._log_lock:
+            self._log.append(entry)
 
     @property
     def name(self) -> str:
@@ -191,6 +254,7 @@ class MCPToolPlugin:
             CommandCompletion('connect', 'Connect to a configured server'),
             CommandCompletion('disconnect', 'Disconnect from a running server'),
             CommandCompletion('reload', 'Reload configuration from .mcp.json'),
+            CommandCompletion('logs', 'Show interaction logs'),
             CommandCompletion('help', 'Show help for MCP commands'),
         ]
 
@@ -232,6 +296,17 @@ class MCPToolPlugin:
                     completions.append(CommandCompletion(name, desc))
             return completions
 
+        if subcommand == 'logs':
+            # Logs subcommand completions: server names or 'clear'
+            partial = args[1].lower() if len(args) > 1 else ''
+            completions = [CommandCompletion('clear', 'Clear all logs')]
+            self._load_config_cache()
+            servers = self._config_cache.get('mcpServers', {})
+            for name in servers:
+                if name.lower().startswith(partial):
+                    completions.append(CommandCompletion(name, f'Show logs for {name}'))
+            return [c for c in completions if c.value.lower().startswith(partial)]
+
         return []
 
     def execute_user_command(
@@ -270,6 +345,8 @@ class MCPToolPlugin:
             return self._cmd_reload()
         elif subcommand == 'status':
             return self._cmd_status()
+        elif subcommand == 'logs':
+            return self._cmd_logs(rest)
         elif subcommand == 'help' or subcommand == '':
             return self._cmd_help()
         else:
@@ -287,12 +364,16 @@ class MCPToolPlugin:
   mcp connect <name>        - Connect to a configured but disconnected server
   mcp disconnect <name>     - Disconnect from a running server
   mcp reload                - Reload configuration from .mcp.json
+  mcp logs [server|clear]   - Show interaction logs (optionally filter by server)
 
 Examples:
   mcp add github /usr/bin/mcp-server-github stdio
   mcp show github
   mcp disconnect github
-  mcp connect github"""
+  mcp connect github
+  mcp logs                  - Show all logs
+  mcp logs GitHub           - Show logs for GitHub server only
+  mcp logs clear            - Clear all logs"""
 
     def _cmd_list(self) -> str:
         """List all configured MCP servers."""
@@ -554,6 +635,64 @@ Examples:
         except Exception as exc:
             return f"Error reloading configuration: {exc}"
 
+    def _cmd_logs(self, args_str: str) -> str:
+        """Show interaction logs, optionally filtered by server.
+
+        Args:
+            args_str: Optional server name to filter by, or 'clear' to clear logs.
+        """
+        arg = args_str.strip().lower() if args_str else ''
+
+        # Handle 'clear' command
+        if arg == 'clear':
+            with self._log_lock:
+                count = len(self._log)
+                self._log.clear()
+            return f"Cleared {count} log entries."
+
+        # Get logs, optionally filtered by server
+        with self._log_lock:
+            entries = list(self._log)
+
+        if not entries:
+            return "No log entries. Logs are recorded during server connections and tool calls."
+
+        # Filter by server if specified
+        filter_server = None
+        if arg:
+            # Check if it's a valid server name (case-insensitive match)
+            self._load_config_cache()
+            servers = self._config_cache.get('mcpServers', {})
+            for name in servers:
+                if name.lower() == arg:
+                    filter_server = name
+                    break
+            if not filter_server:
+                # Also check connected/failed servers
+                for name in list(self._connected_servers) + list(self._failed_servers.keys()):
+                    if name.lower() == arg:
+                        filter_server = name
+                        break
+            if not filter_server:
+                return f"Unknown server: {args_str.strip()}\nUse 'mcp logs' to see all logs or 'mcp list' to see available servers."
+
+        # Filter and format
+        if filter_server:
+            entries = [e for e in entries if e.server and e.server.lower() == filter_server.lower()]
+            if not entries:
+                return f"No log entries for server '{filter_server}'."
+
+        # Format output
+        lines = [f"MCP Interaction Log ({len(entries)} entries)"]
+        if filter_server:
+            lines[0] += f" for '{filter_server}'"
+        lines.append("-" * 60)
+
+        for entry in entries:
+            lines.append(entry.format())
+
+        return '\n'.join(lines)
+
     def _load_config_cache(self) -> None:
         """Load configuration into cache if not already loaded."""
         if self._config_cache:
@@ -673,8 +812,16 @@ Examples:
             self._ensure_mcp_patch()
             from shared.mcp_context_manager import MCPClientManager
 
+            self._log_event(LOG_INFO, "MCP plugin initializing")
+
             registry = self._load_mcp_registry()
             servers = registry.get('mcpServers', {})
+
+            if servers:
+                self._log_event(LOG_INFO, f"Found {len(servers)} server(s) in configuration",
+                              details=', '.join(servers.keys()))
+            else:
+                self._log_event(LOG_WARN, "No MCP servers configured")
 
             # Expand env vars
             def expand_env(env_dict):
@@ -689,19 +836,33 @@ Examples:
             # Helper to connect a single server
             async def connect_server(mgr: MCPClientManager, name: str, spec: dict) -> Tuple[bool, str]:
                 """Connect to a server and return (success, error_message)."""
+                cmd = spec.get('command', 'unknown')
+                args = spec.get('args', [])
+                self._log_event(LOG_INFO, "Connecting to server", server=name,
+                              details=f"command: {cmd} {' '.join(args)}")
                 try:
                     await mgr.connect(
                         name,
-                        spec.get('command'),
-                        spec.get('args', []),
+                        cmd,
+                        args,
                         expand_env(spec.get('env', {}))
                     )
                     self._connected_servers.add(name)
                     self._failed_servers.pop(name, None)
+
+                    # Log tool discovery
+                    conn = mgr.get_connection(name)
+                    tool_count = len(conn.tools)
+                    tool_names = [t.name for t in conn.tools[:10]]
+                    if tool_count > 10:
+                        tool_names.append(f"...and {tool_count - 10} more")
+                    self._log_event(LOG_INFO, f"Connected successfully, discovered {tool_count} tool(s)",
+                                  server=name, details=', '.join(tool_names) if tool_names else None)
                     return True, ''
                 except Exception as exc:
                     error_msg = str(exc)
                     self._failed_servers[name] = error_msg
+                    self._log_event(LOG_ERROR, "Connection failed", server=name, details=error_msg)
                     print(f"[MCPToolPlugin] Connection error for {name}: {exc}", file=sys.stderr)
                     return False, error_msg
 
@@ -718,15 +879,20 @@ Examples:
                 for name, spec in servers.items():
                     await connect_server(manager, name, spec)
 
-                # Cache tools
+                # Cache tools and log summary
                 update_tool_cache(manager)
                 self._manager = manager
+
+                total_tools = sum(len(tools) for tools in self._tool_cache.values())
+                self._log_event(LOG_INFO, f"Initialization complete: {len(self._connected_servers)} connected, "
+                              f"{len(self._failed_servers)} failed, {total_tools} total tools")
 
                 # Process requests from main thread
                 while True:
                     try:
                         req = self._request_queue.get(timeout=0.1)
                         if req is None or req == (None, None):  # Shutdown signal
+                            self._log_event(LOG_INFO, "Shutdown signal received")
                             break
 
                         msg_type, data = req
@@ -735,10 +901,25 @@ Examples:
                             # Tool execution request
                             toolname = data.get('toolname')
                             args = data.get('args', {})
+                            # Find which server provides this tool
+                            server_name = None
+                            for sname, tools in self._tool_cache.items():
+                                if any(t.name == toolname for t in tools):
+                                    server_name = sname
+                                    break
+                            self._log_event(LOG_DEBUG, f"Calling tool: {toolname}", server=server_name,
+                                          details=f"args: {json.dumps(args, default=str)[:200]}")
                             try:
                                 res = await manager.call_tool_auto(toolname, args)
+                                is_error = getattr(res, 'isError', False)
+                                if is_error:
+                                    self._log_event(LOG_WARN, f"Tool returned error: {toolname}", server=server_name)
+                                else:
+                                    self._log_event(LOG_DEBUG, f"Tool completed: {toolname}", server=server_name)
                                 self._response_queue.put(('ok', res))
                             except Exception as exc:
+                                self._log_event(LOG_ERROR, f"Tool execution failed: {toolname}", server=server_name,
+                                              details=str(exc))
                                 self._response_queue.put(('error', str(exc)))
 
                         elif msg_type == MSG_CONNECT_SERVER:
@@ -762,12 +943,15 @@ Examples:
                         elif msg_type == MSG_DISCONNECT_SERVER:
                             # Disconnect from a specific server
                             name = data.get('name')
+                            self._log_event(LOG_INFO, "Disconnecting from server", server=name)
                             try:
                                 await manager.disconnect(name)
                                 self._connected_servers.discard(name)
                                 update_tool_cache(manager)
+                                self._log_event(LOG_INFO, "Disconnected successfully", server=name)
                                 self._response_queue.put(('ok', {}))
                             except Exception as exc:
+                                self._log_event(LOG_ERROR, "Disconnect failed", server=name, details=str(exc))
                                 self._response_queue.put(('error', str(exc)))
 
                         elif msg_type == MSG_RELOAD_CONFIG:
@@ -776,12 +960,19 @@ Examples:
                             connected = []
                             failed = {}
 
+                            self._log_event(LOG_INFO, f"Reloading configuration with {len(new_servers)} server(s)")
+
                             # Disconnect all current servers
-                            for name in list(manager.servers):
+                            current_servers = list(manager.servers)
+                            if current_servers:
+                                self._log_event(LOG_INFO, f"Disconnecting {len(current_servers)} current server(s)")
+                            for name in current_servers:
                                 try:
+                                    self._log_event(LOG_DEBUG, "Disconnecting for reload", server=name)
                                     await manager.disconnect(name)
-                                except Exception:
-                                    pass
+                                except Exception as exc:
+                                    self._log_event(LOG_WARN, "Disconnect during reload failed", server=name,
+                                                  details=str(exc))
                             self._connected_servers.clear()
                             self._failed_servers.clear()
 
@@ -794,6 +985,10 @@ Examples:
                                     failed[name] = error
 
                             update_tool_cache(manager)
+                            total_tools = sum(len(tools) for tools in self._tool_cache.values())
+                            self._log_event(LOG_INFO, f"Reload complete: {len(connected)} connected, "
+                                          f"{len(failed)} failed, {total_tools} total tools")
+
                             self._response_queue.put(('ok', {
                                 'connected': connected,
                                 'failed': failed,
