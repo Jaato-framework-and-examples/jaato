@@ -28,9 +28,11 @@ from rich.console import Console
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from input_handler import InputHandler
+    from agent_registry import AgentRegistry
 
 from plan_panel import PlanPanel
 from output_buffer import OutputBuffer
+from agent_panel import AgentPanel
 
 
 class RichRenderer:
@@ -71,19 +73,38 @@ class PTDisplay:
     prompt_toolkit's FormattedTextControl using ANSI() wrapper.
     """
 
-    def __init__(self, input_handler: Optional["InputHandler"] = None):
+    # Panel width ratios when agent panel is visible
+    OUTPUT_PANEL_WIDTH_RATIO = 0.8  # 80% for output
+    AGENT_PANEL_WIDTH_RATIO = 0.2   # 20% for agents
+
+    def __init__(self, input_handler: Optional["InputHandler"] = None, agent_registry: Optional["AgentRegistry"] = None):
         """Initialize the display.
 
         Args:
             input_handler: Optional InputHandler for completion support.
                           If provided, enables tab completion for commands and files.
+            agent_registry: Optional AgentRegistry for agent visibility panel.
+                          If provided, enables the agent panel (AGENT_PANEL_WIDTH_RATIO width).
         """
         self._width, self._height = shutil.get_terminal_size()
+
+        # Agent registry and panel
+        self._agent_registry = agent_registry
+        self._agent_panel: Optional[AgentPanel] = None
+        if agent_registry:
+            self._agent_panel = AgentPanel(agent_registry)
+            # Set initial agent panel width
+            agent_width = int(self._width * self.AGENT_PANEL_WIDTH_RATIO) - 2
+            self._agent_panel.set_width(agent_width)
+
+        # Calculate output width based on whether agent panel is present
+        output_width_ratio = self.OUTPUT_PANEL_WIDTH_RATIO if self._agent_panel else 1.0
+        output_width = int(self._width * output_width_ratio) - 4
 
         # Rich components
         self._plan_panel = PlanPanel()
         self._output_buffer = OutputBuffer()
-        self._output_buffer.set_width(self._width - 4)
+        self._output_buffer.set_width(output_width)
 
         # Rich renderer
         self._renderer = RichRenderer(self._width)
@@ -123,7 +144,17 @@ class PTDisplay:
         if new_width != self._width or new_height != self._height:
             self._width = new_width
             self._height = new_height
-            self._output_buffer.set_width(self._width - 4)
+
+            # Update output buffer width (OUTPUT_PANEL_WIDTH_RATIO if agent panel present, 100% otherwise)
+            output_width_ratio = self.OUTPUT_PANEL_WIDTH_RATIO if self._agent_panel else 1.0
+            output_width = int(self._width * output_width_ratio) - 4
+            self._output_buffer.set_width(output_width)
+
+            # Update agent panel width if present
+            if self._agent_panel:
+                agent_width = int(self._width * self.AGENT_PANEL_WIDTH_RATIO) - 2
+                self._agent_panel.set_width(agent_width)
+
             self._renderer.set_width(self._width)
             return True
         return False
@@ -134,11 +165,22 @@ class PTDisplay:
 
     def _get_status_bar_content(self):
         """Get status bar content as formatted text."""
+        # Agent name (FIRST field, from selected agent if registry present)
+        if self._agent_registry:
+            agent_name = self._agent_registry.get_selected_agent_name()
+        else:
+            agent_name = "main"
+
         provider = self._model_provider or "—"
         model = self._model_name or "—"
 
         # Build context usage display (show percentage available)
-        usage = self._context_usage
+        # Use selected agent's context if registry present
+        if self._agent_registry:
+            usage = self._agent_registry.get_selected_context_usage()
+        else:
+            usage = self._context_usage
+
         if usage:
             percent_used = usage.get('percent_used', 0)
             percent_available = 100 - percent_used
@@ -152,9 +194,12 @@ class PTDisplay:
             context_str = "100% available"
 
         # Build formatted text with columns
-        # Provider | Model | Context
+        # Agent | Provider | Model | Context
         return [
-            ("class:status-bar.label", " Provider: "),
+            ("class:status-bar.label", " Agent: "),
+            ("class:status-bar.value", agent_name),
+            ("class:status-bar.separator", "  │  "),
+            ("class:status-bar.label", "Provider: "),
             ("class:status-bar.value", provider),
             ("class:status-bar.separator", "  │  "),
             ("class:status-bar.label", "Model: "),
@@ -187,18 +232,46 @@ class PTDisplay:
         # Check for terminal resize and update dimensions if needed
         self._update_dimensions()
 
-        self._output_buffer._flush_current_block()
+        # Use selected agent's buffer if registry present, otherwise use default
+        if self._agent_registry:
+            output_buffer = self._agent_registry.get_selected_buffer()
+            if not output_buffer:
+                output_buffer = self._output_buffer
+        else:
+            output_buffer = self._output_buffer
+
+        output_buffer._flush_current_block()
 
         # Calculate available height for output
         available_height = self._height - 2  # minus input row and status bar
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
 
-        # Render output panel
-        panel = self._output_buffer.render_panel(
+        # Calculate width (OUTPUT_PANEL_WIDTH_RATIO if agent panel present)
+        output_width_ratio = self.OUTPUT_PANEL_WIDTH_RATIO if self._agent_panel else 1.0
+        panel_width = int(self._width * output_width_ratio)
+
+        # Render output panel with correct width for word wrapping
+        panel = output_buffer.render_panel(
             height=available_height,
-            width=self._width,
+            width=panel_width,
         )
+        # Use full-width renderer - Panel's width parameter handles sizing
+        return to_formatted_text(ANSI(self._renderer.render(panel)))
+
+    def _get_agent_panel_content(self):
+        """Get rendered agent panel content as ANSI for prompt_toolkit."""
+        if not self._agent_panel:
+            return to_formatted_text(ANSI(""))
+
+        # Calculate available height for agent panel
+        available_height = self._height - 2  # minus input row and status bar
+        if self._plan_panel.has_plan:
+            available_height -= self._plan_height
+
+        # Render agent panel (width is set on AgentPanel instance)
+        panel = self._agent_panel.render(available_height)
+        # Use full-width renderer - Panel's width parameter handles sizing
         return to_formatted_text(ANSI(self._renderer.render(panel)))
 
     def _build_app(self) -> None:
@@ -247,27 +320,60 @@ class PTDisplay:
         @kb.add("pageup")
         def handle_page_up(event):
             """Handle Page-Up - scroll output up."""
-            self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
+            # Use selected agent's buffer if registry present
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.scroll_up(lines=self._get_scroll_page_size())
+                else:
+                    self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
+            else:
+                self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
             self._app.invalidate()
 
         @kb.add("pagedown")
         def handle_page_down(event):
             """Handle Page-Down - scroll output down."""
-            self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
+            # Use selected agent's buffer if registry present
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.scroll_down(lines=self._get_scroll_page_size())
+                else:
+                    self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
+            else:
+                self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
             self._app.invalidate()
 
         @kb.add("home")
         def handle_home(event):
             """Handle Home - scroll to top of output."""
-            # Scroll up by a large amount to reach the top
-            total_lines = sum(line.display_lines for line in self._output_buffer._lines)
-            self._output_buffer.scroll_up(lines=total_lines)
+            # Use selected agent's buffer if registry present
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    total_lines = sum(line.display_lines for line in buffer._lines)
+                    buffer.scroll_up(lines=total_lines)
+                else:
+                    total_lines = sum(line.display_lines for line in self._output_buffer._lines)
+                    self._output_buffer.scroll_up(lines=total_lines)
+            else:
+                total_lines = sum(line.display_lines for line in self._output_buffer._lines)
+                self._output_buffer.scroll_up(lines=total_lines)
             self._app.invalidate()
 
         @kb.add("end")
         def handle_end(event):
             """Handle End - scroll to bottom of output."""
-            self._output_buffer.scroll_to_bottom()
+            # Use selected agent's buffer if registry present
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.scroll_to_bottom()
+                else:
+                    self._output_buffer.scroll_to_bottom()
+            else:
+                self._output_buffer.scroll_to_bottom()
             self._app.invalidate()
 
         @kb.add("up")
@@ -292,6 +398,13 @@ class PTDisplay:
             """Handle Ctrl+F1 - toggle plan panel visibility."""
             if self._plan_panel.has_plan:
                 self._plan_panel.toggle_hidden()
+                self._app.invalidate()
+
+        @kb.add("f2")
+        def handle_f2(event):
+            """Handle F2 - cycle through agents."""
+            if self._agent_registry:
+                self._agent_registry.cycle_selection()
                 self._app.invalidate()
 
         # Status bar at top (always visible, 1 line)
@@ -321,6 +434,23 @@ class PTDisplay:
             FormattedTextControl(self._get_output_content),
             wrap_lines=False,
         )
+
+        # Agent panel (conditional - only if agent_registry present)
+        agent_window = Window(
+            FormattedTextControl(self._get_agent_panel_content),
+            wrap_lines=False,
+        )
+
+        # Combine output and agent panels (OUTPUT_PANEL_WIDTH_RATIO/AGENT_PANEL_WIDTH_RATIO split if agent panel present)
+        if self._agent_panel:
+            # VSplit: output (OUTPUT_PANEL_WIDTH_RATIO) on left, agent panel (AGENT_PANEL_WIDTH_RATIO) on right
+            content_area = VSplit([
+                output_window,
+                agent_window,
+            ])
+        else:
+            # No agent panel - just output
+            content_area = output_window
 
         # Input prompt label - changes based on mode (pager, waiting for channel, normal)
         def get_prompt_text():
@@ -354,7 +484,7 @@ class PTDisplay:
             content=HSplit([
                 status_bar,
                 plan_window,
-                output_window,
+                content_area,  # Output panel (or VSplit with output + agent panel)
                 input_row,
             ]),
             floats=[
@@ -480,21 +610,45 @@ class PTDisplay:
 
     def append_output(self, source: str, text: str, mode: str) -> None:
         """Append output to the scrolling panel."""
-        self._output_buffer.append(source, text, mode)
+        # Use selected agent's buffer if registry present, otherwise use default
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if not buffer:
+                buffer = self._output_buffer
+        else:
+            buffer = self._output_buffer
+
+        buffer.append(source, text, mode)
         # Auto-scroll to bottom when new output arrives
-        self._output_buffer.scroll_to_bottom()
+        buffer.scroll_to_bottom()
         self.refresh()
 
     def add_system_message(self, message: str, style: str = "dim") -> None:
         """Add a system message to the output."""
-        self._output_buffer.add_system_message(message, style)
+        # Use selected agent's buffer if registry present, otherwise use default
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if not buffer:
+                buffer = self._output_buffer
+        else:
+            buffer = self._output_buffer
+
+        buffer.add_system_message(message, style)
         # Auto-scroll to bottom when new output arrives
-        self._output_buffer.scroll_to_bottom()
+        buffer.scroll_to_bottom()
         self.refresh()
 
     def clear_output(self) -> None:
         """Clear the output buffer."""
-        self._output_buffer.clear()
+        # Use selected agent's buffer if registry present
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if buffer:
+                buffer.clear()
+            else:
+                self._output_buffer.clear()
+        else:
+            self._output_buffer.clear()
         self.refresh()
 
     def add_to_history(self, text: str) -> None:
@@ -547,15 +701,23 @@ class PTDisplay:
             # Account for panel borders
             page_size = max(5, available - 4)
 
+        # Use selected agent's buffer if registry present
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if not buffer:
+                buffer = self._output_buffer
+        else:
+            buffer = self._output_buffer
+
         # Check if pagination is needed
         if len(lines) <= page_size:
             # No pagination needed - just display all lines
             for text, style in lines:
-                self._output_buffer.add_system_message(text, style)
-            self._output_buffer.add_system_message("", style="dim")  # Trailing blank
+                buffer.add_system_message(text, style)
+            buffer.add_system_message("", style="dim")  # Trailing blank
             self.refresh()
         else:
-            # Start pager mode
+            # Start pager mode (note: pager still uses self._output_buffer for now)
             self._start_pager(lines, page_size)
 
     def _start_pager(self, lines: list, page_size: int) -> None:
@@ -585,8 +747,16 @@ class PTDisplay:
         total_pages = (total_lines + page_size - 1) // page_size
         page_num = (current // page_size) + 1
 
+        # Use selected agent's buffer if registry present
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if not buffer:
+                buffer = self._output_buffer
+        else:
+            buffer = self._output_buffer
+
         # Clear output for fresh page
-        self._output_buffer.clear()
+        buffer.clear()
 
         # Calculate what to show
         end_line = min(current + page_size, total_lines)
@@ -601,17 +771,17 @@ class PTDisplay:
             # Start from earlier in the content
             start_line = max(0, current - backfill_count)
             for text, style in lines[start_line:current]:
-                self._output_buffer.add_system_message(text, style)
+                buffer.add_system_message(text, style)
             # Add a separator to show where new content starts
-            self._output_buffer.add_system_message("─" * 40, style="dim")
+            buffer.add_system_message("─" * 40, style="dim")
 
         # Show current page content
         for text, style in lines[current:end_line]:
-            self._output_buffer.add_system_message(text, style)
+            buffer.add_system_message(text, style)
 
         # Show pagination status if not last page
         if not is_last_page:
-            self._output_buffer.add_system_message(
+            buffer.add_system_message(
                 f"── Page {page_num}/{total_pages} ── Press Enter for more, 'q' to quit ──",
                 style="bold cyan"
             )
@@ -661,7 +831,16 @@ class PTDisplay:
 
         Thread-safe: can be called from background threads.
         """
-        self._output_buffer.start_spinner()
+        # Use selected agent's buffer if registry present
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if buffer:
+                buffer.start_spinner()
+            else:
+                self._output_buffer.start_spinner()
+        else:
+            self._output_buffer.start_spinner()
+
         self._spinner_timer_active = True
         # Schedule spinner advance in main event loop (thread-safe)
         if self._app and self._app.is_running:
@@ -672,14 +851,34 @@ class PTDisplay:
     def stop_spinner(self) -> None:
         """Stop the spinner animation."""
         self._spinner_timer_active = False
-        self._output_buffer.stop_spinner()
+
+        # Use selected agent's buffer if registry present
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if buffer:
+                buffer.stop_spinner()
+            else:
+                self._output_buffer.stop_spinner()
+        else:
+            self._output_buffer.stop_spinner()
+
         self.refresh()
 
     def _advance_spinner(self) -> None:
         """Advance spinner animation frame."""
         if not self._spinner_timer_active:
             return
-        self._output_buffer.advance_spinner()
+
+        # Use selected agent's buffer if registry present
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if buffer:
+                buffer.advance_spinner()
+            else:
+                self._output_buffer.advance_spinner()
+        else:
+            self._output_buffer.advance_spinner()
+
         self.refresh()
         # Schedule next frame using prompt_toolkit's call_later
         if self._app and self._app.is_running:
