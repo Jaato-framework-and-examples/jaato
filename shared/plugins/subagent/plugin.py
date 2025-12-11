@@ -261,9 +261,11 @@ class SubagentPlugin:
             ToolSchema(
                 name='close_subagent',
                 description=(
-                    'Explicitly close an active subagent session to free resources. '
-                    'Sessions are automatically cleaned up after inactivity or max turns, '
-                    'but you can close them earlier when the task is complete.'
+                    'Close an active subagent session when the task is complete. '
+                    'IMPORTANT: Use this IMMEDIATELY after a subagent reports task completion '
+                    'to free resources and prevent wasting turns. While sessions auto-close '
+                    'after max_turns, explicit closure is the preferred pattern to ensure '
+                    'efficient resource usage.'
                 ),
                 parameters={
                     "type": "object",
@@ -327,8 +329,13 @@ class SubagentPlugin:
                 "IMPORTANT: Subagents support multi-turn conversations. When spawn_subagent "
                 "returns an agent_id, you can send follow-up messages using continue_subagent "
                 "instead of spawning a new subagent. This preserves context and avoids "
-                "redundant initialization. Use list_active_subagents to see available sessions. "
-                "Sessions auto-close after max_turns or can be closed manually with close_subagent."
+                "redundant initialization. Use list_active_subagents to see available sessions.\n\n"
+                "Subagent Lifecycle Management:\n"
+                "- When a subagent reports it has completed its task, IMMEDIATELY use close_subagent "
+                "to free resources and end the session.\n"
+                "- Sessions auto-close after max_turns, but explicit closure is preferred to avoid "
+                "wasting turns.\n"
+                "- Only keep sessions active if you expect to send more follow-up instructions."
             )
 
         profile_descriptions = []
@@ -349,8 +356,13 @@ class SubagentPlugin:
             "IMPORTANT: Subagents support multi-turn conversations. When spawn_subagent "
             "returns an agent_id, you can send follow-up messages using continue_subagent "
             "instead of spawning a new subagent. This preserves context and avoids "
-            "redundant initialization. Use list_active_subagents to see available sessions. "
-            "Sessions auto-close after max_turns or can be closed manually with close_subagent."
+            "redundant initialization. Use list_active_subagents to see available sessions.\n\n"
+            "Subagent Lifecycle Management:\n"
+            "- When a subagent reports it has completed its task, IMMEDIATELY use close_subagent "
+            "to free resources and end the session.\n"
+            "- Sessions auto-close after max_turns, but explicit closure is preferred to avoid "
+            "wasting turns.\n"
+            "- Only keep sessions active if you expect to send more follow-up instructions."
         )
 
     def get_auto_approved_tools(self) -> List[str]:
