@@ -842,11 +842,15 @@ Examples:
                 self._log_event(LOG_INFO, "Connecting to server", server=name,
                               details=f"command: {cmd} {args_str}".strip())
                 try:
-                    await mgr.connect(
-                        name,
-                        cmd,
-                        args,
-                        expand_env(spec.get('env', {}))
+                    # Add timeout to prevent hanging on unresponsive servers
+                    await asyncio.wait_for(
+                        mgr.connect(
+                            name,
+                            cmd,
+                            args,
+                            expand_env(spec.get('env', {}))
+                        ),
+                        timeout=15.0  # 15 second timeout per server
                     )
                     self._connected_servers.add(name)
                     self._failed_servers.pop(name, None)
@@ -860,6 +864,12 @@ Examples:
                     self._log_event(LOG_INFO, f"Connected successfully, discovered {tool_count} tool(s)",
                                   server=name, details=', '.join(tool_names) if tool_names else None)
                     return True, ''
+                except asyncio.TimeoutError:
+                    error_msg = "Connection timed out (15s)"
+                    self._failed_servers[name] = error_msg
+                    self._log_event(LOG_ERROR, "Connection timed out", server=name, details="Server did not respond within 15 seconds")
+                    print(f"[MCPToolPlugin] Connection timeout for {name}", file=sys.stderr)
+                    return False, error_msg
                 except Exception as exc:
                     error_msg = str(exc)
                     self._failed_servers[name] = error_msg
