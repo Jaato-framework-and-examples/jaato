@@ -284,24 +284,37 @@
 
     console.log('[getBasePath] pathname:', path);
 
-    // Remove filename from path to get directory
-    var dir = path.substring(0, path.lastIndexOf('/'));
+    // Find the /api/ directory in the path - this is our base
+    var apiIndex = path.indexOf('/api/');
+    if (apiIndex === -1) {
+      // Fallback: not in expected structure
+      console.warn('[getBasePath] /api/ not found in path, using root');
+      return './';
+    }
 
-    console.log('[getBasePath] directory:', dir);
+    // Get the path after /api/
+    var pathAfterApi = path.substring(apiIndex + 5); // +5 for '/api/'
 
-    // Count directory depth (number of slashes after removing leading slash)
-    var cleanDir = dir.replace(/^\//, ''); // Remove leading slash
-    var depth = cleanDir === '' ? 0 : (cleanDir.match(/\//g) || []).length + 1;
+    console.log('[getBasePath] pathAfterApi:', pathAfterApi);
 
-    console.log('[getBasePath] cleanDir:', cleanDir, 'depth:', depth);
+    // Remove filename to get directory path after /api/
+    var lastSlash = pathAfterApi.lastIndexOf('/');
+    var dirAfterApi = lastSlash > 0 ? pathAfterApi.substring(0, lastSlash) : '';
 
-    // If at root (index.html), no traversal needed
+    console.log('[getBasePath] dirAfterApi:', dirAfterApi);
+
+    // Count depth (number of directory levels after /api/)
+    var depth = dirAfterApi === '' ? 0 : (dirAfterApi.match(/\//g) || []).length + 1;
+
+    console.log('[getBasePath] depth:', depth);
+
+    // If at root of /api/, no traversal needed
     if (depth === 0) {
       console.log('[getBasePath] returning: ./');
       return './';
     }
 
-    // Build relative path to go up to root
+    // Build relative path to go up to /api/ root
     var base = '';
     for (var i = 0; i < depth; i++) {
       base += '../';
