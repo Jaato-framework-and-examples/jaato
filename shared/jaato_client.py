@@ -225,21 +225,12 @@ class JaatoClient:
                 permission_plugin.add_whitelist_tools(auto_approved)
 
         # Build tool schemas list (provider-agnostic)
+        # Note: permission plugin schemas come from registry if exposed there
         all_schemas = registry.get_exposed_tool_schemas()
-        if permission_plugin:
-            all_schemas.extend(permission_plugin.get_tool_schemas())
         self._tools = all_schemas if all_schemas else None
 
-        # Collect system instructions
-        parts = []
-        registry_instructions = registry.get_system_instructions()
-        if registry_instructions:
-            parts.append(registry_instructions)
-        if permission_plugin:
-            perm_instructions = permission_plugin.get_system_instructions()
-            if perm_instructions:
-                parts.append(perm_instructions)
-        self._system_instruction = "\n\n".join(parts) if parts else None
+        # Collect system instructions from registry (includes permission if exposed)
+        self._system_instruction = registry.get_system_instructions()
 
         # Store user commands for execute_user_command()
         self._user_commands = {}
