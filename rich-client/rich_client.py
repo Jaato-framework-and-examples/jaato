@@ -406,6 +406,17 @@ class RichClient:
 
             def on_agent_status_changed(self, agent_id, status, error=None):
                 registry.update_status(agent_id, status)
+                # Start/stop spinner for this agent's buffer based on status
+                buffer = registry.get_buffer(agent_id)
+                if buffer:
+                    if status == "active":
+                        buffer.start_spinner()
+                        if display:
+                            display.refresh()
+                    elif status in ("done", "error"):
+                        buffer.stop_spinner()
+                        if display:
+                            display.refresh()
 
             def on_agent_completed(self, agent_id, completed_at, success,
                                   token_usage=None, turns_used=None):
@@ -731,6 +742,19 @@ class RichClient:
         self._display = PTDisplay(
             input_handler=self._input_handler,
             agent_registry=self._agent_registry
+        )
+
+        # Create the main agent in the registry
+        from agent_icons import get_icon_for_agent
+        main_icon = get_icon_for_agent("main", icon_name="robot")
+        self._agent_registry.create_agent(
+            agent_id="main",
+            name="main",
+            agent_type="main",
+            profile_name=None,
+            parent_agent_id=None,
+            icon_lines=main_icon,
+            created_at=datetime.now()
         )
 
         # Set model info in status bar
