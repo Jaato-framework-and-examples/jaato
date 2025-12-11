@@ -121,12 +121,14 @@ class SubagentResult:
         turns_used: Number of conversation turns used.
         error: Error message if success is False.
         token_usage: Token usage statistics if available.
+        agent_id: ID of the subagent session (for multi-turn conversations).
     """
     success: bool
     response: str
     turns_used: int = 0
     error: Optional[str] = None
     token_usage: Optional[Dict[str, int]] = None
+    agent_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for tool response."""
@@ -139,4 +141,6 @@ class SubagentResult:
             result['error'] = self.error
         if self.token_usage:
             result['token_usage'] = self.token_usage
+        if self.agent_id:
+            result['agent_id'] = self.agent_id
         return result
