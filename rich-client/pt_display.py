@@ -320,27 +320,60 @@ class PTDisplay:
         @kb.add("pageup")
         def handle_page_up(event):
             """Handle Page-Up - scroll output up."""
-            self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
+            # Use selected agent's buffer if registry present
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.scroll_up(lines=self._get_scroll_page_size())
+                else:
+                    self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
+            else:
+                self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
             self._app.invalidate()
 
         @kb.add("pagedown")
         def handle_page_down(event):
             """Handle Page-Down - scroll output down."""
-            self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
+            # Use selected agent's buffer if registry present
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.scroll_down(lines=self._get_scroll_page_size())
+                else:
+                    self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
+            else:
+                self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
             self._app.invalidate()
 
         @kb.add("home")
         def handle_home(event):
             """Handle Home - scroll to top of output."""
-            # Scroll up by a large amount to reach the top
-            total_lines = sum(line.display_lines for line in self._output_buffer._lines)
-            self._output_buffer.scroll_up(lines=total_lines)
+            # Use selected agent's buffer if registry present
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    total_lines = sum(line.display_lines for line in buffer._lines)
+                    buffer.scroll_up(lines=total_lines)
+                else:
+                    total_lines = sum(line.display_lines for line in self._output_buffer._lines)
+                    self._output_buffer.scroll_up(lines=total_lines)
+            else:
+                total_lines = sum(line.display_lines for line in self._output_buffer._lines)
+                self._output_buffer.scroll_up(lines=total_lines)
             self._app.invalidate()
 
         @kb.add("end")
         def handle_end(event):
             """Handle End - scroll to bottom of output."""
-            self._output_buffer.scroll_to_bottom()
+            # Use selected agent's buffer if registry present
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.scroll_to_bottom()
+                else:
+                    self._output_buffer.scroll_to_bottom()
+            else:
+                self._output_buffer.scroll_to_bottom()
             self._app.invalidate()
 
         @kb.add("up")
@@ -774,7 +807,16 @@ class PTDisplay:
 
         Thread-safe: can be called from background threads.
         """
-        self._output_buffer.start_spinner()
+        # Use selected agent's buffer if registry present
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if buffer:
+                buffer.start_spinner()
+            else:
+                self._output_buffer.start_spinner()
+        else:
+            self._output_buffer.start_spinner()
+
         self._spinner_timer_active = True
         # Schedule spinner advance in main event loop (thread-safe)
         if self._app and self._app.is_running:
@@ -785,14 +827,34 @@ class PTDisplay:
     def stop_spinner(self) -> None:
         """Stop the spinner animation."""
         self._spinner_timer_active = False
-        self._output_buffer.stop_spinner()
+
+        # Use selected agent's buffer if registry present
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if buffer:
+                buffer.stop_spinner()
+            else:
+                self._output_buffer.stop_spinner()
+        else:
+            self._output_buffer.stop_spinner()
+
         self.refresh()
 
     def _advance_spinner(self) -> None:
         """Advance spinner animation frame."""
         if not self._spinner_timer_active:
             return
-        self._output_buffer.advance_spinner()
+
+        # Use selected agent's buffer if registry present
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if buffer:
+                buffer.advance_spinner()
+            else:
+                self._output_buffer.advance_spinner()
+        else:
+            self._output_buffer.advance_spinner()
+
         self.refresh()
         # Schedule next frame using prompt_toolkit's call_later
         if self._app and self._app.is_running:
