@@ -12,36 +12,49 @@ This document describes the architecture of the jaato framework and how a generi
                                               │
                                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              JaatoClient                                     │
+│                         JaatoClient (Facade)                                 │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Public API:                                                         │    │
+│  │  Public API (Backwards Compatible):                                  │    │
 │  │  • connect(project, location, model)                                │    │
 │  │  • configure_tools(registry, permission_plugin, ledger)             │    │
 │  │  • send_message(message) → response                                 │    │
 │  │  • get_history() / reset_session()                                  │    │
-│  │  • get_context_usage()                                              │    │
-│  │  • get_user_commands() → Dict[str, UserCommand]                     │    │
-│  │  • execute_user_command(name, args) → (result, shared)              │    │
-│  │  • set_session_plugin(plugin, config)                               │    │
-│  │  • save_session() / resume_session(id) / list_sessions()            │    │
+│  │  • get_runtime() → JaatoRuntime (for subagent sessions)             │    │
+│  │  • get_session() → JaatoSession (main agent session)                │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
-│                                              │                               │
-│              ┌───────────────────────────────┼───────────────────────────┐   │
-│              │                               │                           │   │
-│              ▼                               ▼                           ▼   │
-│  ┌───────────────────┐       ┌───────────────────┐       ┌──────────────┐   │
-│  │   ToolExecutor    │       │  PluginRegistry   │       │ TokenLedger  │   │
-│  │  (Runs functions) │◄──────│  (Manages tools)  │       │ (Accounting) │   │
-│  └─────────┬─────────┘       └───────────────────┘       └──────────────┘   │
-│            │                          │                                      │
-│            ▼                          ▼                                      │
-│  ┌───────────────────┐       ┌────────────────────────────────────────────┐ │
-│  │PermissionPlugin   │       │   Tool Plugins                              │ │
-│  │ (Access control)  │       │ (CLI, MCP, Todo, References, etc.)          │ │
-│  └───────────────────┘       │   • Model tools (function calling)          │ │
-│                              │   • User commands (direct invocation)        │ │
-│                              └────────────────────────────────────────────┘ │
+│                                    │                                         │
+│                    ┌───────────────┴───────────────┐                        │
+│                    ▼                               ▼                        │
+│  ┌──────────────────────────────┐   ┌──────────────────────────────┐       │
+│  │      JaatoRuntime            │   │      JaatoSession            │       │
+│  │   (Shared Environment)       │   │   (Per-Agent State)          │       │
+│  │  • Provider config           │   │  • Conversation history      │       │
+│  │  • PluginRegistry            │◄──│  • Model selection           │       │
+│  │  • PermissionPlugin          │   │  • Tool subset               │       │
+│  │  • TokenLedger               │   │  • ToolExecutor              │       │
+│  │  • create_session()          │   │  • Turn accounting           │       │
+│  └──────────────────────────────┘   └──────────────────────────────┘       │
+│                    │                                                         │
+│                    │ create_session() for subagents                         │
+│                    ▼                                                         │
+│  ┌──────────────────────────────┐                                           │
+│  │      JaatoSession            │  (Subagent - shares runtime)              │
+│  │  • Own history, model, tools │                                           │
+│  └──────────────────────────────┘                                           │
 └─────────────────────────────────────────────────────────────────────────────┘
+
+### Runtime vs Session Separation
+
+| Component | Scope | Contains |
+|-----------|-------|----------|
+| **JaatoRuntime** | Shared (all agents) | Provider config, registry, permissions, ledger |
+| **JaatoSession** | Per-agent | History, model, tools, executor, turn accounting |
+| **JaatoClient** | Facade | Wraps runtime + main session for backwards compatibility |
+
+Benefits:
+- **Efficient subagent spawning**: `runtime.create_session()` is lightweight
+- **Resource sharing**: Subagents share provider connection, permissions
+- **Backwards compatibility**: Existing `JaatoClient` code works unchanged
                                               │
                                               ▼
                                ┌──────────────────────────┐
@@ -66,7 +79,13 @@ flowchart TB
     end
 
     subgraph Framework["JAATO Framework (shared/)"]
-        JC[JaatoClient<br/>jaato_client.py]
+        JC[JaatoClient<br/>Facade]
+
+        subgraph CoreArch["Runtime + Session Architecture"]
+            JR[JaatoRuntime<br/>Shared Environment]
+            JS[JaatoSession<br/>Main Agent]
+            JS2[JaatoSession<br/>Subagent]
+        end
 
         subgraph Core["Core Components"]
             TE[ToolExecutor<br/>ai_tool_runner.py]
@@ -101,9 +120,13 @@ flowchart TB
     end
 
     App --> JC
-    JC --> TE
-    JC --> TL
-    JC --> PR
+    JC --> JR
+    JC --> JS
+    JR --> PR
+    JR --> TL
+    JR -.->|create_session| JS2
+    JS --> TE
+    JS2 --> TE
     PR --> BG
     PR --> CLI
     PR --> MCP
@@ -757,7 +780,9 @@ print(f"Context: {usage['percent_used']:.1f}% used")
 ```
 shared/
 ├── __init__.py              # Package exports
-├── jaato_client.py          # Main client (entry point)
+├── jaato_client.py          # Client facade (wraps Runtime + Session)
+├── jaato_runtime.py         # Shared environment (provider, registry, permissions)
+├── jaato_session.py         # Per-agent session (history, model, tools)
 ├── ai_tool_runner.py        # ToolExecutor & function loop
 ├── token_accounting.py      # TokenLedger for usage tracking
 ├── mcp_context_manager.py   # MCP server connections

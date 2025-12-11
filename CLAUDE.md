@@ -45,11 +45,23 @@ python3 -m venv .venv
 
 ### Core Components (`shared/`)
 
-- **jaato_client.py**: Core client for the framework
-  - `JaatoClient`: Unified client using SDK chat API for multi-turn conversations
-  - `connect()`, `configure_tools()`, `send_message()` - core methods
-  - `get_history()`, `reset_session()` - history access and control
-  - SDK manages conversation history internally
+- **jaato_client.py**: Core client (facade) for the framework
+  - `JaatoClient`: Backwards-compatible facade wrapping `JaatoRuntime` + `JaatoSession`
+  - `connect()`, `configure_tools()`, `send_message()` - core methods (unchanged API)
+  - `get_runtime()` - access shared runtime for subagent session creation
+  - `get_session()` - access main session for direct manipulation
+
+- **jaato_runtime.py**: Shared environment (resources used across agents)
+  - `JaatoRuntime`: Manages provider config, plugin registry, permissions, ledger
+  - `connect(project, location)` - establish provider configuration
+  - `configure_plugins(registry, permission_plugin, ledger)` - setup shared resources
+  - `create_session(model, tools, system_instructions)` - spawn lightweight sessions
+
+- **jaato_session.py**: Per-agent conversation state
+  - `JaatoSession`: Isolated session with history, model, tool subset
+  - `send_message()`, `get_history()`, `reset_session()` - conversation methods
+  - `set_agent_context(agent_type, agent_name)` - for permission context
+  - Sessions share runtime resources but maintain isolated conversation state
 
 - **ai_tool_runner.py**: Tool execution infrastructure
   - `ToolExecutor`: Registry mapping tool names to callables with permission checking and auto-backgrounding
@@ -104,6 +116,43 @@ python3 -m venv .venv
    - Loop continues until model returns text without function calls
 5. Access history when needed: `history = jaato.get_history()`
 6. Reset session: `jaato.reset_session()` or `jaato.reset_session(modified_history)`
+
+### Subagent Architecture
+
+Subagents share the parent's `JaatoRuntime` but get their own `JaatoSession`:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    JaatoClient (facade)                 │
+│  • Backwards-compatible API for existing code           │
+│  • get_runtime() → access shared environment            │
+└─────────────────────────────────────────────────────────┘
+                          │
+          ┌───────────────┴───────────────┐
+          ▼                               ▼
+┌──────────────────┐           ┌──────────────────┐
+│   JaatoRuntime   │           │   JaatoSession   │
+│  • Provider cfg  │◄─────────►│  (main agent)    │
+│  • Registry      │           │  • History       │
+│  • Permissions   │           │  • Model         │
+│  • Ledger        │           │  • Tools         │
+└──────────────────┘           └──────────────────┘
+          │
+          │ create_session() - lightweight
+          ▼
+┌──────────────────┐
+│   JaatoSession   │
+│   (subagent)     │
+│  • Own history   │
+│  • Own model     │
+│  • Tool subset   │
+└──────────────────┘
+```
+
+Benefits:
+- **No redundant connections** - subagents share provider config
+- **Fast spawning** - `create_session()` is lightweight
+- **Resource sharing** - registry, permissions, ledger shared
 
 ### MCP Server Configuration
 
