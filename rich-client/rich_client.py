@@ -398,6 +398,9 @@ class RichClient:
             def on_agent_output(self, agent_id, source, text, mode):
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
+                    # Stop spinner on first output from model
+                    if source == "model" and buffer.spinner_active():
+                        buffer.stop_spinner()
                     buffer.append(source, text, mode)
                     # Auto-scroll to bottom and refresh display
                     buffer.scroll_to_bottom()

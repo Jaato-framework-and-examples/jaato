@@ -747,8 +747,16 @@ class PTDisplay:
         total_pages = (total_lines + page_size - 1) // page_size
         page_num = (current // page_size) + 1
 
+        # Use selected agent's buffer if registry present
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if not buffer:
+                buffer = self._output_buffer
+        else:
+            buffer = self._output_buffer
+
         # Clear output for fresh page
-        self._output_buffer.clear()
+        buffer.clear()
 
         # Calculate what to show
         end_line = min(current + page_size, total_lines)
@@ -763,17 +771,17 @@ class PTDisplay:
             # Start from earlier in the content
             start_line = max(0, current - backfill_count)
             for text, style in lines[start_line:current]:
-                self._output_buffer.add_system_message(text, style)
+                buffer.add_system_message(text, style)
             # Add a separator to show where new content starts
-            self._output_buffer.add_system_message("─" * 40, style="dim")
+            buffer.add_system_message("─" * 40, style="dim")
 
         # Show current page content
         for text, style in lines[current:end_line]:
-            self._output_buffer.add_system_message(text, style)
+            buffer.add_system_message(text, style)
 
         # Show pagination status if not last page
         if not is_last_page:
-            self._output_buffer.add_system_message(
+            buffer.add_system_message(
                 f"── Page {page_num}/{total_pages} ── Press Enter for more, 'q' to quit ──",
                 style="bold cyan"
             )
