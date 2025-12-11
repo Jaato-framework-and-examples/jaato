@@ -163,11 +163,21 @@ class SubagentPlugin:
                     'has its own tool configuration and runs independently. Use this '
                     'to delegate tasks that require different capabilities or to '
                     'isolate tool access. The subagent will complete the task and '
-                    'return the result.'
+                    'return the result.\n\n'
+                    'IMPORTANT: Always provide EITHER a profile name (for preconfigured agents) '
+                    'OR a descriptive name (for inline agents). This helps identify agents in the UI.'
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Descriptive name for the subagent (e.g., 'bug_fixer', 'code_reviewer', "
+                                "'file_analyzer'). Use this when creating inline agents without a profile. "
+                                "If using a profile, this parameter is optional and the profile name will be used."
+                            )
+                        },
                         "profile": {
                             "type": "string",
                             "description": (
@@ -735,6 +745,7 @@ class SubagentPlugin:
         profile_name = args.get('profile')
         context = args.get('context', '')
         inline_config = args.get('inline_config')
+        custom_name = args.get('name', '')
 
         # Resolve the profile or create inline
         if profile_name:
@@ -778,8 +789,15 @@ class SubagentPlugin:
                 if 'max_turns' in inline_config:
                     max_turns = inline_config['max_turns']
 
+            # Use provided name, or fall back to legacy behavior
+            if custom_name:
+                name = custom_name
+            else:
+                # Backwards compatibility: use old naming scheme
+                name = '_inline' if inline_config else '_inherited'
+
             profile = SubagentProfile(
-                name='_inline' if inline_config else '_inherited',
+                name=name,
                 description='Subagent with inherited plugins',
                 plugins=plugins,
                 system_instructions=system_instructions,
