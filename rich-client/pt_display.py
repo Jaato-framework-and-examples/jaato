@@ -93,6 +93,9 @@ class PTDisplay:
         self._agent_panel: Optional[AgentPanel] = None
         if agent_registry:
             self._agent_panel = AgentPanel(agent_registry)
+            # Set initial agent panel width
+            agent_width = int(self._width * self.AGENT_PANEL_WIDTH_RATIO) - 2
+            self._agent_panel.set_width(agent_width)
 
         # Calculate output width based on whether agent panel is present
         output_width_ratio = self.OUTPUT_PANEL_WIDTH_RATIO if self._agent_panel else 1.0
@@ -253,9 +256,8 @@ class PTDisplay:
             height=available_height,
             width=panel_width,
         )
-        # Create a renderer with the correct width for this panel
-        output_renderer = RichRenderer(panel_width)
-        return to_formatted_text(ANSI(output_renderer.render(panel)))
+        # Use full-width renderer - Panel's width parameter handles sizing
+        return to_formatted_text(ANSI(self._renderer.render(panel)))
 
     def _get_agent_panel_content(self):
         """Get rendered agent panel content as ANSI for prompt_toolkit."""
@@ -267,14 +269,10 @@ class PTDisplay:
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
 
-        # Calculate agent panel width (AGENT_PANEL_WIDTH_RATIO of terminal)
-        agent_panel_width = int(self._width * self.AGENT_PANEL_WIDTH_RATIO)
-
-        # Render agent panel with correct width
+        # Render agent panel (width is set on AgentPanel instance)
         panel = self._agent_panel.render(available_height)
-        # Create a renderer with the correct width for this panel
-        agent_renderer = RichRenderer(agent_panel_width)
-        return to_formatted_text(ANSI(agent_renderer.render(panel)))
+        # Use full-width renderer - Panel's width parameter handles sizing
+        return to_formatted_text(ANSI(self._renderer.render(panel)))
 
     def _build_app(self) -> None:
         """Build the prompt_toolkit application."""
