@@ -182,6 +182,121 @@ askClarification(
             <li><strong>Model Decision</strong>: Model decides whether to retrieve full content</li>
           </ol>
 
+          <h3>Session Flow</h3>
+          <p>Visual representation of how memories work across sessions:</p>
+
+          <svg viewBox="0 0 700 480" xmlns="http://www.w3.org/2000/svg" style="max-width: 100%; height: auto; margin: 20px 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+            <!-- Session 1 -->
+            <text x="10" y="25" font-weight="bold" font-size="16" fill="#2563eb">Session 1: Storing Knowledge</text>
+
+            <!-- User -->
+            <rect x="20" y="45" width="140" height="50" rx="5" fill="#e0e7ff" stroke="#6366f1" stroke-width="2"/>
+            <text x="90" y="65" text-anchor="middle" font-size="12" font-weight="600" fill="#3730a3">User</text>
+            <text x="90" y="82" text-anchor="middle" font-size="10" fill="#4338ca">"Explain Runtime/</text>
+            <text x="90" y="92" text-anchor="middle" font-size="10" fill="#4338ca">Session architecture"</text>
+
+            <!-- Arrow 1 -->
+            <path d="M 160 70 L 185 70" stroke="#6366f1" stroke-width="2" fill="none" marker-end="url(#arrowblue)"/>
+
+            <!-- Model -->
+            <rect x="185" y="45" width="140" height="50" rx="5" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+            <text x="255" y="65" text-anchor="middle" font-size="12" font-weight="600" fill="#1e3a8a">Model</text>
+            <text x="255" y="82" text-anchor="middle" font-size="10" fill="#1e40af">Generates detailed</text>
+            <text x="255" y="92" text-anchor="middle" font-size="10" fill="#1e40af">explanation...</text>
+
+            <!-- Arrow 2 -->
+            <path d="M 255 95 L 255 125" stroke="#3b82f6" stroke-width="2" fill="none" marker-end="url(#arrowblue)"/>
+
+            <!-- Store Memory Tool -->
+            <rect x="185" y="125" width="140" height="50" rx="5" fill="#bbf7d0" stroke="#10b981" stroke-width="2"/>
+            <text x="255" y="142" text-anchor="middle" font-size="11" font-weight="600" fill="#065f46">store_memory()</text>
+            <text x="255" y="157" text-anchor="middle" font-size="9" fill="#047857">tags: [architecture,</text>
+            <text x="255" y="168" text-anchor="middle" font-size="9" fill="#047857">runtime, session]</text>
+
+            <!-- Arrow 3 -->
+            <path d="M 325 150 L 375 150" stroke="#10b981" stroke-width="2" fill="none" marker-end="url(#arrowgreen)"/>
+
+            <!-- Storage -->
+            <rect x="375" y="125" width="140" height="50" rx="5" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+            <text x="445" y="142" text-anchor="middle" font-size="11" font-weight="600" fill="#78350f">Memory Storage</text>
+            <text x="445" y="157" text-anchor="middle" font-size="9" fill="#92400e">.jaato/memories.jsonl</text>
+            <text x="445" y="168" text-anchor="middle" font-size="9" fill="#92400e">✓ Saved</text>
+
+            <!-- Separator -->
+            <line x1="10" y1="210" x2="690" y2="210" stroke="#d1d5db" stroke-width="2" stroke-dasharray="5,5"/>
+
+            <!-- Session 2 -->
+            <text x="10" y="240" font-weight="bold" font-size="16" fill="#7c3aed">Session 2: Retrieving Knowledge</text>
+
+            <!-- User 2 -->
+            <rect x="20" y="260" width="140" height="50" rx="5" fill="#ede9fe" stroke="#8b5cf6" stroke-width="2"/>
+            <text x="90" y="280" text-anchor="middle" font-size="12" font-weight="600" fill="#5b21b6">User</text>
+            <text x="90" y="297" text-anchor="middle" font-size="10" fill="#6d28d9">"How to spawn</text>
+            <text x="90" y="307" text-anchor="middle" font-size="10" fill="#6d28d9">subagent efficiently?"</text>
+
+            <!-- Arrow 4 -->
+            <path d="M 160 285 L 185 285" stroke="#8b5cf6" stroke-width="2" fill="none" marker-end="url(#arrowpurple)"/>
+
+            <!-- Plugin Enrichment -->
+            <rect x="185" y="260" width="140" height="50" rx="5" fill="#fce7f3" stroke="#ec4899" stroke-width="2"/>
+            <text x="255" y="277" text-anchor="middle" font-size="11" font-weight="600" fill="#9f1239">Plugin Enrichment</text>
+            <text x="255" y="292" text-anchor="middle" font-size="9" fill="#be123c">Detects: "subagent"</text>
+            <text x="255" y="302" text-anchor="middle" font-size="9" fill="#be123c">Adds hint 💡</text>
+
+            <!-- Arrow 5 -->
+            <path d="M 325 285 L 355 285" stroke="#ec4899" stroke-width="2" fill="none" marker-end="url(#arrowpink)"/>
+
+            <!-- Model 2 with hint -->
+            <rect x="355" y="260" width="160" height="50" rx="5" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+            <text x="435" y="277" text-anchor="middle" font-size="11" font-weight="600" fill="#1e3a8a">Model (enriched prompt)</text>
+            <text x="435" y="292" text-anchor="middle" font-size="9" fill="#1e40af">Sees hint about</text>
+            <text x="435" y="302" text-anchor="middle" font-size="9" fill="#1e40af">available memory</text>
+
+            <!-- Arrow 6 -->
+            <path d="M 435 310 L 435 340" stroke="#3b82f6" stroke-width="2" fill="none" marker-end="url(#arrowblue)"/>
+
+            <!-- Retrieve Tool -->
+            <rect x="355" y="340" width="160" height="50" rx="5" fill="#bbf7d0" stroke="#10b981" stroke-width="2"/>
+            <text x="435" y="357" text-anchor="middle" font-size="11" font-weight="600" fill="#065f46">retrieve_memories()</text>
+            <text x="435" y="372" text-anchor="middle" font-size="9" fill="#047857">tags: [subagent,</text>
+            <text x="435" y="382" text-anchor="middle" font-size="9" fill="#047857">runtime]</text>
+
+            <!-- Arrow 7 (to storage) -->
+            <path d="M 355 365 L 255 365 L 255 150 L 325 150" stroke="#10b981" stroke-width="2" fill="none" marker-end="url(#arrowgreen)" stroke-dasharray="4,4"/>
+
+            <!-- Arrow 8 (from storage back) -->
+            <path d="M 375 150 L 320 150 L 320 365 L 355 365" stroke="#f59e0b" stroke-width="2" fill="none" marker-end="url(#arroworange)" stroke-dasharray="4,4"/>
+            <text x="270" y="255" font-size="9" fill="#92400e" transform="rotate(-90 270 255)">Full content</text>
+
+            <!-- Arrow 9 -->
+            <path d="M 435 390 L 435 420" stroke="#10b981" stroke-width="2" fill="none" marker-end="url(#arrowgreen)"/>
+
+            <!-- Final Response -->
+            <rect x="355" y="420" width="160" height="50" rx="5" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+            <text x="435" y="437" text-anchor="middle" font-size="11" font-weight="600" fill="#1e3a8a">Model Response</text>
+            <text x="435" y="452" text-anchor="middle" font-size="9" fill="#1e40af">Uses retrieved context</text>
+            <text x="435" y="462" text-anchor="middle" font-size="9" fill="#1e40af">to answer question</text>
+
+            <!-- Arrow markers -->
+            <defs>
+              <marker id="arrowblue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L9,3 z" fill="#3b82f6"/>
+              </marker>
+              <marker id="arrowgreen" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L9,3 z" fill="#10b981"/>
+              </marker>
+              <marker id="arrowpurple" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L9,3 z" fill="#8b5cf6"/>
+              </marker>
+              <marker id="arrowpink" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L9,3 z" fill="#ec4899"/>
+              </marker>
+              <marker id="arroworange" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L9,3 z" fill="#f59e0b"/>
+              </marker>
+            </defs>
+          </svg>
+
           <h3>Configuration</h3>
           <table>
             <tbody>
