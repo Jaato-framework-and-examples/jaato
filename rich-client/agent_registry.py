@@ -84,6 +84,10 @@ class AgentRegistry:
             created_at: Creation timestamp (defaults to now).
         """
         with self._lock:
+            # Skip if agent already exists (prevent duplicates)
+            if agent_id in self._agents:
+                return
+
             # Resolve icon
             if icon_lines is None:
                 icon_lines = get_icon(agent_type, profile_name)
