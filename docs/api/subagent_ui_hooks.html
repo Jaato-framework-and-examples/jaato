@@ -142,6 +142,159 @@
 
     <p>Both main agent and subagents use the same hook interface, ensuring consistent tracking across all agent types.</p>
 
+    <h2>Subagent Profile Configuration</h2>
+
+    <p>Subagent profiles are configured in the subagent plugin configuration. Each profile defines a specialized agent with specific capabilities, model settings, and visual representation.</p>
+
+    <h3>Configuration Schema</h3>
+
+    <p>A subagent profile supports the following fields:</p>
+
+    <div class="example">
+<pre>{
+  <span class="string">"profiles"</span>: {
+    <span class="string">"code_assistant"</span>: {
+      <span class="string">"description"</span>: <span class="string">"Analyzes and refactors code"</span>,
+      <span class="string">"plugins"</span>: [<span class="string">"cli"</span>, <span class="string">"file_edit"</span>, <span class="string">"grep"</span>],
+      <span class="string">"plugin_configs"</span>: {
+        <span class="string">"cli"</span>: {
+          <span class="string">"allowed_commands"</span>: [<span class="string">"tree"</span>, <span class="string">"cat"</span>, <span class="string">"grep"</span>]
+        }
+      },
+      <span class="string">"system_instructions"</span>: <span class="string">"You are a code analysis specialist..."</span>,
+      <span class="string">"model"</span>: <span class="string">"gemini-2.5-flash"</span>,
+      <span class="string">"max_turns"</span>: 10,
+      <span class="string">"auto_approved"</span>: <span class="keyword">false</span>,
+      <span class="string">"icon_name"</span>: <span class="string">"code_assistant"</span>
+    },
+    <span class="string">"custom_agent"</span>: {
+      <span class="string">"description"</span>: <span class="string">"Custom agent with unique icon"</span>,
+      <span class="string">"plugins"</span>: [<span class="string">"cli"</span>],
+      <span class="string">"icon"</span>: [
+        <span class="string">" ┌─┐  "</span>,
+        <span class="string">" │★│  "</span>,
+        <span class="string">" └─┘  "</span>
+      ]
+    }
+  }
+}</pre>
+    </div>
+
+    <h3>Profile Fields</h3>
+
+    <ul>
+        <li><code>description</code> <span class="param-type">(string, required)</span> - Human-readable description of the agent's purpose</li>
+        <li><code>plugins</code> <span class="param-type">(array)</span> - List of plugin names to enable (e.g., <code>["cli", "file_edit", "web_search"]</code>)</li>
+        <li><code>plugin_configs</code> <span class="param-type">(object)</span> - Per-plugin configuration overrides</li>
+        <li><code>system_instructions</code> <span class="param-type">(string)</span> - Additional system instructions for the agent</li>
+        <li><code>model</code> <span class="param-type">(string)</span> - Model override (uses parent's model if not specified)</li>
+        <li><code>max_turns</code> <span class="param-type">(integer)</span> - Maximum conversation turns before returning (default: 10)</li>
+        <li><code>auto_approved</code> <span class="param-type">(boolean)</span> - Whether this agent can spawn without permission (default: false)</li>
+        <li><code>icon</code> <span class="param-type">(array of 3 strings)</span> - Custom ASCII art icon (exactly 3 lines)</li>
+        <li><code>icon_name</code> <span class="param-type">(string)</span> - Name of predefined icon to use</li>
+    </ul>
+
+    <h3>Agent Icons</h3>
+
+    <p>Icons are displayed in the Agents panel (right side, 30% width) to visually identify agents. Icons are exactly 3 lines of ASCII art.</p>
+
+    <h4>Icon Resolution Priority</h4>
+
+    <p>The system resolves icons in the following order:</p>
+
+    <ol>
+        <li><strong>Custom icon</strong> - <code>icon</code> field in profile (highest priority)</li>
+        <li><strong>Profile-registered icon</strong> - Custom icons registered programmatically</li>
+        <li><strong>Predefined icon by name</strong> - <code>icon_name</code> field matches a default icon</li>
+        <li><strong>Agent type default</strong> - Icon based on agent type (<code>"main"</code> or <code>"subagent"</code>)</li>
+        <li><strong>Fallback</strong> - Generic subagent icon (lowest priority)</li>
+    </ol>
+
+    <h4>Available Predefined Icons</h4>
+
+    <p>The following predefined icons are available via the <code>icon_name</code> field:</p>
+
+    <div class="example">
+<pre><span class="comment"># Main agent (default for agent_type="main")</span>
+<span class="string">"main"</span>:
+  ╭─┐
+  │█│
+  └┬┘
+
+<span class="comment"># Code assistant - use icon_name: "code_assistant"</span>
+<span class="string">"code_assistant"</span>:
+ &lt;/&gt;
+  ▼
+ ╚═╝
+
+<span class="comment"># Research agent - use icon_name: "research"</span>
+<span class="string">"research"</span>:
+ [🔍]
+  ║║║
+  ╚╩╝
+
+<span class="comment"># File editor - use icon_name: "file_editor"</span>
+<span class="string">"file_editor"</span>:
+ ┌─┐
+ │≡│
+ └─┘
+
+<span class="comment"># Data analyst - use icon_name: "data_analyst"</span>
+<span class="string">"data_analyst"</span>:
+ ▄▄▄
+ ║█║
+ ╚═╝
+
+<span class="comment"># Test runner - use icon_name: "test_runner"</span>
+<span class="string">"test_runner"</span>:
+ ▶║
+ ▶║
+ ▶║
+
+<span class="comment"># Web scraper - use icon_name: "web_scraper"</span>
+<span class="string">"web_scraper"</span>:
+ ╔╦╗
+ ╠╬╣
+ ╚╩╝
+
+<span class="comment"># Generic task agent - use icon_name: "task_agent"</span>
+<span class="string">"task_agent"</span>:
+ ┌▶┐
+ │░│
+ └─┘
+
+<span class="comment"># Default subagent (fallback)</span>
+<span class="string">"default_subagent"</span>:
+  ⚙ ⚙
+   ▀▄▀
+   ║║
+</pre>
+    </div>
+
+    <h4>Custom Icon Example</h4>
+
+    <p>To define a custom icon, use the <code>icon</code> field with exactly 3 strings:</p>
+
+    <div class="example">
+<pre>{
+  <span class="string">"profiles"</span>: {
+    <span class="string">"my_agent"</span>: {
+      <span class="string">"description"</span>: <span class="string">"My custom agent"</span>,
+      <span class="string">"plugins"</span>: [<span class="string">"cli"</span>],
+      <span class="string">"icon"</span>: [
+        <span class="string">" ╔═╗  "</span>,  <span class="comment">// Line 1 (top)</span>
+        <span class="string">" ║★║  "</span>,  <span class="comment">// Line 2 (middle)</span>
+        <span class="string">" ╚═╝  "</span>   <span class="comment">// Line 3 (bottom)</span>
+      ]
+    }
+  }
+}</pre>
+    </div>
+
+    <div class="note">
+        <strong>Note:</strong> Icons should be approximately 5-7 characters wide for best display in the agent panel. Each line must be the same length to avoid rendering issues.
+    </div>
+
     <h2>Protocol: AgentUIHooks</h2>
 
     <div class="method">
