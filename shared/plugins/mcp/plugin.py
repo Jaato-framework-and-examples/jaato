@@ -153,7 +153,7 @@ class MCPToolPlugin:
                     )
                     schemas.append(schema)
                 except Exception as exc:
-                    print(f"[MCPToolPlugin] Error creating schema for {tool.name}: {exc}", file=sys.stderr)
+                    self._log_event(LOG_ERROR, f"Error creating schema for {tool.name}", server=server_name, details=str(exc))
 
         return schemas
 
@@ -732,6 +732,9 @@ Examples:
         # Store original
         _original_validate_json = mcp_types.JSONRPCMessage.model_validate_json.__func__
 
+        # Capture self for logging in the closure
+        log_event = self._log_event
+
         class SkipMessage(Exception):
             """Raised to signal a non-JSON-RPC message that should be skipped."""
             pass
@@ -746,17 +749,17 @@ Examples:
 
             # Quick checks before expensive parsing
             if not line or not line.startswith('{'):
-                print(f"[Filtered non-JSON]: {line}", file=sys.stderr)
+                log_event(LOG_DEBUG, "Filtered non-JSON message", details=line[:100])
                 raise SkipMessage(line)
 
             # Validate it's actually JSON-RPC 2.0
             try:
                 data = json.loads(line)
                 if not isinstance(data, dict) or data.get('jsonrpc') != '2.0':
-                    print(f"[Filtered non-JSONRPC]: {line}", file=sys.stderr)
+                    log_event(LOG_DEBUG, "Filtered non-JSONRPC message", details=line[:100])
                     raise SkipMessage(line)
             except json.JSONDecodeError:
-                print(f"[Filtered invalid JSON]: {line}", file=sys.stderr)
+                log_event(LOG_DEBUG, "Filtered invalid JSON", details=line[:100])
                 raise SkipMessage(line)
 
             # It's valid JSON-RPC, let Pydantic parse it properly
@@ -868,13 +871,11 @@ Examples:
                     error_msg = "Connection timed out (15s)"
                     self._failed_servers[name] = error_msg
                     self._log_event(LOG_ERROR, "Connection timed out", server=name, details="Server did not respond within 15 seconds")
-                    print(f"[MCPToolPlugin] Connection timeout for {name}", file=sys.stderr)
                     return False, error_msg
                 except Exception as exc:
                     error_msg = str(exc)
                     self._failed_servers[name] = error_msg
                     self._log_event(LOG_ERROR, "Connection failed", server=name, details=error_msg)
-                    print(f"[MCPToolPlugin] Connection error for {name}: {exc}", file=sys.stderr)
                     return False, error_msg
 
             # Helper to update tool cache
@@ -1045,7 +1046,7 @@ Examples:
         try:
             self._loop.run_until_complete(run_mcp_server())
         except Exception as exc:
-            print(f"[MCPToolPlugin] Thread error: {exc}", file=sys.stderr)
+            self._log_event(LOG_ERROR, "MCP thread crashed", details=str(exc))
         finally:
             self._loop.close()
 
