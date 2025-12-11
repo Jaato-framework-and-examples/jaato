@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Google GenAI Provider - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="google-genai.html" class="active">Google GenAI</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/mcp.html">MCP</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Google GenAI Provider</h1>
+          <p class="lead">
+            Connect to Google's Gemini models via AI Studio (personal) or
+            Vertex AI (enterprise). Supports multiple authentication methods
+            with automatic credential detection.
+          </p>
+
+          <table>
+            <tbody>
+              <tr>
+                <td><strong>Name</strong></td>
+                <td><code>google_genai</code></td>
+              </tr>
+              <tr>
+                <td><strong>SDK</strong></td>
+                <td><code>google-genai</code></td>
+              </tr>
+              <tr>
+                <td><strong>Models</strong></td>
+                <td>Gemini 1.5, 2.0, 2.5 family</td>
+              </tr>
+              <tr>
+                <td><strong>Max Context</strong></td>
+                <td>Up to 2M tokens (Gemini 1.5 Pro)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h2 id="endpoints">Endpoints</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Endpoint</th>
+                <th>Use Case</th>
+                <th>Auth</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>AI Studio</strong></td>
+                <td>Personal, development, prototyping</td>
+                <td>API Key</td>
+              </tr>
+              <tr>
+                <td><strong>Vertex AI</strong></td>
+                <td>Enterprise, production, GCP integration</td>
+                <td>GCP credentials</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick start - AI Studio</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient, ProviderConfig
+
+client = JaatoClient()
+
+# AI Studio with API key
+client.connect_with_config(ProviderConfig(
+    api_key="your-api-key",
+    use_vertex_ai=False
+), model="gemini-2.5-flash")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Quick start - Vertex AI</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient
+
+client = JaatoClient()
+
+# Vertex AI with GCP credentials
+client.connect(
+    project="my-gcp-project",
+    location="us-central1",
+    model="gemini-2.5-flash"
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Authentication Methods -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="authentication">Authentication Methods</h2>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Endpoint</th>
+                <th>Use Case</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>api_key</code></td>
+                <td>AI Studio</td>
+                <td>Personal development, quick prototyping</td>
+              </tr>
+              <tr>
+                <td><code>adc</code></td>
+                <td>Vertex AI</td>
+                <td>Local development with gcloud</td>
+              </tr>
+              <tr>
+                <td><code>service_account_file</code></td>
+                <td>Vertex AI</td>
+                <td>CI/CD, production servers</td>
+              </tr>
+              <tr>
+                <td><code>auto</code></td>
+                <td>Either</td>
+                <td>Auto-detect from environment</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>API Key (AI Studio)</h3>
+          <p>
+            Simplest authentication. Get a key from
+            <a href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio</a>.
+          </p>
+          <ul>
+            <li>Free tier available</li>
+            <li>No GCP project required</li>
+            <li>Rate limits apply</li>
+          </ul>
+
+          <h3>ADC - Application Default Credentials</h3>
+          <p>
+            Uses credentials from <code>gcloud auth application-default login</code>.
+            Recommended for local development with Vertex AI.
+          </p>
+
+          <h3>Service Account File</h3>
+          <p>
+            Uses a downloaded JSON key file. Required for automated environments
+            without interactive login.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">API Key authentication</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import ProviderConfig, load_provider
+
+provider = load_provider("google_genai")
+provider.initialize(ProviderConfig(
+    api_key="AIza...",
+    use_vertex_ai=False,
+    auth_method="api_key"
+))
+provider.connect("gemini-2.5-flash")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">ADC authentication</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># First, authenticate with gcloud
+gcloud auth application-default login</code></pre>
+          </div>
+          <div class="code-block">
+            <pre><code class="language-python">provider.initialize(ProviderConfig(
+    project="my-project",
+    location="us-central1",
+    use_vertex_ai=True,
+    auth_method="adc"
+))</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Service account authentication</div>
+          <div class="code-block">
+            <pre><code class="language-python">provider.initialize(ProviderConfig(
+    project="my-project",
+    location="us-central1",
+    credentials_path="/path/to/key.json",
+    use_vertex_ai=True,
+    auth_method="service_account_file"
+))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">ProviderConfig Fields</h2>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Field</th>
+                <th>Type</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>project</code></td>
+                <td><code>str</code></td>
+                <td>GCP project ID (Vertex AI only)</td>
+              </tr>
+              <tr>
+                <td><code>location</code></td>
+                <td><code>str</code></td>
+                <td>GCP region, e.g., <code>us-central1</code></td>
+              </tr>
+              <tr>
+                <td><code>api_key</code></td>
+                <td><code>str</code></td>
+                <td>API key for AI Studio</td>
+              </tr>
+              <tr>
+                <td><code>credentials_path</code></td>
+                <td><code>str</code></td>
+                <td>Path to service account JSON</td>
+              </tr>
+              <tr>
+                <td><code>use_vertex_ai</code></td>
+                <td><code>bool</code></td>
+                <td><code>True</code> = Vertex AI, <code>False</code> = AI Studio</td>
+              </tr>
+              <tr>
+                <td><code>auth_method</code></td>
+                <td><code>str</code></td>
+                <td><code>auto</code>, <code>api_key</code>, <code>adc</code>, <code>service_account_file</code></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Auto-Detection</h3>
+          <p>
+            With <code>auth_method="auto"</code> (default), the provider checks:
+          </p>
+          <ol>
+            <li><code>GOOGLE_GENAI_API_KEY</code> env var &rarr; AI Studio</li>
+            <li><code>GOOGLE_APPLICATION_CREDENTIALS</code> &rarr; Vertex AI</li>
+            <li>ADC from gcloud &rarr; Vertex AI</li>
+            <li>GCE metadata server &rarr; Vertex AI</li>
+          </ol>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Minimal config (auto-detect)</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Just set environment variables
+# Provider auto-detects credentials
+
+from shared import JaatoClient
+
+client = JaatoClient()
+client.connect(
+    project="my-project",      # from env if not set
+    location="us-central1",    # from env if not set
+    model="gemini-2.5-flash"
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Explicit config</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import ProviderConfig
+
+# Full control over authentication
+config = ProviderConfig(
+    project="my-gcp-project",
+    location="us-central1",
+    use_vertex_ai=True,
+    auth_method="adc",
+    extra={
+        "timeout": 60,
+        "retry_count": 3
+    }
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Environment Variables -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="environment">Environment Variables</h2>
+
+          <h3>AI Studio</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Variable</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>GOOGLE_GENAI_API_KEY</code></td>
+                <td>API key from AI Studio</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Vertex AI</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Variable</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>JAATO_GOOGLE_PROJECT</code></td>
+                <td>GCP project ID</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_GOOGLE_LOCATION</code></td>
+                <td>GCP region</td>
+              </tr>
+              <tr>
+                <td><code>GOOGLE_APPLICATION_CREDENTIALS</code></td>
+                <td>Path to service account key</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Optional Overrides</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Variable</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>JAATO_GOOGLE_AUTH_METHOD</code></td>
+                <td>Force auth method</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_GOOGLE_USE_VERTEX</code></td>
+                <td>Force endpoint (<code>true</code>/<code>false</code>)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Legacy (still supported)</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Legacy</th>
+                <th>Equivalent</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>PROJECT_ID</code></td>
+                <td><code>JAATO_GOOGLE_PROJECT</code></td>
+              </tr>
+              <tr>
+                <td><code>LOCATION</code></td>
+                <td><code>JAATO_GOOGLE_LOCATION</code></td>
+              </tr>
+              <tr>
+                <td><code>GOOGLE_CLOUD_PROJECT</code></td>
+                <td><code>JAATO_GOOGLE_PROJECT</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">.env for AI Studio</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Google AI Studio (simple)
+GOOGLE_GENAI_API_KEY=AIza...your-key
+
+# Model selection
+MODEL_NAME=gemini-2.5-flash</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">.env for Vertex AI</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Vertex AI (enterprise)
+JAATO_GOOGLE_PROJECT=my-gcp-project
+JAATO_GOOGLE_LOCATION=us-central1
+
+# Option 1: ADC (run gcloud auth first)
+# No additional env needed
+
+# Option 2: Service account key
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
+
+# Model selection
+MODEL_NAME=gemini-2.5-flash</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error Handling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="errors">Error Handling</h2>
+          <p>
+            The provider uses fail-fast validation and throws specific exceptions
+            with actionable error messages.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Exception</th>
+                <th>Cause</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>CredentialsNotFoundError</code></td>
+                <td>No credentials found for auth method</td>
+              </tr>
+              <tr>
+                <td><code>CredentialsInvalidError</code></td>
+                <td>Credentials rejected or malformed</td>
+              </tr>
+              <tr>
+                <td><code>CredentialsPermissionError</code></td>
+                <td>Missing IAM permissions</td>
+              </tr>
+              <tr>
+                <td><code>ProjectConfigurationError</code></td>
+                <td>Missing project/location for Vertex AI</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p>
+            All exceptions include:
+          </p>
+          <ul>
+            <li>What was checked</li>
+            <li>Why it failed</li>
+            <li>How to fix it</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Handling auth errors</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.google_genai.errors import (
+    CredentialsNotFoundError,
+    CredentialsPermissionError,
+    ProjectConfigurationError,
+)
+
+try:
+    provider.initialize(config)
+except CredentialsNotFoundError as e:
+    print(f"Missing credentials: {e}")
+    # Error message includes fix instructions
+except CredentialsPermissionError as e:
+    print(f"Permission denied: {e}")
+    # Includes gcloud command to fix
+except ProjectConfigurationError as e:
+    print(f"Bad config: {e}")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Example error message</div>
+          <div class="code-block">
+            <pre><code class="language-text">CredentialsNotFoundError: No credentials found for authentication method: auto
+
+Checked locations:
+  - GOOGLE_GENAI_API_KEY: not set
+  - GOOGLE_APPLICATION_CREDENTIALS: not set
+  - ADC user credentials: ~/.config/gcloud/... (not found)
+
+To fix, either:
+  1. Run: gcloud auth application-default login
+  2. Set GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
+  3. Use API key: set GOOGLE_GENAI_API_KEY</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Models -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="models">Available Models</h2>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Context</th>
+                <th>Best For</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>gemini-2.5-flash</code></td>
+                <td>1M tokens</td>
+                <td>Fast, cost-effective</td>
+              </tr>
+              <tr>
+                <td><code>gemini-2.5-pro</code></td>
+                <td>1M tokens</td>
+                <td>Complex reasoning</td>
+              </tr>
+              <tr>
+                <td><code>gemini-2.0-flash</code></td>
+                <td>1M tokens</td>
+                <td>Previous generation</td>
+              </tr>
+              <tr>
+                <td><code>gemini-1.5-pro</code></td>
+                <td>2M tokens</td>
+                <td>Largest context</td>
+              </tr>
+              <tr>
+                <td><code>gemini-1.5-flash</code></td>
+                <td>1M tokens</td>
+                <td>Fast, previous gen</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Capabilities</h3>
+          <ul>
+            <li><strong>Function Calling:</strong> All Gemini models</li>
+            <li><strong>Multimodal:</strong> Images, PDFs, video</li>
+            <li><strong>Structured Output:</strong> JSON schema constraints</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">List available models</div>
+          <div class="code-block">
+            <pre><code class="language-python">provider = load_provider("google_genai")
+provider.initialize(config)
+
+# List all models
+models = provider.list_models()
+for model in models:
+    print(model)
+
+# Filter by prefix
+gemini_models = provider.list_models(prefix="gemini")
+
+# Check context limit
+provider.connect("gemini-2.5-flash")
+limit = provider.get_context_limit()
+print(f"Context: {limit:,} tokens")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Using structured output</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Gemini supports JSON schema constraints
+schema = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "age": {"type": "integer"}
+    },
+    "required": ["name", "age"]
+}
+
+response = provider.send_message(
+    "Extract: John is 30 years old",
+    response_schema=schema
+)
+
+# response.structured_output = {"name": "John", "age": 30}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Troubleshooting -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="troubleshooting">Troubleshooting</h2>
+
+          <h3>No credentials found</h3>
+          <ul>
+            <li>For AI Studio: Set <code>GOOGLE_GENAI_API_KEY</code></li>
+            <li>For Vertex AI: Run <code>gcloud auth application-default login</code></li>
+            <li>Or set <code>GOOGLE_APPLICATION_CREDENTIALS</code></li>
+          </ul>
+
+          <h3>Permission denied (403)</h3>
+          <ul>
+            <li>Verify the service account has <code>roles/aiplatform.user</code></li>
+            <li>Check the project has Vertex AI API enabled</li>
+            <li>Verify billing is enabled on the project</li>
+          </ul>
+
+          <h3>Project/location missing</h3>
+          <ul>
+            <li>Set <code>JAATO_GOOGLE_PROJECT</code> and <code>JAATO_GOOGLE_LOCATION</code></li>
+            <li>Or pass explicitly in <code>ProviderConfig</code></li>
+          </ul>
+
+          <h3>Invalid API key</h3>
+          <ul>
+            <li>Verify the key at <a href="https://aistudio.google.com/apikey" target="_blank">AI Studio</a></li>
+            <li>Check for extra whitespace in the key</li>
+            <li>Ensure the key hasn't been revoked</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">GCP setup commands</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Enable Vertex AI API
+gcloud services enable aiplatform.googleapis.com \
+  --project=my-project
+
+# Grant permissions to service account
+gcloud projects add-iam-policy-binding my-project \
+  --member="serviceAccount:my-sa@my-project.iam.gserviceaccount.com" \
+  --role="roles/aiplatform.user"
+
+# Set up ADC for local dev
+gcloud auth application-default login
+
+# Verify current project
+gcloud config get-value project</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Test connectivity</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Quick test script
+from shared import load_provider, ProviderConfig
+
+provider = load_provider("google_genai")
+
+try:
+    provider.initialize()  # Auto-detect
+    provider.connect("gemini-2.5-flash")
+
+    response = provider.generate("Say hello")
+    print(f"Success: {response.text}")
+except Exception as e:
+    print(f"Error: {e}")</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>
