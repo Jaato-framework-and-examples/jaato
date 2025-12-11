@@ -745,8 +745,8 @@ class RichClient:
         )
 
         # Create the main agent in the registry
-        from agent_icons import get_icon_for_agent
-        main_icon = get_icon_for_agent("main", icon_name="robot")
+        from agent_icons import get_icon
+        main_icon = get_icon("main")
         self._agent_registry.create_agent(
             agent_id="main",
             name="main",
