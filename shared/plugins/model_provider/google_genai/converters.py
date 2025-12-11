@@ -79,10 +79,20 @@ def tool_schema_from_sdk(decl: types.FunctionDeclaration) -> ToolSchema:
 
 
 def tool_schemas_to_sdk_tool(schemas: List[ToolSchema]) -> Optional[types.Tool]:
-    """Convert list of ToolSchemas to SDK Tool object."""
+    """Convert list of ToolSchemas to SDK Tool object.
+
+    Deduplicates by tool name to avoid 'Duplicate function declaration' errors.
+    """
     if not schemas:
         return None
-    declarations = [tool_schema_to_sdk(s) for s in schemas]
+    # Deduplicate by name (keep first occurrence)
+    seen = set()
+    unique_schemas = []
+    for s in schemas:
+        if s.name not in seen:
+            seen.add(s.name)
+            unique_schemas.append(s)
+    declarations = [tool_schema_to_sdk(s) for s in unique_schemas]
     return types.Tool(function_declarations=declarations)
 
 
