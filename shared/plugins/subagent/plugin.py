@@ -91,6 +91,8 @@ class SubagentPlugin:
         self._ui_hooks: Optional['AgentUIHooks'] = None
         self._subagent_counter: int = 0  # Counter for generating unique subagent IDs
         self._parent_agent_id: str = "main"  # Parent agent ID for nested subagents
+        # Session registry for multi-turn conversations
+        self._active_sessions: Dict[str, Dict[str, Any]] = {}  # agent_id -> session info
 
     @property
     def name(self) -> str:
@@ -219,6 +221,64 @@ class SubagentPlugin:
                 }
             ),
             ToolSchema(
+                name='continue_subagent',
+                description=(
+                    'Send a follow-up message to an existing subagent session. Use this '
+                    'when you need to provide additional instructions or clarifications '
+                    'to a subagent that already completed an initial task. This allows '
+                    'multi-turn conversations with subagents instead of spawning new ones.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "subagent_id": {
+                            "type": "string",
+                            "description": (
+                                "ID of the active subagent session (returned by spawn_subagent). "
+                                "Use list_active_subagents to see available sessions."
+                            )
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": (
+                                "Follow-up message or instruction to send to the subagent."
+                            )
+                        }
+                    },
+                    "required": ["subagent_id", "message"]
+                }
+            ),
+            ToolSchema(
+                name='close_subagent',
+                description=(
+                    'Explicitly close an active subagent session to free resources. '
+                    'Sessions are automatically cleaned up after inactivity or max turns, '
+                    'but you can close them earlier when the task is complete.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "subagent_id": {
+                            "type": "string",
+                            "description": "ID of the subagent session to close"
+                        }
+                    },
+                    "required": ["subagent_id"]
+                }
+            ),
+            ToolSchema(
+                name='list_active_subagents',
+                description=(
+                    'List currently active subagent sessions that can receive follow-up '
+                    'messages. Shows subagent ID, profile, creation time, and turn count.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            ),
+            ToolSchema(
                 name='list_subagent_profiles',
                 description=(
                     'List available subagent profiles. Use this to see what '
@@ -237,9 +297,13 @@ class SubagentPlugin:
         """Return mapping of tool names to executor functions."""
         return {
             'spawn_subagent': self._execute_spawn_subagent,
+            'continue_subagent': self._execute_continue_subagent,
+            'close_subagent': self._execute_close_subagent,
+            'list_active_subagents': self._execute_list_active_subagents,
             'list_subagent_profiles': self._execute_list_profiles,
-            # User command alias
+            # User command aliases
             'profiles': self._execute_list_profiles,
+            'active': self._execute_list_active_subagents,
         }
 
     def get_system_instructions(self) -> Optional[str]:
@@ -407,6 +471,228 @@ class SubagentPlugin:
             'inline_allowed': self._config.allow_inline,
             'inline_allowed_plugins': self._config.inline_allowed_plugins,
         }
+
+    def _execute_continue_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Send follow-up message to an existing subagent session.
+
+        Args:
+            args: Tool arguments containing:
+                - subagent_id: ID of the active subagent session
+                - message: Follow-up message to send
+
+        Returns:
+            SubagentResult as a dict.
+        """
+        subagent_id = args.get('subagent_id', '')
+        message = args.get('message', '')
+
+        if not subagent_id:
+            return SubagentResult(
+                success=False,
+                response='',
+                error='No subagent_id provided'
+            ).to_dict()
+
+        if not message:
+            return SubagentResult(
+                success=False,
+                response='',
+                error='No message provided'
+            ).to_dict()
+
+        # Look up active session
+        session_info = self._active_sessions.get(subagent_id)
+        if not session_info:
+            return SubagentResult(
+                success=False,
+                response='',
+                error=f'No active session found with ID: {subagent_id}. Use list_active_subagents to see available sessions.'
+            ).to_dict()
+
+        # Check if max turns exceeded
+        if session_info['turn_count'] >= session_info['max_turns']:
+            # Close the session
+            self._close_session(subagent_id)
+            return SubagentResult(
+                success=False,
+                response='',
+                error=f'Session {subagent_id} exceeded max turns ({session_info["max_turns"]}). Session has been closed.'
+            ).to_dict()
+
+        try:
+            session = session_info['session']
+            agent_id = session_info['agent_id']
+
+            # Notify UI hooks that agent is active again
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_status_changed(
+                    agent_id=agent_id,
+                    status="active"
+                )
+
+            # Wrap output callback to route through UI hooks
+            def subagent_output_callback(source: str, text: str, mode: str) -> None:
+                if self._ui_hooks:
+                    self._ui_hooks.on_agent_output(
+                        agent_id=agent_id,
+                        source=source,
+                        text=text,
+                        mode=mode
+                    )
+
+            # Send follow-up message
+            response = session.send_message(message, on_output=subagent_output_callback)
+
+            # Update session info
+            usage = session.get_context_usage()
+            session_info['last_activity'] = datetime.now()
+            session_info['turn_count'] = usage.get('turns', session_info['turn_count'] + 1)
+
+            token_usage = {
+                'prompt_tokens': usage.get('prompt_tokens', 0),
+                'output_tokens': usage.get('output_tokens', 0),
+                'total_tokens': usage.get('total_tokens', 0),
+            }
+
+            # Notify UI hooks with accounting data
+            if self._ui_hooks:
+                # Per-turn accounting
+                turn_accounting = session.get_turn_accounting()
+                for turn_idx, turn in enumerate(turn_accounting):
+                    self._ui_hooks.on_agent_turn_completed(
+                        agent_id=agent_id,
+                        turn_number=turn_idx,
+                        prompt_tokens=turn.get('prompt', 0),
+                        output_tokens=turn.get('output', 0),
+                        total_tokens=turn.get('total', 0),
+                        duration_seconds=turn.get('duration_seconds', 0),
+                        function_calls=turn.get('function_calls', [])
+                    )
+
+                # Context usage
+                self._ui_hooks.on_agent_context_updated(
+                    agent_id=agent_id,
+                    total_tokens=usage.get('total_tokens', 0),
+                    prompt_tokens=usage.get('prompt_tokens', 0),
+                    output_tokens=usage.get('output_tokens', 0),
+                    turns=usage.get('turns', 0),
+                    percent_used=usage.get('percent_used', 0)
+                )
+
+                # History
+                history = session.get_history()
+                self._ui_hooks.on_agent_history_updated(
+                    agent_id=agent_id,
+                    history=history
+                )
+
+            return SubagentResult(
+                success=True,
+                response=response,
+                turns_used=session_info['turn_count'],
+                token_usage=token_usage,
+                agent_id=agent_id,
+            ).to_dict()
+
+        except Exception as e:
+            logger.exception(f"Error continuing subagent {subagent_id}")
+            # Close the session on error
+            self._close_session(subagent_id)
+            return SubagentResult(
+                success=False,
+                response='',
+                error=f'Error in subagent session: {str(e)}'
+            ).to_dict()
+
+    def _execute_close_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Close an active subagent session.
+
+        Args:
+            args: Tool arguments containing:
+                - subagent_id: ID of the subagent session to close
+
+        Returns:
+            Dict with success status and message.
+        """
+        subagent_id = args.get('subagent_id', '')
+
+        if not subagent_id:
+            return {
+                'success': False,
+                'message': 'No subagent_id provided'
+            }
+
+        if subagent_id not in self._active_sessions:
+            return {
+                'success': False,
+                'message': f'No active session found with ID: {subagent_id}'
+            }
+
+        self._close_session(subagent_id)
+        return {
+            'success': True,
+            'message': f'Session {subagent_id} closed successfully'
+        }
+
+    def _execute_list_active_subagents(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List active subagent sessions.
+
+        Args:
+            args: Tool arguments (unused).
+
+        Returns:
+            Dict containing list of active sessions.
+        """
+        if not self._active_sessions:
+            return {
+                'active_sessions': [],
+                'message': 'No active subagent sessions'
+            }
+
+        sessions = []
+        for agent_id, info in self._active_sessions.items():
+            sessions.append({
+                'agent_id': agent_id,
+                'profile': info['profile'].name,
+                'created_at': info['created_at'].isoformat(),
+                'last_activity': info['last_activity'].isoformat(),
+                'turn_count': info['turn_count'],
+                'max_turns': info['max_turns'],
+            })
+
+        return {
+            'active_sessions': sessions,
+            'count': len(sessions)
+        }
+
+    def _close_session(self, agent_id: str) -> None:
+        """Close and cleanup a subagent session.
+
+        Args:
+            agent_id: ID of the session to close.
+        """
+        if agent_id not in self._active_sessions:
+            return
+
+        session_info = self._active_sessions[agent_id]
+
+        # Notify UI hooks of completion
+        if self._ui_hooks:
+            self._ui_hooks.on_agent_status_changed(
+                agent_id=agent_id,
+                status="done"
+            )
+            self._ui_hooks.on_agent_completed(
+                agent_id=agent_id,
+                completed_at=datetime.now(),
+                success=True,
+                token_usage=None,
+                turns_used=session_info['turn_count']
+            )
+
+        # Remove from registry
+        del self._active_sessions[agent_id]
+        logger.info(f"Closed subagent session: {agent_id}")
 
     def _execute_spawn_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Spawn a subagent to handle a task.
@@ -656,24 +942,23 @@ class SubagentPlugin:
                     history=history
                 )
 
-                # Completion
-                self._ui_hooks.on_agent_status_changed(
-                    agent_id=agent_id,
-                    status="done"
-                )
-                self._ui_hooks.on_agent_completed(
-                    agent_id=agent_id,
-                    completed_at=datetime.now(),
-                    success=True,
-                    token_usage=token_usage,
-                    turns_used=usage.get('turns', 1)
-                )
+            # Store session in registry for multi-turn conversations
+            self._active_sessions[agent_id] = {
+                'session': session,
+                'profile': profile,
+                'agent_id': agent_id,
+                'created_at': datetime.now(),
+                'last_activity': datetime.now(),
+                'turn_count': usage.get('turns', 1),
+                'max_turns': profile.max_turns or 10,
+            }
 
             return SubagentResult(
                 success=True,
                 response=response,
                 turns_used=usage.get('turns', 1),
                 token_usage=token_usage,
+                agent_id=agent_id,
             )
 
         except Exception as e:
