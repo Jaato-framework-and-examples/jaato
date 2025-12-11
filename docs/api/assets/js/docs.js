@@ -282,15 +282,22 @@
     // Determine base path based on current location
     var path = window.location.pathname;
 
+    console.log('[getBasePath] pathname:', path);
+
     // Remove filename from path to get directory
     var dir = path.substring(0, path.lastIndexOf('/'));
+
+    console.log('[getBasePath] directory:', dir);
 
     // Count directory depth (number of slashes after removing leading slash)
     var cleanDir = dir.replace(/^\//, ''); // Remove leading slash
     var depth = cleanDir === '' ? 0 : (cleanDir.match(/\//g) || []).length + 1;
 
+    console.log('[getBasePath] cleanDir:', cleanDir, 'depth:', depth);
+
     // If at root (index.html), no traversal needed
     if (depth === 0) {
+      console.log('[getBasePath] returning: ./');
       return './';
     }
 
@@ -299,6 +306,7 @@
     for (var i = 0; i < depth; i++) {
       base += '../';
     }
+    console.log('[getBasePath] returning:', base);
     return base;
   }
 
