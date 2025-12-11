@@ -1,7 +1,7 @@
 """Agent panel for visualizing active and completed agents.
 
 This module provides the AgentPanel class for rendering the agent list
-in the rich client's side panel (30% width).
+in the rich client's side panel (20% width).
 """
 
 from typing import List, Optional

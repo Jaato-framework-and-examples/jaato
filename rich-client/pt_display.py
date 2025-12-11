@@ -73,6 +73,10 @@ class PTDisplay:
     prompt_toolkit's FormattedTextControl using ANSI() wrapper.
     """
 
+    # Panel width ratios when agent panel is visible
+    OUTPUT_PANEL_WIDTH_RATIO = 0.8  # 80% for output
+    AGENT_PANEL_WIDTH_RATIO = 0.2   # 20% for agents
+
     def __init__(self, input_handler: Optional["InputHandler"] = None, agent_registry: Optional["AgentRegistry"] = None):
         """Initialize the display.
 
@@ -80,7 +84,7 @@ class PTDisplay:
             input_handler: Optional InputHandler for completion support.
                           If provided, enables tab completion for commands and files.
             agent_registry: Optional AgentRegistry for agent visibility panel.
-                          If provided, enables the agent panel (30% width).
+                          If provided, enables the agent panel (AGENT_PANEL_WIDTH_RATIO width).
         """
         self._width, self._height = shutil.get_terminal_size()
 
@@ -91,7 +95,7 @@ class PTDisplay:
             self._agent_panel = AgentPanel(agent_registry)
 
         # Calculate output width based on whether agent panel is present
-        output_width_ratio = 0.7 if self._agent_panel else 1.0
+        output_width_ratio = self.OUTPUT_PANEL_WIDTH_RATIO if self._agent_panel else 1.0
         output_width = int(self._width * output_width_ratio) - 4
 
         # Rich components
@@ -138,14 +142,14 @@ class PTDisplay:
             self._width = new_width
             self._height = new_height
 
-            # Update output buffer width (70% if agent panel present, 100% otherwise)
-            output_width_ratio = 0.7 if self._agent_panel else 1.0
+            # Update output buffer width (OUTPUT_PANEL_WIDTH_RATIO if agent panel present, 100% otherwise)
+            output_width_ratio = self.OUTPUT_PANEL_WIDTH_RATIO if self._agent_panel else 1.0
             output_width = int(self._width * output_width_ratio) - 4
             self._output_buffer.set_width(output_width)
 
             # Update agent panel width if present
             if self._agent_panel:
-                agent_width = int(self._width * 0.3) - 2
+                agent_width = int(self._width * self.AGENT_PANEL_WIDTH_RATIO) - 2
                 self._agent_panel.set_width(agent_width)
 
             self._renderer.set_width(self._width)
@@ -240,8 +244,8 @@ class PTDisplay:
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
 
-        # Calculate width (70% if agent panel present)
-        output_width_ratio = 0.7 if self._agent_panel else 1.0
+        # Calculate width (OUTPUT_PANEL_WIDTH_RATIO if agent panel present)
+        output_width_ratio = self.OUTPUT_PANEL_WIDTH_RATIO if self._agent_panel else 1.0
         panel_width = int(self._width * output_width_ratio)
 
         # Render output panel with correct width for word wrapping
@@ -263,8 +267,8 @@ class PTDisplay:
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
 
-        # Calculate agent panel width (30% of terminal)
-        agent_panel_width = int(self._width * 0.3)
+        # Calculate agent panel width (AGENT_PANEL_WIDTH_RATIO of terminal)
+        agent_panel_width = int(self._width * self.AGENT_PANEL_WIDTH_RATIO)
 
         # Render agent panel with correct width
         panel = self._agent_panel.render(available_height)
@@ -406,9 +410,9 @@ class PTDisplay:
             wrap_lines=False,
         )
 
-        # Combine output and agent panels (70/30 split if agent panel present)
+        # Combine output and agent panels (OUTPUT_PANEL_WIDTH_RATIO/AGENT_PANEL_WIDTH_RATIO split if agent panel present)
         if self._agent_panel:
-            # VSplit: output (70%) on left, agent panel (30%) on right
+            # VSplit: output (OUTPUT_PANEL_WIDTH_RATIO) on left, agent panel (AGENT_PANEL_WIDTH_RATIO) on right
             content_area = VSplit([
                 output_window,
                 agent_window,
