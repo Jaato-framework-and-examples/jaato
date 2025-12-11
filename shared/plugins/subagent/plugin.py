@@ -10,6 +10,7 @@ for subagents, avoiding redundant provider connections.
 import logging
 import os
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from datetime import datetime
 
 from .config import SubagentConfig, SubagentProfile, SubagentResult
 from ..base import UserCommand, CommandCompletion
@@ -17,6 +18,7 @@ from ..model_provider.types import ToolSchema
 
 if TYPE_CHECKING:
     from ...jaato_runtime import JaatoRuntime
+    from .ui_hooks import AgentUIHooks
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,10 @@ class SubagentPlugin:
         self._permission_plugin = None  # Optional permission plugin for subagents
         # Runtime reference for efficient session creation
         self._runtime: Optional['JaatoRuntime'] = None
+        # UI hooks for agent lifecycle integration
+        self._ui_hooks: Optional['AgentUIHooks'] = None
+        self._subagent_counter: int = 0  # Counter for generating unique subagent IDs
+        self._parent_agent_id: str = "main"  # Parent agent ID for nested subagents
 
     @property
     def name(self) -> str:
@@ -357,6 +363,17 @@ class SubagentPlugin:
         """
         self._permission_plugin = plugin
 
+    def set_ui_hooks(self, hooks: 'AgentUIHooks') -> None:
+        """Set UI hooks for subagent lifecycle events.
+
+        This enables rich terminal UIs (like rich-client) to track subagent
+        creation, execution, and completion.
+
+        Args:
+            hooks: Implementation of AgentUIHooks protocol.
+        """
+        self._ui_hooks = hooks
+
     def _execute_list_profiles(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List available subagent profiles.
 
@@ -542,6 +559,36 @@ class SubagentPlugin:
         # Use profile's model or default
         model = profile.model or self._config.default_model
 
+        # Generate agent ID (for nested subagents, use dotted notation)
+        self._subagent_counter += 1
+        if self._parent_agent_id == "main":
+            agent_id = f"subagent_{self._subagent_counter}"
+        else:
+            # Nested subagent: parent.child
+            agent_id = f"{self._parent_agent_id}.{profile.name}"
+
+        # Determine icon (priority: profile.icon > profile.icon_name > default)
+        icon_lines = profile.icon
+        if not icon_lines and profile.icon_name:
+            # Icon will be resolved by UI using icon_name
+            pass
+
+        # Notify UI hooks about agent creation
+        if self._ui_hooks:
+            self._ui_hooks.on_agent_created(
+                agent_id=agent_id,
+                agent_name=profile.name,
+                agent_type="subagent",
+                profile_name=profile.name,
+                parent_agent_id=self._parent_agent_id,
+                icon_lines=icon_lines,
+                created_at=datetime.now()
+            )
+            self._ui_hooks.on_agent_status_changed(
+                agent_id=agent_id,
+                status="active"
+            )
+
         try:
             # Create session from runtime with profile's configuration
             session = self._runtime.create_session(
@@ -556,16 +603,71 @@ class SubagentPlugin:
                 agent_name=profile.name
             )
 
-            # Run the conversation (subagent output is not streamed)
-            response = session.send_message(prompt, on_output=lambda src, txt, mode: None)
+            # Wrap output callback to route through UI hooks
+            def subagent_output_callback(source: str, text: str, mode: str) -> None:
+                if self._ui_hooks:
+                    self._ui_hooks.on_agent_output(
+                        agent_id=agent_id,
+                        source=source,
+                        text=text,
+                        mode=mode
+                    )
 
-            # Get token usage
+            # Run the conversation with output capture
+            response = session.send_message(prompt, on_output=subagent_output_callback)
+
+            # Get accounting data
             usage = session.get_context_usage()
             token_usage = {
                 'prompt_tokens': usage.get('prompt_tokens', 0),
                 'output_tokens': usage.get('output_tokens', 0),
                 'total_tokens': usage.get('total_tokens', 0),
             }
+
+            # Notify UI hooks with accounting data
+            if self._ui_hooks:
+                # Per-turn accounting
+                turn_accounting = session.get_turn_accounting()
+                for turn_idx, turn in enumerate(turn_accounting):
+                    self._ui_hooks.on_agent_turn_completed(
+                        agent_id=agent_id,
+                        turn_number=turn_idx,
+                        prompt_tokens=turn.get('prompt', 0),
+                        output_tokens=turn.get('output', 0),
+                        total_tokens=turn.get('total', 0),
+                        duration_seconds=turn.get('duration_seconds', 0),
+                        function_calls=turn.get('function_calls', [])
+                    )
+
+                # Context usage
+                self._ui_hooks.on_agent_context_updated(
+                    agent_id=agent_id,
+                    total_tokens=usage.get('total_tokens', 0),
+                    prompt_tokens=usage.get('prompt_tokens', 0),
+                    output_tokens=usage.get('output_tokens', 0),
+                    turns=usage.get('turns', 0),
+                    percent_used=usage.get('percent_used', 0)
+                )
+
+                # History
+                history = session.get_history()
+                self._ui_hooks.on_agent_history_updated(
+                    agent_id=agent_id,
+                    history=history
+                )
+
+                # Completion
+                self._ui_hooks.on_agent_status_changed(
+                    agent_id=agent_id,
+                    status="done"
+                )
+                self._ui_hooks.on_agent_completed(
+                    agent_id=agent_id,
+                    completed_at=datetime.now(),
+                    success=True,
+                    token_usage=token_usage,
+                    turns_used=usage.get('turns', 1)
+                )
 
             return SubagentResult(
                 success=True,
@@ -576,6 +678,20 @@ class SubagentPlugin:
 
         except Exception as e:
             logger.exception("Subagent execution error (runtime mode)")
+
+            # Notify UI hooks of error
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_status_changed(
+                    agent_id=agent_id,
+                    status="error",
+                    error=str(e)
+                )
+                self._ui_hooks.on_agent_completed(
+                    agent_id=agent_id,
+                    completed_at=datetime.now(),
+                    success=False
+                )
+
             return SubagentResult(
                 success=False,
                 response='',

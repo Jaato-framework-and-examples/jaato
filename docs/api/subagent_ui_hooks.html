@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Subagent UI Hooks API - Jaato Documentation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            max-width: 960px;
+            margin: 40px auto;
+            padding: 0 20px;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            line-height: 1.6;
+        }
+        h1 {
+            color: #4ec9b0;
+            border-bottom: 3px solid #4ec9b0;
+            padding-bottom: 10px;
+            margin-bottom: 30px;
+        }
+        h2 {
+            color: #569cd6;
+            border-bottom: 2px solid #3e3e42;
+            padding-bottom: 8px;
+            margin-top: 40px;
+            margin-bottom: 20px;
+        }
+        h3 {
+            color: #9cdcfe;
+            margin-top: 30px;
+            margin-bottom: 15px;
+        }
+        p {
+            margin: 15px 0;
+        }
+        .method {
+            background: #252526;
+            padding: 20px;
+            margin: 20px 0;
+            border-left: 4px solid #007acc;
+            border-radius: 4px;
+        }
+        .signature {
+            color: #dcdcaa;
+            font-weight: bold;
+            font-size: 1.1em;
+            margin-bottom: 15px;
+            font-family: 'Monaco', monospace;
+        }
+        .param {
+            margin: 12px 0 12px 30px;
+            padding-left: 15px;
+            border-left: 2px solid #3e3e42;
+        }
+        .param-name {
+            color: #9cdcfe;
+            font-weight: bold;
+        }
+        .param-type {
+            color: #4ec9b0;
+            font-style: italic;
+        }
+        .param-desc {
+            color: #ce9178;
+            margin-top: 5px;
+        }
+        .example {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            margin: 20px 0;
+            border: 1px solid #3e3e42;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .example pre {
+            margin: 0;
+            font-family: 'Monaco', monospace;
+            font-size: 0.9em;
+        }
+        .keyword { color: #569cd6; }
+        .string { color: #ce9178; }
+        .comment { color: #6a9955; }
+        .function { color: #dcdcaa; }
+        .class-name { color: #4ec9b0; }
+        ul {
+            margin: 15px 0 15px 30px;
+        }
+        li {
+            margin: 8px 0;
+        }
+        code {
+            background: #2d2d30;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #ce9178;
+            font-family: 'Monaco', monospace;
+        }
+        .note {
+            background: #2d3748;
+            border-left: 4px solid #f0ad4e;
+            padding: 15px 20px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .note strong {
+            color: #f0ad4e;
+        }
+        a {
+            color: #4ec9b0;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <h1>Subagent UI Hooks API</h1>
+
+    <p>The <code>AgentUIHooks</code> protocol enables rich terminal UIs (like rich-client) to integrate with the agent system, providing visibility into main agent and subagent execution, output, and accounting.</p>
+
+    <h2>Overview</h2>
+
+    <p><strong>Location:</strong> <code>shared/plugins/subagent/ui_hooks.py</code></p>
+
+    <p>The hooks allow UIs to:</p>
+    <ul>
+        <li>Track agent creation and lifecycle (active, done, error)</li>
+        <li>Capture per-agent output in isolated buffers</li>
+        <li>Monitor per-agent, per-turn token usage</li>
+        <li>Track per-agent context consumption</li>
+        <li>Maintain per-agent conversation history</li>
+    </ul>
+
+    <p>Both main agent and subagents use the same hook interface, ensuring consistent tracking across all agent types.</p>
+
+    <h2>Protocol: AgentUIHooks</h2>
+
+    <div class="method">
+        <div class="signature">on_agent_created(agent_id, agent_name, agent_type, profile_name, parent_agent_id, icon_lines, created_at)</div>
+        <p>Called when a new agent is created (main or subagent).</p>
+
+        <div class="param">
+            <span class="param-name">agent_id</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                Unique identifier. Format:
+                <ul>
+                    <li><code>"main"</code> for main agent</li>
+                    <li><code>"subagent_1"</code>, <code>"subagent_2"</code> for top-level subagents</li>
+                    <li><code>"parent.child"</code> for nested subagents (e.g., <code>"code-assist.analyzer"</code>)</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">agent_name</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                Human-readable display name (e.g., <code>"main"</code>, <code>"code-assist"</code>, <code>"code-assist.analyzer"</code>).
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">agent_type</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                Either <code>"main"</code> or <code>"subagent"</code>.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">profile_name</span>
+            <span class="param-type">Optional[str]</span>
+            <div class="param-desc">
+                Profile name if subagent (e.g., <code>"code_assistant"</code>), <code>None</code> for main agent.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">parent_agent_id</span>
+            <span class="param-type">Optional[str]</span>
+            <div class="param-desc">
+                Parent agent's ID if nested subagent, <code>None</code> for main or top-level subagents.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">icon_lines</span>
+            <span class="param-type">Optional[List[str]]</span>
+            <div class="param-desc">
+                Custom ASCII art icon (3 lines) defined in profile, or <code>None</code> to use default.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">created_at</span>
+            <span class="param-type">datetime</span>
+            <div class="param-desc">
+                Timestamp when agent was created.
+            </div>
+        </div>
+    </div>
+
+    <div class="method">
+        <div class="signature">on_agent_output(agent_id, source, text, mode)</div>
+        <p>Called whenever an agent produces output (model response, tool output, etc.).</p>
+
+        <div class="param">
+            <span class="param-name">agent_id</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                Which agent produced this output.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">source</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                Output source: <code>"model"</code> for model responses, <code>"user"</code> for user input,
+                or plugin name for tool output (e.g., <code>"cli"</code>, <code>"mcp"</code>).
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">text</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                The output text content.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">mode</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                <code>"write"</code> for new output block, <code>"append"</code> to continue previous block.
+            </div>
+        </div>
+    </div>
+
+    <div class="method">
+        <div class="signature">on_agent_status_changed(agent_id, status, error=None)</div>
+        <p>Called when an agent's status changes.</p>
+
+        <div class="param">
+            <span class="param-name">agent_id</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                Which agent's status changed.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">status</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                New status: <code>"active"</code>, <code>"done"</code>, or <code>"error"</code>.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">error</span>
+            <span class="param-type">Optional[str]</span>
+            <div class="param-desc">
+                Error message if status is <code>"error"</code>, <code>None</code> otherwise.
+            </div>
+        </div>
+    </div>
+
+    <div class="method">
+        <div class="signature">on_agent_completed(agent_id, completed_at, success, token_usage=None, turns_used=None)</div>
+        <p>Called when an agent completes execution.</p>
+
+        <div class="param">
+            <span class="param-name">agent_id</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                Which agent completed.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">completed_at</span>
+            <span class="param-type">datetime</span>
+            <div class="param-desc">
+                Timestamp when agent completed.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">success</span>
+            <span class="param-type">bool</span>
+            <div class="param-desc">
+                <code>True</code> if agent succeeded, <code>False</code> if errored.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">token_usage</span>
+            <span class="param-type">Optional[Dict[str, int]]</span>
+            <div class="param-desc">
+                Dictionary with keys: <code>"prompt_tokens"</code>, <code>"output_tokens"</code>, <code>"total_tokens"</code>.
+                <code>None</code> if not available.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">turns_used</span>
+            <span class="param-type">Optional[int]</span>
+            <div class="param-desc">
+                Number of conversation turns used. <code>None</code> if not available.
+            </div>
+        </div>
+    </div>
+
+    <div class="method">
+        <div class="signature">on_agent_turn_completed(agent_id, turn_number, prompt_tokens, output_tokens, total_tokens, duration_seconds, function_calls)</div>
+        <p>Called after each conversation turn completes. Enables per-agent, per-turn token accounting.</p>
+
+        <div class="param">
+            <span class="param-name">agent_id</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                Which agent completed the turn.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">turn_number</span>
+            <span class="param-type">int</span>
+            <div class="param-desc">
+                Turn index (0-based).
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">prompt_tokens</span>
+            <span class="param-type">int</span>
+            <div class="param-desc">
+                Tokens consumed by the prompt.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">output_tokens</span>
+            <span class="param-type">int</span>
+            <div class="param-desc">
+                Tokens generated in the response.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">total_tokens</span>
+            <span class="param-type">int</span>
+            <div class="param-desc">
+                Sum of <code>prompt_tokens</code> + <code>output_tokens</code>.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">duration_seconds</span>
+            <span class="param-type">float</span>
+            <div class="param-desc">
+                Time taken for the turn.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">function_calls</span>
+            <span class="param-type">List[Dict[str, Any]]</span>
+            <div class="param-desc">
+                List of function calls made during the turn, each with <code>'name'</code> and <code>'duration_seconds'</code> keys.
+            </div>
+        </div>
+    </div>
+
+    <div class="method">
+        <div class="signature">on_agent_context_updated(agent_id, total_tokens, prompt_tokens, output_tokens, turns, percent_used)</div>
+        <p>Called when agent's context usage changes. Enables per-agent context tracking.</p>
+
+        <div class="param">
+            <span class="param-name">agent_id</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                Which agent's context updated.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">total_tokens</span>
+            <span class="param-type">int</span>
+            <div class="param-desc">
+                Total tokens used.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">prompt_tokens</span>
+            <span class="param-type">int</span>
+            <div class="param-desc">
+                Cumulative prompt tokens.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">output_tokens</span>
+            <span class="param-type">int</span>
+            <div class="param-desc">
+                Cumulative output tokens.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">turns</span>
+            <span class="param-type">int</span>
+            <div class="param-desc">
+                Number of turns.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">percent_used</span>
+            <span class="param-type">float</span>
+            <div class="param-desc">
+                Percentage of context window used.
+            </div>
+        </div>
+    </div>
+
+    <div class="method">
+        <div class="signature">on_agent_history_updated(agent_id, history)</div>
+        <p>Called when agent's conversation history changes (after each turn). Enables per-agent history isolation.</p>
+
+        <div class="param">
+            <span class="param-name">agent_id</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                Which agent's history updated.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">history</span>
+            <span class="param-type">List[Message]</span>
+            <div class="param-desc">
+                Complete conversation history snapshot (list of <code>Message</code> objects).
+            </div>
+        </div>
+    </div>
+
+    <h2>Integration Example</h2>
+
+    <div class="example">
+<pre><span class="comment"># Rich client integration</span>
+<span class="keyword">from</span> shared.plugins.subagent.ui_hooks <span class="keyword">import</span> <span class="class-name">AgentUIHooks</span>
+<span class="keyword">from</span> rich_client.agent_registry <span class="keyword">import</span> <span class="class-name">AgentRegistry</span>
+
+<span class="keyword">class</span> <span class="class-name">RichClientHooks</span>:
+    <span class="string">"""UI hooks implementation for rich client."""</span>
+
+    <span class="keyword">def</span> <span class="function">__init__</span>(self, agent_registry: <span class="class-name">AgentRegistry</span>):
+        self._registry = agent_registry
+
+    <span class="keyword">def</span> <span class="function">on_agent_created</span>(self, agent_id, agent_name, agent_type,
+                         profile_name, parent_agent_id, icon_lines, created_at):
+        self._registry.create_agent(
+            agent_id=agent_id,
+            name=agent_name,
+            agent_type=agent_type,
+            profile_name=profile_name,
+            icon_lines=icon_lines,
+            created_at=created_at
+        )
+
+    <span class="keyword">def</span> <span class="function">on_agent_output</span>(self, agent_id, source, text, mode):
+        buffer = self._registry.get_buffer(agent_id)
+        <span class="keyword">if</span> buffer:
+            buffer.append(source, text, mode)
+
+    <span class="keyword">def</span> <span class="function">on_agent_status_changed</span>(self, agent_id, status, error=<span class="keyword">None</span>):
+        self._registry.update_status(agent_id, status)
+
+    <span class="keyword">def</span> <span class="function">on_agent_completed</span>(self, agent_id, completed_at,
+                          success, token_usage, turns_used):
+        self._registry.mark_completed(agent_id, completed_at)
+
+    <span class="keyword">def</span> <span class="function">on_agent_turn_completed</span>(self, agent_id, turn_number, prompt_tokens,
+                               output_tokens, total_tokens, duration_seconds,
+                               function_calls):
+        self._registry.update_turn_accounting(
+            agent_id, turn_number, prompt_tokens, output_tokens,
+            total_tokens, duration_seconds, function_calls
+        )
+
+    <span class="keyword">def</span> <span class="function">on_agent_context_updated</span>(self, agent_id, total_tokens, prompt_tokens,
+                                output_tokens, turns, percent_used):
+        self._registry.update_context_usage(
+            agent_id, total_tokens, prompt_tokens,
+            output_tokens, turns, percent_used
+        )
+
+    <span class="keyword">def</span> <span class="function">on_agent_history_updated</span>(self, agent_id, history):
+        self._registry.update_history(agent_id, history)
+
+<span class="comment"># Register hooks</span>
+hooks = RichClientHooks(agent_registry)
+jaato_client.set_ui_hooks(hooks)
+subagent_plugin.set_ui_hooks(hooks)</pre>
+    </div>
+
+    <h2>Callback Sequence</h2>
+
+    <p>Typical callback sequence when main agent spawns a subagent:</p>
+
+    <div class="example">
+<pre><span class="comment">1. Main agent created (at startup):</span>
+   on_agent_created(agent_id=<span class="string">"main"</span>, agent_type=<span class="string">"main"</span>, ...)
+   on_agent_status_changed(agent_id=<span class="string">"main"</span>, status=<span class="string">"active"</span>)
+
+<span class="comment">2. Main agent receives user input:</span>
+   on_agent_output(agent_id=<span class="string">"main"</span>, source=<span class="string">"user"</span>, text=<span class="string">"Analyze code"</span>, mode=<span class="string">"write"</span>)
+
+<span class="comment">3. Main agent responds:</span>
+   on_agent_output(agent_id=<span class="string">"main"</span>, source=<span class="string">"model"</span>, text=<span class="string">"I'll use subagent..."</span>, mode=<span class="string">"write"</span>)
+
+<span class="comment">4. Main agent spawns subagent:</span>
+   on_agent_created(agent_id=<span class="string">"subagent_1"</span>, agent_name=<span class="string">"code-assist"</span>,
+                    agent_type=<span class="string">"subagent"</span>, profile_name=<span class="string">"code_assistant"</span>, ...)
+   on_agent_status_changed(agent_id=<span class="string">"subagent_1"</span>, status=<span class="string">"active"</span>)
+
+<span class="comment">5. Subagent executes:</span>
+   on_agent_output(agent_id=<span class="string">"subagent_1"</span>, source=<span class="string">"model"</span>, text=<span class="string">"Analyzing..."</span>, mode=<span class="string">"write"</span>)
+   on_agent_output(agent_id=<span class="string">"subagent_1"</span>, source=<span class="string">"cli"</span>, text=<span class="string">"tree output"</span>, mode=<span class="string">"write"</span>)
+   on_agent_turn_completed(agent_id=<span class="string">"subagent_1"</span>, turn_number=<span class="keyword">0</span>, ...)
+   on_agent_context_updated(agent_id=<span class="string">"subagent_1"</span>, ...)
+   on_agent_history_updated(agent_id=<span class="string">"subagent_1"</span>, ...)
+
+<span class="comment">6. Subagent completes:</span>
+   on_agent_status_changed(agent_id=<span class="string">"subagent_1"</span>, status=<span class="string">"done"</span>)
+   on_agent_completed(agent_id=<span class="string">"subagent_1"</span>, success=<span class="keyword">True</span>, token_usage={...}, ...)
+
+<span class="comment">7. Main agent continues:</span>
+   on_agent_output(agent_id=<span class="string">"main"</span>, source=<span class="string">"model"</span>, text=<span class="string">"Based on analysis..."</span>, mode=<span class="string">"write"</span>)
+   on_agent_turn_completed(agent_id=<span class="string">"main"</span>, turn_number=<span class="keyword">0</span>, ...)
+   on_agent_context_updated(agent_id=<span class="string">"main"</span>, ...)
+   on_agent_history_updated(agent_id=<span class="string">"main"</span>, ...)</pre>
+    </div>
+
+    <h2>Thread Safety</h2>
+
+    <div class="note">
+        <strong>Important:</strong> All hooks may be called from background threads (especially for subagents).
+        Implementations must be thread-safe. Use thread-safe queues, locks, or other synchronization primitives as appropriate.
+    </div>
+
+    <h2>Notes</h2>
+
+    <ul>
+        <li>Hooks are optional. If not set, agents run normally without UI integration.</li>
+        <li>Main agent and subagents use the same hook interface.</li>
+        <li>For nested subagents, <code>agent_id</code> uses dotted notation: <code>"parent.child"</code>.</li>
+        <li>Subagent output is only visible when that agent is selected in the UI (not auto-displayed in main agent's view).</li>
+        <li>Each agent maintains completely isolated state: output buffer, history, turn accounting, and context usage.</li>
+        <li>The <code>history</code> and <code>context</code> commands show the currently <em>selected</em> agent's data.</li>
+    </ul>
+
+    <h2>Related Files</h2>
+
+    <ul>
+        <li><code>shared/plugins/subagent/ui_hooks.py</code> - Protocol definition</li>
+        <li><code>shared/jaato_client.py</code> - Main agent hook integration</li>
+        <li><code>shared/plugins/subagent/plugin.py</code> - Subagent hook integration</li>
+        <li><code>rich-client/agent_registry.py</code> - Agent state management</li>
+        <li><code>rich-client/agent_panel.py</code> - Agent visualization</li>
+        <li><code>rich-client/rich_client.py</code> - Hook implementation example</li>
+    </ul>
+
+</body>
+</html>

@@ -46,6 +46,7 @@ from input_handler import InputHandler
 # Rich TUI components
 from pt_display import PTDisplay
 from plan_reporter import create_live_reporter
+from agent_registry import AgentRegistry
 
 
 class RichClient:
@@ -68,6 +69,9 @@ class RichClient:
         self.permission_plugin: Optional[PermissionPlugin] = None
         self.todo_plugin: Optional[TodoPlugin] = None
         self.ledger = TokenLedger()
+
+        # Agent registry for tracking agents and their state
+        self._agent_registry = AgentRegistry()
 
         # Rich TUI display (prompt_toolkit-based)
         self._display: Optional[PTDisplay] = None
@@ -361,6 +365,73 @@ class RichClient:
                 )
                 self._trace("Permission channel callbacks set (queue)")
 
+    def _setup_agent_hooks(self) -> None:
+        """Set up agent lifecycle hooks for UI integration."""
+        if not self._jaato or not self._agent_registry:
+            return
+
+        # Import the protocol
+        from shared.plugins.subagent.ui_hooks import AgentUIHooks
+
+        # Create hooks implementation
+        registry = self._agent_registry
+
+        class RichClientHooks:
+            """UI hooks implementation for rich client."""
+
+            def on_agent_created(self, agent_id, agent_name, agent_type, profile_name,
+                               parent_agent_id, icon_lines, created_at):
+                registry.create_agent(
+                    agent_id=agent_id,
+                    name=agent_name,
+                    agent_type=agent_type,
+                    profile_name=profile_name,
+                    parent_agent_id=parent_agent_id,
+                    icon_lines=icon_lines,
+                    created_at=created_at
+                )
+
+            def on_agent_output(self, agent_id, source, text, mode):
+                buffer = registry.get_buffer(agent_id)
+                if buffer:
+                    buffer.append(source, text, mode)
+
+            def on_agent_status_changed(self, agent_id, status, error=None):
+                registry.update_status(agent_id, status)
+
+            def on_agent_completed(self, agent_id, completed_at, success,
+                                  token_usage=None, turns_used=None):
+                registry.mark_completed(agent_id, completed_at)
+
+            def on_agent_turn_completed(self, agent_id, turn_number, prompt_tokens,
+                                       output_tokens, total_tokens, duration_seconds,
+                                       function_calls):
+                registry.update_turn_accounting(
+                    agent_id, turn_number, prompt_tokens, output_tokens,
+                    total_tokens, duration_seconds, function_calls
+                )
+
+            def on_agent_context_updated(self, agent_id, total_tokens, prompt_tokens,
+                                        output_tokens, turns, percent_used):
+                registry.update_context_usage(
+                    agent_id, total_tokens, prompt_tokens,
+                    output_tokens, turns, percent_used
+                )
+
+            def on_agent_history_updated(self, agent_id, history):
+                registry.update_history(agent_id, history)
+
+        hooks = RichClientHooks()
+
+        # Register hooks with JaatoClient (main agent)
+        self._jaato.set_ui_hooks(hooks)
+
+        # Register hooks with SubagentPlugin if present
+        if self.registry:
+            subagent_plugin = self.registry.get_plugin("subagent")
+            if subagent_plugin and hasattr(subagent_plugin, 'set_ui_hooks'):
+                subagent_plugin.set_ui_hooks(hooks)
+
     def _setup_session_plugin(self) -> None:
         """Set up session persistence plugin."""
         if not self._jaato:
@@ -648,8 +719,11 @@ class RichClient:
         Args:
             initial_prompt: Optional prompt to run before entering interactive mode.
         """
-        # Create the display with input handler for completions
-        self._display = PTDisplay(input_handler=self._input_handler)
+        # Create the display with input handler and agent registry
+        self._display = PTDisplay(
+            input_handler=self._input_handler,
+            agent_registry=self._agent_registry
+        )
 
         # Set model info in status bar
         self._display.set_model_info(self._model_provider, self._model_name)
@@ -657,6 +731,9 @@ class RichClient:
         # Set up the live reporter and queue channels
         self._setup_live_reporter()
         self._setup_queue_channels()
+
+        # Register UI hooks with jaato client and subagent plugin
+        self._setup_agent_hooks()
 
         # Load release name from file
         release_name = "Jaato Rich TUI Client"
@@ -717,24 +794,35 @@ class RichClient:
         self._display.show_lines(lines)
 
     def _show_history(self) -> None:
-        """Show conversation history in output panel.
+        """Show conversation history for SELECTED agent.
 
-        Matches the simple-client format exactly.
+        Uses selected agent's history from the agent registry.
         """
-        if not self._display or not self._jaato:
+        if not self._display:
             return
 
-        history = self._jaato.get_history()
-        turn_accounting = self._jaato.get_turn_accounting()
-        turn_boundaries = self._jaato.get_turn_boundaries()
+        # Get selected agent's history and accounting
+        selected_agent = self._agent_registry.get_selected_agent()
+        if not selected_agent:
+            return
+
+        history = selected_agent.history
+        turn_accounting = selected_agent.turn_accounting
+
+        # For main agent, also get turn boundaries
+        turn_boundaries = []
+        if selected_agent.agent_id == "main" and self._jaato:
+            turn_boundaries = self._jaato.get_turn_boundaries()
 
         count = len(history)
-        total_turns = len(turn_boundaries)
+        total_turns = len(turn_accounting) if turn_accounting else len(turn_boundaries)
 
         lines = [
             ("=" * 60, ""),
-            (f"  Conversation History: {count} message(s), {total_turns} turn(s)", "bold"),
-            ("  Tip: Use 'backtoturn <turn_id>' to revert to a specific turn", "dim"),
+            (f"  Conversation History: {selected_agent.name}", "bold"),
+            (f"  Agent: {selected_agent.agent_id} ({selected_agent.agent_type})", "dim"),
+            (f"  Messages: {count}, Turns: {total_turns}", "dim"),
+            ("  Tip: Use 'backtoturn <turn_id>' to revert to a specific turn (main agent only)", "dim"),
             ("=" * 60, ""),
         ]
 
@@ -902,20 +990,27 @@ class RichClient:
             lines.append((f"  (unknown part: {part_type}, attrs: [{attr_preview}])", "yellow"))
 
     def _show_context(self) -> None:
-        """Show context/token usage in output panel."""
-        if not self._display or not self._jaato:
+        """Show context/token usage for SELECTED agent."""
+        if not self._display:
+            return
+
+        # Get selected agent's context usage
+        selected_agent = self._agent_registry.get_selected_agent()
+        if not selected_agent:
             self._display.show_lines([("Context tracking not available", "yellow")])
             return
 
-        usage = self._jaato.get_context_usage()
+        usage = selected_agent.context_usage
 
         lines = [
             ("─" * 50, "dim"),
-            ("Context Usage:", "bold"),
-            (f"  Total tokens: {usage['total_tokens']}", "dim"),
-            (f"  Prompt tokens: {usage['prompt_tokens']}", "dim"),
-            (f"  Output tokens: {usage['output_tokens']}", "dim"),
-            (f"  Turns: {usage['turns']}", "dim"),
+            (f"Context Usage: {selected_agent.name}", "bold"),
+            (f"  Agent: {selected_agent.agent_id}", "dim"),
+            (f"  Total tokens: {usage.get('total_tokens', 0)}", "dim"),
+            (f"  Prompt tokens: {usage.get('prompt_tokens', 0)}", "dim"),
+            (f"  Output tokens: {usage.get('output_tokens', 0)}", "dim"),
+            (f"  Turns: {usage.get('turns', 0)}", "dim"),
+            (f"  Percent used: {usage.get('percent_used', 0):.1f}%", "dim"),
             ("─" * 50, "dim"),
         ]
 

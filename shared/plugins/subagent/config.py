@@ -20,6 +20,8 @@ class SubagentProfile:
         model: Optional model override (uses parent's model if not specified).
         max_turns: Maximum conversation turns before returning (default: 10).
         auto_approved: Whether this subagent can be spawned without permission.
+        icon: Optional custom ASCII art icon (3 lines) for UI visualization.
+        icon_name: Optional name of predefined icon (e.g., "code_assistant").
     """
     name: str
     description: str
@@ -29,6 +31,8 @@ class SubagentProfile:
     model: Optional[str] = None
     max_turns: int = 10
     auto_approved: bool = False
+    icon: Optional[List[str]] = None
+    icon_name: Optional[str] = None
 
 
 @dataclass
@@ -93,6 +97,8 @@ class SubagentConfig:
                 model=profile_data.get('model'),
                 max_turns=profile_data.get('max_turns', 10),
                 auto_approved=profile_data.get('auto_approved', False),
+                icon=profile_data.get('icon'),
+                icon_name=profile_data.get('icon_name'),
             )
 
         return cls(

@@ -28,9 +28,11 @@ from rich.console import Console
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from input_handler import InputHandler
+    from agent_registry import AgentRegistry
 
 from plan_panel import PlanPanel
 from output_buffer import OutputBuffer
+from agent_panel import AgentPanel
 
 
 class RichRenderer:
@@ -71,19 +73,31 @@ class PTDisplay:
     prompt_toolkit's FormattedTextControl using ANSI() wrapper.
     """
 
-    def __init__(self, input_handler: Optional["InputHandler"] = None):
+    def __init__(self, input_handler: Optional["InputHandler"] = None, agent_registry: Optional["AgentRegistry"] = None):
         """Initialize the display.
 
         Args:
             input_handler: Optional InputHandler for completion support.
                           If provided, enables tab completion for commands and files.
+            agent_registry: Optional AgentRegistry for agent visibility panel.
+                          If provided, enables the agent panel (30% width).
         """
         self._width, self._height = shutil.get_terminal_size()
+
+        # Agent registry and panel
+        self._agent_registry = agent_registry
+        self._agent_panel: Optional[AgentPanel] = None
+        if agent_registry:
+            self._agent_panel = AgentPanel(agent_registry)
+
+        # Calculate output width based on whether agent panel is present
+        output_width_ratio = 0.7 if self._agent_panel else 1.0
+        output_width = int(self._width * output_width_ratio) - 4
 
         # Rich components
         self._plan_panel = PlanPanel()
         self._output_buffer = OutputBuffer()
-        self._output_buffer.set_width(self._width - 4)
+        self._output_buffer.set_width(output_width)
 
         # Rich renderer
         self._renderer = RichRenderer(self._width)
@@ -123,7 +137,17 @@ class PTDisplay:
         if new_width != self._width or new_height != self._height:
             self._width = new_width
             self._height = new_height
-            self._output_buffer.set_width(self._width - 4)
+
+            # Update output buffer width (70% if agent panel present, 100% otherwise)
+            output_width_ratio = 0.7 if self._agent_panel else 1.0
+            output_width = int(self._width * output_width_ratio) - 4
+            self._output_buffer.set_width(output_width)
+
+            # Update agent panel width if present
+            if self._agent_panel:
+                agent_width = int(self._width * 0.3) - 2
+                self._agent_panel.set_width(agent_width)
+
             self._renderer.set_width(self._width)
             return True
         return False
@@ -134,11 +158,22 @@ class PTDisplay:
 
     def _get_status_bar_content(self):
         """Get status bar content as formatted text."""
+        # Agent name (FIRST field, from selected agent if registry present)
+        if self._agent_registry:
+            agent_name = self._agent_registry.get_selected_agent_name()
+        else:
+            agent_name = "main"
+
         provider = self._model_provider or "—"
         model = self._model_name or "—"
 
         # Build context usage display (show percentage available)
-        usage = self._context_usage
+        # Use selected agent's context if registry present
+        if self._agent_registry:
+            usage = self._agent_registry.get_selected_context_usage()
+        else:
+            usage = self._context_usage
+
         if usage:
             percent_used = usage.get('percent_used', 0)
             percent_available = 100 - percent_used
@@ -152,9 +187,12 @@ class PTDisplay:
             context_str = "100% available"
 
         # Build formatted text with columns
-        # Provider | Model | Context
+        # Agent | Provider | Model | Context
         return [
-            ("class:status-bar.label", " Provider: "),
+            ("class:status-bar.label", " Agent: "),
+            ("class:status-bar.value", agent_name),
+            ("class:status-bar.separator", "  │  "),
+            ("class:status-bar.label", "Provider: "),
             ("class:status-bar.value", provider),
             ("class:status-bar.separator", "  │  "),
             ("class:status-bar.label", "Model: "),
@@ -187,18 +225,44 @@ class PTDisplay:
         # Check for terminal resize and update dimensions if needed
         self._update_dimensions()
 
-        self._output_buffer._flush_current_block()
+        # Use selected agent's buffer if registry present, otherwise use default
+        if self._agent_registry:
+            output_buffer = self._agent_registry.get_selected_buffer()
+            if not output_buffer:
+                output_buffer = self._output_buffer
+        else:
+            output_buffer = self._output_buffer
+
+        output_buffer._flush_current_block()
 
         # Calculate available height for output
         available_height = self._height - 2  # minus input row and status bar
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
 
+        # Calculate width (70% if agent panel present)
+        output_width_ratio = 0.7 if self._agent_panel else 1.0
+        panel_width = int(self._width * output_width_ratio)
+
         # Render output panel
-        panel = self._output_buffer.render_panel(
+        panel = output_buffer.render_panel(
             height=available_height,
-            width=self._width,
+            width=panel_width,
         )
+        return to_formatted_text(ANSI(self._renderer.render(panel)))
+
+    def _get_agent_panel_content(self):
+        """Get rendered agent panel content as ANSI for prompt_toolkit."""
+        if not self._agent_panel:
+            return to_formatted_text(ANSI(""))
+
+        # Calculate available height for agent panel
+        available_height = self._height - 2  # minus input row and status bar
+        if self._plan_panel.has_plan:
+            available_height -= self._plan_height
+
+        # Render agent panel
+        panel = self._agent_panel.render(available_height)
         return to_formatted_text(ANSI(self._renderer.render(panel)))
 
     def _build_app(self) -> None:
@@ -294,6 +358,13 @@ class PTDisplay:
                 self._plan_panel.toggle_hidden()
                 self._app.invalidate()
 
+        @kb.add("f2")
+        def handle_f2(event):
+            """Handle F2 - cycle through agents."""
+            if self._agent_registry:
+                self._agent_registry.cycle_selection()
+                self._app.invalidate()
+
         # Status bar at top (always visible, 1 line)
         status_bar = Window(
             FormattedTextControl(self._get_status_bar_content),
@@ -321,6 +392,23 @@ class PTDisplay:
             FormattedTextControl(self._get_output_content),
             wrap_lines=False,
         )
+
+        # Agent panel (conditional - only if agent_registry present)
+        agent_window = Window(
+            FormattedTextControl(self._get_agent_panel_content),
+            wrap_lines=False,
+        )
+
+        # Combine output and agent panels (70/30 split if agent panel present)
+        if self._agent_panel:
+            # VSplit: output (70%) on left, agent panel (30%) on right
+            content_area = VSplit([
+                output_window,
+                agent_window,
+            ])
+        else:
+            # No agent panel - just output
+            content_area = output_window
 
         # Input prompt label - changes based on mode (pager, waiting for channel, normal)
         def get_prompt_text():
@@ -354,7 +442,7 @@ class PTDisplay:
             content=HSplit([
                 status_bar,
                 plan_window,
-                output_window,
+                content_area,  # Output panel (or VSplit with output + agent panel)
                 input_row,
             ]),
             floats=[
