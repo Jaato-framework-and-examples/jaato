@@ -10,30 +10,45 @@ The demo below shows spawning a code-review subagent to analyze the CLI plugin s
 
 ## Architecture Overview
 
+The subagent plugin uses the shared `JaatoRuntime` to create lightweight sessions, avoiding redundant provider connections:
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                           Parent Agent                                   │
-│  ┌─────────────────┐    ┌─────────────────┐    ┌──────────────────┐    │
-│  │ PluginRegistry  │───▶│  ToolExecutor   │◀───│  SubagentPlugin  │    │
-│  │                 │    │                 │    │                  │    │
-│  │ - cli           │    │                 │    │ - spawn_subagent │    │
-│  │ - mcp           │    │                 │    │ - list_profiles  │    │
-│  │ - subagent      │    │                 │    │                  │    │
-│  └─────────────────┘    └────────┬────────┘    └────────┬─────────┘    │
-│                                  │                      │              │
-│                                  │         ┌────────────▼────────────┐ │
-│                                  │         │   Subagent Instance     │ │
-│                                  │         │  ┌──────────────────┐   │ │
-│                                  │         │  │  JaatoClient     │   │ │
-│                                  │         │  │  (inherited or   │   │ │
-│                                  │         │  │   custom plugins)│   │ │
-│                                  │         │  └──────────────────┘   │ │
-│                                  │         └─────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │                      JaatoRuntime (Shared)                       │    │
+│  │  • Provider config    • PluginRegistry    • Permissions          │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│                    │                               │                     │
+│                    ▼                               ▼                     │
+│  ┌──────────────────────────┐      ┌──────────────────────────┐        │
+│  │   JaatoSession (Main)    │      │  SubagentPlugin          │        │
+│  │   • History              │      │  • spawn_subagent        │        │
+│  │   • Tools                │      │  • list_profiles         │        │
+│  │   • Model                │      │                          │        │
+│  └──────────────────────────┘      └────────────┬─────────────┘        │
+│                                                  │                      │
+│                                    runtime.create_session()             │
+│                                                  │                      │
+│                                                  ▼                      │
+│                                    ┌──────────────────────────┐        │
+│                                    │  JaatoSession (Subagent) │        │
+│                                    │  • Own history           │        │
+│                                    │  • Own model selection   │        │
+│                                    │  • Tool subset           │        │
+│                                    │  • Shares runtime        │        │
+│                                    └──────────────────────────┘        │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+**Benefits of Runtime Sharing:**
+- No redundant provider connections for each subagent
+- Fast subagent spawning (lightweight session creation)
+- Shared permissions and token accounting
+
 ## Features
 
+- **Runtime Sharing**: Subagents use `JaatoRuntime.create_session()` for efficient spawning (no redundant connections)
 - **Plugin Inheritance**: Subagents automatically inherit the parent's plugin configuration by default
 - **Optional Overrides**: Use `inline_config` to override specific properties (plugins, max_turns, system_instructions)
 - **Predefined Profiles**: Configure named profiles for common subagent configurations

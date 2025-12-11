@@ -89,13 +89,14 @@
         <div class="panel-explanation">
           <h1>JaatoClient</h1>
           <p class="lead">
-            The main entry point for the jaato framework. Provides a unified interface
-            for connecting to AI providers, configuring tools, and managing multi-turn
-            conversations.
+            The main entry point for the jaato framework. JaatoClient is a <strong>facade</strong>
+            that wraps <code>JaatoRuntime</code> (shared resources) and <code>JaatoSession</code>
+            (per-agent state), providing a unified interface for connecting to AI providers,
+            configuring tools, and managing multi-turn conversations.
           </p>
 
           <div class="method-signature">
-            <span class="token-keyword">from</span> shared <span class="token-keyword">import</span> JaatoClient
+            <span class="token-keyword">from</span> shared <span class="token-keyword">import</span> JaatoClient, JaatoRuntime, JaatoSession
           </div>
         </div>
         <div class="panel-code">
@@ -211,6 +212,24 @@ client = JaatoClient(provider_name="google_genai")
             <span class="method-name">list_available_models</span>(<span class="param">prefix</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>) -> <span class="type">List[str]</span>
           </div>
           <p>Lists available models from the provider, optionally filtered by prefix.</p>
+
+          <h3 id="get-runtime">get_runtime</h3>
+          <div class="method-signature">
+            <span class="method-name">get_runtime</span>() -> <span class="type">JaatoRuntime</span>
+          </div>
+          <p>
+            Returns the underlying <code>JaatoRuntime</code> for advanced use cases like
+            creating subagent sessions. The runtime holds shared resources (provider config,
+            registry, permissions, ledger).
+          </p>
+
+          <h3 id="get-session">get_session</h3>
+          <div class="method-signature">
+            <span class="method-name">get_session</span>() -> <span class="type">JaatoSession</span>
+          </div>
+          <p>
+            Returns the underlying <code>JaatoSession</code> for direct session manipulation.
+          </p>
         </div>
         <div class="panel-code">
           <div class="code-label">Connection</div>
@@ -247,6 +266,22 @@ client.connect(
     location=os.getenv("LOCATION"),
     model=os.getenv("MODEL_NAME")
 )</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Runtime &amp; Session access</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Access runtime for subagent creation
+runtime = client.get_runtime()
+sub_session = runtime.create_session(
+    model="gemini-2.5-flash",
+    tools=["cli", "web_search"],
+    system_instructions="You are a researcher."
+)
+sub_response = sub_session.send_message("Research...")
+
+# Access main session directly
+main_session = client.get_session()
+history = main_session.get_history()</code></pre>
           </div>
         </div>
       </section>
