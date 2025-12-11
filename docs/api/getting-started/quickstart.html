@@ -56,10 +56,18 @@
       <div class="sidebar-section">
         <div class="sidebar-title">API Reference</div>
         <ul class="sidebar-nav">
+          <li><a href="../api-reference/index.html">Overview</a></li>
           <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
           <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
-          <li><a href="../api-reference/tool-executor.html">ToolExecutor</a></li>
           <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
         </ul>
       </div>
     </aside>
@@ -78,12 +86,34 @@
           <h2 id="requirements">Requirements</h2>
           <ul>
             <li>Python 3.10 or higher</li>
-            <li>A Google Cloud project with Vertex AI enabled</li>
-            <li>Service account credentials (or application default credentials)</li>
+            <li>Google AI credentials (see table)</li>
           </ul>
+
+          <h2 id="auth-options">Authentication Options</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Use Case</th>
+                <th>Setup</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>API Key</strong></td>
+                <td>Personal, experimentation</td>
+                <td><a href="https://aistudio.google.com/apikey" target="_blank">Get key</a></td>
+              </tr>
+              <tr>
+                <td><strong>Vertex AI</strong></td>
+                <td>Enterprise, production</td>
+                <td><a href="../api-reference/providers/google-genai.html#vertex-ai">Setup guide</a></td>
+              </tr>
+            </tbody>
+          </table>
           <p>
-            See the <a href="../../gcp-setup.md">GCP Setup Guide</a> for detailed
-            instructions on configuring your Google Cloud project.
+            See the <a href="../api-reference/providers/google-genai.html">Google GenAI Provider</a>
+            reference for detailed configuration options.
           </p>
         </div>
         <div class="panel-code">
@@ -100,8 +130,7 @@
         <div class="panel-explanation">
           <h2 id="installation">Installation</h2>
           <p>
-            Clone the repository and set up a virtual environment. All dependencies
-            are listed in <code>requirements.txt</code>.
+            Clone the repository and set up a virtual environment.
           </p>
         </div>
         <div class="panel-code">
@@ -110,11 +139,8 @@
             <pre><code class="language-bash">git clone https://github.com/apanoia/jaato.git
 cd jaato
 
-# Create virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt</code></pre>
           </div>
         </div>
@@ -125,46 +151,22 @@ pip install -r requirements.txt</code></pre>
         <div class="panel-explanation">
           <h2 id="environment">Environment Setup</h2>
           <p>
-            Create a <code>.env</code> file with your GCP project configuration.
-            The client uses these values to connect to Vertex AI.
+            Create a <code>.env</code> file with your credentials. The provider
+            auto-detects the endpoint based on your configuration.
           </p>
-
-          <ul class="param-list">
-            <li>
-              <span class="param-name">PROJECT_ID</span>
-              <span class="param-type">string</span>
-              <span class="param-required">required</span>
-              <div class="param-desc">Your Google Cloud project ID</div>
-            </li>
-            <li>
-              <span class="param-name">LOCATION</span>
-              <span class="param-type">string</span>
-              <span class="param-required">required</span>
-              <div class="param-desc">Vertex AI region (e.g., <code>us-central1</code>)</div>
-            </li>
-            <li>
-              <span class="param-name">MODEL_NAME</span>
-              <span class="param-type">string</span>
-              <span class="param-required">required</span>
-              <div class="param-desc">Model to use (e.g., <code>gemini-2.5-flash</code>)</div>
-            </li>
-            <li>
-              <span class="param-name">GOOGLE_APPLICATION_CREDENTIALS</span>
-              <span class="param-type">string</span>
-              <span class="param-optional">optional</span>
-              <div class="param-desc">Path to service account JSON key file</div>
-            </li>
-          </ul>
         </div>
         <div class="panel-code">
-          <div class="code-label">.env</div>
+          <div class="code-label">.env (API Key)</div>
+          <div class="code-block">
+            <pre><code class="language-bash">GOOGLE_GENAI_API_KEY=AIza...your-key
+MODEL_NAME=gemini-2.5-flash</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">.env (Vertex AI)</div>
           <div class="code-block">
             <pre><code class="language-bash">PROJECT_ID=my-gcp-project
 LOCATION=us-central1
-MODEL_NAME=gemini-2.5-flash
-
-# Optional: explicit credentials path
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json</code></pre>
+MODEL_NAME=gemini-2.5-flash</code></pre>
           </div>
         </div>
       </section>
@@ -174,23 +176,20 @@ GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json</code></pre>
         <div class="panel-explanation">
           <h2 id="basic-usage">Basic Usage</h2>
           <p>
-            The simplest way to use jaato is to create a client, connect to a model,
-            and send a message. Without tools configured, the model responds with
-            text only.
+            Create a client, connect to a model, and send a message.
           </p>
 
           <h3>Steps</h3>
           <ol>
-            <li>Import <code>JaatoClient</code> from <code>shared</code></li>
-            <li>Create a client instance</li>
-            <li>Connect with your project, location, and model</li>
-            <li>Use <code>generate()</code> for simple text completion</li>
+            <li>Import <code>JaatoClient</code></li>
+            <li>Create client and connect</li>
+            <li>Use <code>generate()</code> for text completion</li>
           </ol>
 
           <div class="callout callout-info">
             <div class="callout-title">Note</div>
-            <code>generate()</code> is for simple one-shot completions.
-            For multi-turn conversations with tool use, see <code>send_message()</code> below.
+            <code>generate()</code> is for one-shot completions.
+            For multi-turn conversations, see <code>send_message()</code> below.
           </div>
         </div>
         <div class="panel-code">
@@ -198,17 +197,9 @@ GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json</code></pre>
           <div class="code-block">
             <pre><code class="language-python">from shared import JaatoClient
 
-# Create client (defaults to google_genai provider)
 client = JaatoClient()
+client.connect(model="gemini-2.5-flash")  # Uses env config
 
-# Connect to model
-client.connect(
-    project="my-gcp-project",
-    location="us-central1",
-    model="gemini-2.5-flash"
-)
-
-# Simple generation (no tools)
 response = client.generate("What is 2 + 2?")
 print(response)  # "4"</code></pre>
           </div>
@@ -261,11 +252,7 @@ print(response)  # "4"</code></pre>
             <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
 
 client = JaatoClient()
-client.connect(
-    project="my-gcp-project",
-    location="us-central1",
-    model="gemini-2.5-flash"
-)
+client.connect(model="gemini-2.5-flash")  # Uses API key from env
 
 # Discover and expose plugins
 registry = PluginRegistry(model_name="gemini-2.5-flash")

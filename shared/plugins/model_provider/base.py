@@ -6,7 +6,7 @@ Model providers encapsulate all SDK-specific logic for interacting with AI model
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, List, Literal, Optional, Protocol, runtime_checkable
 
 from .types import (
     Message,
@@ -26,6 +26,10 @@ from .types import (
 OutputCallback = Callable[[str, str, str], None]
 
 
+# Authentication method type for Google GenAI provider
+GoogleAuthMethod = Literal["auto", "api_key", "service_account_file", "adc", "impersonation"]
+
+
 @dataclass
 class ProviderConfig:
     """Configuration for model provider initialization.
@@ -38,12 +42,29 @@ class ProviderConfig:
         location: Region/location for the service.
         api_key: API key for authentication (if applicable).
         credentials_path: Path to credentials file (if applicable).
+        use_vertex_ai: If True, use Vertex AI endpoint (requires project/location).
+            If False, use Google AI Studio endpoint (requires api_key).
+            Default is True for backwards compatibility.
+        auth_method: Authentication method to use. Options:
+            - "auto": Automatically detect from available credentials (default)
+            - "api_key": Use API key (Google AI Studio)
+            - "service_account_file": Use service account JSON file
+            - "adc": Use Application Default Credentials
+            - "impersonation": Use service account impersonation
+        target_service_account: Target service account email for impersonation.
+            Required when auth_method is "impersonation".
+        credentials: Pre-built credentials object (advanced usage).
+            When provided, this takes precedence over other auth methods.
         extra: Provider-specific additional configuration.
     """
     project: Optional[str] = None
     location: Optional[str] = None
     api_key: Optional[str] = None
     credentials_path: Optional[str] = None
+    use_vertex_ai: bool = True
+    auth_method: GoogleAuthMethod = "auto"
+    target_service_account: Optional[str] = None
+    credentials: Optional[Any] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
 

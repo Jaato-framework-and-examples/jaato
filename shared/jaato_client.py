@@ -147,14 +147,25 @@ class JaatoClient:
 
         return self._provider.list_models(prefix=prefix)
 
-    def connect(self, project: str, location: str, model: str) -> None:
+    def connect(
+        self,
+        project: Optional[str] = None,
+        location: Optional[str] = None,
+        model: Optional[str] = None
+    ) -> None:
         """Connect to the AI model provider.
 
+        For AI Studio (API key): Only model is required.
+        For Vertex AI: project, location, and model are all required.
+
         Args:
-            project: Cloud project ID (e.g., GCP project).
-            location: Provider region (e.g., 'us-central1', 'global').
-            model: Model name (e.g., 'gemini-2.0-flash').
+            project: Cloud project ID (required for Vertex AI).
+            location: Provider region (required for Vertex AI).
+            model: Model name (e.g., 'gemini-2.5-flash').
         """
+        if not model:
+            raise ValueError("model is required")
+
         # Load and initialize the provider
         config = ProviderConfig(project=project, location=location)
         self._provider = load_provider(self._provider_name, config)
@@ -214,21 +225,12 @@ class JaatoClient:
                 permission_plugin.add_whitelist_tools(auto_approved)
 
         # Build tool schemas list (provider-agnostic)
+        # Note: permission plugin schemas come from registry if exposed there
         all_schemas = registry.get_exposed_tool_schemas()
-        if permission_plugin:
-            all_schemas.extend(permission_plugin.get_tool_schemas())
         self._tools = all_schemas if all_schemas else None
 
-        # Collect system instructions
-        parts = []
-        registry_instructions = registry.get_system_instructions()
-        if registry_instructions:
-            parts.append(registry_instructions)
-        if permission_plugin:
-            perm_instructions = permission_plugin.get_system_instructions()
-            if perm_instructions:
-                parts.append(perm_instructions)
-        self._system_instruction = "\n\n".join(parts) if parts else None
+        # Collect system instructions from registry (includes permission if exposed)
+        self._system_instruction = registry.get_system_instructions()
 
         # Store user commands for execute_user_command()
         self._user_commands = {}

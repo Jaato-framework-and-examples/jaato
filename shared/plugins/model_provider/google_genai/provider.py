@@ -1,17 +1,25 @@
 """Google GenAI (Vertex AI / Gemini) model provider implementation.
 
 This provider encapsulates all interactions with the Google GenAI SDK,
-including Vertex AI authentication, chat session management, and
-function calling.
+supporting both:
+- Google AI Studio (api.generativelanguage.googleapis.com) - API key auth
+- Vertex AI (vertexai.googleapis.com) - GCP authentication
+
+Authentication methods:
+- API Key: For AI Studio, simple development use
+- ADC (Application Default Credentials): For Vertex AI, local development
+- Service Account File: For Vertex AI, production/CI use
+- Impersonation: For Vertex AI, act as another service account
 """
 
 import json
+import os
 from typing import Any, Dict, List, Optional
 
 from google import genai
 from google.genai import types
 
-from ..base import ModelProviderPlugin, ProviderConfig
+from ..base import GoogleAuthMethod, ModelProviderPlugin, ProviderConfig
 from ..types import (
     Message,
     ProviderResponse,
@@ -30,6 +38,23 @@ from .converters import (
     tool_schemas_to_sdk_tool,
     serialize_history,
     deserialize_history,
+)
+from .errors import (
+    CredentialsNotFoundError,
+    CredentialsInvalidError,
+    CredentialsPermissionError,
+    ProjectConfigurationError,
+    ImpersonationError,
+)
+from .env import (
+    resolve_auth_method,
+    resolve_use_vertex,
+    resolve_api_key,
+    resolve_credentials_path,
+    resolve_project,
+    resolve_location,
+    resolve_target_service_account,
+    get_checked_credential_locations,
 )
 
 
@@ -61,24 +86,41 @@ class GoogleGenAIProvider:
     """Google GenAI / Vertex AI model provider.
 
     This provider supports:
-    - Vertex AI authentication via service account or ADC
+    - Dual endpoints: Google AI Studio (API key) and Vertex AI (GCP auth)
+    - Multiple auth methods: API key, ADC, service account file
     - Gemini model family (1.5, 2.0, 2.5)
     - Multi-turn chat with SDK-managed history
     - Function calling with manual control
     - Token counting and context management
 
-    Usage:
+    Usage (Vertex AI - organization):
         provider = GoogleGenAIProvider()
         provider.initialize(ProviderConfig(
             project='my-project',
-            location='us-central1'
+            location='us-central1',
+            use_vertex_ai=True,
+            auth_method='auto'  # Uses ADC or GOOGLE_APPLICATION_CREDENTIALS
         ))
         provider.connect('gemini-2.5-flash')
-        provider.create_session(
-            system_instruction="You are a helpful assistant.",
-            tools=[ToolSchema(name='greet', description='Say hello', parameters={})]
-        )
         response = provider.send_message("Hello!")
+
+    Usage (AI Studio - personal):
+        provider = GoogleGenAIProvider()
+        provider.initialize(ProviderConfig(
+            api_key='your-api-key',
+            use_vertex_ai=False,
+            auth_method='api_key'
+        ))
+        provider.connect('gemini-2.5-flash')
+        response = provider.send_message("Hello!")
+
+    Environment variables (auto-detected if config not provided):
+        GOOGLE_GENAI_API_KEY: API key for AI Studio
+        GOOGLE_APPLICATION_CREDENTIALS: Service account file for Vertex AI
+        JAATO_GOOGLE_PROJECT / GOOGLE_CLOUD_PROJECT: GCP project ID
+        JAATO_GOOGLE_LOCATION: GCP region (e.g., us-central1)
+        JAATO_GOOGLE_AUTH_METHOD: Force specific auth method
+        JAATO_GOOGLE_USE_VERTEX: Force Vertex AI (true) or AI Studio (false)
     """
 
     def __init__(self):
@@ -88,6 +130,10 @@ class GoogleGenAIProvider:
         self._project: Optional[str] = None
         self._location: Optional[str] = None
         self._chat = None  # genai Chat object
+
+        # Authentication state
+        self._use_vertex_ai: bool = True
+        self._auth_method: GoogleAuthMethod = "auto"
 
         # Current session configuration
         self._system_instruction: Optional[str] = None
@@ -102,24 +148,297 @@ class GoogleGenAIProvider:
     # ==================== Lifecycle ====================
 
     def initialize(self, config: Optional[ProviderConfig] = None) -> None:
-        """Initialize the provider with Vertex AI credentials.
+        """Initialize the provider with credentials.
+
+        Supports both Google AI Studio (API key) and Vertex AI (GCP auth).
+        Uses fail-fast validation to catch configuration errors early.
 
         Args:
-            config: Configuration with project and location.
+            config: Configuration with authentication details.
+                If not provided, configuration is loaded from environment variables.
+
+        Raises:
+            CredentialsNotFoundError: No credentials found for the auth method.
+            CredentialsInvalidError: Credentials are malformed or rejected.
+            ProjectConfigurationError: Missing project/location for Vertex AI.
         """
         if config is None:
             config = ProviderConfig()
 
-        self._project = config.project
-        self._location = config.location
+        # Resolve configuration from environment if not explicitly set
+        resolved_config = self._resolve_config(config)
 
-        # Create the client
-        # Vertex AI mode uses ADC or GOOGLE_APPLICATION_CREDENTIALS
-        self._client = genai.Client(
-            vertexai=True,
-            project=config.project,
-            location=config.location
+        # Store resolved values
+        self._use_vertex_ai = resolved_config.use_vertex_ai
+        self._auth_method = resolved_config.auth_method
+        self._project = resolved_config.project
+        self._location = resolved_config.location
+
+        # Validate configuration before attempting connection
+        self._validate_config(resolved_config)
+
+        # Create the client based on endpoint type
+        self._client = self._create_client(resolved_config)
+
+        # Verify connectivity with a lightweight API call
+        self._verify_connectivity()
+
+    def _resolve_config(self, config: ProviderConfig) -> ProviderConfig:
+        """Resolve configuration by merging explicit config with environment.
+
+        Explicit config values take precedence over environment variables.
+
+        Args:
+            config: Explicitly provided configuration.
+
+        Returns:
+            Fully resolved configuration.
+        """
+        # Resolve auth method
+        auth_method = config.auth_method
+        if auth_method == "auto":
+            auth_method = resolve_auth_method()
+
+        # Resolve use_vertex_ai
+        # If api_key is provided or auth_method is api_key, default to AI Studio
+        use_vertex_ai = config.use_vertex_ai
+        if config.api_key or auth_method == "api_key":
+            use_vertex_ai = False
+        elif config.use_vertex_ai is True:  # Explicit True or default
+            use_vertex_ai = resolve_use_vertex()
+
+        # Resolve credentials
+        api_key = config.api_key or resolve_api_key()
+        credentials_path = config.credentials_path or resolve_credentials_path()
+
+        # Resolve project/location (only needed for Vertex AI)
+        project = config.project or resolve_project()
+        location = config.location or resolve_location()
+
+        # Resolve target service account (for impersonation)
+        target_service_account = config.target_service_account or resolve_target_service_account()
+
+        return ProviderConfig(
+            project=project,
+            location=location,
+            api_key=api_key,
+            credentials_path=credentials_path,
+            use_vertex_ai=use_vertex_ai,
+            auth_method=auth_method,
+            target_service_account=target_service_account,
+            credentials=config.credentials,
+            extra=config.extra,
         )
+
+    def _validate_config(self, config: ProviderConfig) -> None:
+        """Validate configuration before creating client.
+
+        Args:
+            config: Resolved configuration to validate.
+
+        Raises:
+            CredentialsNotFoundError: Missing required credentials.
+            ProjectConfigurationError: Missing project/location for Vertex AI.
+            ImpersonationError: Missing target service account for impersonation.
+        """
+        if config.use_vertex_ai:
+            # Vertex AI requires project and location
+            if not config.project:
+                raise ProjectConfigurationError(
+                    project=config.project,
+                    location=config.location,
+                    reason="Project ID is required for Vertex AI",
+                )
+            if not config.location:
+                raise ProjectConfigurationError(
+                    project=config.project,
+                    location=config.location,
+                    reason="Location is required for Vertex AI",
+                )
+
+            # For service_account_file method, verify file exists
+            if config.auth_method == "service_account_file":
+                creds_path = config.credentials_path
+                if not creds_path:
+                    raise CredentialsNotFoundError(
+                        auth_method=config.auth_method,
+                        checked_locations=get_checked_credential_locations(config.auth_method),
+                    )
+                if not os.path.exists(creds_path):
+                    raise CredentialsNotFoundError(
+                        auth_method=config.auth_method,
+                        checked_locations=[f"{creds_path} (file not found)"],
+                        suggestion=f"Verify the file exists: {creds_path}",
+                    )
+
+            # For impersonation, verify target service account is set
+            if config.auth_method == "impersonation":
+                if not config.target_service_account:
+                    raise ImpersonationError(
+                        target_service_account=None,
+                        reason="Target service account is required for impersonation",
+                    )
+        else:
+            # AI Studio requires API key
+            if not config.api_key:
+                raise CredentialsNotFoundError(
+                    auth_method="api_key",
+                    checked_locations=get_checked_credential_locations("api_key"),
+                )
+
+    def _create_client(self, config: ProviderConfig) -> genai.Client:
+        """Create the GenAI client based on configuration.
+
+        Args:
+            config: Resolved and validated configuration.
+
+        Returns:
+            Initialized genai.Client.
+
+        Raises:
+            CredentialsInvalidError: If credentials are rejected.
+            ImpersonationError: If impersonation fails.
+        """
+        try:
+            if config.use_vertex_ai:
+                # Vertex AI mode - check for impersonation
+                if config.auth_method == "impersonation":
+                    credentials = self._create_impersonated_credentials(config)
+                    return genai.Client(
+                        vertexai=True,
+                        project=config.project,
+                        location=config.location,
+                        credentials=credentials,
+                    )
+                else:
+                    # Standard Vertex AI auth (ADC or service account file)
+                    return genai.Client(
+                        vertexai=True,
+                        project=config.project,
+                        location=config.location,
+                    )
+            else:
+                # AI Studio mode with API key
+                return genai.Client(
+                    api_key=config.api_key,
+                )
+        except ImpersonationError:
+            raise
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "api key" in error_msg or "invalid" in error_msg:
+                raise CredentialsInvalidError(
+                    auth_method=config.auth_method,
+                    reason=str(e),
+                    credentials_source="api_key" if config.api_key else "environment",
+                ) from e
+            raise
+
+    def _create_impersonated_credentials(self, config: ProviderConfig):
+        """Create impersonated credentials for service account impersonation.
+
+        Args:
+            config: Configuration with target_service_account set.
+
+        Returns:
+            Impersonated credentials object.
+
+        Raises:
+            ImpersonationError: If impersonation fails.
+        """
+        try:
+            import google.auth
+            from google.auth import impersonated_credentials
+
+            # Get source credentials (ADC or from service account file)
+            if config.credentials_path:
+                # Use service account file as source
+                from google.oauth2 import service_account
+                source_credentials = service_account.Credentials.from_service_account_file(
+                    config.credentials_path,
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                )
+            else:
+                # Use ADC as source
+                source_credentials, _ = google.auth.default(
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                )
+
+            # Create impersonated credentials
+            target_credentials = impersonated_credentials.Credentials(
+                source_credentials=source_credentials,
+                target_principal=config.target_service_account,
+                target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+
+            return target_credentials
+
+        except Exception as e:
+            error_msg = str(e).lower()
+
+            # Try to get source principal for better error messages
+            source_principal = None
+            try:
+                import google.auth
+                creds, _ = google.auth.default()
+                if hasattr(creds, 'service_account_email'):
+                    source_principal = f"serviceAccount:{creds.service_account_email}"
+                elif hasattr(creds, '_service_account_email'):
+                    source_principal = f"serviceAccount:{creds._service_account_email}"
+            except Exception:
+                pass
+
+            if "permission" in error_msg or "403" in error_msg or "token creator" in error_msg:
+                raise ImpersonationError(
+                    target_service_account=config.target_service_account,
+                    source_principal=source_principal,
+                    reason="Source principal lacks Service Account Token Creator role",
+                    original_error=str(e),
+                ) from e
+            else:
+                raise ImpersonationError(
+                    target_service_account=config.target_service_account,
+                    source_principal=source_principal,
+                    reason="Failed to create impersonated credentials",
+                    original_error=str(e),
+                ) from e
+
+    def _verify_connectivity(self) -> None:
+        """Verify connectivity by making a lightweight API call.
+
+        Raises:
+            CredentialsPermissionError: If credentials lack required permissions.
+            CredentialsInvalidError: If credentials are rejected.
+        """
+        if not self._client:
+            return
+
+        try:
+            # List models is a lightweight call that verifies auth works
+            # Just fetch one to minimize overhead
+            models = list(self._client.models.list())
+            # We don't need to check the result, just that it didn't error
+        except Exception as e:
+            error_msg = str(e).lower()
+
+            if "permission" in error_msg or "forbidden" in error_msg or "403" in error_msg:
+                raise CredentialsPermissionError(
+                    project=self._project,
+                    original_error=str(e),
+                ) from e
+            elif "unauthorized" in error_msg or "401" in error_msg or "invalid" in error_msg:
+                raise CredentialsInvalidError(
+                    auth_method=self._auth_method,
+                    reason=str(e),
+                ) from e
+            elif "not found" in error_msg or "404" in error_msg:
+                raise ProjectConfigurationError(
+                    project=self._project,
+                    location=self._location,
+                    reason=f"Project or API not found: {e}",
+                ) from e
+            # For other errors, let them propagate
+            raise
 
     def shutdown(self) -> None:
         """Clean up resources."""

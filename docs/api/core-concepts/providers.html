@@ -56,10 +56,18 @@
       <div class="sidebar-section">
         <div class="sidebar-title">API Reference</div>
         <ul class="sidebar-nav">
+          <li><a href="../api-reference/index.html">Overview</a></li>
           <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
           <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
-          <li><a href="../api-reference/tool-executor.html">ToolExecutor</a></li>
           <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
         </ul>
       </div>
     </aside>
@@ -386,25 +394,26 @@ def from_sdk_response(resp) -> ProviderResponse:
           <h2 id="configuration">Provider Configuration</h2>
           <p>
             Providers are configured via <code>ProviderConfig</code>, which
-            holds credentials and connection details.
+            holds credentials and connection details. Each provider has its own
+            authentication requirements.
           </p>
 
-          <h3>ProviderConfig Fields</h3>
+          <h3>Common ProviderConfig Fields</h3>
           <ul class="param-list">
+            <li>
+              <span class="param-name">api_key</span>
+              <span class="param-type">str</span>
+              <div class="param-desc">API key for authentication</div>
+            </li>
             <li>
               <span class="param-name">project</span>
               <span class="param-type">str</span>
-              <div class="param-desc">Cloud project ID (Google, etc.)</div>
+              <div class="param-desc">Cloud project ID (provider-specific)</div>
             </li>
             <li>
               <span class="param-name">location</span>
               <span class="param-type">str</span>
-              <div class="param-desc">Region/location</div>
-            </li>
-            <li>
-              <span class="param-name">api_key</span>
-              <span class="param-type">str</span>
-              <div class="param-desc">API key (if applicable)</div>
+              <div class="param-desc">Region/location (provider-specific)</div>
             </li>
             <li>
               <span class="param-name">credentials_path</span>
@@ -417,50 +426,52 @@ def from_sdk_response(resp) -> ProviderResponse:
               <div class="param-desc">Provider-specific options</div>
             </li>
           </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Provider-Specific Documentation</div>
+            Authentication methods, environment variables, and detailed configuration
+            are documented in each provider's reference page:
+            <ul style="margin-top: 8px; margin-bottom: 0;">
+              <li><a href="../api-reference/providers/google-genai.html">Google GenAI Provider</a></li>
+            </ul>
+          </div>
         </div>
         <div class="panel-code">
-          <div class="code-label">Configuration options</div>
+          <div class="code-label">Generic configuration pattern</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import ProviderConfig
+            <pre><code class="language-python">from shared import ProviderConfig, load_provider
 
-# Via JaatoClient (recommended)
-client = JaatoClient()
+# Load any provider
+provider = load_provider("google_genai")  # or "anthropic", "openai"
+
+# Configure with ProviderConfig
+provider.initialize(ProviderConfig(
+    api_key="...",          # Common
+    project="...",          # Provider-specific
+    location="...",         # Provider-specific
+    extra={"timeout": 60}   # Provider-specific
+))
+
+# Connect to a model
+provider.connect("model-name")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Via JaatoClient (recommended)</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient
+
+# JaatoClient handles provider setup
+client = JaatoClient()  # Default provider
+
+# Connect with credentials
 client.connect(
     project="my-project",
     location="us-central1",
     model="gemini-2.5-flash"
 )
 
-# Direct provider configuration
-from shared import load_provider
-
-provider = load_provider("google_genai")
-provider.initialize(ProviderConfig(
-    project="my-project",
-    location="us-central1",
-    credentials_path="/path/to/key.json",
-    extra={
-        "timeout": 60,
-        "retry_count": 3
-    }
-))
-provider.connect("gemini-2.5-flash")</code></pre>
-          </div>
-
-          <div class="code-label" style="margin-top: 24px;">Environment variables</div>
-          <div class="code-block">
-            <pre><code class="language-python"># Google GenAI provider uses:
-
-# PROJECT_ID - GCP project
-# LOCATION - Vertex AI region
-# MODEL_NAME - Default model
-# GOOGLE_APPLICATION_CREDENTIALS - SA key
-
-# Example .env file:
-PROJECT_ID=my-gcp-project
-LOCATION=us-central1
-MODEL_NAME=gemini-2.5-flash
-GOOGLE_APPLICATION_CREDENTIALS=/path/key.json</code></pre>
+# Or specify provider explicitly
+client = JaatoClient(provider_name="google_genai")</code></pre>
           </div>
         </div>
       </section>

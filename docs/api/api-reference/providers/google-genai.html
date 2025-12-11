@@ -1,0 +1,1118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Google GenAI Provider - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="google-genai.html" class="active">Google GenAI</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/mcp.html">MCP</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Google GenAI Provider</h1>
+          <p class="lead">
+            Connect to Google's Gemini models via AI Studio (personal) or
+            Vertex AI (enterprise). Supports multiple authentication methods
+            with automatic credential detection.
+          </p>
+
+          <table>
+            <tbody>
+              <tr>
+                <td><strong>Name</strong></td>
+                <td><code>google_genai</code></td>
+              </tr>
+              <tr>
+                <td><strong>SDK</strong></td>
+                <td><code>google-genai</code></td>
+              </tr>
+              <tr>
+                <td><strong>Models</strong></td>
+                <td>Gemini 1.5, 2.0, 2.5 family</td>
+              </tr>
+              <tr>
+                <td><strong>Max Context</strong></td>
+                <td>Up to 2M tokens (Gemini 1.5 Pro)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h2 id="endpoints">Endpoints</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Endpoint</th>
+                <th>Use Case</th>
+                <th>Auth</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>AI Studio</strong></td>
+                <td>Personal, development, prototyping</td>
+                <td>API Key</td>
+              </tr>
+              <tr>
+                <td><strong>Vertex AI</strong></td>
+                <td>Enterprise, production, GCP integration</td>
+                <td>GCP credentials</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick start - AI Studio</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient, ProviderConfig
+
+client = JaatoClient()
+
+# AI Studio with API key
+client.connect_with_config(ProviderConfig(
+    api_key="your-api-key",
+    use_vertex_ai=False
+), model="gemini-2.5-flash")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Quick start - Vertex AI</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient
+
+client = JaatoClient()
+
+# Vertex AI with GCP credentials
+client.connect(
+    project="my-gcp-project",
+    location="us-central1",
+    model="gemini-2.5-flash"
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Authentication Methods -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="authentication">Authentication Methods</h2>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Endpoint</th>
+                <th>Use Case</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>api_key</code></td>
+                <td>AI Studio</td>
+                <td>Personal development, quick prototyping</td>
+              </tr>
+              <tr>
+                <td><code>adc</code></td>
+                <td>Vertex AI</td>
+                <td>Local development with gcloud</td>
+              </tr>
+              <tr>
+                <td><code>service_account_file</code></td>
+                <td>Vertex AI</td>
+                <td>CI/CD, production servers</td>
+              </tr>
+              <tr>
+                <td><code>impersonation</code></td>
+                <td>Vertex AI</td>
+                <td>Cross-project, least-privilege access</td>
+              </tr>
+              <tr>
+                <td><code>auto</code></td>
+                <td>Either</td>
+                <td>Auto-detect from environment</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>API Key (AI Studio)</h3>
+          <p>
+            Simplest authentication. Get a key from
+            <a href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio</a>.
+            See the <a href="#api-key">API Key section</a> below for details.
+          </p>
+          <ul>
+            <li>Free tier available</li>
+            <li>No GCP project required</li>
+            <li>Rate limits apply</li>
+          </ul>
+
+          <h3>ADC - Application Default Credentials</h3>
+          <p>
+            Uses credentials from <code>gcloud auth application-default login</code>.
+            Recommended for local development with Vertex AI. See the
+            <a href="#adc">ADC section</a> below for details.
+          </p>
+
+          <h3>Service Account File</h3>
+          <p>
+            Uses a downloaded JSON key file. Required for automated environments
+            without interactive login.
+          </p>
+
+          <h3>Impersonation</h3>
+          <p>
+            Allows a user or service account to act as another service account.
+            Useful for:
+          </p>
+          <ul>
+            <li>Cross-project resource access</li>
+            <li>Least-privilege access patterns</li>
+            <li>Testing with different permissions</li>
+          </ul>
+          <p>
+            Requires the source principal to have <code>roles/iam.serviceAccountTokenCreator</code>
+            on the target service account.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">API Key authentication</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import ProviderConfig, load_provider
+
+provider = load_provider("google_genai")
+provider.initialize(ProviderConfig(
+    api_key="AIza...",
+    use_vertex_ai=False,
+    auth_method="api_key"
+))
+provider.connect("gemini-2.5-flash")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">ADC authentication</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># First, authenticate with gcloud
+gcloud auth application-default login</code></pre>
+          </div>
+          <div class="code-block">
+            <pre><code class="language-python">provider.initialize(ProviderConfig(
+    project="my-project",
+    location="us-central1",
+    use_vertex_ai=True,
+    auth_method="adc"
+))</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Service account authentication</div>
+          <div class="code-block">
+            <pre><code class="language-python">provider.initialize(ProviderConfig(
+    project="my-project",
+    location="us-central1",
+    credentials_path="/path/to/key.json",
+    use_vertex_ai=True,
+    auth_method="service_account_file"
+))</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Impersonation authentication</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Impersonate another service account
+provider.initialize(ProviderConfig(
+    project="target-project",
+    location="us-central1",
+    target_service_account="target-sa@project.iam.gserviceaccount.com",
+    use_vertex_ai=True,
+    auth_method="impersonation"
+))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- API Key Deep Dive -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="api-key">Google AI Studio API Key Authentication</h2>
+          <p>
+            Authentication using a Google AI Studio API key is a simple, project-based identification method.
+            Unlike the robust, user-identity-focused methods of OAuth or the service account methods of ADC/impersonation,
+            the API key acts as a simple, long-lived secret token to link API calls to a specific Google Cloud project
+            for the purpose of billing and quota tracking.
+          </p>
+
+          <h3>Key Characteristics</h3>
+          <dl>
+            <dt><strong>Project Identification, Not User Identification</strong></dt>
+            <dd>
+              The API key identifies which project is making the API call, not who
+              (which specific user or service account) is making it.
+            </dd>
+            <dt><strong>Simple Mechanism</strong></dt>
+            <dd>
+              You include the API key directly in your API requests. The Google AI SDKs automate this
+              by looking for the <code>GOOGLE_GENAI_API_KEY</code> environment variable.
+            </dd>
+            <dt><strong>Ease of Use</strong></dt>
+            <dd>
+              It is the easiest form of authentication to set up, ideal for prototyping, testing, and
+              public applications. You can generate keys quickly in the
+              <a href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio dashboard</a>.
+            </dd>
+            <dt><strong>Limited Scope</strong></dt>
+            <dd>
+              API keys are generally used for accessing specific, project-bound AI services
+              (like the Generative Language API) but do not grant broad IAM permissions across
+              your entire Google Cloud environment.
+            </dd>
+          </dl>
+
+          <h3>Security Considerations</h3>
+          <p>
+            API keys are less secure than token-based methods because they are long-lived
+            and can be easily exposed if hardcoded in source code or client-side applications.
+          </p>
+          <ul>
+            <li>Treat API keys like passwords - never commit them to source control</li>
+            <li>Use environment variables or secret managers to store keys</li>
+            <li>Add API or IP address restrictions in the Google Cloud Console</li>
+            <li>Rotate keys periodically</li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Recommendation</div>
+            For production-level, enterprise applications that require robust security,
+            granular access control, and compliance features, use
+            <a href="#adc">Application Default Credentials (ADC)</a> or
+            <a href="#impersonation">service account impersonation</a> within Vertex AI.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Get your API key</div>
+          <div class="code-block">
+            <pre><code class="language-text">1. Go to https://aistudio.google.com/apikey
+2. Click "Create API Key"
+3. Copy the generated key
+4. Store securely (never commit to git)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Setup environment variable</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># In your .env file (add to .gitignore)
+GOOGLE_GENAI_API_KEY=AIza...your-api-key
+
+# Or export directly (session only)
+export GOOGLE_GENAI_API_KEY=AIza...your-api-key</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Use API key in code</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient, ProviderConfig
+
+client = JaatoClient()
+
+# Explicit API key config
+client.connect_with_config(ProviderConfig(
+    api_key="AIza...",  # or from env var
+    use_vertex_ai=False,
+    auth_method="api_key"
+), model="gemini-2.5-flash")
+
+# Or auto-detect from GOOGLE_GENAI_API_KEY env var
+client = JaatoClient()
+client.connect(model="gemini-2.5-flash")
+# Provider auto-detects API key from environment</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Rate limits</div>
+          <div class="code-block">
+            <pre><code class="language-text">Free tier limits (as of 2025):
+- 15 RPM (requests per minute)
+- 1,500 RPD (requests per day)
+- 1M TPM (tokens per minute)
+
+Some models (e.g., gemini-3-pro) are
+not available in the free tier.</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- ADC Deep Dive -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="adc">Application Default Credentials (ADC)</h2>
+          <p>
+            Application Default Credentials (ADC) is an authentication strategy used by Google Cloud
+            client libraries to automatically find credentials based on the application's environment.
+            It provides a single, consistent way for your code to authenticate to Google Cloud APIs
+            (including Vertex AI) regardless of where the code is running.
+          </p>
+
+          <h3>How ADC Works</h3>
+          <p>
+            Instead of hardcoding credentials or managing API keys manually within your code,
+            ADC abstracts the authentication process. When a Google Cloud client library initializes,
+            it looks for credentials in a specific, predefined search path:
+          </p>
+          <ol>
+            <li><strong>Environment Variable:</strong> Checks for the <code>GOOGLE_APPLICATION_CREDENTIALS</code>
+              environment variable, which can point to a local JSON key file for a service account.</li>
+            <li><strong>Local Credential File:</strong> On a local development machine, it looks for
+              credentials in a well-known file location created by running the
+              <code>gcloud auth application-default login</code> command.</li>
+            <li><strong>Attached Service Account:</strong> In production environments like Compute Engine,
+              App Engine, or Cloud Run, the libraries automatically use the attached service account's
+              credentials via the metadata server.</li>
+          </ol>
+
+          <h3>Relationship to Impersonation</h3>
+          <p>
+            ADC can work in conjunction with service account impersonation:
+          </p>
+          <ul>
+            <li><strong>Local Development:</strong> You can set up your local ADC file by using the
+              <code>gcloud auth application-default login --impersonate-service-account</code> command.
+              This command uses your user credentials to obtain a short-lived token for a specified
+              service account and stores it locally.</li>
+            <li><strong>Production:</strong> A service account attached to a VM (the impersonator) can be
+              granted permission to impersonate another service account (the target) with the specific
+              permissions needed for a task.</li>
+          </ul>
+          <p>
+            In short, ADC is the mechanism that automatically finds and uses the correct credentials
+            (whether user credentials, service account keys, or short-lived impersonated tokens)
+            for your application. This allows for seamless transitions between different development
+            and production environments without changing your application's authentication code.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Setup ADC for local development</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Option 1: Use your user credentials
+gcloud auth application-default login
+
+# Option 2: Use impersonation with ADC
+gcloud auth application-default login \
+  --impersonate-service-account=my-sa@project.iam.gserviceaccount.com</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">ADC search path</div>
+          <div class="code-block">
+            <pre><code class="language-text">1. GOOGLE_APPLICATION_CREDENTIALS env var
+   → /path/to/service-account.json
+
+2. gcloud ADC file location
+   → ~/.config/gcloud/application_default_credentials.json
+
+3. GCE/Cloud Run metadata server
+   → Attached service account credentials</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Use ADC in code</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient, ProviderConfig
+
+client = JaatoClient()
+
+# ADC authentication (default for Vertex AI)
+client.connect_with_config(ProviderConfig(
+    project="my-project",
+    location="us-central1",
+    auth_method="adc"  # or "auto" to auto-detect
+), model="gemini-2.5-flash")
+
+# Client automatically uses ADC
+response = client.generate("Hello!")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Impersonation Deep Dive -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="impersonation">Service Account Impersonation</h2>
+          <p>
+            The <code>impersonation</code> authentication method allows an authenticated identity
+            (such as a user account or another service account) to assume the permissions of a
+            different service account to access Google Cloud resources.
+          </p>
+          <p>
+            This method is a <strong>secure alternative</strong> to using long-lived service account keys,
+            as it uses short-lived credentials and requires prior authentication.
+          </p>
+
+          <h3>Key Concepts</h3>
+          <dl>
+            <dt><strong>Impersonator Principal</strong></dt>
+            <dd>
+              The user or service account that initiates the authentication process.
+              This principal must have the <code>iam.serviceAccounts.getAccessToken</code> permission,
+              included in the <code>roles/iam.serviceAccountTokenCreator</code> IAM role.
+            </dd>
+            <dt><strong>Target Service Account</strong></dt>
+            <dd>
+              The service account whose permissions are being assumed.
+              This account has the actual roles and permissions required to perform
+              operations within Vertex AI.
+            </dd>
+            <dt><strong>Short-lived Credentials</strong></dt>
+            <dd>
+              When impersonation is used, the system generates temporary access tokens
+              that expire quickly (typically in less than an hour).
+            </dd>
+          </dl>
+
+          <h3>Why Use Impersonation?</h3>
+          <ul>
+            <li><strong>Enhanced Security:</strong> Eliminates the need to create, manage, and
+              distribute persistent service account keys, which are high-risk credentials if exposed.</li>
+            <li><strong>Flexible Access Control:</strong> Allows administrators to temporarily grant
+              elevated access or test specific sets of permissions without altering a user's permanent IAM roles.</li>
+            <li><strong>Local Development:</strong> Developers can use their own user credentials to
+              impersonate a service account, making development and testing simpler without managing
+              service account keys on local machines.</li>
+          </ul>
+
+          <h3>How It Works</h3>
+          <ol>
+            <li>An authenticated user or service account (the impersonator) requests short-lived credentials
+              for the target service account.</li>
+            <li>Google Cloud checks if the impersonator has the Service Account Token Creator role
+              on the target service account.</li>
+            <li>If permission is granted, Google Cloud issues a short-lived access token.</li>
+            <li>The impersonator uses this token to make API calls to Vertex AI, acting as the
+              target service account and leveraging its permissions.</li>
+          </ol>
+          <p>
+            For detailed steps on setting up impersonation, refer to the
+            <a href="https://cloud.google.com/iam/docs/impersonating-service-accounts" target="_blank">
+              Google Cloud documentation on service account impersonation</a>.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Setup impersonation permissions</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Step 1: Grant Token Creator role to impersonator
+# (e.g., your user account)
+gcloud iam service-accounts add-iam-policy-binding \
+  target-sa@my-project.iam.gserviceaccount.com \
+  --member="user:developer@example.com" \
+  --role="roles/iam.serviceAccountTokenCreator"
+
+# Step 2: Ensure target SA has Vertex AI access
+gcloud projects add-iam-policy-binding my-project \
+  --member="serviceAccount:target-sa@my-project.iam.gserviceaccount.com" \
+  --role="roles/aiplatform.user"</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Use impersonation in code</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient, ProviderConfig
+
+client = JaatoClient()
+
+# Your user credentials (via ADC) will impersonate
+# the target service account
+client.connect_with_config(ProviderConfig(
+    project="my-project",
+    location="us-central1",
+    target_service_account="target-sa@my-project.iam.gserviceaccount.com",
+    auth_method="impersonation"
+), model="gemini-2.5-flash")
+
+# Now all requests use target SA's permissions
+response = client.generate("Hello!")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Environment-based configuration</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env file
+JAATO_GOOGLE_PROJECT=my-project
+JAATO_GOOGLE_LOCATION=us-central1
+JAATO_GOOGLE_TARGET_SERVICE_ACCOUNT=target-sa@my-project.iam.gserviceaccount.com
+JAATO_GOOGLE_AUTH_METHOD=impersonation
+MODEL_NAME=gemini-2.5-flash</code></pre>
+          </div>
+          <div class="code-block">
+            <pre><code class="language-python"># Auto-detects impersonation from env
+client = JaatoClient()
+client.connect(model="gemini-2.5-flash")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">ProviderConfig Fields</h2>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Field</th>
+                <th>Type</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>project</code></td>
+                <td><code>str</code></td>
+                <td>GCP project ID (Vertex AI only)</td>
+              </tr>
+              <tr>
+                <td><code>location</code></td>
+                <td><code>str</code></td>
+                <td>GCP region, e.g., <code>us-central1</code></td>
+              </tr>
+              <tr>
+                <td><code>api_key</code></td>
+                <td><code>str</code></td>
+                <td>API key for AI Studio</td>
+              </tr>
+              <tr>
+                <td><code>credentials_path</code></td>
+                <td><code>str</code></td>
+                <td>Path to service account JSON</td>
+              </tr>
+              <tr>
+                <td><code>use_vertex_ai</code></td>
+                <td><code>bool</code></td>
+                <td><code>True</code> = Vertex AI, <code>False</code> = AI Studio</td>
+              </tr>
+              <tr>
+                <td><code>auth_method</code></td>
+                <td><code>str</code></td>
+                <td><code>auto</code>, <code>api_key</code>, <code>adc</code>, <code>service_account_file</code>, <code>impersonation</code></td>
+              </tr>
+              <tr>
+                <td><code>target_service_account</code></td>
+                <td><code>str</code></td>
+                <td>Target SA email for impersonation</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Auto-Detection</h3>
+          <p>
+            With <code>auth_method="auto"</code> (default), the provider checks:
+          </p>
+          <ol>
+            <li><code>GOOGLE_GENAI_API_KEY</code> env var &rarr; AI Studio</li>
+            <li><code>JAATO_GOOGLE_TARGET_SERVICE_ACCOUNT</code> &rarr; Impersonation</li>
+            <li><code>GOOGLE_APPLICATION_CREDENTIALS</code> &rarr; Vertex AI</li>
+            <li>ADC from gcloud &rarr; Vertex AI</li>
+            <li>GCE metadata server &rarr; Vertex AI</li>
+          </ol>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Minimal config (auto-detect)</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Just set environment variables
+# Provider auto-detects credentials
+
+from shared import JaatoClient
+
+client = JaatoClient()
+client.connect(
+    project="my-project",      # from env if not set
+    location="us-central1",    # from env if not set
+    model="gemini-2.5-flash"
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Explicit config</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import ProviderConfig
+
+# Full control over authentication
+config = ProviderConfig(
+    project="my-gcp-project",
+    location="us-central1",
+    use_vertex_ai=True,
+    auth_method="adc",
+    extra={
+        "timeout": 60,
+        "retry_count": 3
+    }
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Environment Variables -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="environment">Environment Variables</h2>
+
+          <h3>AI Studio</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Variable</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>GOOGLE_GENAI_API_KEY</code></td>
+                <td>API key from AI Studio</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Vertex AI</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Variable</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>JAATO_GOOGLE_PROJECT</code></td>
+                <td>GCP project ID</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_GOOGLE_LOCATION</code></td>
+                <td>GCP region</td>
+              </tr>
+              <tr>
+                <td><code>GOOGLE_APPLICATION_CREDENTIALS</code></td>
+                <td>Path to service account key</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_GOOGLE_TARGET_SERVICE_ACCOUNT</code></td>
+                <td>Target SA for impersonation</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Optional Overrides</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Variable</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>JAATO_GOOGLE_AUTH_METHOD</code></td>
+                <td>Force auth method</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_GOOGLE_USE_VERTEX</code></td>
+                <td>Force endpoint (<code>true</code>/<code>false</code>)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Legacy (still supported)</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Legacy</th>
+                <th>Equivalent</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>PROJECT_ID</code></td>
+                <td><code>JAATO_GOOGLE_PROJECT</code></td>
+              </tr>
+              <tr>
+                <td><code>LOCATION</code></td>
+                <td><code>JAATO_GOOGLE_LOCATION</code></td>
+              </tr>
+              <tr>
+                <td><code>GOOGLE_CLOUD_PROJECT</code></td>
+                <td><code>JAATO_GOOGLE_PROJECT</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">.env for AI Studio</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Google AI Studio (simple)
+GOOGLE_GENAI_API_KEY=AIza...your-key
+
+# Model selection
+MODEL_NAME=gemini-2.5-flash</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">.env for Vertex AI</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Vertex AI (enterprise)
+JAATO_GOOGLE_PROJECT=my-gcp-project
+JAATO_GOOGLE_LOCATION=us-central1
+
+# Option 1: ADC (run gcloud auth first)
+# No additional env needed
+
+# Option 2: Service account key
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
+
+# Model selection
+MODEL_NAME=gemini-2.5-flash</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">.env for Impersonation</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Impersonation (act as another SA)
+JAATO_GOOGLE_PROJECT=target-project
+JAATO_GOOGLE_LOCATION=us-central1
+JAATO_GOOGLE_TARGET_SERVICE_ACCOUNT=target-sa@project.iam.gserviceaccount.com
+JAATO_GOOGLE_AUTH_METHOD=impersonation
+
+# Model selection
+MODEL_NAME=gemini-2.5-flash</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error Handling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="errors">Error Handling</h2>
+          <p>
+            The provider uses fail-fast validation and throws specific exceptions
+            with actionable error messages.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Exception</th>
+                <th>Cause</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>CredentialsNotFoundError</code></td>
+                <td>No credentials found for auth method</td>
+              </tr>
+              <tr>
+                <td><code>CredentialsInvalidError</code></td>
+                <td>Credentials rejected or malformed</td>
+              </tr>
+              <tr>
+                <td><code>CredentialsPermissionError</code></td>
+                <td>Missing IAM permissions</td>
+              </tr>
+              <tr>
+                <td><code>ProjectConfigurationError</code></td>
+                <td>Missing project/location for Vertex AI</td>
+              </tr>
+              <tr>
+                <td><code>ImpersonationError</code></td>
+                <td>Impersonation failed or missing target SA</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p>
+            All exceptions include:
+          </p>
+          <ul>
+            <li>What was checked</li>
+            <li>Why it failed</li>
+            <li>How to fix it</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Handling auth errors</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.google_genai.errors import (
+    CredentialsNotFoundError,
+    CredentialsPermissionError,
+    ProjectConfigurationError,
+    ImpersonationError,
+)
+
+try:
+    provider.initialize(config)
+except CredentialsNotFoundError as e:
+    print(f"Missing credentials: {e}")
+    # Error message includes fix instructions
+except CredentialsPermissionError as e:
+    print(f"Permission denied: {e}")
+    # Includes gcloud command to fix
+except ProjectConfigurationError as e:
+    print(f"Bad config: {e}")
+except ImpersonationError as e:
+    print(f"Impersonation failed: {e}")
+    # Includes Token Creator role setup</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Example error message</div>
+          <div class="code-block">
+            <pre><code class="language-text">CredentialsNotFoundError: No credentials found for authentication method: auto
+
+Checked locations:
+  - GOOGLE_GENAI_API_KEY: not set
+  - GOOGLE_APPLICATION_CREDENTIALS: not set
+  - ADC user credentials: ~/.config/gcloud/... (not found)
+
+To fix, either:
+  1. Run: gcloud auth application-default login
+  2. Set GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
+  3. Use API key: set GOOGLE_GENAI_API_KEY</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Models -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="models">Available Models</h2>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Context</th>
+                <th>Best For</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>gemini-2.5-flash</code></td>
+                <td>1M tokens</td>
+                <td>Fast, cost-effective</td>
+              </tr>
+              <tr>
+                <td><code>gemini-2.5-pro</code></td>
+                <td>1M tokens</td>
+                <td>Complex reasoning</td>
+              </tr>
+              <tr>
+                <td><code>gemini-2.0-flash</code></td>
+                <td>1M tokens</td>
+                <td>Previous generation</td>
+              </tr>
+              <tr>
+                <td><code>gemini-1.5-pro</code></td>
+                <td>2M tokens</td>
+                <td>Largest context</td>
+              </tr>
+              <tr>
+                <td><code>gemini-1.5-flash</code></td>
+                <td>1M tokens</td>
+                <td>Fast, previous gen</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Capabilities</h3>
+          <ul>
+            <li><strong>Function Calling:</strong> All Gemini models</li>
+            <li><strong>Multimodal:</strong> Images, PDFs, video</li>
+            <li><strong>Structured Output:</strong> JSON schema constraints</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">List available models</div>
+          <div class="code-block">
+            <pre><code class="language-python">provider = load_provider("google_genai")
+provider.initialize(config)
+
+# List all models
+models = provider.list_models()
+for model in models:
+    print(model)
+
+# Filter by prefix
+gemini_models = provider.list_models(prefix="gemini")
+
+# Check context limit
+provider.connect("gemini-2.5-flash")
+limit = provider.get_context_limit()
+print(f"Context: {limit:,} tokens")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Using structured output</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Gemini supports JSON schema constraints
+schema = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "age": {"type": "integer"}
+    },
+    "required": ["name", "age"]
+}
+
+response = provider.send_message(
+    "Extract: John is 30 years old",
+    response_schema=schema
+)
+
+# response.structured_output = {"name": "John", "age": 30}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Troubleshooting -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="troubleshooting">Troubleshooting</h2>
+
+          <h3>No credentials found</h3>
+          <ul>
+            <li>For AI Studio: Set <code>GOOGLE_GENAI_API_KEY</code></li>
+            <li>For Vertex AI: Run <code>gcloud auth application-default login</code></li>
+            <li>Or set <code>GOOGLE_APPLICATION_CREDENTIALS</code></li>
+          </ul>
+
+          <h3>Permission denied (403)</h3>
+          <ul>
+            <li>Verify the service account has <code>roles/aiplatform.user</code></li>
+            <li>Check the project has Vertex AI API enabled</li>
+            <li>Verify billing is enabled on the project</li>
+          </ul>
+
+          <h3>Project/location missing</h3>
+          <ul>
+            <li>Set <code>JAATO_GOOGLE_PROJECT</code> and <code>JAATO_GOOGLE_LOCATION</code></li>
+            <li>Or pass explicitly in <code>ProviderConfig</code></li>
+          </ul>
+
+          <h3>Invalid API key</h3>
+          <ul>
+            <li>Verify the key at <a href="https://aistudio.google.com/apikey" target="_blank">AI Studio</a></li>
+            <li>Check for extra whitespace in the key</li>
+            <li>Ensure the key hasn't been revoked</li>
+          </ul>
+
+          <h3>Impersonation failed</h3>
+          <ul>
+            <li>Verify the source has <code>roles/iam.serviceAccountTokenCreator</code> on the target SA</li>
+            <li>Check the target SA email is correct</li>
+            <li>Ensure target SA has <code>roles/aiplatform.user</code></li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">GCP setup commands</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Enable Vertex AI API
+gcloud services enable aiplatform.googleapis.com \
+  --project=my-project
+
+# Grant permissions to service account
+gcloud projects add-iam-policy-binding my-project \
+  --member="serviceAccount:my-sa@my-project.iam.gserviceaccount.com" \
+  --role="roles/aiplatform.user"
+
+# Set up ADC for local dev
+gcloud auth application-default login
+
+# Verify current project
+gcloud config get-value project</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Setup for impersonation</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Grant Token Creator role to source (your user or SA)
+gcloud iam service-accounts add-iam-policy-binding \
+  target-sa@project.iam.gserviceaccount.com \
+  --member="user:you@example.com" \
+  --role="roles/iam.serviceAccountTokenCreator"
+
+# Grant Vertex AI role to target SA
+gcloud projects add-iam-policy-binding my-project \
+  --member="serviceAccount:target-sa@project.iam.gserviceaccount.com" \
+  --role="roles/aiplatform.user"</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Test connectivity</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Quick test script
+from shared import load_provider, ProviderConfig
+
+provider = load_provider("google_genai")
+
+try:
+    provider.initialize()  # Auto-detect
+    provider.connect("gemini-2.5-flash")
+
+    response = provider.generate("Say hello")
+    print(f"Success: {response.text}")
+except Exception as e:
+    print(f"Error: {e}")</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>

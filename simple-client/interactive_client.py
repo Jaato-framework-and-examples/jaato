@@ -159,23 +159,30 @@ class InteractiveClient:
         if active_bundle and self.verbose:
             self.log(f"[client] Using custom CA bundle: {active_bundle}")
 
-        # Check required environment variables
-        required_vars = ["PROJECT_ID", "LOCATION", "MODEL_NAME"]
-        missing = [v for v in required_vars if not os.environ.get(v)]
-        if missing:
-            print(f"Error: Missing required environment variables: {', '.join(missing)}")
-            print("Please set these in your .env file or environment.")
+        # Check required environment variables - MODEL_NAME always required
+        model_name = os.environ.get("MODEL_NAME")
+        if not model_name:
+            print("Error: Missing required environment variable: MODEL_NAME")
             return False
 
-        project_id = os.environ["PROJECT_ID"]
-        location = os.environ["LOCATION"]
-        model_name = os.environ["MODEL_NAME"]
+        # Check auth method: API key (AI Studio) or Vertex AI
+        api_key = os.environ.get("GOOGLE_GENAI_API_KEY")
+        project_id = os.environ.get("PROJECT_ID")
+        location = os.environ.get("LOCATION")
+
+        if not api_key and (not project_id or not location):
+            print("Error: Set GOOGLE_GENAI_API_KEY for AI Studio, or PROJECT_ID and LOCATION for Vertex AI")
+            return False
 
         # Initialize JaatoClient
-        self.log(f"[client] Connecting to Vertex AI (project={project_id}, location={location})")
         try:
             self._jaato = JaatoClient()
-            self._jaato.connect(project_id, location, model_name)
+            if api_key:
+                self.log(f"[client] Connecting to AI Studio")
+                self._jaato.connect(model=model_name)
+            else:
+                self.log(f"[client] Connecting to Vertex AI (project={project_id}, location={location})")
+                self._jaato.connect(project_id, location, model_name)
             self.log(f"[client] Using model: {model_name}")
             try:
                 available_models = self._jaato.list_available_models()

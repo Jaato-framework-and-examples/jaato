@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Providers Reference - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html" class="active">Overview</a></li>
+          <li><a href="google-genai.html">Google GenAI</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/mcp.html">MCP</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Provider Reference</h1>
+          <p class="lead">
+            Model providers connect jaato to AI services. Each provider handles
+            authentication, API communication, and type conversion for a specific
+            AI platform.
+          </p>
+
+          <h2 id="available">Available Providers</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Name</th>
+                <th>Status</th>
+                <th>Models</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong><a href="google-genai.html">Google GenAI</a></strong></td>
+                <td><code>google_genai</code></td>
+                <td>Available</td>
+                <td>Gemini 1.5, 2.0, 2.5</td>
+              </tr>
+              <tr>
+                <td><strong>Anthropic</strong></td>
+                <td><code>anthropic</code></td>
+                <td>Planned</td>
+                <td>Claude 3, 3.5, 4</td>
+              </tr>
+              <tr>
+                <td><strong>OpenAI</strong></td>
+                <td><code>openai</code></td>
+                <td>Planned</td>
+                <td>GPT-4, GPT-4o</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h2 id="choosing">Choosing a Provider</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Use Case</th>
+                <th>Recommended</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Personal development</td>
+                <td>Google GenAI (AI Studio) - free tier available</td>
+              </tr>
+              <tr>
+                <td>Enterprise / GCP integration</td>
+                <td>Google GenAI (Vertex AI)</td>
+              </tr>
+              <tr>
+                <td>AWS integration</td>
+                <td>Anthropic (via Bedrock) - planned</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Using a provider</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient
+
+# Default provider (google_genai)
+client = JaatoClient()
+client.connect(
+    project="my-project",
+    location="us-central1",
+    model="gemini-2.5-flash"
+)
+
+# Explicit provider selection
+client = JaatoClient(provider_name="google_genai")
+
+# Future: other providers
+# client = JaatoClient(provider_name="anthropic")
+# client = JaatoClient(provider_name="openai")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Discover available providers</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import discover_providers, load_provider
+
+# Find what's available
+providers = discover_providers()
+print(f"Available: {providers}")
+# ['google_genai']
+
+# Load a specific provider
+provider = load_provider("google_genai")
+print(f"Loaded: {provider.name}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Provider Comparison -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="comparison">Provider Comparison</h2>
+
+          <h3>Google GenAI</h3>
+          <ul>
+            <li><strong>Endpoints:</strong> AI Studio (personal) + Vertex AI (enterprise)</li>
+            <li><strong>Auth:</strong> API key, ADC, service account</li>
+            <li><strong>Features:</strong> Function calling, multimodal, structured output</li>
+            <li><strong>Best for:</strong> GCP users, long context needs (1M+ tokens)</li>
+          </ul>
+
+          <h3>Anthropic (Planned)</h3>
+          <ul>
+            <li><strong>Endpoints:</strong> Direct API, AWS Bedrock</li>
+            <li><strong>Auth:</strong> API key</li>
+            <li><strong>Features:</strong> Function calling, multimodal</li>
+            <li><strong>Best for:</strong> AWS users, complex reasoning tasks</li>
+          </ul>
+
+          <h3>OpenAI (Planned)</h3>
+          <ul>
+            <li><strong>Endpoints:</strong> Direct API, Azure OpenAI</li>
+            <li><strong>Auth:</strong> API key</li>
+            <li><strong>Features:</strong> Function calling, multimodal</li>
+            <li><strong>Best for:</strong> Azure users, broad ecosystem</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Provider capabilities</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Check provider capabilities
+provider = load_provider("google_genai")
+
+# Structured output support
+if provider.supports_structured_output():
+    response = provider.send_message(
+        "Extract data",
+        response_schema={"type": "object", ...}
+    )
+
+# Context limits
+limit = provider.get_context_limit()
+print(f"Context window: {limit:,} tokens")
+# Context window: 1,048,576 tokens
+
+# Token counting
+tokens = provider.count_tokens("Hello world")
+print(f"Token count: {tokens}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Next Steps -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="next-steps">Next Steps</h2>
+          <ul>
+            <li><a href="google-genai.html">Google GenAI Provider</a> - Setup, authentication, configuration</li>
+            <li><a href="../../core-concepts/providers.html">Provider Concepts</a> - How providers work</li>
+            <li><a href="../types.html">Types Reference</a> - Provider-agnostic types</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Provider directory structure</div>
+          <div class="code-block">
+            <pre><code class="language-text">shared/plugins/model_provider/
+├── __init__.py
+├── base.py              # Protocol definition
+├── types.py             # Unified types
+└── google_genai/
+    ├── __init__.py
+    ├── provider.py      # Implementation
+    ├── converters.py    # Type conversion
+    ├── env.py           # Environment resolution
+    └── errors.py        # Auth exceptions
+
+# Future providers:
+├── anthropic/
+│   └── provider.py
+└── openai/
+    └── provider.py</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>
