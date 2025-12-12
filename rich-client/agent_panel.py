@@ -95,6 +95,7 @@ class AgentPanel:
         # Map internal status to user-friendly display labels
         status_labels = {
             "active": "Processing",
+            "waiting": "Awaiting",
             "done": "Finished",
             "error": "Error",
             "pending": "Awaiting"
@@ -114,6 +115,9 @@ class AgentPanel:
             elif agent.status == "error":
                 name_style = "red"
                 status_style = "red"
+            elif agent.status == "waiting":
+                name_style = "white"
+                status_style = "green"
             else:  # active
                 name_style = "white"
                 status_style = "yellow"

@@ -618,6 +618,12 @@ class SubagentPlugin:
                     history=history
                 )
 
+                # Change status to "waiting" - response complete, ready for more input
+                self._ui_hooks.on_agent_status_changed(
+                    agent_id=agent_id,
+                    status="waiting"
+                )
+
             return SubagentResult(
                 success=True,
                 response=response,
@@ -980,6 +986,12 @@ class SubagentPlugin:
                 self._ui_hooks.on_agent_history_updated(
                     agent_id=agent_id,
                     history=history
+                )
+
+                # Change status to "waiting" - task complete, ready for follow-up
+                self._ui_hooks.on_agent_status_changed(
+                    agent_id=agent_id,
+                    status="waiting"
                 )
 
             # Store session in registry for multi-turn conversations
