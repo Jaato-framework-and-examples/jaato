@@ -275,7 +275,7 @@ class RichClient:
         self.permission_plugin.initialize({
             "channel_type": "queue",
             "channel_config": {
-                "use_colors": False,  # Disable ANSI colors - TUI handles styling via Rich
+                "use_colors": True,  # Enable ANSI colors for diff coloring
             },
             "policy": {
                 "defaultPolicy": "ask",
