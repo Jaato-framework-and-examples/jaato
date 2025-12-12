@@ -92,6 +92,15 @@ class AgentPanel:
         """
         card_width = self._panel_width - 4  # Account for panel padding/border
 
+        # Map internal status to user-friendly display labels
+        status_labels = {
+            "active": "Processing",
+            "done": "Finished",
+            "error": "Error",
+            "pending": "Awaiting"
+        }
+        display_status = status_labels.get(agent.status, agent.status.capitalize())
+
         # Determine styles based on status and selection
         if is_selected:
             border_char = "═"
@@ -138,8 +147,7 @@ class AgentPanel:
         lines.append(name_line)
 
         # Status line
-        status_display = f"({agent.status})"
-        status_text = Text(status_display.center(card_width - 2), style=status_style)
+        status_text = Text(f"({display_status})".center(card_width - 2), style=status_style)
         if is_selected:
             status_line = Text("║", style="cyan") + status_text + Text("║", style="cyan")
         else:
