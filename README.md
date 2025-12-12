@@ -53,7 +53,7 @@ jaato includes 14+ built-in plugins for tool orchestration, file operations, ses
 - **web_search** - Web search integration
 - **subagent** - Delegate to specialized sub-agents
 
-📖 **[View full plugin reference with examples →](https://apanoia.github.io/jaato/docs/api/api-reference/plugins/index.html)**
+📖 **[View full plugin reference with examples →](https://apanoia.github.io/jaato/api/api-reference/plugins/index.html)**
 
 For plugin development, see [shared/plugins/README.md](shared/plugins/README.md).
 
@@ -83,7 +83,7 @@ jaato uses environment variables and configuration files for setup:
 2. **Configure environment** - Copy `.env.example` to `.env` and edit with your credentials
 3. **Optional: Add MCP servers** - Configure in `.mcp.json` for external tool integrations
 
-📖 **[Provider setup guides →](https://apanoia.github.io/jaato/docs/api/api-reference/providers/index.html)** | **[GCP/Vertex AI setup →](docs/gcp-setup.md)** | **[Environment variables →](#environment-variables)**
+📖 **[Provider setup guides →](https://apanoia.github.io/jaato/api/api-reference/providers/index.html)** | **[GCP/Vertex AI setup →](docs/gcp-setup.md)** | **[Environment variables →](#environment-variables)**
 
 ## Usage
 
@@ -396,11 +396,11 @@ jaato/
 
 ## Documentation
 
-📚 **[Full API Documentation →](https://apanoia.github.io/jaato/docs/api/index.html)** - Complete reference with examples
+📚 **[Full API Documentation →](https://apanoia.github.io/jaato/api/index.html)** - Complete reference with examples
 
 **Guides:**
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up your GCP project
-- [Plugin Reference](https://apanoia.github.io/jaato/docs/api/api-reference/plugins/index.html) - All built-in plugins with configuration options
+- [Plugin Reference](https://apanoia.github.io/jaato/api/api-reference/plugins/index.html) - All built-in plugins with configuration options
 - [Plugin Development](shared/plugins/README.md) - Creating custom tool plugins
 - [ModLog Training](modlog-training-set-test/README.md) - COBOL training data generation
 - [Sequence Diagrams](sequence-diagram-generator/README.md) - Trace visualization
