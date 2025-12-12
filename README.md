@@ -67,13 +67,12 @@ For plugin development, see [shared/plugins/README.md](shared/plugins/README.md)
 ### Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/apanoia/jaato.git
 cd jaato
-
-# Install with development mode
-pip install -e .
+pip install .
 ```
+
+📖 **[Installation guides →](https://apanoia.github.io/jaato/api/guides/installation.html)** - Detailed instructions for users, plugin developers, and contributors
 
 ### Configuration
 
