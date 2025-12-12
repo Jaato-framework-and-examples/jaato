@@ -1048,7 +1048,28 @@ Examples:
         except Exception as exc:
             self._log_event(LOG_ERROR, "MCP thread crashed", details=str(exc))
         finally:
-            self._loop.close()
+            # Cleanup: cancel all remaining tasks
+            try:
+                # Get all pending tasks
+                pending = asyncio.all_tasks(self._loop)
+                for task in pending:
+                    task.cancel()
+                # Wait for cancellations to complete
+                if pending:
+                    self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass  # Ignore errors during cleanup
+
+            # On Windows, give subprocess cleanup time to complete
+            if sys.platform == 'win32':
+                import time
+                time.sleep(0.2)
+
+            # Close the event loop
+            try:
+                self._loop.close()
+            except Exception:
+                pass  # Ignore errors when closing loop
 
     def _ensure_thread(self):
         """Start the MCP background thread if not already running."""
