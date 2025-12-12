@@ -72,7 +72,7 @@ cd jaato
 pip install .
 ```
 
-📖 **[Installation guides →](https://apanoia.github.io/jaato/api/guides/installation.html)** - Detailed instructions for users, plugin developers, and contributors
+📖 **[Installation guides →](https://apanoia.github.io/jaato/api/index.html#installation)** - Detailed instructions for users, plugin developers, and contributors
 
 ### Configuration
 
