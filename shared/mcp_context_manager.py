@@ -183,7 +183,10 @@ class MCPClientManager:
         # On Windows, subprocess cleanup needs special handling to avoid pipe errors
 
         # Give pending operations a chance to complete
-        await asyncio.sleep(0.1)
+        try:
+            await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            pass  # Event loop may be shutting down
 
         # Cancel any pending tasks in the current event loop
         if sys.version_info >= (3, 11):
@@ -194,21 +197,24 @@ class MCPClientManager:
                         task.cancel()
                     # Wait briefly for cancellation to complete
                     await asyncio.sleep(0.05)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 pass  # Ignore errors during task cleanup
 
         # Close all contexts in reverse order
         for ctx in reversed(self._contexts):
             try:
                 await ctx.__aexit__(exc_type, exc_val, exc_tb)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 # Silently ignore cleanup errors - they're typically just
                 # resource warnings from subprocess cleanup on Windows
                 pass
 
         # On Windows, give subprocess transports time to finish cleanup
         if sys.platform == 'win32':
-            await asyncio.sleep(0.1)
+            try:
+                await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                pass  # Event loop may be shutting down
 
         self._contexts.clear()
         self._connections.clear()
