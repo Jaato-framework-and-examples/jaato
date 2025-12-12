@@ -6,7 +6,9 @@
 
 **j**ust **a**nother **a**gentic **t**ool **o**rchestrator
 
-A framework for building agentic AI applications with LLM function calling on Google's Vertex AI and Gemini models.
+A provider-agnostic framework for building agentic AI applications with LLM function calling, tool orchestration, and extensible plugin architecture.
+
+**Currently supports:** Google Vertex AI (Gemini models) | **Coming soon:** Anthropic Claude, OpenAI
 
 ## Demo
 
@@ -22,9 +24,10 @@ The metaphor is intentional: just as a traditional jaato grinds raw grains into 
 
 jaato is a future-proof framework for building agentic AI applications, featuring:
 
-- **Vertex AI Integration** - Using the `google-genai` SDK with Gemini models
+- **Multi-Provider Support** - Provider-agnostic architecture (currently: Vertex AI/Gemini)
 - **Function Calling** - Multi-turn tool execution loops with automatic result feeding
 - **Tool Orchestration** - Unified interface for CLI tools and MCP (Model Context Protocol) servers
+- **Plugin System** - 14+ built-in plugins for file ops, memory, web search, and more
 - **Token Accounting** - Detailed tracking of prompt/output tokens with retry logic
 
 > **Note**: This project is currently experimental, but is being developed with the intention of becoming a production-ready orchestration framework. It follows best engineering practices and patterns, with AI-assisted development applied judiciously rather than relying on "vibe coding."
@@ -54,56 +57,33 @@ jaato includes 14+ built-in plugins for tool orchestration, file operations, ses
 
 For plugin development, see [shared/plugins/README.md](shared/plugins/README.md).
 
-## Prerequisites
+## Quick Start
+
+### Prerequisites
 
 - Python 3.10+
-- Google Cloud Platform account with Vertex AI enabled
-- GCP credentials file (service account key JSON) with Vertex AI permissions
+- AI provider account (currently supports Google Vertex AI)
 
-## Installation
+### Installation
 
 ```bash
 # Clone the repository
 git clone https://github.com/apanoia/jaato.git
 cd jaato
 
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
+# Install with development mode
+pip install -e .
 ```
 
-## Configuration
+### Configuration
 
-1. Copy the example environment file:
-   ```bash
-   cp .env.example .env
-   ```
+jaato uses environment variables and configuration files for setup:
 
-2. Edit `.env` with your configuration:
-   ```bash
-   PROJECT_ID=your-gcp-project-id
-   LOCATION=us-central1
-   MODEL_NAME=gemini-2.5-flash
-   GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
-   ```
+1. **Set up your AI provider** - Configure your model provider (Google Vertex AI, etc.)
+2. **Configure environment** - Copy `.env.example` to `.env` and edit with your credentials
+3. **Optional: Add MCP servers** - Configure in `.mcp.json` for external tool integrations
 
-3. (Optional) Configure MCP servers in `.mcp.json`:
-   ```json
-   {
-     "mcpServers": {
-       "GitHub": {
-         "type": "stdio",
-         "command": "mcp-server-github",
-         "env": {
-           "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
-         }
-       }
-     }
-   }
-   ```
+📖 **[Provider setup guides →](docs/api/api-reference/providers/index.html)** | **[GCP/Vertex AI setup →](docs/gcp-setup.md)** | **[Environment variables →](#environment-variables)**
 
 ## Usage
 
