@@ -187,7 +187,13 @@ class RichClient:
                 if not key.startswith('_'):
                     lines.append((f"  {key}: {value}", "dim"))
         else:
-            lines.append((f"  {result}", "dim"))
+            # Handle multi-line strings by splitting on newlines
+            result_str = str(result)
+            if '\n' in result_str:
+                for line in result_str.split('\n'):
+                    lines.append((f"  {line}", "dim"))
+            else:
+                lines.append((f"  {result_str}", "dim"))
 
         if shared:
             lines.append(("  [Result shared with model]", "dim cyan"))
