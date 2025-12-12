@@ -765,8 +765,62 @@ Examples:
             # It's valid JSON-RPC, let Pydantic parse it properly
             return _original_validate_json(cls, json_data, *args, **kwargs)
 
-        # Apply patch
+        # Apply validation patch
         mcp_types.JSONRPCMessage.model_validate_json = filtered_validate_json
+
+        # Patch traceback printing to suppress SkipMessage error logging
+        # This prevents "Failed to parse JSONRPC message from server" errors
+        # that appear in PowerShell when MCP servers output non-JSONRPC log messages
+        import traceback as tb_module
+        _original_print_exception = tb_module.print_exception
+        _original_print_exc = tb_module.print_exc
+
+        def filtered_print_exception(*args, **kwargs):
+            """Suppress printing SkipMessage exceptions."""
+            # Handle both old (exc_type, exc_value, exc_tb) and new (exc) signatures
+            if args:
+                exc = args[0] if len(args) == 1 else args[1]
+                if exc is not None and type(exc).__name__ == 'SkipMessage':
+                    # Silently skip - these are expected non-JSONRPC log messages
+                    return
+            _original_print_exception(*args, **kwargs)
+
+        def filtered_print_exc(*args, **kwargs):
+            """Suppress printing SkipMessage exceptions via print_exc."""
+            import sys
+            exc_info = sys.exc_info()
+            if exc_info[0] is not None and exc_info[0].__name__ == 'SkipMessage':
+                # Silently skip - these are expected non-JSONRPC log messages
+                return
+            _original_print_exc(*args, **kwargs)
+
+        tb_module.print_exception = filtered_print_exception
+        tb_module.print_exc = filtered_print_exc
+
+        # Also patch print to suppress the "Failed to parse JSONRPC message" prefix
+        import builtins
+        _original_print = builtins.print
+
+        def filtered_print(*args, **kwargs):
+            """Suppress 'Failed to parse JSONRPC message from server' messages."""
+            if args and len(args) > 0:
+                first_arg = str(args[0])
+                if 'Failed to parse JSONRPC message from server' in first_arg:
+                    # Check if this is followed by a SkipMessage in the call stack
+                    import inspect
+                    frame = inspect.currentframe()
+                    try:
+                        # Look up the stack to see if we're in MCP's error handling
+                        caller_frame = frame.f_back
+                        if caller_frame and 'stdout_reader' in caller_frame.f_code.co_name:
+                            # This is the MCP library printing the error - suppress it
+                            return
+                    finally:
+                        del frame
+            _original_print(*args, **kwargs)
+
+        builtins.print = filtered_print
+
         self._mcp_patch_applied = True
 
     def _load_mcp_registry(self, registry_path: Optional[str] = None) -> Dict[str, Any]:
