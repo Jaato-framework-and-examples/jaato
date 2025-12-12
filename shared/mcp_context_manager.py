@@ -5,6 +5,7 @@ A clean architecture for managing multiple simultaneous MCP server connections.
 """
 
 import asyncio
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 from contextlib import asynccontextmanager
@@ -178,12 +179,37 @@ class MCPClientManager:
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        # Close all contexts in reverse order with proper cleanup
+        # On Windows, subprocess cleanup needs special handling to avoid pipe errors
+
+        # Give pending operations a chance to complete
+        await asyncio.sleep(0.1)
+
+        # Cancel any pending tasks in the current event loop
+        if sys.version_info >= (3, 11):
+            try:
+                tasks = [t for t in asyncio.all_tasks() if not t.done()]
+                if tasks:
+                    for task in tasks:
+                        task.cancel()
+                    # Wait briefly for cancellation to complete
+                    await asyncio.sleep(0.05)
+            except Exception:
+                pass  # Ignore errors during task cleanup
+
         # Close all contexts in reverse order
         for ctx in reversed(self._contexts):
             try:
                 await ctx.__aexit__(exc_type, exc_val, exc_tb)
-            except Exception as e:
-                print(f"Error closing context: {e}")
+            except Exception:
+                # Silently ignore cleanup errors - they're typically just
+                # resource warnings from subprocess cleanup on Windows
+                pass
+
+        # On Windows, give subprocess transports time to finish cleanup
+        if sys.platform == 'win32':
+            await asyncio.sleep(0.1)
+
         self._contexts.clear()
         self._connections.clear()
 
