@@ -464,7 +464,7 @@ class RichClient:
             def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds):
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
-                    buffer.remove_active_tool(tool_name)
+                    buffer.mark_tool_completed(tool_name, success, duration_seconds)
                     if display:
                         display.refresh()
 

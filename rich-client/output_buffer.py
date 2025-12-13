@@ -27,9 +27,12 @@ class OutputLine:
 
 @dataclass
 class ActiveToolCall:
-    """Represents an actively executing tool call."""
+    """Represents an actively executing or completed tool call."""
     name: str
     args_summary: str  # Truncated string representation of args
+    completed: bool = False  # True when tool execution finished
+    success: bool = True  # Whether the tool succeeded (only valid when completed)
+    duration_seconds: Optional[float] = None  # Execution time (only valid when completed)
 
 
 class OutputBuffer:
@@ -179,9 +182,9 @@ class OutputBuffer:
         self._spinner_index = 0
 
     def stop_spinner(self) -> None:
-        """Stop showing spinner and clear active tools."""
+        """Stop showing spinner. Tool history is preserved for display."""
         self._spinner_active = False
-        self._active_tools.clear()  # Clear active tools when spinner stops
+        # Don't clear active tools - they remain visible as completed tools
 
     def advance_spinner(self) -> None:
         """Advance spinner to next frame."""
@@ -212,13 +215,30 @@ class OutputBuffer:
 
         self._active_tools.append(ActiveToolCall(name=tool_name, args_summary=args_str))
 
+    def mark_tool_completed(self, tool_name: str, success: bool = True,
+                            duration_seconds: Optional[float] = None) -> None:
+        """Mark a tool as completed (keeps it in the tree with completion status).
+
+        Args:
+            tool_name: Name of the tool that finished.
+            success: Whether the tool execution succeeded.
+            duration_seconds: How long the tool took to execute.
+        """
+        for tool in self._active_tools:
+            if tool.name == tool_name and not tool.completed:
+                tool.completed = True
+                tool.success = success
+                tool.duration_seconds = duration_seconds
+                return
+
     def remove_active_tool(self, tool_name: str) -> None:
-        """Remove a tool from the active tools list.
+        """Remove a tool from the active tools list (legacy, now marks as completed).
 
         Args:
             tool_name: Name of the tool that finished.
         """
-        self._active_tools = [t for t in self._active_tools if t.name != tool_name]
+        # Instead of removing, mark as completed to keep the tree visible
+        self.mark_tool_completed(tool_name)
 
     def clear_active_tools(self) -> None:
         """Clear all active tools."""
@@ -458,24 +478,49 @@ class OutputBuffer:
                         output.append(" " * (len(f"[{line.source}] ")))  # Indent continuation
                     output.append_text(Text.from_ansi(wrapped_line))
 
-        # Add spinner at the bottom if active
-        if self._spinner_active:
+        # Add tool call tree at the bottom (persistent)
+        if self._active_tools:
+            if lines_to_show:
+                output.append("\n")
+
+            # Show header based on spinner state
+            if self._spinner_active:
+                frame = self.SPINNER_FRAMES[self._spinner_index]
+                output.append(f"Model> {frame} ", style="bold cyan")
+                output.append("thinking...", style="dim italic")
+            else:
+                # All tools completed - show "Processed" header
+                output.append("Model> ✓ ", style="bold green")
+                output.append("Processed", style="dim italic")
+
+            # Show tool calls below header
+            for i, tool in enumerate(self._active_tools):
+                output.append("\n")
+                is_last = (i == len(self._active_tools) - 1)
+                prefix = "└─" if is_last else "├─"
+                output.append(f"       {prefix} ", style="dim")
+
+                if tool.completed:
+                    # Completed tool - show with checkmark and duration
+                    status_icon = "✓" if tool.success else "✗"
+                    status_style = "green" if tool.success else "red"
+                    output.append(f"{status_icon} ", style=status_style)
+                    output.append(tool.name, style="dim yellow")
+                    if tool.duration_seconds is not None:
+                        output.append(f" ({tool.duration_seconds:.2f}s)", style="dim")
+                else:
+                    # Active tool - show with spinner indicator
+                    output.append("○ ", style="yellow")
+                    output.append(tool.name, style="yellow")
+                    if tool.args_summary and tool.args_summary != "{}":
+                        output.append(f"({tool.args_summary})", style="dim")
+        elif self._spinner_active:
+            # Spinner active but no tools yet
             if lines_to_show:
                 output.append("\n")
             frame = self.SPINNER_FRAMES[self._spinner_index]
             output.append(f"Model> {frame} ", style="bold cyan")
             output.append("thinking...", style="dim italic")
-
-            # Show active tool calls below spinner
-            if self._active_tools:
-                for i, tool in enumerate(self._active_tools):
-                    output.append("\n")
-                    is_last = (i == len(self._active_tools) - 1)
-                    prefix = "└─" if is_last else "├─"
-                    output.append(f"       {prefix} ", style="dim")
-                    output.append(tool.name, style="yellow")
-                    if tool.args_summary and tool.args_summary != "{}":
-                        output.append(f"({tool.args_summary})", style="dim")
 
         return output
 
