@@ -793,8 +793,7 @@ class RichClient:
                             else:
                                 lines.append((line, ""))
                         lines.append(("─" * 40, "dim"))
-                        lines.append(("Press Enter to continue, 'q' to return", "bold cyan"))
-                        self._display.show_lines(lines, page_size=20)
+                        self._display.show_lines(lines)
                         return
             # Don't echo answer - it's shown inline in the tool tree
             self._channel_input_queue.put(user_input)
