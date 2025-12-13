@@ -281,6 +281,8 @@ class OutputBuffer:
             if tool.name == tool_name and not tool.completed:
                 tool.permission_state = "pending"
                 tool.permission_prompt_lines = prompt_lines
+                # Scroll to bottom to show the prompt
+                self._scroll_offset = 0
                 return
 
     def set_tool_permission_resolved(self, tool_name: str, granted: bool,
@@ -310,6 +312,8 @@ class OutputBuffer:
             if tool.name == tool_name and not tool.completed:
                 tool.clarification_state = "pending"
                 tool.clarification_prompt_lines = prompt_lines
+                # Scroll to bottom to show the prompt
+                self._scroll_offset = 0
                 return
 
     def set_tool_clarification_resolved(self, tool_name: str) -> None:
