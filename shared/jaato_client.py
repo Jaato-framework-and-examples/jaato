@@ -147,6 +147,10 @@ class JaatoClient:
         """
         self._ui_hooks = hooks
 
+        # Pass hooks to session if it exists
+        if self._session:
+            self._session.set_ui_hooks(hooks, self._agent_id)
+
         # Notify about main agent creation
         if self._ui_hooks:
             self._ui_hooks.on_agent_created(
@@ -158,10 +162,7 @@ class JaatoClient:
                 icon_lines=None,  # Uses default main icon
                 created_at=datetime.now()
             )
-            self._ui_hooks.on_agent_status_changed(
-                agent_id=self._agent_id,
-                status="active"
-            )
+            # Note: Don't set status to "active" here - that happens when user sends input
 
     def list_available_models(self, prefix: Optional[str] = None) -> List[str]:
         """List models from the provider.
@@ -228,6 +229,10 @@ class JaatoClient:
 
         # Create main session
         self._session = self._runtime.create_session(model=self._model_name)
+
+        # Pass UI hooks to session if they were set before configure_tools
+        if self._ui_hooks:
+            self._session.set_ui_hooks(self._ui_hooks, self._agent_id)
 
     def configure_custom_tools(
         self,

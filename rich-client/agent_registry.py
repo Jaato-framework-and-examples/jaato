@@ -330,3 +330,12 @@ class AgentRegistry:
         with self._lock:
             agent = self.get_selected_agent()
             return agent.name if agent else "main"
+
+    def get_all_agent_ids(self) -> List[str]:
+        """Get all agent IDs in display order.
+
+        Returns:
+            List of agent IDs.
+        """
+        with self._lock:
+            return list(self._agent_order)

@@ -27,6 +27,7 @@ from .plugins.model_provider.types import (
 if TYPE_CHECKING:
     from .jaato_runtime import JaatoRuntime
     from .plugins.model_provider.base import ModelProviderPlugin
+    from .plugins.subagent.ui_hooks import AgentUIHooks
 
 # Pattern to match @references in prompts
 AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
@@ -98,6 +99,10 @@ class JaatoSession:
         self._agent_type: str = "main"
         self._agent_name: Optional[str] = None
 
+        # UI hooks for agent lifecycle events
+        self._ui_hooks: Optional['AgentUIHooks'] = None
+        self._agent_id: str = "main"  # Unique ID for this agent
+
     @property
     def model_name(self) -> Optional[str]:
         """Get the model name for this session."""
@@ -136,6 +141,23 @@ class JaatoSession:
                 self._runtime.permission_plugin,
                 context=context
             )
+
+    def set_ui_hooks(
+        self,
+        hooks: 'AgentUIHooks',
+        agent_id: str
+    ) -> None:
+        """Set UI hooks for agent lifecycle events.
+
+        This enables rich terminal UIs to track tool execution and other
+        lifecycle events for this session.
+
+        Args:
+            hooks: Implementation of AgentUIHooks protocol.
+            agent_id: Unique identifier for this agent (e.g., "main", "subagent_1").
+        """
+        self._ui_hooks = hooks
+        self._agent_id = agent_id
 
     def configure(
         self,
@@ -309,6 +331,14 @@ class JaatoSession:
                     name = fc.name
                     args = fc.args
 
+                    # Emit hook: tool starting
+                    if self._ui_hooks:
+                        self._ui_hooks.on_tool_call_start(
+                            agent_id=self._agent_id,
+                            tool_name=name,
+                            tool_args=args
+                        )
+
                     fc_start = datetime.now()
                     if self._executor:
                         executor_result = self._executor.execute(name, args)
@@ -316,12 +346,27 @@ class JaatoSession:
                         executor_result = (False, {"error": f"No executor registered for {name}"})
                     fc_end = datetime.now()
 
+                    # Determine success from executor result
+                    fc_success = True
+                    if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                        fc_success = executor_result[0]
+
+                    # Emit hook: tool ended
+                    fc_duration = (fc_end - fc_start).total_seconds()
+                    if self._ui_hooks:
+                        self._ui_hooks.on_tool_call_end(
+                            agent_id=self._agent_id,
+                            tool_name=name,
+                            success=fc_success,
+                            duration_seconds=fc_duration
+                        )
+
                     # Record function call timing
                     turn_data['function_calls'].append({
                         'name': name,
                         'start_time': fc_start.isoformat(),
                         'end_time': fc_end.isoformat(),
-                        'duration_seconds': (fc_end - fc_start).total_seconds(),
+                        'duration_seconds': fc_duration,
                     })
 
                     # Build ToolResult
@@ -659,6 +704,14 @@ class JaatoSession:
                     name = fc.name
                     args = fc.args
 
+                    # Emit hook: tool starting
+                    if self._ui_hooks:
+                        self._ui_hooks.on_tool_call_start(
+                            agent_id=self._agent_id,
+                            tool_name=name,
+                            tool_args=args
+                        )
+
                     fc_start = datetime.now()
                     if self._executor:
                         executor_result = self._executor.execute(name, args)
@@ -666,11 +719,26 @@ class JaatoSession:
                         executor_result = (False, {"error": f"No executor registered for {name}"})
                     fc_end = datetime.now()
 
+                    # Determine success from executor result
+                    fc_success = True
+                    if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                        fc_success = executor_result[0]
+
+                    # Emit hook: tool ended
+                    fc_duration = (fc_end - fc_start).total_seconds()
+                    if self._ui_hooks:
+                        self._ui_hooks.on_tool_call_end(
+                            agent_id=self._agent_id,
+                            tool_name=name,
+                            success=fc_success,
+                            duration_seconds=fc_duration
+                        )
+
                     turn_data['function_calls'].append({
                         'name': name,
                         'start_time': fc_start.isoformat(),
                         'end_time': fc_end.isoformat(),
-                        'duration_seconds': (fc_end - fc_start).total_seconds(),
+                        'duration_seconds': fc_duration,
                     })
 
                     tool_result = self._build_tool_result(fc, executor_result)
