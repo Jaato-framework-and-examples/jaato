@@ -134,6 +134,10 @@ class OutputBuffer:
         if source == "plan":
             return
 
+        # Skip permission messages - they're shown inline under tool calls in the tree
+        if source == "permission":
+            return
+
         if mode == "write":
             # Start a new block - this is a new turn
             self._flush_current_block()
