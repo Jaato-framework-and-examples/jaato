@@ -1,7 +1,7 @@
 # jaato
 
 <p align="center">
-  <img src="docs/jaato_(traditional grinder)_logo.jpg" alt="jaato logo" width="200"/>
+  <img src="docs/jaato-logo.png" alt="jaato logo" width="200"/>
 </p>
 
 **j**ust **a**nother **a**gentic **t**ool **o**rchestrator
