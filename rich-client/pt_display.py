@@ -280,8 +280,10 @@ class PTDisplay:
         # Check for terminal resize and update dimensions if needed
         self._update_dimensions()
 
-        # Use selected agent's buffer if registry present, otherwise use default
-        if self._agent_registry:
+        # Use pager temp buffer if pager is active, otherwise use main buffer
+        if getattr(self, '_pager_active', False) and hasattr(self, '_pager_temp_buffer'):
+            output_buffer = self._pager_temp_buffer
+        elif self._agent_registry:
             output_buffer = self._agent_registry.get_selected_buffer()
             if not output_buffer:
                 output_buffer = self._output_buffer
@@ -797,6 +799,9 @@ class PTDisplay:
     def _start_pager(self, lines: list, page_size: int) -> None:
         """Start paged display mode (internal).
 
+        Creates a temporary buffer for pager content, preserving the original
+        buffer which is restored when pager exits.
+
         Args:
             lines: List of (text, style) tuples to display.
             page_size: Lines per page.
@@ -806,22 +811,21 @@ class PTDisplay:
         self._pager_current = 0
         self._pager_active = True
 
-        # Clear the buffer first to remove tool tree and any existing content
+        # Create a temporary buffer for pager content (preserves original)
+        self._pager_temp_buffer = OutputBuffer()
+        # Copy width settings from the main buffer
         if self._agent_registry:
-            buffer = self._agent_registry.get_selected_buffer()
-            if buffer:
-                buffer.clear()
+            original_buffer = self._agent_registry.get_selected_buffer()
+            if original_buffer:
+                self._pager_temp_buffer.set_width(original_buffer._console_width)
         else:
-            self._output_buffer.clear()
-
-        # Force an immediate refresh to clear the display
-        self.refresh()
+            self._pager_temp_buffer.set_width(self._output_buffer._console_width)
 
         self._show_pager_page()
 
     def _show_pager_page(self) -> None:
-        """Show the current pager page."""
-        if not self._pager_active:
+        """Show the current pager page in the temporary pager buffer."""
+        if not self._pager_active or not hasattr(self, '_pager_temp_buffer'):
             return
 
         lines = self._pager_lines
@@ -832,15 +836,10 @@ class PTDisplay:
         total_pages = (total_lines + page_size - 1) // page_size
         page_num = (current // page_size) + 1
 
-        # Use selected agent's buffer if registry present
-        if self._agent_registry:
-            buffer = self._agent_registry.get_selected_buffer()
-            if not buffer:
-                buffer = self._output_buffer
-        else:
-            buffer = self._output_buffer
+        # Use the temporary pager buffer (not the main buffer)
+        buffer = self._pager_temp_buffer
 
-        # Clear output for fresh page
+        # Clear the temp buffer for fresh page
         buffer.clear()
 
         # Calculate what to show
@@ -887,24 +886,28 @@ class PTDisplay:
             return False
 
         if text.lower() == 'q':
-            # Quit pager - add blank line for separation from next command
-            self._pager_active = False
-            # Don't clear - keep current page content visible
-            self._output_buffer.add_system_message("", style="dim")
-            self.refresh()
+            # Quit pager - restore original buffer
+            self._stop_pager()
             return True
 
         # Empty string or any other input advances to next page
         self._pager_current += self._pager_page_size
         if self._pager_current >= len(self._pager_lines):
-            # Reached end - last page already shown, just deactivate
-            self._pager_active = False
-            self._output_buffer.add_system_message("", style="dim")
-            self.refresh()
+            # Reached end - restore original buffer
+            self._stop_pager()
         else:
             self._show_pager_page()
 
         return True
+
+    def _stop_pager(self) -> None:
+        """Stop pager mode and restore original buffer."""
+        self._pager_active = False
+        # Clean up temporary buffer
+        if hasattr(self, '_pager_temp_buffer'):
+            del self._pager_temp_buffer
+        # Refresh to show original buffer again
+        self.refresh()
 
     @property
     def pager_active(self) -> bool:
