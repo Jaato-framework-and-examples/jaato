@@ -207,9 +207,10 @@ class OutputBuffer:
         self._spinner_index = 0
 
     def stop_spinner(self) -> None:
-        """Stop showing spinner. Tool history is preserved for display."""
+        """Stop showing spinner and finalize tool tree if complete."""
         self._spinner_active = False
-        # Don't clear active tools - they remain visible as completed tools
+        # Convert tool tree to scrollable lines if all tools are done
+        self.finalize_tool_tree()
 
     def advance_spinner(self) -> None:
         """Advance spinner to next frame."""
@@ -270,6 +271,83 @@ class OutputBuffer:
 
     def clear_active_tools(self) -> None:
         """Clear all active tools."""
+        self._active_tools.clear()
+
+    def finalize_tool_tree(self) -> None:
+        """Convert tool tree to regular scrollable lines.
+
+        Called when a turn is complete to make the tool tree scroll
+        with the rest of the content instead of staying fixed.
+        """
+        if not self._active_tools:
+            return
+
+        # Check if all tools are completed and no pending prompts
+        all_completed = all(tool.completed for tool in self._active_tools)
+        any_pending = any(
+            tool.permission_state == "pending" or tool.clarification_state == "pending"
+            for tool in self._active_tools
+        )
+
+        if not all_completed or any_pending:
+            return  # Don't finalize yet
+
+        # Build the tool tree as text lines
+        lines = []
+        lines.append(("Model> ✓ Processed", "bold green"))
+
+        for i, tool in enumerate(self._active_tools):
+            is_last = (i == len(self._active_tools) - 1)
+            prefix = "└─" if is_last else "├─"
+
+            # Build tool line
+            status_icon = "✓" if tool.success else "✗"
+            status_style = "green" if tool.success else "red"
+            line_parts = [f"       {prefix} {status_icon} {tool.name}"]
+
+            if tool.duration_seconds is not None:
+                line_parts.append(f" ({tool.duration_seconds:.2f}s)")
+
+            # Add permission result
+            if tool.permission_state in ("granted", "denied"):
+                if tool.permission_state == "granted":
+                    method_label = tool.permission_method or "allowed"
+                    if method_label == "whitelist":
+                        line_parts.append(" ✓ auto-approved (whitelist)")
+                    else:
+                        line_parts.append(f" ✓ allowed ({method_label})")
+                else:
+                    method_label = tool.permission_method or "denied"
+                    if method_label == "blacklist":
+                        line_parts.append(" ✗ blocked (blacklist)")
+                    else:
+                        line_parts.append(f" ✗ denied ({method_label})")
+
+            # Add clarification result
+            if tool.clarification_state == "resolved":
+                line_parts.append(" ✓ answered")
+
+            lines.append(("".join(line_parts), ""))
+
+            # Add error message if failed
+            if not tool.success and tool.error_message:
+                continuation = "   " if is_last else "│  "
+                error_msg = tool.error_message
+                if len(error_msg) > 60:
+                    error_msg = error_msg[:57] + "..."
+                lines.append((f"       {continuation}     ⚠ {error_msg}", "dim red"))
+
+        # Add lines to buffer as system messages (they'll scroll normally)
+        for text, style in lines:
+            self._add_line("system", text, style or "")
+
+        # Un-defer any model lines that were marked render_after_tools
+        # They're now in the correct position after the tool tree lines
+        for line in self._lines:
+            if line.render_after_tools:
+                line.render_after_tools = False
+
+        # Clear active tools so they don't render separately anymore
         self._active_tools.clear()
 
     @property
