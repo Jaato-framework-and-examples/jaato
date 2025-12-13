@@ -202,29 +202,75 @@ A 3D rendered icon showing mathematical operation symbols (+, ×, =) arranged in
 4. **Generate at 512x512** for best quality
 5. **Export both PNG and SVG** versions if possible
 
+### Storage Location
+
+Store generated icons in:
+```
+docs/api/assets/images/plugins/
+```
+
 ### Recommended File Naming Convention
 
 ```
-icons/
+docs/api/assets/images/plugins/
 ├── plugin-cli.png
 ├── plugin-cli.svg
 ├── plugin-mcp.png
 ├── plugin-mcp.svg
 ├── plugin-file-edit.png
 ├── plugin-file-edit.svg
-... etc
+├── plugin-todo.png
+├── plugin-todo.svg
+├── plugin-web-search.png
+├── plugin-web-search.svg
+├── plugin-permission.png
+├── plugin-permission.svg
+├── plugin-session.png
+├── plugin-session.svg
+├── plugin-memory.png
+├── plugin-memory.svg
+├── plugin-subagent.png
+├── plugin-subagent.svg
+├── plugin-background.png
+├── plugin-background.svg
+├── plugin-clarification.png
+├── plugin-clarification.svg
+├── plugin-references.png
+├── plugin-references.svg
+├── plugin-multimodal.png
+├── plugin-multimodal.svg
+├── plugin-slash-command.png
+├── plugin-slash-command.svg
+├── plugin-calculator.png
+├── plugin-calculator.svg
+├── plugin-gc-truncate.png
+├── plugin-gc-truncate.svg
+├── plugin-gc-summarize.png
+├── plugin-gc-summarize.svg
+├── plugin-gc-hybrid.png
+├── plugin-gc-hybrid.svg
+├── plugin-model-provider.png
+├── plugin-model-provider.svg
+├── plugin-registry.png
+└── plugin-registry.svg
 ```
 
 ### Integration Points
 
 **README.md:** Add icons inline with plugin descriptions in the Available Plugins section
+```markdown
+| ![cli](docs/api/assets/images/plugins/plugin-cli.png) | **cli** | Execute shell commands... |
+```
 
-**HTML Docs:** Place icons in `docs/api/assets/images/plugins/` and reference from:
+**HTML Docs:** Reference from plugin pages:
+```html
+<img src="../../assets/images/plugins/plugin-cli.png" alt="CLI Plugin" width="48">
+```
 - `docs/api/api-reference/plugins/*.html`
 - `docs/api/guides/tool-plugins.html`
 - Plugin cards on the main index page
 
-**Individual Plugin Dirs:** Add `icon.png` to each plugin's directory for local reference
+**Individual Plugin Dirs (optional):** Symlink or copy `icon.png` to each plugin's directory for local reference
 
 ---
 
