@@ -173,3 +173,38 @@ class AgentUIHooks(Protocol):
             history: Complete conversation history snapshot (List[Message]).
         """
         ...
+
+    def on_tool_call_start(
+        self,
+        agent_id: str,
+        tool_name: str,
+        tool_args: Dict[str, Any]
+    ) -> None:
+        """Called when a tool starts executing.
+
+        Enables real-time tool call visualization in the UI (e.g., showing
+        active tools below the spinner).
+
+        Args:
+            agent_id: Which agent initiated the tool call.
+            tool_name: Name of the tool being called.
+            tool_args: Arguments passed to the tool.
+        """
+        ...
+
+    def on_tool_call_end(
+        self,
+        agent_id: str,
+        tool_name: str,
+        success: bool,
+        duration_seconds: float
+    ) -> None:
+        """Called when a tool finishes executing.
+
+        Args:
+            agent_id: Which agent's tool call completed.
+            tool_name: Name of the tool that finished.
+            success: Whether the tool executed successfully.
+            duration_seconds: How long the tool took to execute.
+        """
+        ...

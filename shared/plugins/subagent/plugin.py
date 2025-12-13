@@ -935,6 +935,10 @@ class SubagentPlugin:
                 agent_name=profile.name
             )
 
+            # Pass UI hooks to session for tool call tracking
+            if self._ui_hooks:
+                session.set_ui_hooks(self._ui_hooks, agent_id)
+
             # Wrap output callback to route through UI hooks
             def subagent_output_callback(source: str, text: str, mode: str) -> None:
                 if self._ui_hooks:
