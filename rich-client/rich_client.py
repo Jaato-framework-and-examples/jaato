@@ -772,10 +772,10 @@ class RichClient:
 
         # Route input to channel queue if waiting for permission/clarification
         if self._waiting_for_channel_input:
-            # Check for 'v' to view full truncated prompt
+            # Check for 'v' to view full prompt in pager
             if user_input.lower() == 'v':
                 buffer = self._agent_registry.get_buffer("main")
-                if buffer and buffer.has_truncated_pending_prompt():
+                if buffer and buffer.has_pending_prompt():
                     prompt_data = buffer.get_pending_prompt_for_pager()
                     if prompt_data:
                         prompt_type, prompt_lines = prompt_data

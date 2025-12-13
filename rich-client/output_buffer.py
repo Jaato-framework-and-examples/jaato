@@ -329,13 +329,13 @@ class OutputBuffer:
 
         Returns:
             Tuple of (type, lines) where type is "permission" or "clarification",
-            or None if no prompt is pending or not truncated.
+            or None if no prompt is pending.
         """
         for tool in self._active_tools:
-            if tool.permission_state == "pending" and tool.permission_truncated:
-                return ("permission", tool.permission_prompt_lines or [])
-            if tool.clarification_state == "pending" and tool.clarification_truncated:
-                return ("clarification", tool.clarification_prompt_lines or [])
+            if tool.permission_state == "pending" and tool.permission_prompt_lines:
+                return ("permission", tool.permission_prompt_lines)
+            if tool.clarification_state == "pending" and tool.clarification_prompt_lines:
+                return ("clarification", tool.clarification_prompt_lines)
         return None
 
     def has_truncated_pending_prompt(self) -> bool:
@@ -348,6 +348,19 @@ class OutputBuffer:
             if tool.permission_state == "pending" and tool.permission_truncated:
                 return True
             if tool.clarification_state == "pending" and tool.clarification_truncated:
+                return True
+        return False
+
+    def has_pending_prompt(self) -> bool:
+        """Check if there's any pending prompt awaiting user input.
+
+        Returns:
+            True if any permission or clarification prompt is pending.
+        """
+        for tool in self._active_tools:
+            if tool.permission_state == "pending" and tool.permission_prompt_lines:
+                return True
+            if tool.clarification_state == "pending" and tool.clarification_prompt_lines:
                 return True
         return False
 
