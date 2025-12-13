@@ -33,6 +33,7 @@ class ActiveToolCall:
     completed: bool = False  # True when tool execution finished
     success: bool = True  # Whether the tool succeeded (only valid when completed)
     duration_seconds: Optional[float] = None  # Execution time (only valid when completed)
+    error_message: Optional[str] = None  # Error message if tool failed
     # Permission tracking
     permission_state: Optional[str] = None  # None, "pending", "granted", "denied"
     permission_method: Optional[str] = None  # "yes", "always", "once", "never", "whitelist", "blacklist"
@@ -233,19 +234,22 @@ class OutputBuffer:
         self._active_tools.append(ActiveToolCall(name=tool_name, args_summary=args_str))
 
     def mark_tool_completed(self, tool_name: str, success: bool = True,
-                            duration_seconds: Optional[float] = None) -> None:
+                            duration_seconds: Optional[float] = None,
+                            error_message: Optional[str] = None) -> None:
         """Mark a tool as completed (keeps it in the tree with completion status).
 
         Args:
             tool_name: Name of the tool that finished.
             success: Whether the tool execution succeeded.
             duration_seconds: How long the tool took to execute.
+            error_message: Error message if the tool failed.
         """
         for tool in self._active_tools:
             if tool.name == tool_name and not tool.completed:
                 tool.completed = True
                 tool.success = success
                 tool.duration_seconds = duration_seconds
+                tool.error_message = error_message
                 return
 
     def remove_active_tool(self, tool_name: str) -> None:
@@ -641,6 +645,16 @@ class OutputBuffer:
                         output.append(" ", style="dim")
                         output.append("✓ ", style="cyan")
                         output.append("answered", style="dim cyan")
+                    # Show error message on next line for failed tools
+                    if not tool.success and tool.error_message:
+                        output.append("\n")
+                        output.append(f"       {continuation}     ", style="dim")
+                        output.append("⚠ ", style="red")
+                        # Truncate error message if too long
+                        error_msg = tool.error_message
+                        if len(error_msg) > 60:
+                            error_msg = error_msg[:57] + "..."
+                        output.append(error_msg, style="dim red")
                 else:
                     # Active tool - show with spinner indicator
                     output.append("○ ", style="yellow")
