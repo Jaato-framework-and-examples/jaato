@@ -23,6 +23,7 @@ class OutputLine:
     style: str
     display_lines: int = 1  # How many terminal lines this takes when rendered
     is_turn_start: bool = False  # True if this is the first line of a new turn
+    render_after_tools: bool = False  # True if this should render after tool tree
 
 
 @dataclass
@@ -129,7 +130,14 @@ class OutputBuffer:
             is_turn_start: Whether this is the first line of a new turn.
         """
         display_lines = self._measure_display_lines(source, text, is_turn_start)
-        self._lines.append(OutputLine(source, text, style, display_lines, is_turn_start))
+        # Model output should render after tool tree if there are active (non-completed) tools
+        # This keeps the permission/clarification prompts visible above explanatory text
+        render_after = False
+        if source == "model" and self._active_tools:
+            has_active = any(not tool.completed for tool in self._active_tools)
+            if has_active:
+                render_after = True
+        self._lines.append(OutputLine(source, text, style, display_lines, is_turn_start, render_after))
 
     def append(self, source: str, text: str, mode: str) -> None:
         """Append output to the buffer.
@@ -523,24 +531,29 @@ class OutputBuffer:
         else:
             lines_to_show = all_lines
 
+        # Split lines into regular and deferred (to render after tool tree)
+        regular_lines = [line for line in lines_to_show if not line.render_after_tools]
+        deferred_lines = [line for line in lines_to_show if line.render_after_tools]
+
         # Build output text with wrapping
         output = Text()
 
         # Calculate available width for content (accounting for prefixes)
         wrap_width = self._console_width if self._console_width > 20 else 80
 
-        for i, line in enumerate(lines_to_show):
+        # Define wrap_text helper before the loops
+        def wrap_text(text: str, prefix_width: int = 0) -> List[str]:
+            """Wrap text to console width, accounting for prefix."""
+            available = max(20, wrap_width - prefix_width)
+            if len(text) <= available:
+                return [text]
+            # Use textwrap for clean word-based wrapping
+            return textwrap.wrap(text, width=available, break_long_words=True, break_on_hyphens=False)
+
+        # Render regular lines first (before tool tree)
+        for i, line in enumerate(regular_lines):
             if i > 0:
                 output.append("\n")
-
-            # Wrap text to fit console width
-            def wrap_text(text: str, prefix_width: int = 0) -> List[str]:
-                """Wrap text to console width, accounting for prefix."""
-                available = max(20, wrap_width - prefix_width)
-                if len(text) <= available:
-                    return [text]
-                # Use textwrap for clean word-based wrapping
-                return textwrap.wrap(text, width=available, break_long_words=True, break_on_hyphens=False)
 
             if line.source == "system":
                 # System messages use their style directly
@@ -652,9 +665,9 @@ class OutputBuffer:
                         output.append(" " * (len(f"[{line.source}] ")))  # Indent continuation
                     output.append_text(Text.from_ansi(wrapped_line))
 
-        # Add tool call tree at the bottom (persistent)
+        # Add tool call tree (after regular lines, before deferred lines)
         if self._active_tools:
-            if lines_to_show:
+            if regular_lines:
                 output.append("\n")
 
             # Check if waiting for user input (permission or clarification)
@@ -875,11 +888,33 @@ class OutputBuffer:
                         output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
         elif self._spinner_active:
             # Spinner active but no tools yet
-            if lines_to_show:
+            if regular_lines:
                 output.append("\n")
             frame = self.SPINNER_FRAMES[self._spinner_index]
             output.append(f"Model> {frame} ", style="bold cyan")
             output.append("thinking...", style="dim italic")
+
+        # Render deferred lines after tool tree (model text that came with tool calls)
+        if deferred_lines:
+            # Add separator if we have tool tree or spinner
+            if self._active_tools or self._spinner_active:
+                output.append("\n")
+
+            for i, line in enumerate(deferred_lines):
+                if i > 0:
+                    output.append("\n")
+
+                # Only model lines should be deferred, render with prefix on turn start
+                prefix_width = 7 if line.is_turn_start else 0  # "Model> " = 7 chars
+                wrapped = wrap_text(line.text, prefix_width)
+                for j, wrapped_line in enumerate(wrapped):
+                    if j > 0:
+                        output.append("\n")
+                    if j == 0 and line.is_turn_start:
+                        output.append("Model> ", style="bold cyan")
+                    elif j > 0 and line.is_turn_start:
+                        output.append("       ")  # Indent continuation lines
+                    output.append(wrapped_line)
 
         return output
 
