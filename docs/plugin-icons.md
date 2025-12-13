@@ -24,7 +24,60 @@ All icons should follow these consistent style parameters:
 
 ---
 
-## Core Infrastructure Plugins
+## Main Project Icon - The Jaato (Traditional Himalayan Grinder)
+
+The main project icon represents the **jaato** (जाँतो) - a traditional rotary hand-quern from the Himalayan region used to mill grains. The metaphor: raw inputs are ground through LLM tools to produce refined outputs.
+
+### Visual Elements
+- **Two circular grinding stones** - stacked, the top stone rotates
+- **Wooden handle (hāto)** - extends from the top stone for turning
+- **Central hole** - where grain is fed through
+- **Grain particles** - showing the grinding/processing action
+- **Circular motion energy** - representing the orchestration loop
+
+### Detailed Prompt
+
+```
+A 3D rendered traditional Himalayan jaato (rotary hand-quern grinder) icon. Two circular flat grinding stones stacked on top of each other - the bottom stone is stationary dark indigo (#4f46e5), the top stone is lighter indigo (#635bff) with a visible wooden handle (hāto) extending outward. A central funnel hole in the top stone glows with cyan energy (#00d4ff) where grain enters. Small glowing particles cascade from between the stones, representing refined output. Subtle circular motion lines around the top stone suggest rotation. The handle has warm wood tones contrasting with the cool indigo stones. Modern minimalist 3D design, soft shadows, dark slate background (#1e1e2e), 512x512 pixels, professional software icon style, slight glossy finish on the stones.
+```
+
+### Simplified Prompt
+
+```
+3D Himalayan stone grinder (jaato), two circular stones with wooden handle, cyan glowing center hole, grain particles, indigo color palette, dark background, modern icon style
+```
+
+### Alternative Variations
+
+**Abstract/Geometric Version:**
+```
+A 3D rendered abstract icon of two concentric circular discs representing grinding stones. The top disc rotates with motion blur, featuring an indigo (#635bff) to cyan (#00d4ff) gradient. A wooden handle extends from the edge. The center glows with bright cyan energy. Geometric grain particles spiral outward. Modern minimalist design, soft shadows, dark slate background (#1e1e2e), 512x512 pixels, professional software icon.
+```
+
+**Stylized Tech Version:**
+```
+A 3D rendered fusion of traditional Himalayan grinder and modern tech. Two circular platform layers - bottom solid indigo (#4f46e5), top translucent with circuit-like patterns in cyan (#00d4ff). A sleek handle extends from the rotating top layer. Data streams flow through the glowing central aperture, emerging as refined particles below. Modern minimalist design, soft shadows, dark slate background (#1e1e2e), 512x512 pixels, professional software icon style.
+```
+
+### Storage Location
+
+Store the main project icon in:
+```
+docs/jaato-logo.png
+docs/jaato-logo.svg
+```
+
+Or for the HTML docs:
+```
+docs/api/assets/images/jaato-logo.png
+docs/api/assets/images/jaato-logo.svg
+```
+
+---
+
+## Plugin Icons
+
+### Core Infrastructure Plugins
 
 ### 1. Model Provider (`model_provider/`)
 **Visual Concept:** Neural network hub connecting to multiple clouds
