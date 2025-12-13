@@ -34,6 +34,9 @@ class ClarificationPlugin:
         # Clarification lifecycle hooks for UI integration
         self._on_clarification_requested: Optional[Callable[[str, List[str]], None]] = None
         self._on_clarification_resolved: Optional[Callable[[str], None]] = None
+        # Per-question hooks for progressive display
+        self._on_question_displayed: Optional[Callable[[str, int, int, List[str]], None]] = None
+        self._on_question_answered: Optional[Callable[[str, int, str], None]] = None
 
     @property
     def name(self) -> str:
@@ -62,7 +65,9 @@ class ClarificationPlugin:
     def set_clarification_hooks(
         self,
         on_requested: Optional[Callable[[str, List[str]], None]] = None,
-        on_resolved: Optional[Callable[[str], None]] = None
+        on_resolved: Optional[Callable[[str], None]] = None,
+        on_question_displayed: Optional[Callable[[str, int, int, List[str]], None]] = None,
+        on_question_answered: Optional[Callable[[str, int, str], None]] = None
     ) -> None:
         """Set hooks for clarification lifecycle events.
 
@@ -70,13 +75,19 @@ class ClarificationPlugin:
         requests start and complete.
 
         Args:
-            on_requested: Called when clarification prompt is shown.
+            on_requested: Called when clarification session starts.
                 Signature: (tool_name, prompt_lines) -> None
             on_resolved: Called when clarification is resolved.
                 Signature: (tool_name) -> None
+            on_question_displayed: Called when each question is shown.
+                Signature: (tool_name, question_index, total_questions, question_lines) -> None
+            on_question_answered: Called when user answers a question.
+                Signature: (tool_name, question_index, answer_summary) -> None
         """
         self._on_clarification_requested = on_requested
         self._on_clarification_resolved = on_resolved
+        self._on_question_displayed = on_question_displayed
+        self._on_question_answered = on_question_answered
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the tool declarations for Vertex AI."""
@@ -261,13 +272,20 @@ The tool returns responses keyed by question number (1-based):
             # Parse the request
             request = self._parse_request(args)
 
-            # Emit clarification requested hook
+            # Emit clarification requested hook (for initial context, not all questions)
             if self._on_clarification_requested:
-                prompt_lines = self._build_prompt_lines(request)
-                self._on_clarification_requested("request_clarification", prompt_lines)
+                # Just send context, not all questions - questions come one by one
+                context_lines = []
+                if request.context:
+                    context_lines.append(f"Context: {request.context}")
+                self._on_clarification_requested("request_clarification", context_lines)
 
-            # Get user responses via the channel
-            response = self._channel.request_clarification(request)
+            # Get user responses via the channel, passing per-question hooks
+            response = self._channel.request_clarification(
+                request,
+                on_question_displayed=self._on_question_displayed,
+                on_question_answered=self._on_question_answered
+            )
 
             # Emit clarification resolved hook
             if self._on_clarification_resolved:

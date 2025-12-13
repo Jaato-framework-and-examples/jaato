@@ -39,10 +39,13 @@ class ActiveToolCall:
     permission_method: Optional[str] = None  # "yes", "always", "once", "never", "whitelist", "blacklist"
     permission_prompt_lines: Optional[List[str]] = None  # Expanded prompt while pending
     permission_truncated: bool = False  # True if prompt is truncated
-    # Clarification tracking
+    # Clarification tracking (per-question progressive display)
     clarification_state: Optional[str] = None  # None, "pending", "resolved"
-    clarification_prompt_lines: Optional[List[str]] = None  # Expanded prompt while pending
+    clarification_prompt_lines: Optional[List[str]] = None  # Current question lines
     clarification_truncated: bool = False  # True if prompt is truncated
+    clarification_current_question: int = 0  # Current question index (1-based)
+    clarification_total_questions: int = 0  # Total number of questions
+    clarification_answered: Optional[List[Tuple[int, str]]] = None  # List of (question_index, answer_summary)
 
 
 class OutputBuffer:
@@ -302,22 +305,72 @@ class OutputBuffer:
                 return
 
     def set_tool_clarification_pending(self, tool_name: str, prompt_lines: List[str]) -> None:
-        """Mark a tool as awaiting clarification with the prompt to display.
+        """Mark a tool as awaiting clarification (initial context only).
 
         Args:
             tool_name: Name of the tool awaiting clarification.
-            prompt_lines: Lines of the clarification prompt to display.
+            prompt_lines: Initial context lines (not the questions).
         """
         for tool in self._active_tools:
             if tool.name == tool_name and not tool.completed:
                 tool.clarification_state = "pending"
                 tool.clarification_prompt_lines = prompt_lines
+                tool.clarification_answered = []  # Initialize answered list
                 # Scroll to bottom to show the prompt
                 self._scroll_offset = 0
                 return
 
+    def set_tool_clarification_question(
+        self,
+        tool_name: str,
+        question_index: int,
+        total_questions: int,
+        question_lines: List[str]
+    ) -> None:
+        """Set the current question being displayed for clarification.
+
+        Args:
+            tool_name: Name of the tool.
+            question_index: Current question number (1-based).
+            total_questions: Total number of questions.
+            question_lines: Lines for this question's prompt.
+        """
+        for tool in self._active_tools:
+            if tool.name == tool_name and not tool.completed:
+                tool.clarification_state = "pending"
+                tool.clarification_current_question = question_index
+                tool.clarification_total_questions = total_questions
+                tool.clarification_prompt_lines = question_lines
+                if tool.clarification_answered is None:
+                    tool.clarification_answered = []
+                # Scroll to bottom to show the question
+                self._scroll_offset = 0
+                return
+
+    def set_tool_question_answered(
+        self,
+        tool_name: str,
+        question_index: int,
+        answer_summary: str
+    ) -> None:
+        """Mark a clarification question as answered.
+
+        Args:
+            tool_name: Name of the tool.
+            question_index: Question number that was answered (1-based).
+            answer_summary: Brief summary of the answer.
+        """
+        for tool in self._active_tools:
+            if tool.name == tool_name:
+                if tool.clarification_answered is None:
+                    tool.clarification_answered = []
+                tool.clarification_answered.append((question_index, answer_summary))
+                # Clear prompt lines since question is answered
+                tool.clarification_prompt_lines = None
+                return
+
     def set_tool_clarification_resolved(self, tool_name: str) -> None:
-        """Mark a tool's clarification as resolved.
+        """Mark a tool's clarification as fully resolved.
 
         Args:
             tool_name: Name of the tool.
@@ -325,7 +378,9 @@ class OutputBuffer:
         for tool in self._active_tools:
             if tool.name == tool_name:
                 tool.clarification_state = "resolved"
-                tool.clarification_prompt_lines = None  # Clear expanded prompt
+                tool.clarification_prompt_lines = None
+                tool.clarification_current_question = 0
+                tool.clarification_total_questions = 0
                 return
 
     def get_pending_prompt_for_pager(self) -> Optional[Tuple[str, List[str]]]:
@@ -748,64 +803,76 @@ class OutputBuffer:
                     output.append("\n")
                     output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
 
-                # Show clarification info under this tool (only when pending)
-                if tool.clarification_state == "pending" and tool.clarification_prompt_lines:
-                    # Expanded clarification prompt
+                # Show clarification info under this tool
+                if tool.clarification_state == "pending":
+                    # Show header with progress
                     output.append("\n")
                     output.append(f"       {continuation}     ", style="dim")
                     output.append("❓ ", style="cyan")
-                    output.append("Clarification needed", style="cyan")
-
-                    # Limit lines to show (keep input prompt visible at end)
-                    max_prompt_lines = 18
-                    prompt_lines = tool.clarification_prompt_lines
-                    total_lines = len(prompt_lines)
-                    truncated = False
-                    hidden_count = 0
-
-                    if total_lines > max_prompt_lines:
-                        truncated = True
-                        tool.clarification_truncated = True
-                        hidden_count = total_lines - max_prompt_lines + 1
-                        lines_to_render = prompt_lines[:max_prompt_lines - 2]
+                    if tool.clarification_total_questions > 0:
+                        output.append(f"Clarification ({tool.clarification_current_question}/{tool.clarification_total_questions})", style="cyan")
                     else:
-                        tool.clarification_truncated = False
-                        lines_to_render = prompt_lines
+                        output.append("Clarification needed", style="cyan")
 
-                    # Draw box around clarification prompt
-                    box_width = max(len(line) for line in prompt_lines) + 4
-                    box_width = min(box_width, 60)  # Cap width
-                    output.append("\n")
-                    output.append(f"       {continuation}     ┌" + "─" * box_width + "┐", style="dim")
+                    # Show previously answered questions (collapsed)
+                    if tool.clarification_answered:
+                        for q_idx, answer_summary in tool.clarification_answered:
+                            output.append("\n")
+                            output.append(f"       {continuation}     ", style="dim")
+                            output.append("  ✓ ", style="green")
+                            output.append(f"Q{q_idx}: ", style="dim")
+                            output.append(answer_summary, style="dim green")
 
-                    for prompt_line in lines_to_render:
+                    # Show current question prompt (if any)
+                    if tool.clarification_prompt_lines:
+                        # Limit lines to show
+                        max_prompt_lines = 18
+                        prompt_lines = tool.clarification_prompt_lines
+                        total_lines = len(prompt_lines)
+                        truncated = False
+                        hidden_count = 0
+
+                        if total_lines > max_prompt_lines:
+                            truncated = True
+                            tool.clarification_truncated = True
+                            hidden_count = total_lines - max_prompt_lines + 1
+                            lines_to_render = prompt_lines[:max_prompt_lines - 2]
+                        else:
+                            tool.clarification_truncated = False
+                            lines_to_render = prompt_lines
+
+                        # Draw box around current question
+                        box_width = max(len(line) for line in prompt_lines) + 4
+                        box_width = min(box_width, 60)  # Cap width
                         output.append("\n")
-                        # Truncate long lines
-                        display_line = prompt_line[:box_width - 2] if len(prompt_line) > box_width - 2 else prompt_line
-                        padding = box_width - len(display_line) - 2
-                        output.append(f"       {continuation}     │ ", style="dim")
-                        output.append(display_line)
-                        output.append(" " * padding + " │", style="dim")
+                        output.append(f"       {continuation}     ┌" + "─" * box_width + "┐", style="dim")
 
-                    # Show truncation indicator if needed
-                    if truncated:
-                        output.append("\n")
-                        truncation_msg = f"[...{hidden_count} more - 'v' to view...]"
-                        padding = box_width - len(truncation_msg) - 2
-                        output.append(f"       {continuation}     │ ", style="dim")
-                        output.append(truncation_msg, style="dim italic cyan")
-                        output.append(" " * padding + " │", style="dim")
-                        # Show last line (usually input prompt)
-                        last_line = prompt_lines[-1]
-                        output.append("\n")
-                        display_line = last_line[:box_width - 2] if len(last_line) > box_width - 2 else last_line
-                        padding = box_width - len(display_line) - 2
-                        output.append(f"       {continuation}     │ ", style="dim")
-                        output.append(display_line, style="cyan")
-                        output.append(" " * padding + " │", style="dim")
+                        for prompt_line in lines_to_render:
+                            output.append("\n")
+                            display_line = prompt_line[:box_width - 2] if len(prompt_line) > box_width - 2 else prompt_line
+                            padding = box_width - len(display_line) - 2
+                            output.append(f"       {continuation}     │ ", style="dim")
+                            output.append(display_line)
+                            output.append(" " * padding + " │", style="dim")
 
-                    output.append("\n")
-                    output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
+                        # Show truncation indicator if needed
+                        if truncated:
+                            output.append("\n")
+                            truncation_msg = f"[...{hidden_count} more - 'v' to view...]"
+                            padding = box_width - len(truncation_msg) - 2
+                            output.append(f"       {continuation}     │ ", style="dim")
+                            output.append(truncation_msg, style="dim italic cyan")
+                            output.append(" " * padding + " │", style="dim")
+                            last_line = prompt_lines[-1]
+                            output.append("\n")
+                            display_line = last_line[:box_width - 2] if len(last_line) > box_width - 2 else last_line
+                            padding = box_width - len(display_line) - 2
+                            output.append(f"       {continuation}     │ ", style="dim")
+                            output.append(display_line, style="cyan")
+                            output.append(" " * padding + " │", style="dim")
+
+                        output.append("\n")
+                        output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
         elif self._spinner_active:
             # Spinner active but no tools yet
             if lines_to_show:

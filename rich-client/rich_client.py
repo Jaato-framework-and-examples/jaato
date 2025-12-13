@@ -529,7 +529,8 @@ class RichClient:
         """Set up clarification lifecycle hooks for UI integration.
 
         These hooks update the tool call tree to show clarification status
-        inline under the request_clarification tool.
+        inline under the request_clarification tool, with questions shown
+        one at a time.
         """
         if not self.registry or not self._agent_registry:
             return
@@ -542,7 +543,7 @@ class RichClient:
         display = self._display
 
         def on_clarification_requested(tool_name: str, prompt_lines: list):
-            """Called when clarification prompt is shown."""
+            """Called when clarification session starts (context only)."""
             buffer = registry.get_buffer("main")
             if buffer:
                 buffer.set_tool_clarification_pending(tool_name, prompt_lines)
@@ -550,16 +551,34 @@ class RichClient:
                     display.refresh()
 
         def on_clarification_resolved(tool_name: str):
-            """Called when clarification is resolved."""
+            """Called when all clarification questions are answered."""
             buffer = registry.get_buffer("main")
             if buffer:
                 buffer.set_tool_clarification_resolved(tool_name)
                 if display:
                     display.refresh()
 
+        def on_question_displayed(tool_name: str, question_index: int, total_questions: int, question_lines: list):
+            """Called when each question is shown."""
+            buffer = registry.get_buffer("main")
+            if buffer:
+                buffer.set_tool_clarification_question(tool_name, question_index, total_questions, question_lines)
+                if display:
+                    display.refresh()
+
+        def on_question_answered(tool_name: str, question_index: int, answer_summary: str):
+            """Called when user answers a question."""
+            buffer = registry.get_buffer("main")
+            if buffer:
+                buffer.set_tool_question_answered(tool_name, question_index, answer_summary)
+                if display:
+                    display.refresh()
+
         clarification_plugin.set_clarification_hooks(
             on_requested=on_clarification_requested,
-            on_resolved=on_clarification_resolved
+            on_resolved=on_clarification_resolved,
+            on_question_displayed=on_question_displayed,
+            on_question_answered=on_question_answered
         )
 
     def _setup_session_plugin(self) -> None:
