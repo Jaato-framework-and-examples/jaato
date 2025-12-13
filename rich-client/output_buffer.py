@@ -590,6 +590,28 @@ class OutputBuffer:
                     output.append(tool.name, style="dim yellow")
                     if tool.duration_seconds is not None:
                         output.append(f" ({tool.duration_seconds:.2f}s)", style="dim")
+                    # Add collapsed permission result on same line
+                    if tool.permission_state in ("granted", "denied"):
+                        output.append(" ", style="dim")
+                        if tool.permission_state == "granted":
+                            output.append("✓ ", style="green")
+                            method_label = tool.permission_method or "allowed"
+                            if method_label == "whitelist":
+                                output.append("auto-approved (whitelist)", style="dim green")
+                            else:
+                                output.append(f"allowed ({method_label})", style="dim green")
+                        else:
+                            output.append("✗ ", style="red")
+                            method_label = tool.permission_method or "denied"
+                            if method_label == "blacklist":
+                                output.append("blocked (blacklist)", style="dim red")
+                            else:
+                                output.append(f"denied ({method_label})", style="dim red")
+                    # Add collapsed clarification result on same line
+                    if tool.clarification_state == "resolved":
+                        output.append(" ", style="dim")
+                        output.append("✓ ", style="cyan")
+                        output.append("answered", style="dim cyan")
                 else:
                     # Active tool - show with spinner indicator
                     output.append("○ ", style="yellow")
@@ -597,7 +619,7 @@ class OutputBuffer:
                     if tool.args_summary and tool.args_summary != "{}":
                         output.append(f"({tool.args_summary})", style="dim")
 
-                # Show permission info under this tool
+                # Show permission info under this tool (only when pending)
                 if tool.permission_state == "pending" and tool.permission_prompt_lines:
                     # Expanded permission prompt
                     output.append("\n")
@@ -627,26 +649,8 @@ class OutputBuffer:
                         output.append(" " * padding + " │", style="dim")
                     output.append("\n")
                     output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
-                elif tool.permission_state in ("granted", "denied"):
-                    # Collapsed permission result
-                    output.append("\n")
-                    output.append(f"       {continuation}     ", style="dim")
-                    if tool.permission_state == "granted":
-                        output.append("✓ ", style="green")
-                        method_label = tool.permission_method or "allowed"
-                        if method_label == "whitelist":
-                            output.append("auto-approved (whitelist)", style="dim green")
-                        else:
-                            output.append(f"allowed ({method_label})", style="dim green")
-                    else:
-                        output.append("✗ ", style="red")
-                        method_label = tool.permission_method or "denied"
-                        if method_label == "blacklist":
-                            output.append("blocked (blacklist)", style="dim red")
-                        else:
-                            output.append(f"denied ({method_label})", style="dim red")
 
-                # Show clarification info under this tool
+                # Show clarification info under this tool (only when pending)
                 if tool.clarification_state == "pending" and tool.clarification_prompt_lines:
                     # Expanded clarification prompt
                     output.append("\n")
@@ -668,12 +672,6 @@ class OutputBuffer:
                         output.append(" " * padding + " │", style="dim")
                     output.append("\n")
                     output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
-                elif tool.clarification_state == "resolved":
-                    # Collapsed clarification result
-                    output.append("\n")
-                    output.append(f"       {continuation}     ", style="dim")
-                    output.append("✓ ", style="cyan")
-                    output.append("answered", style="dim cyan")
         elif self._spinner_active:
             # Spinner active but no tools yet
             if lines_to_show:
