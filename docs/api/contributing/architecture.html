@@ -398,6 +398,80 @@ sequenceDiagram
         </div>
       </section>
 
+      <!-- UI Hooks System -->
+      <section>
+        <h2 id="ui-hooks">UI Hooks System</h2>
+        <p>
+          The framework provides a UI hooks system (<code>AgentUIHooks</code> protocol) that enables
+          rich terminal UIs to integrate with agent execution. This provides visibility into agent
+          lifecycle, tool execution, and accounting.
+        </p>
+
+        <h3>Key Hooks</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Hook</th>
+              <th>When Called</th>
+              <th>Purpose</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>on_agent_status_changed</code></td>
+              <td>Status change</td>
+              <td>Start/stop spinner ("active", "done", "error")</td>
+            </tr>
+            <tr>
+              <td><code>on_tool_call_start</code></td>
+              <td>Tool begins</td>
+              <td>Show active tool below spinner</td>
+            </tr>
+            <tr>
+              <td><code>on_tool_call_end</code></td>
+              <td>Tool completes</td>
+              <td>Remove tool from display</td>
+            </tr>
+            <tr>
+              <td><code>on_agent_output</code></td>
+              <td>Any output</td>
+              <td>Route to agent's output buffer</td>
+            </tr>
+            <tr>
+              <td><code>on_agent_turn_completed</code></td>
+              <td>Turn ends</td>
+              <td>Update per-turn accounting</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Tool Call Visualization</h3>
+        <p>
+          The <code>on_tool_call_start</code> and <code>on_tool_call_end</code> hooks enable real-time
+          visualization of active tool calls. When a tool is executing, the UI can show it below the spinner:
+        </p>
+        <div class="code-block">
+          <pre><code>Model> ⠋ thinking...
+       ├─ cli_execute({'cmd': 'ls -la'})
+       └─ web_search({'query': 'python docs'})</code></pre>
+        </div>
+        <p>
+          These hooks are emitted automatically for <strong>all plugins</strong> from
+          <code>JaatoSession._run_chat_loop()</code>. No plugin-specific changes are required.
+        </p>
+
+        <h3>Hook Propagation</h3>
+        <p>Hooks are set at multiple levels:</p>
+        <ul>
+          <li><code>JaatoClient.set_ui_hooks(hooks)</code> - Main agent, passes to session</li>
+          <li><code>JaatoSession.set_ui_hooks(hooks, agent_id)</code> - Tool lifecycle emission</li>
+          <li><code>SubagentPlugin.set_ui_hooks(hooks)</code> - Passes to spawned sessions</li>
+        </ul>
+        <p>
+          See <a href="../subagent_ui_hooks.html">Subagent UI Hooks API</a> for complete documentation.
+        </p>
+      </section>
+
       <!-- Key Abstractions -->
       <section>
         <h2 id="abstractions">Key Abstractions</h2>

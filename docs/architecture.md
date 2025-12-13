@@ -832,6 +832,122 @@ shared/
     └── gc_hybrid/           # HybridGCPlugin - generational collection
 ```
 
+## UI Hooks Architecture
+
+The framework provides a UI hooks system (`AgentUIHooks` protocol) that enables rich terminal UIs to integrate with agent execution. The hooks provide visibility into agent lifecycle, tool execution, and accounting.
+
+### Hook Integration Points
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         JaatoClient / JaatoSession                          │
+│                                                                             │
+│  User sends input ──► on_agent_status_changed(agent_id, "active")           │
+│         │                        │                                          │
+│         ▼                        ▼                                          │
+│  ┌─────────────┐         ┌──────────────────┐                               │
+│  │   Spinner   │◄────────│  OutputBuffer    │                               │
+│  │   starts    │         │  starts spinner  │                               │
+│  └─────────────┘         └──────────────────┘                               │
+│         │                                                                   │
+│         ▼                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                    Tool Execution Loop                               │    │
+│  │                                                                      │    │
+│  │   for fc in function_calls:                                         │    │
+│  │       ──► on_tool_call_start(agent_id, tool_name, args)             │    │
+│  │       │                                                              │    │
+│  │       │   executor.execute(tool_name, args)                         │    │
+│  │       │                                                              │    │
+│  │       ──► on_tool_call_end(agent_id, tool_name, success, duration)  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│         │                                                                   │
+│         ▼                                                                   │
+│  on_agent_output(agent_id, "model", response_text, "write")                 │
+│  on_agent_turn_completed(agent_id, turn_data)                               │
+│  on_agent_context_updated(agent_id, usage)                                  │
+│  on_agent_history_updated(agent_id, history)                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Tool Call Lifecycle Hooks
+
+The `on_tool_call_start` and `on_tool_call_end` hooks enable real-time visualization of tool execution:
+
+```python
+# Emitted from JaatoSession._run_chat_loop()
+for fc in function_calls:
+    name = fc.name
+    args = fc.args
+
+    # Hook: tool starting (shows in UI below spinner)
+    if self._ui_hooks:
+        self._ui_hooks.on_tool_call_start(
+            agent_id=self._agent_id,
+            tool_name=name,
+            tool_args=args
+        )
+
+    # Execute tool
+    result = executor.execute(name, args)
+
+    # Hook: tool ended (removes from UI)
+    if self._ui_hooks:
+        self._ui_hooks.on_tool_call_end(
+            agent_id=self._agent_id,
+            tool_name=name,
+            success=True,
+            duration_seconds=elapsed
+        )
+```
+
+This enables the UI to display active tools below the spinner:
+
+```
+Model> ⠋ thinking...
+       ├─ cli_execute({'cmd': 'ls -la'})
+       └─ web_search({'query': 'python docs'})
+```
+
+### Hook Propagation
+
+Hooks are set at multiple levels to ensure all agents (main and subagents) emit lifecycle events:
+
+| Component | Method | Purpose |
+|-----------|--------|---------|
+| `JaatoClient` | `set_ui_hooks(hooks)` | Sets hooks on main agent, passes to session |
+| `JaatoSession` | `set_ui_hooks(hooks, agent_id)` | Stores hooks for tool lifecycle emission |
+| `SubagentPlugin` | `set_ui_hooks(hooks)` | Stores hooks, passes to spawned sessions |
+
+### Available Hooks
+
+| Hook | When Called | Purpose |
+|------|-------------|---------|
+| `on_agent_created` | Agent spawned | Register agent in UI |
+| `on_agent_status_changed` | Status change | Start/stop spinner ("active", "done", "error") |
+| `on_agent_output` | Any output | Route to agent's output buffer |
+| `on_tool_call_start` | Tool begins | Show active tool in spinner area |
+| `on_tool_call_end` | Tool completes | Remove tool from spinner area |
+| `on_agent_turn_completed` | Turn ends | Update per-turn accounting |
+| `on_agent_context_updated` | Context changes | Update context usage display |
+| `on_agent_history_updated` | History changes | Update history snapshot |
+| `on_agent_completed` | Agent finishes | Mark agent as done |
+
+### Spinner Animation
+
+The spinner system advances animations for ALL agents with active spinners, not just the selected one:
+
+```python
+def _advance_spinner(self) -> None:
+    # Advance spinners on ALL agent buffers
+    for agent_id in self._agent_registry.get_all_agent_ids():
+        buffer = self._agent_registry.get_buffer(agent_id)
+        if buffer and buffer.spinner_active:
+            buffer.advance_spinner()
+```
+
+This ensures that when you switch agents (F2), the spinner is already animating if that agent is thinking.
+
 ## User Commands vs Model Tools
 
 Plugins can provide two types of capabilities:
