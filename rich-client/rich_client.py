@@ -847,12 +847,15 @@ class RichClient:
             if name in exposed:
                 status = "✓ enabled"
                 status_style = "green"
+                skip_reason = None
             elif name in skipped:
-                status = "⊘ skipped (model requirements)"
+                status = "⊘ skipped"
                 status_style = "yellow"
+                skip_reason = skipped[name]  # List of required patterns
             else:
                 status = "○ available"
                 status_style = "dim"
+                skip_reason = None
 
             # Get description from plugin
             description = self._get_plugin_description(plugin)
@@ -860,6 +863,9 @@ class RichClient:
             # Format output
             lines.append((f"  {name}", "cyan"))
             lines.append((f"    Status: {status}", status_style))
+            if skip_reason:
+                patterns = ", ".join(skip_reason)
+                lines.append((f"    Requires model: {patterns}", "yellow"))
             if description:
                 # Wrap long descriptions
                 if len(description) > 70:
