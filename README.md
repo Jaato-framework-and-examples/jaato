@@ -1,7 +1,7 @@
 # jaato
 
 <p align="center">
-  <img src="docs/jaato_(traditional grinder)_logo.jpg" alt="jaato logo" width="200"/>
+  <img src="docs/jaato-logo.png" alt="jaato logo" width="200"/>
 </p>
 
 **j**ust **a**nother **a**gentic **t**ool **o**rchestrator
@@ -42,20 +42,59 @@ jaato is a future-proof framework for building agentic AI applications, featurin
 
 ### Available Plugins
 
-jaato includes 14+ built-in plugins for tool orchestration, file operations, session management, and more.
+jaato includes **20 built-in plugins** organized into categories for tool orchestration, file operations, session management, and more.
 
-**Key plugins:**
-- **cli** - Execute shell commands with auto-backgrounding
-- **mcp** - Connect to Model Context Protocol servers
-- **memory** - Model self-curated persistent knowledge across sessions
-- **file_edit** - File operations with diff-based approval
-- **todo** - Task planning with workflow enforcement
-- **web_search** - Web search integration
-- **subagent** - Delegate to specialized sub-agents
+#### Tool Execution
+| | Plugin | Description |
+|:--:|--------|-------------|
+| <img src="docs/api/assets/images/plugins/plugin-cli.png" width="32"> | **cli** | Execute shell commands with intelligent auto-backgrounding for long-running processes |
+| <img src="docs/api/assets/images/plugins/plugin-mcp.png" width="32"> | **mcp** | Connect to Model Context Protocol servers for external tool integrations |
+| <img src="docs/api/assets/images/plugins/plugin-background.png" width="32"> | **background** | Orchestrate parallel background tasks across all BackgroundCapable plugins |
+
+#### File & Content Management
+| | Plugin | Description |
+|:--:|--------|-------------|
+| <img src="docs/api/assets/images/plugins/plugin-file-edit.png" width="32"> | **file_edit** | File operations with diff-based approval, automatic backups, and undo support |
+| <img src="docs/api/assets/images/plugins/plugin-references.png" width="32"> | **references** | Inject documentation sources into model context (auto or user-selected) |
+| <img src="docs/api/assets/images/plugins/plugin-multimodal.png" width="32"> | **multimodal** | Handle images via @file references with lazy-loading |
+| <img src="docs/api/assets/images/plugins/plugin-slash-command.png" width="32"> | **slash_command** | Process /commands with template variable substitution |
+
+#### Memory & State
+| | Plugin | Description |
+|:--:|--------|-------------|
+| <img src="docs/api/assets/images/plugins/plugin-memory.png" width="32"> | **memory** | Model self-curated persistent knowledge across sessions |
+| <img src="docs/api/assets/images/plugins/plugin-session.png" width="32"> | **session** | Save and resume conversations across restarts |
+| <img src="docs/api/assets/images/plugins/plugin-todo.png" width="32"> | **todo** | Plan registration with progress tracking and workflow enforcement |
+
+#### User Interaction
+| | Plugin | Description |
+|:--:|--------|-------------|
+| <img src="docs/api/assets/images/plugins/plugin-permission.png" width="32"> | **permission** | Control tool execution with policies, blacklists, and interactive approval |
+| <img src="docs/api/assets/images/plugins/plugin-clarification.png" width="32"> | **clarification** | Request user input with single/multiple choice and free text responses |
+
+#### Context Management (GC)
+| | Plugin | Description |
+|:--:|--------|-------------|
+| <img src="docs/api/assets/images/plugins/plugin-gc-truncate.png" width="32"> | **gc_truncate** | Simple turn-based garbage collection via truncation |
+| <img src="docs/api/assets/images/plugins/plugin-gc-summarize.png" width="32"> | **gc_summarize** | Compression-based GC via summarization |
+| <img src="docs/api/assets/images/plugins/plugin-gc-hybrid.png" width="32"> | **gc_hybrid** | Generational approach combining truncation and summarization |
+
+#### Specialized Capabilities
+| | Plugin | Description |
+|:--:|--------|-------------|
+| <img src="docs/api/assets/images/plugins/plugin-web-search.png" width="32"> | **web_search** | DuckDuckGo web search integration for current information |
+| <img src="docs/api/assets/images/plugins/plugin-subagent.png" width="32"> | **subagent** | Delegate tasks to specialized subagents with custom tool configurations |
+| <img src="docs/api/assets/images/plugins/plugin-calculator.png" width="32"> | **calculator** | Mathematical calculation tools with configurable precision |
+
+#### Infrastructure
+| | Plugin | Description |
+|:--:|--------|-------------|
+| <img src="docs/api/assets/images/plugins/plugin-model-provider.png" width="32"> | **model_provider** | Provider-agnostic abstraction layer for multi-provider AI support |
+| <img src="docs/api/assets/images/plugins/plugin-registry.png" width="32"> | **registry** | Plugin discovery, lifecycle management, and tool exposure control |
 
 📖 **[View full plugin reference with examples →](https://apanoia.github.io/jaato/api/api-reference/plugins/index.html)**
 
-For plugin development, see [shared/plugins/README.md](shared/plugins/README.md).
+For plugin development, see [shared/plugins/README.md](shared/plugins/README.md). For plugin icon design guidelines, see [docs/plugin-icons.md](docs/plugin-icons.md).
 
 ## Quick Start
 
