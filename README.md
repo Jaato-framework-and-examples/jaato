@@ -42,20 +42,61 @@ jaato is a future-proof framework for building agentic AI applications, featurin
 
 ### Available Plugins
 
-jaato includes 14+ built-in plugins for tool orchestration, file operations, session management, and more.
+jaato includes **20 built-in plugins** organized into categories for tool orchestration, file operations, session management, and more.
 
-**Key plugins:**
-- **cli** - Execute shell commands with auto-backgrounding
-- **mcp** - Connect to Model Context Protocol servers
-- **memory** - Model self-curated persistent knowledge across sessions
-- **file_edit** - File operations with diff-based approval
-- **todo** - Task planning with workflow enforcement
-- **web_search** - Web search integration
-- **subagent** - Delegate to specialized sub-agents
+<!-- Plugin icons: see docs/plugin-icons.md for generation prompts -->
+
+#### Tool Execution
+| Plugin | Description |
+|--------|-------------|
+| **cli** | Execute shell commands with intelligent auto-backgrounding for long-running processes |
+| **mcp** | Connect to Model Context Protocol servers for external tool integrations |
+| **background** | Orchestrate parallel background tasks across all BackgroundCapable plugins |
+
+#### File & Content Management
+| Plugin | Description |
+|--------|-------------|
+| **file_edit** | File operations with diff-based approval, automatic backups, and undo support |
+| **references** | Inject documentation sources into model context (auto or user-selected) |
+| **multimodal** | Handle images via @file references with lazy-loading |
+| **slash_command** | Process /commands with template variable substitution |
+
+#### Memory & State
+| Plugin | Description |
+|--------|-------------|
+| **memory** | Model self-curated persistent knowledge across sessions |
+| **session** | Save and resume conversations across restarts |
+| **todo** | Plan registration with progress tracking and workflow enforcement |
+
+#### User Interaction
+| Plugin | Description |
+|--------|-------------|
+| **permission** | Control tool execution with policies, blacklists, and interactive approval |
+| **clarification** | Request user input with single/multiple choice and free text responses |
+
+#### Context Management (GC)
+| Plugin | Description |
+|--------|-------------|
+| **gc_truncate** | Simple turn-based garbage collection via truncation |
+| **gc_summarize** | Compression-based GC via summarization |
+| **gc_hybrid** | Generational approach combining truncation and summarization |
+
+#### Specialized Capabilities
+| Plugin | Description |
+|--------|-------------|
+| **web_search** | DuckDuckGo web search integration for current information |
+| **subagent** | Delegate tasks to specialized subagents with custom tool configurations |
+| **calculator** | Mathematical calculation tools with configurable precision |
+
+#### Infrastructure
+| Plugin | Description |
+|--------|-------------|
+| **model_provider** | Provider-agnostic abstraction layer for multi-provider AI support |
+| **registry** | Plugin discovery, lifecycle management, and tool exposure control |
 
 📖 **[View full plugin reference with examples →](https://apanoia.github.io/jaato/api/api-reference/plugins/index.html)**
 
-For plugin development, see [shared/plugins/README.md](shared/plugins/README.md).
+For plugin development, see [shared/plugins/README.md](shared/plugins/README.md). For plugin icon design guidelines, see [docs/plugin-icons.md](docs/plugin-icons.md).
 
 ## Quick Start
 
