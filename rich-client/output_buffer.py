@@ -559,16 +559,16 @@ class OutputBuffer:
             )
 
             # Show header based on state
-            if self._spinner_active:
-                if awaiting_input:
-                    # Waiting for user response
-                    output.append("Model> ⏳ ", style="bold yellow")
-                    output.append("Awaiting...", style="dim italic")
-                else:
-                    # Model is processing
-                    frame = self.SPINNER_FRAMES[self._spinner_index]
-                    output.append(f"Model> {frame} ", style="bold cyan")
-                    output.append("thinking...", style="dim italic")
+            # Awaiting user input takes precedence over other states
+            if awaiting_input:
+                # Waiting for user response
+                output.append("Model> ⏳ ", style="bold yellow")
+                output.append("Awaiting...", style="dim italic")
+            elif self._spinner_active:
+                # Model is processing
+                frame = self.SPINNER_FRAMES[self._spinner_index]
+                output.append(f"Model> {frame} ", style="bold cyan")
+                output.append("thinking...", style="dim italic")
             else:
                 # All tools completed - show "Processed" header
                 output.append("Model> ✓ ", style="bold green")
