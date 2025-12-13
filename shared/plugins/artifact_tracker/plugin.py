@@ -190,12 +190,17 @@ class ArtifactTrackerPlugin:
                         "add_tags": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Tags to add"
+                            "description": "Tags to add to existing tags"
                         },
                         "remove_tags": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Tags to remove"
+                            "description": "Tags to remove from existing tags"
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Replace ALL tags with this list (use add_tags/remove_tags for incremental changes)"
                         },
                         "notes": {
                             "type": "string",
@@ -531,11 +536,17 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         for rel_path in args.get("remove_related", []):
             artifact.remove_relation(rel_path)
 
-        for tag in args.get("add_tags", []):
-            artifact.add_tag(tag)
+        # Handle tags - "tags" replaces all, add_tags/remove_tags are incremental
+        if "tags" in args:
+            # Replace all tags
+            artifact.tags = list(args["tags"]) if args["tags"] else []
+        else:
+            # Incremental tag changes
+            for tag in args.get("add_tags", []):
+                artifact.add_tag(tag)
 
-        for tag in args.get("remove_tags", []):
-            artifact.remove_tag(tag)
+            for tag in args.get("remove_tags", []):
+                artifact.remove_tag(tag)
 
         if "notes" in args:
             artifact.notes = args["notes"]
