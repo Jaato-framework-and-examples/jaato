@@ -959,15 +959,18 @@ class PTDisplay:
         the spinner animation loop is running. This doesn't touch any
         buffer's spinner state - it only ensures the timer is active.
         """
-        if self._spinner_timer_active:
-            return  # Already running
-
+        # Always set to True and schedule - handles race conditions where
+        # a previous timer callback might be about to set it False
+        was_active = self._spinner_timer_active
         self._spinner_timer_active = True
-        # Schedule spinner advance in main event loop (thread-safe)
-        if self._app and self._app.is_running:
-            self._app.loop.call_soon_threadsafe(self._advance_spinner)
-        else:
-            self._advance_spinner()
+
+        # Only schedule if not already running to avoid multiple timers
+        if not was_active:
+            # Schedule spinner advance in main event loop (thread-safe)
+            if self._app and self._app.is_running:
+                self._app.loop.call_soon_threadsafe(self._advance_spinner)
+            else:
+                self._advance_spinner()
 
     def _advance_spinner(self) -> None:
         """Advance spinner animation frame.
@@ -992,13 +995,12 @@ class PTDisplay:
                 self._output_buffer.advance_spinner()
                 any_active = True
 
-        # Stop timer if no agents have active spinners
-        if not any_active:
-            self._spinner_timer_active = False
-            return
+        # Only refresh if there are active spinners
+        if any_active:
+            self.refresh()
 
-        self.refresh()
-        # Schedule next frame using prompt_toolkit's call_later
+        # Always schedule next frame - timer keeps running to catch new spinners
+        # The timer will be stopped explicitly via stop_spinner() when needed
         if self._app and self._app.is_running:
             self._app.loop.call_later(0.1, self._advance_spinner)
 

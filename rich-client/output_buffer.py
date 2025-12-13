@@ -208,9 +208,12 @@ class OutputBuffer:
 
     def stop_spinner(self) -> None:
         """Stop showing spinner and finalize tool tree if complete."""
+        was_active = self._spinner_active
         self._spinner_active = False
-        # Convert tool tree to scrollable lines if all tools are done
-        self.finalize_tool_tree()
+        # Only finalize if spinner was actually active (avoid duplicate calls)
+        if was_active:
+            # Convert tool tree to scrollable lines if all tools are done
+            self.finalize_tool_tree()
 
     def advance_spinner(self) -> None:
         """Advance spinner to next frame."""
