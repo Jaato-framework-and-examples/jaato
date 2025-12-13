@@ -261,7 +261,8 @@ class PTDisplay:
         """Get the number of lines to scroll per page (half the visible height)."""
         # Ensure dimensions are current
         self._update_dimensions()
-        available_height = self._height - 2  # minus input row and status bar
+        input_height = self._get_input_height()
+        available_height = self._height - 1 - input_height  # minus status bar and input area
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
         # Scroll by half the visible content area
@@ -289,8 +290,9 @@ class PTDisplay:
 
         output_buffer._flush_current_block()
 
-        # Calculate available height for output
-        available_height = self._height - 2  # minus input row and status bar
+        # Calculate available height for output (account for dynamic input height)
+        input_height = self._get_input_height()
+        available_height = self._height - 1 - input_height  # minus status bar and input area
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
 
@@ -311,8 +313,9 @@ class PTDisplay:
         if not self._agent_panel:
             return to_formatted_text(ANSI(""))
 
-        # Calculate available height for agent panel
-        available_height = self._height - 2  # minus input row and status bar
+        # Calculate available height for agent panel (account for dynamic input height)
+        input_height = self._get_input_height()
+        available_height = self._height - 1 - input_height  # minus status bar and input area
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
 
