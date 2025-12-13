@@ -17,6 +17,7 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout.containers import HSplit, VSplit, Window, ConditionalContainer
+from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.menus import CompletionsMenu
@@ -77,6 +78,10 @@ class PTDisplay:
     OUTPUT_PANEL_WIDTH_RATIO = 0.8  # 80% for output
     AGENT_PANEL_WIDTH_RATIO = 0.2   # 20% for agents
 
+    # Input area height limits (expandable input)
+    INPUT_MIN_HEIGHT = 1   # Minimum input height (single line)
+    INPUT_MAX_HEIGHT = 10  # Maximum input height before scrolling
+
     def __init__(self, input_handler: Optional["InputHandler"] = None, agent_registry: Optional["AgentRegistry"] = None):
         """Initialize the display.
 
@@ -119,6 +124,7 @@ class PTDisplay:
             history=input_handler._pt_history if input_handler else None,
             complete_while_typing=True if input_handler else False,
             enable_history_search=True,  # Enable up/down arrow history navigation
+            on_text_changed=lambda _: self._on_input_changed(),  # Trigger layout update
         )
         self._input_callback: Optional[Callable[[str], None]] = None
 
@@ -158,6 +164,47 @@ class PTDisplay:
             self._renderer.set_width(self._width)
             return True
         return False
+
+    def _on_input_changed(self) -> None:
+        """Called when input buffer text changes - invalidates layout for resize."""
+        if self._app and self._app.is_running:
+            self._app.invalidate()
+
+    def _get_input_height(self) -> int:
+        """Calculate dynamic height for input area based on content.
+
+        Returns the number of lines needed to display the current input,
+        clamped between INPUT_MIN_HEIGHT and INPUT_MAX_HEIGHT.
+        """
+        if not self._input_buffer:
+            return self.INPUT_MIN_HEIGHT
+
+        text = self._input_buffer.text
+        if not text:
+            return self.INPUT_MIN_HEIGHT
+
+        # Count newlines in the text (each newline = additional line)
+        line_count = text.count('\n') + 1
+
+        # Also account for line wrapping based on terminal width
+        # Subtract prompt width ("You> " = 5 chars) from available width
+        prompt_width = 8  # "You> " or "Answer> " with some padding
+        available_width = max(20, self._width - prompt_width)
+
+        # Calculate wrapped lines for each logical line
+        wrapped_lines = 0
+        for line in text.split('\n'):
+            if len(line) == 0:
+                wrapped_lines += 1
+            else:
+                # Ceiling division: how many rows does this line take?
+                wrapped_lines += (len(line) + available_width - 1) // available_width
+
+        # Use the larger of line count or wrapped line count
+        height = max(line_count, wrapped_lines)
+
+        # Clamp to configured limits
+        return max(self.INPUT_MIN_HEIGHT, min(height, self.INPUT_MAX_HEIGHT))
 
     def _has_plan(self) -> bool:
         """Check if plan panel should be visible."""
@@ -214,7 +261,8 @@ class PTDisplay:
         """Get the number of lines to scroll per page (half the visible height)."""
         # Ensure dimensions are current
         self._update_dimensions()
-        available_height = self._height - 2  # minus input row and status bar
+        input_height = self._get_input_height()
+        available_height = self._height - 1 - input_height  # minus status bar and input area
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
         # Scroll by half the visible content area
@@ -242,8 +290,9 @@ class PTDisplay:
 
         output_buffer._flush_current_block()
 
-        # Calculate available height for output
-        available_height = self._height - 2  # minus input row and status bar
+        # Calculate available height for output (account for dynamic input height)
+        input_height = self._get_input_height()
+        available_height = self._height - 1 - input_height  # minus status bar and input area
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
 
@@ -264,8 +313,9 @@ class PTDisplay:
         if not self._agent_panel:
             return to_formatted_text(ANSI(""))
 
-        # Calculate available height for agent panel
-        available_height = self._height - 2  # minus input row and status bar
+        # Calculate available height for agent panel (account for dynamic input height)
+        input_height = self._get_input_height()
+        available_height = self._height - 1 - input_height  # minus status bar and input area
         if self._plan_panel.has_plan:
             available_height -= self._plan_height
 
@@ -295,6 +345,12 @@ class PTDisplay:
                 self._input_buffer.reset()
                 if self._input_callback:
                     self._input_callback(text)
+
+        @kb.add("escape", "enter")
+        def handle_alt_enter(event):
+            """Handle Alt+Enter / Escape+Enter - insert newline for multi-line input."""
+            if not getattr(self, '_pager_active', False):
+                event.current_buffer.insert_text('\n')
 
         @kb.add("q")
         def handle_q(event):
@@ -462,15 +518,16 @@ class PTDisplay:
 
         prompt_label = Window(
             FormattedTextControl(get_prompt_text),
-            height=1,
+            height=self._get_input_height,
             dont_extend_width=True,
         )
 
-        # Input text area - hidden during pager mode
+        # Input text area - hidden during pager mode (expandable height with word wrap)
         input_window = ConditionalContainer(
             Window(
                 BufferControl(buffer=self._input_buffer),
-                height=1,
+                height=self._get_input_height,
+                wrap_lines=True,
             ),
             filter=Condition(lambda: not getattr(self, '_pager_active', False)),
         )
