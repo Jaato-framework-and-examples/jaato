@@ -363,6 +363,22 @@ class PTDisplay:
                 # Normal mode - insert 'q' character
                 event.current_buffer.insert_text("q")
 
+        @kb.add("v")
+        def handle_v(event):
+            """Handle 'v' key - view full prompt if truncated, otherwise type 'v'."""
+            # Check if waiting for channel input with truncated prompt
+            if getattr(self, '_waiting_for_channel_input', False):
+                # Check if there's a truncated prompt to view
+                if self._agent_registry:
+                    buffer = self._agent_registry.get_buffer("main")
+                    if buffer and buffer.has_truncated_pending_prompt():
+                        # Trigger zoom via callback
+                        if self._input_callback:
+                            self._input_callback("v")
+                        return
+            # Normal mode - insert 'v' character
+            event.current_buffer.insert_text("v")
+
         @kb.add("c-c")
         def handle_ctrl_c(event):
             """Handle Ctrl-C - exit."""
@@ -513,6 +529,14 @@ class PTDisplay:
             if getattr(self, '_pager_active', False):
                 return [("class:prompt.pager", "── Enter: next, q: quit ──")]
             if getattr(self, '_waiting_for_channel_input', False):
+                # Check if there's a truncated prompt - show 'v' hint
+                has_truncated = False
+                if self._agent_registry:
+                    buffer = self._agent_registry.get_buffer("main")
+                    if buffer and buffer.has_truncated_pending_prompt():
+                        has_truncated = True
+                if has_truncated:
+                    return [("class:prompt.permission", "Answer (v=view)> ")]
                 return [("class:prompt.permission", "Answer> ")]
             return [("class:prompt", "You> ")]
 
