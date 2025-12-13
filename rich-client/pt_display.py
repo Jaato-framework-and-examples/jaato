@@ -124,6 +124,7 @@ class PTDisplay:
             history=input_handler._pt_history if input_handler else None,
             complete_while_typing=True if input_handler else False,
             enable_history_search=True,  # Enable up/down arrow history navigation
+            on_text_changed=lambda _: self._on_input_changed(),  # Trigger layout update
         )
         self._input_callback: Optional[Callable[[str], None]] = None
 
@@ -163,6 +164,11 @@ class PTDisplay:
             self._renderer.set_width(self._width)
             return True
         return False
+
+    def _on_input_changed(self) -> None:
+        """Called when input buffer text changes - invalidates layout for resize."""
+        if self._app and self._app.is_running:
+            self._app.invalidate()
 
     def _get_input_height(self) -> int:
         """Calculate dynamic height for input area based on content.
@@ -513,11 +519,12 @@ class PTDisplay:
             dont_extend_width=True,
         )
 
-        # Input text area - hidden during pager mode (expandable height)
+        # Input text area - hidden during pager mode (expandable height with word wrap)
         input_window = ConditionalContainer(
             Window(
                 BufferControl(buffer=self._input_buffer),
                 height=self._get_input_height,
+                wrap_lines=True,
             ),
             filter=Condition(lambda: not getattr(self, '_pager_active', False)),
         )
