@@ -37,6 +37,9 @@ class ActiveToolCall:
     permission_state: Optional[str] = None  # None, "pending", "granted", "denied"
     permission_method: Optional[str] = None  # "yes", "always", "once", "never", "whitelist", "blacklist"
     permission_prompt_lines: Optional[List[str]] = None  # Expanded prompt while pending
+    # Clarification tracking
+    clarification_state: Optional[str] = None  # None, "pending", "resolved"
+    clarification_prompt_lines: Optional[List[str]] = None  # Expanded prompt while pending
 
 
 class OutputBuffer:
@@ -136,6 +139,10 @@ class OutputBuffer:
 
         # Skip permission messages - they're shown inline under tool calls in the tree
         if source == "permission":
+            return
+
+        # Skip clarification messages - they're shown inline under tool calls in the tree
+        if source == "clarification":
             return
 
         if mode == "write":
@@ -284,6 +291,31 @@ class OutputBuffer:
                 tool.permission_state = "granted" if granted else "denied"
                 tool.permission_method = method
                 tool.permission_prompt_lines = None  # Clear expanded prompt
+                return
+
+    def set_tool_clarification_pending(self, tool_name: str, prompt_lines: List[str]) -> None:
+        """Mark a tool as awaiting clarification with the prompt to display.
+
+        Args:
+            tool_name: Name of the tool awaiting clarification.
+            prompt_lines: Lines of the clarification prompt to display.
+        """
+        for tool in self._active_tools:
+            if tool.name == tool_name and not tool.completed:
+                tool.clarification_state = "pending"
+                tool.clarification_prompt_lines = prompt_lines
+                return
+
+    def set_tool_clarification_resolved(self, tool_name: str) -> None:
+        """Mark a tool's clarification as resolved.
+
+        Args:
+            tool_name: Name of the tool.
+        """
+        for tool in self._active_tools:
+            if tool.name == tool_name:
+                tool.clarification_state = "resolved"
+                tool.clarification_prompt_lines = None  # Clear expanded prompt
                 return
 
     def scroll_up(self, lines: int = 5) -> bool:
@@ -520,11 +552,23 @@ class OutputBuffer:
             if lines_to_show:
                 output.append("\n")
 
-            # Show header based on spinner state
+            # Check if waiting for user input (permission or clarification)
+            awaiting_input = any(
+                tool.permission_state == "pending" or tool.clarification_state == "pending"
+                for tool in self._active_tools
+            )
+
+            # Show header based on state
             if self._spinner_active:
-                frame = self.SPINNER_FRAMES[self._spinner_index]
-                output.append(f"Model> {frame} ", style="bold cyan")
-                output.append("thinking...", style="dim italic")
+                if awaiting_input:
+                    # Waiting for user response
+                    output.append("Model> ⏳ ", style="bold yellow")
+                    output.append("Awaiting...", style="dim italic")
+                else:
+                    # Model is processing
+                    frame = self.SPINNER_FRAMES[self._spinner_index]
+                    output.append(f"Model> {frame} ", style="bold cyan")
+                    output.append("thinking...", style="dim italic")
             else:
                 # All tools completed - show "Processed" header
                 output.append("Model> ✓ ", style="bold green")
@@ -601,6 +645,35 @@ class OutputBuffer:
                             output.append("blocked (blacklist)", style="dim red")
                         else:
                             output.append(f"denied ({method_label})", style="dim red")
+
+                # Show clarification info under this tool
+                if tool.clarification_state == "pending" and tool.clarification_prompt_lines:
+                    # Expanded clarification prompt
+                    output.append("\n")
+                    output.append(f"       {continuation}     ", style="dim")
+                    output.append("❓ ", style="cyan")
+                    output.append("Clarification needed", style="cyan")
+                    # Draw box around clarification prompt
+                    box_width = max(len(line) for line in tool.clarification_prompt_lines) + 4
+                    box_width = min(box_width, 60)  # Cap width
+                    output.append("\n")
+                    output.append(f"       {continuation}     ┌" + "─" * box_width + "┐", style="dim")
+                    for prompt_line in tool.clarification_prompt_lines:
+                        output.append("\n")
+                        # Truncate long lines
+                        display_line = prompt_line[:box_width - 2] if len(prompt_line) > box_width - 2 else prompt_line
+                        padding = box_width - len(display_line) - 2
+                        output.append(f"       {continuation}     │ ", style="dim")
+                        output.append(display_line)
+                        output.append(" " * padding + " │", style="dim")
+                    output.append("\n")
+                    output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
+                elif tool.clarification_state == "resolved":
+                    # Collapsed clarification result
+                    output.append("\n")
+                    output.append(f"       {continuation}     ", style="dim")
+                    output.append("✓ ", style="cyan")
+                    output.append("answered", style="dim cyan")
         elif self._spinner_active:
             # Spinner active but no tools yet
             if lines_to_show:

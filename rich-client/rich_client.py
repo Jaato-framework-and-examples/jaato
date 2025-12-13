@@ -524,6 +524,43 @@ class RichClient:
             on_resolved=on_permission_resolved
         )
 
+    def _setup_clarification_hooks(self) -> None:
+        """Set up clarification lifecycle hooks for UI integration.
+
+        These hooks update the tool call tree to show clarification status
+        inline under the request_clarification tool.
+        """
+        if not self.registry or not self._agent_registry:
+            return
+
+        clarification_plugin = self.registry.get_plugin("clarification")
+        if not clarification_plugin or not hasattr(clarification_plugin, 'set_clarification_hooks'):
+            return
+
+        registry = self._agent_registry
+        display = self._display
+
+        def on_clarification_requested(tool_name: str, prompt_lines: list):
+            """Called when clarification prompt is shown."""
+            buffer = registry.get_buffer("main")
+            if buffer:
+                buffer.set_tool_clarification_pending(tool_name, prompt_lines)
+                if display:
+                    display.refresh()
+
+        def on_clarification_resolved(tool_name: str):
+            """Called when clarification is resolved."""
+            buffer = registry.get_buffer("main")
+            if buffer:
+                buffer.set_tool_clarification_resolved(tool_name)
+                if display:
+                    display.refresh()
+
+        clarification_plugin.set_clarification_hooks(
+            on_requested=on_clarification_requested,
+            on_resolved=on_clarification_resolved
+        )
+
     def _setup_session_plugin(self) -> None:
         """Set up session persistence plugin."""
         if not self._jaato:
@@ -841,6 +878,9 @@ class RichClient:
 
         # Set up permission hooks for inline permission display in tool tree
         self._setup_permission_hooks()
+
+        # Set up clarification hooks for inline clarification display in tool tree
+        self._setup_clarification_hooks()
 
         # Load release name from file
         release_name = "Jaato Rich TUI Client"

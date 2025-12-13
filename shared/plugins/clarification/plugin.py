@@ -31,6 +31,9 @@ class ClarificationPlugin:
     def __init__(self):
         self._initialized = False
         self._channel: Optional[ClarificationChannel] = None
+        # Clarification lifecycle hooks for UI integration
+        self._on_clarification_requested: Optional[Callable[[str, List[str]], None]] = None
+        self._on_clarification_resolved: Optional[Callable[[str], None]] = None
 
     @property
     def name(self) -> str:
@@ -55,6 +58,25 @@ class ClarificationPlugin:
         """Clean up plugin resources."""
         self._channel = None
         self._initialized = False
+
+    def set_clarification_hooks(
+        self,
+        on_requested: Optional[Callable[[str, List[str]], None]] = None,
+        on_resolved: Optional[Callable[[str], None]] = None
+    ) -> None:
+        """Set hooks for clarification lifecycle events.
+
+        These hooks enable UI integration by notifying when clarification
+        requests start and complete.
+
+        Args:
+            on_requested: Called when clarification prompt is shown.
+                Signature: (tool_name, prompt_lines) -> None
+            on_resolved: Called when clarification is resolved.
+                Signature: (tool_name) -> None
+        """
+        self._on_clarification_requested = on_requested
+        self._on_clarification_resolved = on_resolved
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the tool declarations for Vertex AI."""
@@ -239,8 +261,17 @@ The tool returns responses keyed by question number (1-based):
             # Parse the request
             request = self._parse_request(args)
 
+            # Emit clarification requested hook
+            if self._on_clarification_requested:
+                prompt_lines = self._build_prompt_lines(request)
+                self._on_clarification_requested("request_clarification", prompt_lines)
+
             # Get user responses via the channel
             response = self._channel.request_clarification(request)
+
+            # Emit clarification resolved hook
+            if self._on_clarification_resolved:
+                self._on_clarification_resolved("request_clarification")
 
             # Format the response for the model
             if response.cancelled:
@@ -293,6 +324,30 @@ The tool returns responses keyed by question number (1-based):
 
         except Exception as e:
             return {"error": f"Failed to process clarification request: {str(e)}"}
+
+    def _build_prompt_lines(self, request: ClarificationRequest) -> List[str]:
+        """Build prompt lines for UI display from request info.
+
+        Args:
+            request: The clarification request.
+
+        Returns:
+            List of strings representing the clarification prompt.
+        """
+        lines = []
+
+        if request.context:
+            lines.append(f"Context: {request.context}")
+            lines.append("")
+
+        for i, question in enumerate(request.questions, 1):
+            req_marker = "*" if question.required else ""
+            lines.append(f"Q{i}{req_marker}: {question.text}")
+            if question.choices:
+                for j, choice in enumerate(question.choices, 1):
+                    lines.append(f"  {j}. {choice.text}")
+
+        return lines
 
     def _parse_request(self, args: Dict[str, Any]) -> ClarificationRequest:
         """Parse tool arguments into a ClarificationRequest."""
