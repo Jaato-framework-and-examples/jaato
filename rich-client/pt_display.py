@@ -529,14 +529,7 @@ class PTDisplay:
             if getattr(self, '_pager_active', False):
                 return [("class:prompt.pager", "── Enter: next, q: quit ──")]
             if getattr(self, '_waiting_for_channel_input', False):
-                # Check if there's a pending prompt - show 'v' hint
-                has_pending = False
-                if self._agent_registry:
-                    buffer = self._agent_registry.get_buffer("main")
-                    if buffer and buffer.has_pending_prompt():
-                        has_pending = True
-                if has_pending:
-                    return [("class:prompt.permission", "Answer (v=view)> ")]
+                # 'v' hint is already shown in the output panel truncation indicator
                 return [("class:prompt.permission", "Answer> ")]
             return [("class:prompt", "You> ")]
 
@@ -812,6 +805,17 @@ class PTDisplay:
         self._pager_page_size = page_size
         self._pager_current = 0
         self._pager_active = True
+
+        # Clear the buffer first to remove tool tree and any existing content
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if buffer:
+                buffer.clear()
+        else:
+            self._output_buffer.clear()
+
+        # Force an immediate refresh to clear the display
+        self.refresh()
 
         self._show_pager_page()
 
