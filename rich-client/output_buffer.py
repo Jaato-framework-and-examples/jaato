@@ -33,6 +33,10 @@ class ActiveToolCall:
     completed: bool = False  # True when tool execution finished
     success: bool = True  # Whether the tool succeeded (only valid when completed)
     duration_seconds: Optional[float] = None  # Execution time (only valid when completed)
+    # Permission tracking
+    permission_state: Optional[str] = None  # None, "pending", "granted", "denied"
+    permission_method: Optional[str] = None  # "yes", "always", "once", "never", "whitelist", "blacklist"
+    permission_prompt_lines: Optional[List[str]] = None  # Expanded prompt while pending
 
 
 class OutputBuffer:
@@ -248,6 +252,35 @@ class OutputBuffer:
     def active_tools(self) -> List[ActiveToolCall]:
         """Get list of currently active tools."""
         return list(self._active_tools)
+
+    def set_tool_permission_pending(self, tool_name: str, prompt_lines: List[str]) -> None:
+        """Mark a tool as awaiting permission with the prompt to display.
+
+        Args:
+            tool_name: Name of the tool awaiting permission.
+            prompt_lines: Lines of the permission prompt to display.
+        """
+        for tool in self._active_tools:
+            if tool.name == tool_name and not tool.completed:
+                tool.permission_state = "pending"
+                tool.permission_prompt_lines = prompt_lines
+                return
+
+    def set_tool_permission_resolved(self, tool_name: str, granted: bool,
+                                      method: str) -> None:
+        """Mark a tool's permission as resolved.
+
+        Args:
+            tool_name: Name of the tool.
+            granted: Whether permission was granted.
+            method: How permission was resolved (yes, always, once, never, whitelist, etc.)
+        """
+        for tool in self._active_tools:
+            if tool.name == tool_name:
+                tool.permission_state = "granted" if granted else "denied"
+                tool.permission_method = method
+                tool.permission_prompt_lines = None  # Clear expanded prompt
+                return
 
     def scroll_up(self, lines: int = 5) -> bool:
         """Scroll up (view older content).
@@ -498,6 +531,7 @@ class OutputBuffer:
                 output.append("\n")
                 is_last = (i == len(self._active_tools) - 1)
                 prefix = "└─" if is_last else "├─"
+                continuation = "   " if is_last else "│  "
                 output.append(f"       {prefix} ", style="dim")
 
                 if tool.completed:
@@ -514,6 +548,55 @@ class OutputBuffer:
                     output.append(tool.name, style="yellow")
                     if tool.args_summary and tool.args_summary != "{}":
                         output.append(f"({tool.args_summary})", style="dim")
+
+                # Show permission info under this tool
+                if tool.permission_state == "pending" and tool.permission_prompt_lines:
+                    # Expanded permission prompt
+                    output.append("\n")
+                    output.append(f"       {continuation}     ", style="dim")
+                    output.append("⚠ ", style="yellow")
+                    output.append("Permission required", style="yellow")
+                    # Draw box around permission prompt
+                    box_width = max(len(line) for line in tool.permission_prompt_lines) + 4
+                    box_width = min(box_width, 60)  # Cap width
+                    output.append("\n")
+                    output.append(f"       {continuation}     ┌" + "─" * box_width + "┐", style="dim")
+                    for prompt_line in tool.permission_prompt_lines:
+                        output.append("\n")
+                        # Truncate long lines
+                        display_line = prompt_line[:box_width - 2] if len(prompt_line) > box_width - 2 else prompt_line
+                        padding = box_width - len(display_line) - 2
+                        output.append(f"       {continuation}     │ ", style="dim")
+                        # Color diff lines appropriately
+                        if display_line.startswith('+') and not display_line.startswith('+++'):
+                            output.append(display_line, style="green")
+                        elif display_line.startswith('-') and not display_line.startswith('---'):
+                            output.append(display_line, style="red")
+                        elif display_line.startswith('@@'):
+                            output.append(display_line, style="cyan")
+                        else:
+                            output.append(display_line)
+                        output.append(" " * padding + " │", style="dim")
+                    output.append("\n")
+                    output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
+                elif tool.permission_state in ("granted", "denied"):
+                    # Collapsed permission result
+                    output.append("\n")
+                    output.append(f"       {continuation}     ", style="dim")
+                    if tool.permission_state == "granted":
+                        output.append("✓ ", style="green")
+                        method_label = tool.permission_method or "allowed"
+                        if method_label == "whitelist":
+                            output.append("auto-approved (whitelist)", style="dim green")
+                        else:
+                            output.append(f"allowed ({method_label})", style="dim green")
+                    else:
+                        output.append("✗ ", style="red")
+                        method_label = tool.permission_method or "denied"
+                        if method_label == "blacklist":
+                            output.append("blocked (blacklist)", style="dim red")
+                        else:
+                            output.append(f"denied ({method_label})", style="dim red")
         elif self._spinner_active:
             # Spinner active but no tools yet
             if lines_to_show:
