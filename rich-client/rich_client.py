@@ -697,6 +697,10 @@ class RichClient:
             self._show_tools()
             return
 
+        if user_input.lower() == 'plugins':
+            self._show_plugins()
+            return
+
         if user_input.lower() == 'reset':
             self.clear_history()
             self._display.show_lines([("[History cleared]", "yellow")])
@@ -821,6 +825,89 @@ class RichClient:
             lines.append((f"  {tool.name}: {tool.description}", "dim"))
 
         self._display.show_lines(lines)
+
+    def _show_plugins(self) -> None:
+        """Show available plugins with status and descriptions."""
+        if not self._display or not self.registry:
+            return
+
+        available = self.registry.list_available()
+        exposed = set(self.registry.list_exposed())
+        skipped = self.registry.list_skipped_plugins()
+
+        lines = [("Available Plugins:", "bold")]
+        lines.append(("", ""))
+
+        for name in sorted(available):
+            plugin = self.registry.get_plugin(name)
+            if not plugin:
+                continue
+
+            # Determine status
+            if name in exposed:
+                status = "✓ enabled"
+                status_style = "green"
+            elif name in skipped:
+                status = "⊘ skipped (model requirements)"
+                status_style = "yellow"
+            else:
+                status = "○ available"
+                status_style = "dim"
+
+            # Get description from plugin
+            description = self._get_plugin_description(plugin)
+
+            # Format output
+            lines.append((f"  {name}", "cyan"))
+            lines.append((f"    Status: {status}", status_style))
+            if description:
+                # Wrap long descriptions
+                if len(description) > 70:
+                    description = description[:67] + "..."
+                lines.append((f"    {description}", "dim"))
+            lines.append(("", ""))
+
+        # Add summary
+        lines.append(("─" * 40, "dim"))
+        lines.append((f"  Total: {len(available)} plugins ({len(exposed)} enabled, {len(skipped)} skipped)", "dim"))
+
+        self._display.show_lines(lines)
+
+    def _get_plugin_description(self, plugin) -> str:
+        """Get a description for a plugin.
+
+        Tries multiple sources:
+        1. plugin.description property/attribute
+        2. plugin.__doc__ (class docstring)
+        3. First tool's description (if plugin has tools)
+        4. Empty string as fallback
+        """
+        # Try description property
+        if hasattr(plugin, 'description'):
+            desc = plugin.description
+            if callable(desc):
+                desc = desc()
+            if desc:
+                return str(desc).strip().split('\n')[0]
+
+        # Try class docstring
+        if plugin.__doc__:
+            # Take first non-empty line of docstring
+            for line in plugin.__doc__.strip().split('\n'):
+                line = line.strip()
+                if line:
+                    return line
+
+        # Try first tool description
+        if hasattr(plugin, 'get_tool_schemas'):
+            try:
+                schemas = plugin.get_tool_schemas()
+                if schemas and schemas[0].description:
+                    return f"Provides: {schemas[0].name}"
+            except Exception:
+                pass
+
+        return ""
 
     def _show_history(self) -> None:
         """Show conversation history for SELECTED agent.
@@ -1082,6 +1169,7 @@ class RichClient:
             ("Commands (auto-complete as you type):", "bold"),
             ("  help          - Show this help message", "dim"),
             ("  tools         - List tools available to the model", "dim"),
+            ("  plugins       - List available plugins with status", "dim"),
             ("  reset         - Clear conversation history", "dim"),
             ("  history       - Show full conversation history", "dim"),
             ("  context       - Show context window usage", "dim"),
