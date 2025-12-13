@@ -130,13 +130,9 @@ class OutputBuffer:
             is_turn_start: Whether this is the first line of a new turn.
         """
         display_lines = self._measure_display_lines(source, text, is_turn_start)
-        # Model output should render after tool tree if there are active (non-completed) tools
-        # This keeps the permission/clarification prompts visible above explanatory text
-        render_after = False
-        if source == "model" and self._active_tools:
-            has_active = any(not tool.completed for tool in self._active_tools)
-            if has_active:
-                render_after = True
+        # Model output should render after tool tree if there are any tools
+        # This keeps the tool tree visible above model responses
+        render_after = source == "model" and bool(self._active_tools)
         self._lines.append(OutputLine(source, text, style, display_lines, is_turn_start, render_after))
 
     def append(self, source: str, text: str, mode: str) -> None:
