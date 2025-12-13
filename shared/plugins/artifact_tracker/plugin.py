@@ -686,7 +686,8 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
                 "path": path,
                 "related_count": 0,
                 "related": [],
-                "message": f"No tracked artifacts are related to: {path}",
+                "message": f"No tracked artifacts depend on: {path}",
+                "next_step": "You can proceed with your changes. No artifacts will need review.",
             }
 
         results = []
@@ -703,8 +704,18 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             "path": path,
             "related_count": len(results),
             "related": results,
-            "message": f"Found {len(results)} artifact(s) related to: {path}",
-            "recommendation": "Consider reviewing/updating these artifacts if you modify this file.",
+            "message": f"⚠️  {len(results)} artifact(s) depend on this file and will need review if you modify it.",
+            "workflow_reminder": (
+                "IMPORTANT: After you finish editing this file, you MUST call:\n"
+                f"  notifyChange(path=\"{path}\", reason=\"<describe your changes>\")\n"
+                "This will automatically flag the dependent artifacts for review."
+            ),
+            "next_steps": [
+                f"1. Make your changes to {path}",
+                f"2. Call notifyChange(\"{path}\", \"<reason>\") to flag dependents",
+                "3. Review each flagged artifact",
+                "4. Call acknowledgeReview() for each after reviewing",
+            ],
         }
 
     def _execute_remove_artifact(self, args: Dict[str, Any]) -> Dict[str, Any]:
