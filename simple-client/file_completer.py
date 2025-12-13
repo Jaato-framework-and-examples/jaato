@@ -21,6 +21,7 @@ from prompt_toolkit.document import Document
 DEFAULT_COMMANDS = [
     ("help", "Show help message and available commands"),
     ("tools", "List available tools"),
+    ("plugins", "List available plugins with status"),
     ("reset", "Clear conversation history"),
     ("history", "Show full conversation history"),
     ("context", "Show context window usage"),
