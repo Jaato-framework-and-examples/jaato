@@ -44,55 +44,53 @@ jaato is a future-proof framework for building agentic AI applications, featurin
 
 jaato includes **20 built-in plugins** organized into categories for tool orchestration, file operations, session management, and more.
 
-<!-- Plugin icons: see docs/plugin-icons.md for generation prompts -->
-
 #### Tool Execution
-| Plugin | Description |
-|--------|-------------|
-| **cli** | Execute shell commands with intelligent auto-backgrounding for long-running processes |
-| **mcp** | Connect to Model Context Protocol servers for external tool integrations |
-| **background** | Orchestrate parallel background tasks across all BackgroundCapable plugins |
+| | Plugin | Description |
+|:--:|--------|-------------|
+| <img src="docs/api/assets/images/plugins/plugin-cli.png" width="32"> | **cli** | Execute shell commands with intelligent auto-backgrounding for long-running processes |
+| <img src="docs/api/assets/images/plugins/plugin-mcp.png" width="32"> | **mcp** | Connect to Model Context Protocol servers for external tool integrations |
+| <img src="docs/api/assets/images/plugins/plugin-background.png" width="32"> | **background** | Orchestrate parallel background tasks across all BackgroundCapable plugins |
 
 #### File & Content Management
-| Plugin | Description |
-|--------|-------------|
-| **file_edit** | File operations with diff-based approval, automatic backups, and undo support |
-| **references** | Inject documentation sources into model context (auto or user-selected) |
-| **multimodal** | Handle images via @file references with lazy-loading |
-| **slash_command** | Process /commands with template variable substitution |
+| | Plugin | Description |
+|:--:|--------|-------------|
+| <img src="docs/api/assets/images/plugins/plugin-file-edit.png" width="32"> | **file_edit** | File operations with diff-based approval, automatic backups, and undo support |
+| <img src="docs/api/assets/images/plugins/plugin-references.png" width="32"> | **references** | Inject documentation sources into model context (auto or user-selected) |
+| <img src="docs/api/assets/images/plugins/plugin-multimodal.png" width="32"> | **multimodal** | Handle images via @file references with lazy-loading |
+| <img src="docs/api/assets/images/plugins/plugin-slash-command.png" width="32"> | **slash_command** | Process /commands with template variable substitution |
 
 #### Memory & State
-| Plugin | Description |
-|--------|-------------|
-| **memory** | Model self-curated persistent knowledge across sessions |
-| **session** | Save and resume conversations across restarts |
-| **todo** | Plan registration with progress tracking and workflow enforcement |
+| | Plugin | Description |
+|:--:|--------|-------------|
+| <img src="docs/api/assets/images/plugins/plugin-memory.png" width="32"> | **memory** | Model self-curated persistent knowledge across sessions |
+| <img src="docs/api/assets/images/plugins/plugin-session.png" width="32"> | **session** | Save and resume conversations across restarts |
+| <img src="docs/api/assets/images/plugins/plugin-todo.png" width="32"> | **todo** | Plan registration with progress tracking and workflow enforcement |
 
 #### User Interaction
-| Plugin | Description |
-|--------|-------------|
-| **permission** | Control tool execution with policies, blacklists, and interactive approval |
-| **clarification** | Request user input with single/multiple choice and free text responses |
+| | Plugin | Description |
+|:--:|--------|-------------|
+| <img src="docs/api/assets/images/plugins/plugin-permission.png" width="32"> | **permission** | Control tool execution with policies, blacklists, and interactive approval |
+| <img src="docs/api/assets/images/plugins/plugin-clarification.png" width="32"> | **clarification** | Request user input with single/multiple choice and free text responses |
 
 #### Context Management (GC)
-| Plugin | Description |
-|--------|-------------|
-| **gc_truncate** | Simple turn-based garbage collection via truncation |
-| **gc_summarize** | Compression-based GC via summarization |
-| **gc_hybrid** | Generational approach combining truncation and summarization |
+| | Plugin | Description |
+|:--:|--------|-------------|
+| <img src="docs/api/assets/images/plugins/plugin-gc-truncate.png" width="32"> | **gc_truncate** | Simple turn-based garbage collection via truncation |
+| <img src="docs/api/assets/images/plugins/plugin-gc-summarize.png" width="32"> | **gc_summarize** | Compression-based GC via summarization |
+| <img src="docs/api/assets/images/plugins/plugin-gc-hybrid.png" width="32"> | **gc_hybrid** | Generational approach combining truncation and summarization |
 
 #### Specialized Capabilities
-| Plugin | Description |
-|--------|-------------|
-| **web_search** | DuckDuckGo web search integration for current information |
-| **subagent** | Delegate tasks to specialized subagents with custom tool configurations |
-| **calculator** | Mathematical calculation tools with configurable precision |
+| | Plugin | Description |
+|:--:|--------|-------------|
+| <img src="docs/api/assets/images/plugins/plugin-web-search.png" width="32"> | **web_search** | DuckDuckGo web search integration for current information |
+| <img src="docs/api/assets/images/plugins/plugin-subagent.png" width="32"> | **subagent** | Delegate tasks to specialized subagents with custom tool configurations |
+| <img src="docs/api/assets/images/plugins/plugin-calculator.png" width="32"> | **calculator** | Mathematical calculation tools with configurable precision |
 
 #### Infrastructure
-| Plugin | Description |
-|--------|-------------|
-| **model_provider** | Provider-agnostic abstraction layer for multi-provider AI support |
-| **registry** | Plugin discovery, lifecycle management, and tool exposure control |
+| | Plugin | Description |
+|:--:|--------|-------------|
+| <img src="docs/api/assets/images/plugins/plugin-model-provider.png" width="32"> | **model_provider** | Provider-agnostic abstraction layer for multi-provider AI support |
+| <img src="docs/api/assets/images/plugins/plugin-registry.png" width="32"> | **registry** | Plugin discovery, lifecycle management, and tool exposure control |
 
 📖 **[View full plugin reference with examples →](https://apanoia.github.io/jaato/api/api-reference/plugins/index.html)**
 
