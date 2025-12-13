@@ -774,7 +774,7 @@ class RichClient:
         if self._waiting_for_channel_input:
             # Check for 'v' to view full truncated prompt
             if user_input.lower() == 'v':
-                buffer = self._buffer_registry.get_buffer("main")
+                buffer = self._agent_registry.get_buffer("main")
                 if buffer and buffer.has_truncated_pending_prompt():
                     prompt_data = buffer.get_pending_prompt_for_pager()
                     if prompt_data:
