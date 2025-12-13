@@ -295,7 +295,8 @@ class ArtifactTrackerPlugin:
             ToolSchema(
                 name="acknowledgeReview",
                 description=(
-                    "WORKFLOW STEP: Call after reviewing a flagged artifact. "
+                    "WORKFLOW STEP: Call after reviewing flagged artifact(s). "
+                    "Supports both single path and array of paths for batch acknowledgment. "
                     "Set `was_updated=true` if you modified the artifact content. "
                     "Set `notes` to explain what you checked/changed. "
                     "This clears the review flag so it won't appear in reminders."
@@ -305,18 +306,23 @@ class ArtifactTrackerPlugin:
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Path of the artifact"
+                            "description": "Path of a single artifact to acknowledge"
+                        },
+                        "paths": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Array of artifact paths to acknowledge (batch operation)"
                         },
                         "notes": {
                             "type": "string",
-                            "description": "Notes about the review (e.g., 'No changes needed')"
+                            "description": "Notes about the review (e.g., 'No changes needed') - applied to all"
                         },
                         "was_updated": {
                             "type": "boolean",
-                            "description": "Set to true if you updated the artifact"
+                            "description": "Set to true if you updated the artifact(s)"
                         }
                     },
-                    "required": ["path"]
+                    "required": []
                 }
             ),
             ToolSchema(
@@ -346,18 +352,24 @@ class ArtifactTrackerPlugin:
             ToolSchema(
                 name="removeArtifact",
                 description=(
-                    "Stop tracking an artifact. Use when deleting an artifact file "
-                    "or when it no longer needs to stay in sync with other files."
+                    "Stop tracking artifact(s). Use when deleting artifact files "
+                    "or when they no longer need to stay in sync with other files. "
+                    "Supports both single path and array of paths."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Path of the artifact to remove"
+                            "description": "Path of a single artifact to remove"
+                        },
+                        "paths": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Array of artifact paths to remove (batch operation)"
                         }
                     },
-                    "required": ["path"]
+                    "required": []
                 }
             ),
             ToolSchema(
@@ -686,38 +698,75 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         }
 
     def _execute_acknowledge_review(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the acknowledgeReview tool."""
-        path = args.get("path", "")
+        """Execute the acknowledgeReview tool.
+
+        Supports both single path and array of paths.
+        """
+        single_path = args.get("path", "")
+        paths_array = args.get("paths", [])
         notes = args.get("notes")
         was_updated = args.get("was_updated", False)
 
-        if not path:
-            return {"error": "path is required"}
+        # Build list of paths to acknowledge
+        paths_to_ack = []
+        if single_path:
+            paths_to_ack.append(single_path)
+        if paths_array:
+            paths_to_ack.extend(paths_array)
 
-        # Normalize path for lookup
-        path = _normalize_path(path)
+        if not paths_to_ack:
+            return {"error": "Either 'path' or 'paths' is required"}
+
+        # Normalize all paths
+        paths_to_ack = [_normalize_path(p) for p in paths_to_ack]
 
         if not self._registry:
             return {"error": "Plugin not initialized"}
 
-        artifact = self._registry.get_by_path(path)
-        if not artifact:
-            return {"error": f"Artifact not found: {path}"}
+        # Acknowledge each artifact
+        acknowledged = []
+        not_found = []
+        for path in paths_to_ack:
+            artifact = self._registry.get_by_path(path)
+            if artifact:
+                if was_updated:
+                    artifact.mark_updated()
+                else:
+                    artifact.acknowledge_review(notes)
+                acknowledged.append({
+                    "path": artifact.path,
+                    "review_status": artifact.review_status.value,
+                })
+            else:
+                not_found.append(path)
 
-        if was_updated:
-            artifact.mark_updated()
+        if acknowledged:
+            self._save_state()
+
+        # Build response
+        if len(paths_to_ack) == 1:
+            # Single path - simple response
+            if acknowledged:
+                return {
+                    "success": True,
+                    "path": acknowledged[0]["path"],
+                    "review_status": acknowledged[0]["review_status"],
+                    "notes": notes,
+                    "message": f"Review acknowledged: {acknowledged[0]['path']}",
+                }
+            else:
+                return {"error": f"Artifact not found: {not_found[0]}"}
         else:
-            artifact.acknowledge_review(notes)
-
-        self._save_state()
-
-        return {
-            "success": True,
-            "path": artifact.path,
-            "review_status": artifact.review_status.value,
-            "notes": artifact.notes,
-            "message": f"Review acknowledged: {path}",
-        }
+            # Multiple paths - detailed response
+            return {
+                "success": len(not_found) == 0,
+                "acknowledged": acknowledged,
+                "acknowledged_count": len(acknowledged),
+                "not_found": not_found,
+                "message": f"Acknowledged {len(acknowledged)} artifact(s)" + (
+                    f", {len(not_found)} not found" if not_found else ""
+                ),
+            }
 
     def _execute_check_related(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the checkRelated tool."""
@@ -781,30 +830,65 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         return result
 
     def _execute_remove_artifact(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the removeArtifact tool."""
-        path = args.get("path", "")
+        """Execute the removeArtifact tool.
 
-        if not path:
-            return {"error": "path is required"}
+        Supports both single path and array of paths.
+        """
+        single_path = args.get("path", "")
+        paths_array = args.get("paths", [])
 
-        # Normalize path for lookup
-        path = _normalize_path(path)
+        # Build list of paths to remove
+        paths_to_remove = []
+        if single_path:
+            paths_to_remove.append(single_path)
+        if paths_array:
+            paths_to_remove.extend(paths_array)
+
+        if not paths_to_remove:
+            return {"error": "Either 'path' or 'paths' is required"}
+
+        # Normalize all paths
+        paths_to_remove = [_normalize_path(p) for p in paths_to_remove]
 
         if not self._registry:
             return {"error": "Plugin not initialized"}
 
-        artifact = self._registry.get_by_path(path)
-        if not artifact:
-            return {"error": f"Artifact not found: {path}"}
+        # Remove each artifact
+        removed = []
+        not_found = []
+        for path in paths_to_remove:
+            artifact = self._registry.get_by_path(path)
+            if artifact:
+                self._registry.remove(artifact.artifact_id)
+                removed.append(path)
+            else:
+                not_found.append(path)
 
-        self._registry.remove(artifact.artifact_id)
-        self._save_state()
+        if removed:
+            self._save_state()
 
-        return {
-            "success": True,
-            "path": path,
-            "message": f"Stopped tracking: {path}",
-        }
+        # Build response
+        if len(paths_to_remove) == 1:
+            # Single path - simple response
+            if removed:
+                return {
+                    "success": True,
+                    "path": removed[0],
+                    "message": f"Stopped tracking: {removed[0]}",
+                }
+            else:
+                return {"error": f"Artifact not found: {not_found[0]}"}
+        else:
+            # Multiple paths - detailed response
+            return {
+                "success": len(not_found) == 0,
+                "removed": removed,
+                "removed_count": len(removed),
+                "not_found": not_found,
+                "message": f"Removed {len(removed)} artifact(s)" + (
+                    f", {len(not_found)} not found" if not_found else ""
+                ),
+            }
 
     def _execute_notify_change(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the notifyChange tool.
