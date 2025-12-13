@@ -37,18 +37,19 @@ class ArtifactTrackerPlugin:
 
     Key features:
     - Track documents, tests, configs, and other artifacts
-    - Define relationships between artifacts
-    - Flag artifacts for review when related files change
-    - System instructions that remind model to check related artifacts
+    - Define relationships between artifacts (artifact depends on source files)
+    - Auto-flag artifacts for review when related source files change
+    - System instructions that guide the model through the workflow
 
     Tools provided:
-    - trackArtifact: Register a new artifact to track
+    - trackArtifact: Register a new artifact with its dependencies
     - updateArtifact: Update artifact metadata
-    - listArtifacts: Show all tracked artifacts
-    - flagForReview: Mark artifact as needing review
+    - listArtifacts: Show all tracked artifacts (with filtering)
+    - checkRelated: Find artifacts that depend on a file (BEFORE modifying)
+    - notifyChange: Auto-flag dependent artifacts (AFTER modifying a source file)
     - acknowledgeReview: Mark artifact as reviewed
+    - flagForReview: Manually flag a single artifact
     - removeArtifact: Stop tracking an artifact
-    - checkRelated: Find artifacts related to a path
     """
 
     def __init__(self):
@@ -119,10 +120,10 @@ class ArtifactTrackerPlugin:
             ToolSchema(
                 name="trackArtifact",
                 description=(
-                    "Register a new artifact (document, test, config, etc.) to track. "
-                    "Use this whenever you create or significantly modify a file that "
-                    "should be kept in sync with other parts of the codebase. "
-                    "Tracking artifacts helps ensure they stay up-to-date when related code changes."
+                    "WORKFLOW STEP: Register a new artifact after creating it. "
+                    "Use for documents, tests, configs that should stay in sync with code. "
+                    "Set `related_to` to list source files this artifact depends on. "
+                    "NEXT: When you later modify those source files, call `notifyChange` to flag this artifact for review."
                 ),
                 parameters={
                     "type": "object",
@@ -161,9 +162,9 @@ class ArtifactTrackerPlugin:
             ToolSchema(
                 name="updateArtifact",
                 description=(
-                    "Update metadata for a tracked artifact. Use when you've made "
-                    "changes to an artifact and want to update its tracking info, "
-                    "add relations, or update the description."
+                    "Update metadata for a tracked artifact (description, relations, tags). "
+                    "Use `mark_updated=true` after modifying the artifact's content to clear review flags. "
+                    "Use `add_related` to link to additional source files this artifact depends on."
                 ),
                 parameters={
                     "type": "object",
@@ -211,9 +212,9 @@ class ArtifactTrackerPlugin:
             ToolSchema(
                 name="listArtifacts",
                 description=(
-                    "List all tracked artifacts, optionally filtered by type, tag, "
-                    "or review status. Use this to see what artifacts are being tracked "
-                    "and which ones need attention."
+                    "List all tracked artifacts. Use `needs_review=true` to see only artifacts "
+                    "flagged for review. Filter by `artifact_type` or `tag` to narrow results. "
+                    "Check this periodically to see what needs attention."
                 ),
                 parameters={
                     "type": "object",
@@ -238,9 +239,9 @@ class ArtifactTrackerPlugin:
             ToolSchema(
                 name="flagForReview",
                 description=(
-                    "Mark an artifact as needing review. Use this when you've made "
-                    "changes that might affect a related artifact, to remind yourself "
-                    "to check and update it."
+                    "Manually mark a single artifact as needing review. "
+                    "PREFER using `notifyChange` instead - it automatically flags ALL dependent artifacts. "
+                    "Use this only when you need to flag a specific artifact with a custom reason."
                 ),
                 parameters={
                     "type": "object",
@@ -260,8 +261,10 @@ class ArtifactTrackerPlugin:
             ToolSchema(
                 name="acknowledgeReview",
                 description=(
-                    "Mark an artifact as reviewed. Use after you've checked an artifact "
-                    "and either updated it or confirmed no changes are needed."
+                    "WORKFLOW STEP: Call after reviewing a flagged artifact. "
+                    "Set `was_updated=true` if you modified the artifact content. "
+                    "Set `notes` to explain what you checked/changed. "
+                    "This clears the review flag so it won't appear in reminders."
                 ),
                 parameters={
                     "type": "object",
@@ -285,9 +288,10 @@ class ArtifactTrackerPlugin:
             ToolSchema(
                 name="checkRelated",
                 description=(
-                    "Find all artifacts related to a given path. Use this BEFORE making "
-                    "changes to a file to see what other artifacts might need updating. "
-                    "This helps maintain consistency across related files."
+                    "WORKFLOW STEP: Call BEFORE modifying a file to preview impact. "
+                    "Shows all tracked artifacts that depend on this file (have it in `related_to`). "
+                    "If artifacts are found, plan to review them after your changes. "
+                    "NEXT: After modifying the file, call `notifyChange` to flag dependent artifacts."
                 ),
                 parameters={
                     "type": "object",
@@ -303,8 +307,8 @@ class ArtifactTrackerPlugin:
             ToolSchema(
                 name="removeArtifact",
                 description=(
-                    "Stop tracking an artifact. Use when an artifact is deleted or "
-                    "no longer needs to be tracked."
+                    "Stop tracking an artifact. Use when deleting an artifact file "
+                    "or when it no longer needs to stay in sync with other files."
                 ),
                 parameters={
                     "type": "object",
@@ -315,6 +319,29 @@ class ArtifactTrackerPlugin:
                         }
                     },
                     "required": ["path"]
+                }
+            ),
+            ToolSchema(
+                name="notifyChange",
+                description=(
+                    "WORKFLOW STEP: Call AFTER modifying a source file to auto-flag dependent artifacts. "
+                    "This finds all tracked artifacts that have the changed file in their `related_to` list "
+                    "and marks them as needing review. Much easier than manually calling `flagForReview` for each. "
+                    "NEXT: Review each flagged artifact and call `acknowledgeReview` when done."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path of the file that was modified"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Brief description of what changed (e.g., 'Added new endpoint', 'Renamed function')"
+                        }
+                    },
+                    "required": ["path", "reason"]
                 }
             ),
         ]
@@ -329,6 +356,7 @@ class ArtifactTrackerPlugin:
             "acknowledgeReview": self._execute_acknowledge_review,
             "checkRelated": self._execute_check_related,
             "removeArtifact": self._execute_remove_artifact,
+            "notifyChange": self._execute_notify_change,
             # User command aliases
             "artifacts": self._execute_list_artifacts,
         }
@@ -359,37 +387,47 @@ class ArtifactTrackerPlugin:
 
         return f"""You have access to ARTIFACT TRACKING tools to keep related files in sync.
 
-**PURPOSE**:
-These tools help you remember what documents, tests, and configs you've created
-or modified, and remind you to update them when related code changes.
+**PURPOSE**: Track documents, tests, and configs so you remember to update them when related code changes.
 
-**WHEN TO TRACK ARTIFACTS**:
-- README files and documentation you create/update
-- Test files (especially when related to specific source files)
-- Configuration files that depend on code structure
-- Schema files (database, API) that affect multiple files
-- Any file that should stay in sync with other parts of the codebase
+**COMPLETE WORKFLOW** (follow these steps):
 
-**CRITICAL WORKFLOW**:
-1. **BEFORE modifying a file**: Use `checkRelated` to see if any tracked
-   artifacts depend on it. If so, plan to review/update them too.
+┌─────────────────────────────────────────────────────────────────────┐
+│  WHEN CREATING A NEW ARTIFACT (doc, test, config):                  │
+│                                                                     │
+│  1. Create the file                                                 │
+│  2. Call `trackArtifact` with:                                      │
+│     - path: the file you created                                    │
+│     - related_to: source files it depends on                        │
+│     - description: what this artifact is                            │
+└─────────────────────────────────────────────────────────────────────┘
 
-2. **AFTER creating/modifying important files**: Use `trackArtifact` to
-   register them with appropriate `related_to` links.
+┌─────────────────────────────────────────────────────────────────────┐
+│  WHEN MODIFYING A SOURCE FILE:                                      │
+│                                                                     │
+│  1. BEFORE editing: `checkRelated(path)` → see what depends on it   │
+│  2. Make your changes to the file                                   │
+│  3. AFTER editing: `notifyChange(path, reason)` → auto-flags deps   │
+│  4. Review each flagged artifact                                    │
+│  5. For each: `acknowledgeReview(path, was_updated, notes)`         │
+└─────────────────────────────────────────────────────────────────────┘
 
-3. **When you see "ATTENTION" above**: Review and address flagged artifacts
-   before continuing with other work.
+**TOOL QUICK REFERENCE**:
+- `trackArtifact` → register new artifact with dependencies
+- `checkRelated` → preview what artifacts depend on a file (BEFORE edit)
+- `notifyChange` → auto-flag all dependent artifacts (AFTER edit)
+- `acknowledgeReview` → clear review flag after checking artifact
+- `listArtifacts` → see all tracked artifacts and their status
+- `updateArtifact` → modify artifact metadata
+- `flagForReview` → manually flag single artifact (prefer notifyChange)
+- `removeArtifact` → stop tracking an artifact
 
-**RELATIONSHIP EXAMPLES**:
-- Test file `tests/test_api.py` → related_to: `["src/api.py"]`
-- README `docs/auth.md` → related_to: `["src/auth/", "src/middleware/auth.py"]`
-- Config `config/routes.json` → related_to: `["src/routes/"]`
+**RELATIONSHIP PATTERN**:
+The artifact's `related_to` lists what SOURCE FILES it depends on.
+When those source files change, the artifact needs review.
 
-**BEST PRACTICES**:
-- Track tests and link them to the code they test
-- Track documentation and link to the code it documents
-- Use descriptive `reason` when flagging for review
-- Don't forget to `acknowledgeReview` after checking artifacts
+Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
+→ When you modify `src/api.py`, call `notifyChange("src/api.py", "reason")`
+→ This automatically flags `tests/test_api.py` for review
 
 {reminder_text}"""
 
@@ -403,6 +441,7 @@ or modified, and remind you to update them when related code changes.
             "acknowledgeReview",
             "checkRelated",
             "removeArtifact",
+            "notifyChange",
             "artifacts",
         ]
 
@@ -678,6 +717,52 @@ or modified, and remind you to update them when related code changes.
             "success": True,
             "path": path,
             "message": f"Stopped tracking: {path}",
+        }
+
+    def _execute_notify_change(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the notifyChange tool.
+
+        Automatically flags all artifacts that depend on the changed file.
+        """
+        path = args.get("path", "")
+        reason = args.get("reason", "")
+
+        if not path:
+            return {"error": "path is required"}
+        if not reason:
+            return {"error": "reason is required"}
+
+        if not self._registry:
+            return {"error": "Plugin not initialized"}
+
+        # Find all artifacts that have this path in their related_to list
+        flagged = []
+        for artifact in self._registry.get_all():
+            if path in artifact.related_to:
+                artifact.mark_for_review(f"Source changed: {reason}")
+                flagged.append({
+                    "path": artifact.path,
+                    "type": artifact.artifact_type.value,
+                    "description": artifact.description,
+                })
+
+        if flagged:
+            self._save_state()
+
+        return {
+            "success": True,
+            "changed_path": path,
+            "reason": reason,
+            "flagged_count": len(flagged),
+            "flagged_artifacts": flagged,
+            "message": (
+                f"Flagged {len(flagged)} artifact(s) for review due to changes in: {path}"
+                if flagged else f"No tracked artifacts depend on: {path}"
+            ),
+            "next_step": (
+                "Review each flagged artifact and call `acknowledgeReview` when done."
+                if flagged else None
+            ),
         }
 
 
