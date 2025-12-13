@@ -32,6 +32,35 @@ from ..base import UserCommand
 DEFAULT_STORAGE_PATH = ".artifact_tracker.json"
 
 
+def _normalize_path(path: str) -> str:
+    """Normalize a path to prevent duplicates.
+
+    Handles:
+    - Removes leading ./
+    - Normalizes path separators
+    - Removes trailing slashes (except for root)
+    - Collapses redundant separators and .. references
+
+    Args:
+        path: The path to normalize
+
+    Returns:
+        Normalized path string
+    """
+    if not path:
+        return path
+
+    # Use os.path.normpath to handle .., redundant separators, etc.
+    normalized = os.path.normpath(path)
+
+    # normpath keeps leading ./ as just the path, but we want consistency
+    # Also handle the case where path starts with ./
+    if normalized == '.':
+        return '.'
+
+    return normalized
+
+
 class ArtifactTrackerPlugin:
     """Plugin that tracks artifacts created/modified by the model.
 
@@ -296,7 +325,8 @@ class ArtifactTrackerPlugin:
                     "WORKFLOW STEP: Call BEFORE modifying a file to preview impact. "
                     "Shows all tracked artifacts that depend on this file (have it in `related_to`). "
                     "If artifacts are found, plan to review them after your changes. "
-                    "NEXT: After modifying the file, call `notifyChange` to flag dependent artifacts."
+                    "NEXT: After modifying the file, call `notifyChange` to flag dependent artifacts. "
+                    "Use `verbose=false` for concise output without workflow reminders."
                 ),
                 parameters={
                     "type": "object",
@@ -304,6 +334,10 @@ class ArtifactTrackerPlugin:
                         "path": {
                             "type": "string",
                             "description": "Path to check for related artifacts"
+                        },
+                        "verbose": {
+                            "type": "boolean",
+                            "description": "Include workflow reminders in output (default: true). Set to false for concise output."
                         }
                     },
                     "required": ["path"]
@@ -343,7 +377,10 @@ class ArtifactTrackerPlugin:
                         },
                         "reason": {
                             "type": "string",
-                            "description": "Brief description of what changed (e.g., 'Added new endpoint', 'Renamed function')"
+                            "description": (
+                                "Brief description of what changed (e.g., 'Added new endpoint', 'Renamed function'). "
+                                "This becomes the REVIEW COMMENT shown to reviewers when they check flagged artifacts."
+                            )
                         }
                     },
                     "required": ["path", "reason"]
@@ -476,6 +513,10 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         if not description:
             return {"error": "description is required"}
 
+        # Normalize paths to prevent duplicates (e.g., ./doc.md vs doc.md)
+        path = _normalize_path(path)
+        related_to = [_normalize_path(p) for p in related_to]
+
         # Check if already tracked
         if self._registry and self._registry.get_by_path(path):
             return {"error": f"Artifact already tracked: {path}. Use updateArtifact to modify."}
@@ -519,6 +560,9 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         if not path:
             return {"error": "path is required"}
 
+        # Normalize path for lookup
+        path = _normalize_path(path)
+
         if not self._registry:
             return {"error": "Plugin not initialized"}
 
@@ -530,11 +574,12 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         if "description" in args and args["description"]:
             artifact.description = args["description"]
 
+        # Normalize relation paths
         for rel_path in args.get("add_related", []):
-            artifact.add_relation(rel_path)
+            artifact.add_relation(_normalize_path(rel_path))
 
         for rel_path in args.get("remove_related", []):
-            artifact.remove_relation(rel_path)
+            artifact.remove_relation(_normalize_path(rel_path))
 
         # Handle tags - "tags" replaces all, add_tags/remove_tags are incremental
         if "tags" in args:
@@ -619,6 +664,9 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         if not reason:
             return {"error": "reason is required"}
 
+        # Normalize path for lookup
+        path = _normalize_path(path)
+
         if not self._registry:
             return {"error": "Plugin not initialized"}
 
@@ -646,6 +694,9 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         if not path:
             return {"error": "path is required"}
 
+        # Normalize path for lookup
+        path = _normalize_path(path)
+
         if not self._registry:
             return {"error": "Plugin not initialized"}
 
@@ -671,9 +722,13 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
     def _execute_check_related(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the checkRelated tool."""
         path = args.get("path", "")
+        verbose = args.get("verbose", True)  # Default to verbose for discoverability
 
         if not path:
             return {"error": "path is required"}
+
+        # Normalize path for lookup
+        path = _normalize_path(path)
 
         if not self._registry:
             return {"error": "Plugin not initialized"}
@@ -682,13 +737,15 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         affected = self._registry.find_affected_by_change(path)
 
         if not affected:
-            return {
+            result = {
                 "path": path,
                 "related_count": 0,
                 "related": [],
                 "message": f"No tracked artifacts depend on: {path}",
-                "next_step": "You can proceed with your changes. No artifacts will need review.",
             }
+            if verbose:
+                result["next_step"] = "You can proceed with your changes. No artifacts will need review."
+            return result
 
         results = []
         for artifact in affected:
@@ -700,23 +757,28 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
                 "is_source": artifact.path == path,
             })
 
-        return {
+        result = {
             "path": path,
             "related_count": len(results),
             "related": results,
             "message": f"⚠️  {len(results)} artifact(s) depend on this file and will need review if you modify it.",
-            "workflow_reminder": (
+        }
+
+        # Add workflow guidance in verbose mode
+        if verbose:
+            result["workflow_reminder"] = (
                 "IMPORTANT: After you finish editing this file, you MUST call:\n"
                 f"  notifyChange(path=\"{path}\", reason=\"<describe your changes>\")\n"
                 "This will automatically flag the dependent artifacts for review."
-            ),
-            "next_steps": [
+            )
+            result["next_steps"] = [
                 f"1. Make your changes to {path}",
                 f"2. Call notifyChange(\"{path}\", \"<reason>\") to flag dependents",
                 "3. Review each flagged artifact",
                 "4. Call acknowledgeReview() for each after reviewing",
-            ],
-        }
+            ]
+
+        return result
 
     def _execute_remove_artifact(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the removeArtifact tool."""
@@ -724,6 +786,9 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
 
         if not path:
             return {"error": "path is required"}
+
+        # Normalize path for lookup
+        path = _normalize_path(path)
 
         if not self._registry:
             return {"error": "Plugin not initialized"}
@@ -745,6 +810,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         """Execute the notifyChange tool.
 
         Automatically flags all artifacts that depend on the changed file.
+        The `reason` parameter becomes the review comment shown to reviewers.
         """
         path = args.get("path", "")
         reason = args.get("reason", "")
@@ -754,12 +820,16 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         if not reason:
             return {"error": "reason is required"}
 
+        # Normalize path for matching
+        path = _normalize_path(path)
+
         if not self._registry:
             return {"error": "Plugin not initialized"}
 
         # Find all artifacts that have this path in their related_to list
         flagged = []
         for artifact in self._registry.get_all():
+            # Check if normalized path matches any of the artifact's relations
             if path in artifact.related_to:
                 artifact.mark_for_review(f"Source changed: {reason}")
                 flagged.append({
