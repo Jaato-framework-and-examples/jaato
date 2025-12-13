@@ -921,20 +921,50 @@ class PTDisplay:
 
         self.refresh()
 
+    def ensure_spinner_timer_running(self) -> None:
+        """Ensure the spinner animation timer is running.
+
+        Call this when an agent's status changes to 'active' to ensure
+        the spinner animation loop is running. This doesn't touch any
+        buffer's spinner state - it only ensures the timer is active.
+        """
+        if self._spinner_timer_active:
+            return  # Already running
+
+        self._spinner_timer_active = True
+        # Schedule spinner advance in main event loop (thread-safe)
+        if self._app and self._app.is_running:
+            self._app.loop.call_soon_threadsafe(self._advance_spinner)
+        else:
+            self._advance_spinner()
+
     def _advance_spinner(self) -> None:
-        """Advance spinner animation frame."""
+        """Advance spinner animation frame.
+
+        Advances spinners on ALL agent buffers that have active spinners.
+        This ensures that when you switch agents (F2), the spinner is
+        already animating if that agent is thinking.
+        """
         if not self._spinner_timer_active:
             return
 
-        # Use selected agent's buffer if registry present
+        # Advance spinners on ALL agent buffers that have active spinners
+        any_active = False
         if self._agent_registry:
-            buffer = self._agent_registry.get_selected_buffer()
-            if buffer:
-                buffer.advance_spinner()
-            else:
-                self._output_buffer.advance_spinner()
+            for agent_id in self._agent_registry.get_all_agent_ids():
+                buffer = self._agent_registry.get_buffer(agent_id)
+                if buffer and buffer.spinner_active:
+                    buffer.advance_spinner()
+                    any_active = True
         else:
-            self._output_buffer.advance_spinner()
+            if self._output_buffer.spinner_active:
+                self._output_buffer.advance_spinner()
+                any_active = True
+
+        # Stop timer if no agents have active spinners
+        if not any_active:
+            self._spinner_timer_active = False
+            return
 
         self.refresh()
         # Schedule next frame using prompt_toolkit's call_later

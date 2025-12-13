@@ -25,6 +25,13 @@ class OutputLine:
     is_turn_start: bool = False  # True if this is the first line of a new turn
 
 
+@dataclass
+class ActiveToolCall:
+    """Represents an actively executing tool call."""
+    name: str
+    args_summary: str  # Truncated string representation of args
+
+
 class OutputBuffer:
     """Manages output lines for the scrolling panel.
 
@@ -49,6 +56,7 @@ class OutputBuffer:
         self._scroll_offset: int = 0  # Lines scrolled up from bottom (0 = at bottom)
         self._spinner_active: bool = False
         self._spinner_index: int = 0
+        self._active_tools: List[ActiveToolCall] = []  # Currently executing tools
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -163,6 +171,7 @@ class OutputBuffer:
         self._current_block = None
         self._scroll_offset = 0
         self._spinner_active = False
+        self._active_tools.clear()
 
     def start_spinner(self) -> None:
         """Start showing spinner in the output."""
@@ -170,8 +179,9 @@ class OutputBuffer:
         self._spinner_index = 0
 
     def stop_spinner(self) -> None:
-        """Stop showing spinner."""
+        """Stop showing spinner and clear active tools."""
         self._spinner_active = False
+        self._active_tools.clear()  # Clear active tools when spinner stops
 
     def advance_spinner(self) -> None:
         """Advance spinner to next frame."""
@@ -182,6 +192,42 @@ class OutputBuffer:
     def spinner_active(self) -> bool:
         """Check if spinner is currently active."""
         return self._spinner_active
+
+    def add_active_tool(self, tool_name: str, tool_args: dict) -> None:
+        """Add a tool to the active tools list.
+
+        Args:
+            tool_name: Name of the tool being executed.
+            tool_args: Arguments passed to the tool.
+        """
+        # Create a summary of args (truncated for display)
+        args_str = str(tool_args)
+        if len(args_str) > 60:
+            args_str = args_str[:57] + "..."
+
+        # Don't add duplicates
+        for tool in self._active_tools:
+            if tool.name == tool_name:
+                return
+
+        self._active_tools.append(ActiveToolCall(name=tool_name, args_summary=args_str))
+
+    def remove_active_tool(self, tool_name: str) -> None:
+        """Remove a tool from the active tools list.
+
+        Args:
+            tool_name: Name of the tool that finished.
+        """
+        self._active_tools = [t for t in self._active_tools if t.name != tool_name]
+
+    def clear_active_tools(self) -> None:
+        """Clear all active tools."""
+        self._active_tools.clear()
+
+    @property
+    def active_tools(self) -> List[ActiveToolCall]:
+        """Get list of currently active tools."""
+        return list(self._active_tools)
 
     def scroll_up(self, lines: int = 5) -> bool:
         """Scroll up (view older content).
@@ -419,6 +465,17 @@ class OutputBuffer:
             frame = self.SPINNER_FRAMES[self._spinner_index]
             output.append(f"Model> {frame} ", style="bold cyan")
             output.append("thinking...", style="dim italic")
+
+            # Show active tool calls below spinner
+            if self._active_tools:
+                for i, tool in enumerate(self._active_tools):
+                    output.append("\n")
+                    is_last = (i == len(self._active_tools) - 1)
+                    prefix = "└─" if is_last else "├─"
+                    output.append(f"       {prefix} ", style="dim")
+                    output.append(tool.name, style="yellow")
+                    if tool.args_summary and tool.args_summary != "{}":
+                        output.append(f"({tool.args_summary})", style="dim")
 
         return output
 

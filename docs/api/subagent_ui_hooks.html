@@ -138,6 +138,7 @@
         <li>Monitor per-agent, per-turn token usage</li>
         <li>Track per-agent context consumption</li>
         <li>Maintain per-agent conversation history</li>
+        <li><strong>Track active tool calls in real-time</strong> (display below spinner)</li>
     </ul>
 
     <p>Both main agent and subagents use the same hook interface, ensuring consistent tracking across all agent types.</p>
@@ -611,6 +612,84 @@
         </div>
     </div>
 
+    <div class="method">
+        <div class="signature">on_tool_call_start(agent_id, tool_name, tool_args)</div>
+        <p>Called when a tool starts executing. Enables real-time tool call visualization in the UI (e.g., showing active tools below the spinner).</p>
+
+        <div class="param">
+            <span class="param-name">agent_id</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                Which agent initiated the tool call.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">tool_name</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                Name of the tool being called (e.g., <code>"cli_execute"</code>, <code>"web_search"</code>).
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">tool_args</span>
+            <span class="param-type">Dict[str, Any]</span>
+            <div class="param-desc">
+                Arguments passed to the tool. Can be displayed truncated in the UI.
+            </div>
+        </div>
+    </div>
+
+    <div class="method">
+        <div class="signature">on_tool_call_end(agent_id, tool_name, success, duration_seconds)</div>
+        <p>Called when a tool finishes executing. Removes the tool from the active tools display.</p>
+
+        <div class="param">
+            <span class="param-name">agent_id</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                Which agent's tool call completed.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">tool_name</span>
+            <span class="param-type">str</span>
+            <div class="param-desc">
+                Name of the tool that finished.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">success</span>
+            <span class="param-type">bool</span>
+            <div class="param-desc">
+                Whether the tool executed successfully.
+            </div>
+        </div>
+
+        <div class="param">
+            <span class="param-name">duration_seconds</span>
+            <span class="param-type">float</span>
+            <div class="param-desc">
+                How long the tool took to execute.
+            </div>
+        </div>
+    </div>
+
+    <h2>Tool Call Visualization</h2>
+
+    <p>The <code>on_tool_call_start</code> and <code>on_tool_call_end</code> hooks enable real-time visualization of active tool calls. When implemented, the UI can show active tools below the spinner:</p>
+
+    <div class="example">
+<pre>Model> ⠋ thinking...
+       ├─ cli_execute({'cmd': 'ls -la'})
+       └─ web_search({'query': 'python docs'})</pre>
+    </div>
+
+    <p>These hooks are emitted automatically for <strong>all plugins</strong> from <code>JaatoSession._run_chat_loop()</code>. No plugin-specific changes are required - any tool that executes through the session will trigger these hooks.</p>
+
     <h2>Integration Example</h2>
 
     <div class="example">
@@ -665,6 +744,16 @@
     <span class="keyword">def</span> <span class="function">on_agent_history_updated</span>(self, agent_id, history):
         self._registry.update_history(agent_id, history)
 
+    <span class="keyword">def</span> <span class="function">on_tool_call_start</span>(self, agent_id, tool_name, tool_args):
+        buffer = self._registry.get_buffer(agent_id)
+        <span class="keyword">if</span> buffer:
+            buffer.add_active_tool(tool_name, tool_args)
+
+    <span class="keyword">def</span> <span class="function">on_tool_call_end</span>(self, agent_id, tool_name, success, duration_seconds):
+        buffer = self._registry.get_buffer(agent_id)
+        <span class="keyword">if</span> buffer:
+            buffer.remove_active_tool(tool_name)
+
 <span class="comment"># Register hooks</span>
 hooks = RichClientHooks(agent_registry)
 jaato_client.set_ui_hooks(hooks)
@@ -691,9 +780,11 @@ subagent_plugin.set_ui_hooks(hooks)</pre>
                     agent_type=<span class="string">"subagent"</span>, profile_name=<span class="string">"code_assistant"</span>, ...)
    on_agent_status_changed(agent_id=<span class="string">"subagent_1"</span>, status=<span class="string">"active"</span>)
 
-<span class="comment">5. Subagent executes:</span>
+<span class="comment">5. Subagent executes (with tool calls):</span>
    on_agent_output(agent_id=<span class="string">"subagent_1"</span>, source=<span class="string">"model"</span>, text=<span class="string">"Analyzing..."</span>, mode=<span class="string">"write"</span>)
+   on_tool_call_start(agent_id=<span class="string">"subagent_1"</span>, tool_name=<span class="string">"cli_execute"</span>, tool_args={<span class="string">"cmd"</span>: <span class="string">"tree"</span>})
    on_agent_output(agent_id=<span class="string">"subagent_1"</span>, source=<span class="string">"cli"</span>, text=<span class="string">"tree output"</span>, mode=<span class="string">"write"</span>)
+   on_tool_call_end(agent_id=<span class="string">"subagent_1"</span>, tool_name=<span class="string">"cli_execute"</span>, success=<span class="keyword">True</span>, duration_seconds=<span class="keyword">0.5</span>)
    on_agent_turn_completed(agent_id=<span class="string">"subagent_1"</span>, turn_number=<span class="keyword">0</span>, ...)
    on_agent_context_updated(agent_id=<span class="string">"subagent_1"</span>, ...)
    on_agent_history_updated(agent_id=<span class="string">"subagent_1"</span>, ...)
@@ -730,10 +821,12 @@ subagent_plugin.set_ui_hooks(hooks)</pre>
     <h2>Related Files</h2>
 
     <ul>
-        <li><code>shared/plugins/subagent/ui_hooks.py</code> - Protocol definition</li>
+        <li><code>shared/plugins/subagent/ui_hooks.py</code> - Protocol definition (includes tool hooks)</li>
         <li><code>shared/jaato_client.py</code> - Main agent hook integration</li>
+        <li><code>shared/jaato_session.py</code> - Tool call hooks emission (set_ui_hooks, _run_chat_loop)</li>
         <li><code>shared/plugins/subagent/plugin.py</code> - Subagent hook integration</li>
         <li><code>rich-client/agent_registry.py</code> - Agent state management</li>
+        <li><code>rich-client/output_buffer.py</code> - Active tool tracking and spinner rendering</li>
         <li><code>rich-client/agent_panel.py</code> - Agent visualization</li>
         <li><code>rich-client/rich_client.py</code> - Hook implementation example</li>
     </ul>

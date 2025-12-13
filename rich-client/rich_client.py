@@ -98,6 +98,9 @@ class RichClient:
         self._model_provider: str = ""
         self._model_name: str = ""
 
+        # UI hooks reference for signaling agent status changes
+        self._ui_hooks: Optional[Any] = None
+
     def log(self, msg: str) -> None:
         """Log message to output panel."""
         if self.verbose and self._display:
@@ -421,6 +424,8 @@ class RichClient:
                     if status == "active":
                         buffer.start_spinner()
                         if display:
+                            # Ensure the spinner animation timer is running
+                            display.ensure_spinner_timer_running()
                             display.refresh()
                     elif status in ("done", "error"):
                         buffer.stop_spinner()
@@ -449,7 +454,24 @@ class RichClient:
             def on_agent_history_updated(self, agent_id, history):
                 registry.update_history(agent_id, history)
 
+            def on_tool_call_start(self, agent_id, tool_name, tool_args):
+                buffer = registry.get_buffer(agent_id)
+                if buffer:
+                    buffer.add_active_tool(tool_name, tool_args)
+                    if display:
+                        display.refresh()
+
+            def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds):
+                buffer = registry.get_buffer(agent_id)
+                if buffer:
+                    buffer.remove_active_tool(tool_name)
+                    if display:
+                        display.refresh()
+
         hooks = RichClientHooks()
+
+        # Store hooks reference for direct calls (e.g., when user sends input)
+        self._ui_hooks = hooks
 
         # Register hooks with JaatoClient (main agent)
         self._jaato.set_ui_hooks(hooks)
@@ -602,9 +624,8 @@ class RichClient:
 
         self._trace("_start_model_thread starting")
 
-        # Start spinner to show we're waiting for the model
-        if self._display:
-            self._display.start_spinner()
+        # Spinner is already started by on_agent_status_changed hook
+        # (called from _handle_input before this method)
 
         # Create callback that stops spinner on first output
         output_callback = self._create_output_callback(stop_spinner_on_first=True)
@@ -737,6 +758,14 @@ class RichClient:
 
         # Show user input in output immediately
         self._display.append_output("user", user_input, "write")
+
+        # Signal that main agent is now active (processing input)
+        # This starts the spinner via the hooks
+        if self._ui_hooks:
+            self._ui_hooks.on_agent_status_changed(
+                agent_id="main",
+                status="active"
+            )
 
         # Expand file references
         expanded_prompt = self._input_handler.expand_file_references(user_input)
