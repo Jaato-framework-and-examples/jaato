@@ -37,9 +37,11 @@ class ActiveToolCall:
     permission_state: Optional[str] = None  # None, "pending", "granted", "denied"
     permission_method: Optional[str] = None  # "yes", "always", "once", "never", "whitelist", "blacklist"
     permission_prompt_lines: Optional[List[str]] = None  # Expanded prompt while pending
+    permission_truncated: bool = False  # True if prompt is truncated
     # Clarification tracking
     clarification_state: Optional[str] = None  # None, "pending", "resolved"
     clarification_prompt_lines: Optional[List[str]] = None  # Expanded prompt while pending
+    clarification_truncated: bool = False  # True if prompt is truncated
 
 
 class OutputBuffer:
@@ -317,6 +319,33 @@ class OutputBuffer:
                 tool.clarification_state = "resolved"
                 tool.clarification_prompt_lines = None  # Clear expanded prompt
                 return
+
+    def get_pending_prompt_for_pager(self) -> Optional[Tuple[str, List[str]]]:
+        """Get the pending prompt that's awaiting user input for pager display.
+
+        Returns:
+            Tuple of (type, lines) where type is "permission" or "clarification",
+            or None if no prompt is pending or not truncated.
+        """
+        for tool in self._active_tools:
+            if tool.permission_state == "pending" and tool.permission_truncated:
+                return ("permission", tool.permission_prompt_lines or [])
+            if tool.clarification_state == "pending" and tool.clarification_truncated:
+                return ("clarification", tool.clarification_prompt_lines or [])
+        return None
+
+    def has_truncated_pending_prompt(self) -> bool:
+        """Check if there's a truncated prompt awaiting user input.
+
+        Returns:
+            True if a truncated permission or clarification prompt is pending.
+        """
+        for tool in self._active_tools:
+            if tool.permission_state == "pending" and tool.permission_truncated:
+                return True
+            if tool.clarification_state == "pending" and tool.clarification_truncated:
+                return True
+        return False
 
     def scroll_up(self, lines: int = 5) -> bool:
         """Scroll up (view older content).
@@ -626,12 +655,32 @@ class OutputBuffer:
                     output.append(f"       {continuation}     ", style="dim")
                     output.append("⚠ ", style="yellow")
                     output.append("Permission required", style="yellow")
+
+                    # Limit lines to show (keep options visible at end)
+                    max_prompt_lines = 18
+                    prompt_lines = tool.permission_prompt_lines
+                    total_lines = len(prompt_lines)
+                    truncated = False
+                    hidden_count = 0
+
+                    if total_lines > max_prompt_lines:
+                        # Show first (max - 2) lines, then "...N more...", then last line (options)
+                        truncated = True
+                        tool.permission_truncated = True
+                        hidden_count = total_lines - max_prompt_lines + 1
+                        # First part + placeholder + last line
+                        lines_to_render = prompt_lines[:max_prompt_lines - 2]
+                    else:
+                        tool.permission_truncated = False
+                        lines_to_render = prompt_lines
+
                     # Draw box around permission prompt
-                    box_width = max(len(line) for line in tool.permission_prompt_lines) + 4
+                    box_width = max(len(line) for line in prompt_lines) + 4
                     box_width = min(box_width, 60)  # Cap width
                     output.append("\n")
                     output.append(f"       {continuation}     ┌" + "─" * box_width + "┐", style="dim")
-                    for prompt_line in tool.permission_prompt_lines:
+
+                    for prompt_line in lines_to_render:
                         output.append("\n")
                         # Truncate long lines
                         display_line = prompt_line[:box_width - 2] if len(prompt_line) > box_width - 2 else prompt_line
@@ -647,6 +696,24 @@ class OutputBuffer:
                         else:
                             output.append(display_line)
                         output.append(" " * padding + " │", style="dim")
+
+                    # Show truncation indicator if needed
+                    if truncated:
+                        output.append("\n")
+                        truncation_msg = f"[...{hidden_count} more - 'v' to view...]"
+                        padding = box_width - len(truncation_msg) - 2
+                        output.append(f"       {continuation}     │ ", style="dim")
+                        output.append(truncation_msg, style="dim italic cyan")
+                        output.append(" " * padding + " │", style="dim")
+                        # Show last line (usually options)
+                        last_line = prompt_lines[-1]
+                        output.append("\n")
+                        display_line = last_line[:box_width - 2] if len(last_line) > box_width - 2 else last_line
+                        padding = box_width - len(display_line) - 2
+                        output.append(f"       {continuation}     │ ", style="dim")
+                        output.append(display_line, style="cyan")  # Options styled cyan
+                        output.append(" " * padding + " │", style="dim")
+
                     output.append("\n")
                     output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
 
@@ -657,12 +724,30 @@ class OutputBuffer:
                     output.append(f"       {continuation}     ", style="dim")
                     output.append("❓ ", style="cyan")
                     output.append("Clarification needed", style="cyan")
+
+                    # Limit lines to show (keep input prompt visible at end)
+                    max_prompt_lines = 18
+                    prompt_lines = tool.clarification_prompt_lines
+                    total_lines = len(prompt_lines)
+                    truncated = False
+                    hidden_count = 0
+
+                    if total_lines > max_prompt_lines:
+                        truncated = True
+                        tool.clarification_truncated = True
+                        hidden_count = total_lines - max_prompt_lines + 1
+                        lines_to_render = prompt_lines[:max_prompt_lines - 2]
+                    else:
+                        tool.clarification_truncated = False
+                        lines_to_render = prompt_lines
+
                     # Draw box around clarification prompt
-                    box_width = max(len(line) for line in tool.clarification_prompt_lines) + 4
+                    box_width = max(len(line) for line in prompt_lines) + 4
                     box_width = min(box_width, 60)  # Cap width
                     output.append("\n")
                     output.append(f"       {continuation}     ┌" + "─" * box_width + "┐", style="dim")
-                    for prompt_line in tool.clarification_prompt_lines:
+
+                    for prompt_line in lines_to_render:
                         output.append("\n")
                         # Truncate long lines
                         display_line = prompt_line[:box_width - 2] if len(prompt_line) > box_width - 2 else prompt_line
@@ -670,6 +755,24 @@ class OutputBuffer:
                         output.append(f"       {continuation}     │ ", style="dim")
                         output.append(display_line)
                         output.append(" " * padding + " │", style="dim")
+
+                    # Show truncation indicator if needed
+                    if truncated:
+                        output.append("\n")
+                        truncation_msg = f"[...{hidden_count} more - 'v' to view...]"
+                        padding = box_width - len(truncation_msg) - 2
+                        output.append(f"       {continuation}     │ ", style="dim")
+                        output.append(truncation_msg, style="dim italic cyan")
+                        output.append(" " * padding + " │", style="dim")
+                        # Show last line (usually input prompt)
+                        last_line = prompt_lines[-1]
+                        output.append("\n")
+                        display_line = last_line[:box_width - 2] if len(last_line) > box_width - 2 else last_line
+                        padding = box_width - len(display_line) - 2
+                        output.append(f"       {continuation}     │ ", style="dim")
+                        output.append(display_line, style="cyan")
+                        output.append(" " * padding + " │", style="dim")
+
                     output.append("\n")
                     output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
         elif self._spinner_active:

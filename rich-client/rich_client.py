@@ -771,9 +771,31 @@ class RichClient:
 
         # Route input to channel queue if waiting for permission/clarification
         if self._waiting_for_channel_input:
-            # Show the answer in output panel
-            if user_input:
-                self._display.append_output("user", user_input, "write")
+            # Check for 'v' to view full truncated prompt
+            if user_input.lower() == 'v':
+                buffer = self._buffer_registry.get_buffer("main")
+                if buffer and buffer.has_truncated_pending_prompt():
+                    prompt_data = buffer.get_pending_prompt_for_pager()
+                    if prompt_data:
+                        prompt_type, prompt_lines = prompt_data
+                        # Show full prompt in pager
+                        title = "Permission Request" if prompt_type == "permission" else "Clarification Request"
+                        lines = [(f"─── {title} ───", "bold cyan")]
+                        for line in prompt_lines:
+                            # Color diff lines
+                            if line.startswith('+') and not line.startswith('+++'):
+                                lines.append((line, "green"))
+                            elif line.startswith('-') and not line.startswith('---'):
+                                lines.append((line, "red"))
+                            elif line.startswith('@@'):
+                                lines.append((line, "cyan"))
+                            else:
+                                lines.append((line, ""))
+                        lines.append(("─" * 40, "dim"))
+                        lines.append(("Press Enter to continue, 'q' to return", "bold cyan"))
+                        self._display.show_lines(lines, page_size=20)
+                        return
+            # Don't echo answer - it's shown inline in the tool tree
             self._channel_input_queue.put(user_input)
             self._trace(f"Input routed to channel queue: {user_input}")
             # Don't start spinner here - the channel may have more questions.
