@@ -197,7 +197,8 @@ class AgentUIHooks(Protocol):
         agent_id: str,
         tool_name: str,
         success: bool,
-        duration_seconds: float
+        duration_seconds: float,
+        error_message: Optional[str] = None
     ) -> None:
         """Called when a tool finishes executing.
 
@@ -206,5 +207,6 @@ class AgentUIHooks(Protocol):
             tool_name: Name of the tool that finished.
             success: Whether the tool executed successfully.
             duration_seconds: How long the tool took to execute.
+            error_message: Error message if the tool failed.
         """
         ...

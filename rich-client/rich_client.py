@@ -468,10 +468,11 @@ class RichClient:
                     if display:
                         display.refresh()
 
-            def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds):
+            def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds,
+                                  error_message=None):
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
-                    buffer.mark_tool_completed(tool_name, success, duration_seconds)
+                    buffer.mark_tool_completed(tool_name, success, duration_seconds, error_message)
                     if display:
                         display.refresh()
 

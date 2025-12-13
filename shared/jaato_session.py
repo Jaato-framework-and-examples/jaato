@@ -346,10 +346,14 @@ class JaatoSession:
                         executor_result = (False, {"error": f"No executor registered for {name}"})
                     fc_end = datetime.now()
 
-                    # Determine success from executor result
+                    # Determine success and error message from executor result
                     fc_success = True
+                    fc_error_message = None
                     if isinstance(executor_result, tuple) and len(executor_result) == 2:
                         fc_success = executor_result[0]
+                        # Extract error message if tool failed
+                        if not fc_success and isinstance(executor_result[1], dict):
+                            fc_error_message = executor_result[1].get('error')
 
                     # Emit hook: tool ended
                     fc_duration = (fc_end - fc_start).total_seconds()
@@ -358,7 +362,8 @@ class JaatoSession:
                             agent_id=self._agent_id,
                             tool_name=name,
                             success=fc_success,
-                            duration_seconds=fc_duration
+                            duration_seconds=fc_duration,
+                            error_message=fc_error_message
                         )
 
                     # Record function call timing
@@ -719,10 +724,14 @@ class JaatoSession:
                         executor_result = (False, {"error": f"No executor registered for {name}"})
                     fc_end = datetime.now()
 
-                    # Determine success from executor result
+                    # Determine success and error message from executor result
                     fc_success = True
+                    fc_error_message = None
                     if isinstance(executor_result, tuple) and len(executor_result) == 2:
                         fc_success = executor_result[0]
+                        # Extract error message if tool failed
+                        if not fc_success and isinstance(executor_result[1], dict):
+                            fc_error_message = executor_result[1].get('error')
 
                     # Emit hook: tool ended
                     fc_duration = (fc_end - fc_start).total_seconds()
@@ -731,7 +740,8 @@ class JaatoSession:
                             agent_id=self._agent_id,
                             tool_name=name,
                             success=fc_success,
-                            duration_seconds=fc_duration
+                            duration_seconds=fc_duration,
+                            error_message=fc_error_message
                         )
 
                     turn_data['function_calls'].append({
