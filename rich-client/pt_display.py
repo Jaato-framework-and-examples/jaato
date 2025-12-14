@@ -331,13 +331,13 @@ class PTDisplay:
         # Key bindings
         kb = KeyBindings()
 
-        @kb.add("enter")
+        @kb.add("enter", eager=True)
         def handle_enter(event):
             """Handle enter key - submit input or advance pager."""
             if getattr(self, '_pager_active', False):
                 # In pager mode - advance page
-                if self._input_callback:
-                    self._input_callback("")  # Empty string advances pager
+                self._advance_pager_page()
+                return
             else:
                 # Normal mode - submit input
                 text = self._input_buffer.text.strip()
@@ -354,12 +354,13 @@ class PTDisplay:
             if not getattr(self, '_pager_active', False):
                 event.current_buffer.insert_text('\n')
 
-        @kb.add("q")
+        @kb.add("q", eager=True)
         def handle_q(event):
             """Handle 'q' key - quit pager if active, otherwise type 'q'."""
             if getattr(self, '_pager_active', False):
                 # In pager mode - quit pager directly
                 self._stop_pager()
+                return  # Don't insert 'q'
             else:
                 # Normal mode - insert 'q' character
                 event.current_buffer.insert_text("q")
@@ -379,6 +380,17 @@ class PTDisplay:
                         return
             # Normal mode - insert 'v' character
             event.current_buffer.insert_text("v")
+
+        @kb.add(" ", eager=True)
+        def handle_space(event):
+            """Handle space key - advance pager if active, otherwise insert space."""
+            if getattr(self, '_pager_active', False):
+                # In pager mode - advance page
+                self._advance_pager_page()
+                return
+            else:
+                # Normal mode - insert space character
+                event.current_buffer.insert_text(" ")
 
         @kb.add("c-c")
         def handle_ctrl_c(event):
@@ -911,6 +923,17 @@ class PTDisplay:
             del self._pager_temp_buffer
         # Refresh to show original buffer again
         self.refresh()
+
+    def _advance_pager_page(self) -> None:
+        """Advance to next pager page or exit if at end."""
+        if not getattr(self, '_pager_active', False):
+            return
+        self._pager_current += self._pager_page_size
+        if self._pager_current >= len(self._pager_lines):
+            # Reached end - restore original buffer
+            self._stop_pager()
+        else:
+            self._show_pager_page()
 
     @property
     def pager_active(self) -> bool:
