@@ -839,7 +839,7 @@ class OutputBuffer:
                     box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
                     content_width = box_width - 4  # Space for "│ " and " │"
                     output.append("\n")
-                    output.append(f"       {continuation}     ┌" + "─" * box_width + "┐", style="dim")
+                    output.append(f"       {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
 
                     for prompt_line in lines_to_render:
                         # Wrap long lines instead of truncating
@@ -887,7 +887,7 @@ class OutputBuffer:
                             output.append(" " * max(0, padding) + " │", style="dim")
 
                     output.append("\n")
-                    output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
+                    output.append(f"       {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
 
                 # Show clarification info under this tool
                 if tool.clarification_state == "pending":
@@ -932,7 +932,7 @@ class OutputBuffer:
                         box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
                         content_width = box_width - 4
                         output.append("\n")
-                        output.append(f"       {continuation}     ┌" + "─" * box_width + "┐", style="dim")
+                        output.append(f"       {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
 
                         for prompt_line in lines_to_render:
                             # Wrap long lines
@@ -970,7 +970,7 @@ class OutputBuffer:
                                 output.append(" " * max(0, padding) + " │", style="dim")
 
                         output.append("\n")
-                        output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
+                        output.append(f"       {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
         elif self._spinner_active:
             # Spinner active but no tools yet
             if lines_to_show:
