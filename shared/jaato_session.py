@@ -296,7 +296,11 @@ class JaatoSession:
 
         # List subcommand
         if subcommand == "list":
-            models = self._runtime.list_available_models()
+            # Use session's provider if available (faster, no new API connection)
+            if self._provider and hasattr(self._provider, 'list_models'):
+                models = self._provider.list_models()
+            else:
+                models = self._runtime.list_available_models()
             return {
                 "current_model": self._model_name,
                 "available_models": models

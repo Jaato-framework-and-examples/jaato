@@ -466,14 +466,42 @@ class GoogleGenAIProvider:
         """Get the current model name."""
         return self._model_name
 
+    # Known models for fast listing without API call
+    KNOWN_MODELS = [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-8b",
+        "gemini-1.5-pro",
+    ]
+
     def list_models(self, prefix: Optional[str] = None) -> List[str]:
         """List available models.
+
+        Returns a static list of known models for fast response.
+        Use list_models_api() to fetch the full list from the API.
 
         Args:
             prefix: Optional filter prefix (e.g., 'gemini').
 
         Returns:
             List of model names.
+        """
+        models = self.KNOWN_MODELS.copy()
+        if prefix:
+            models = [m for m in models if m.startswith(prefix)]
+        return sorted(models)
+
+    def list_models_api(self, prefix: Optional[str] = None) -> List[str]:
+        """List available models from API (slow).
+
+        Args:
+            prefix: Optional filter prefix (e.g., 'gemini').
+
+        Returns:
+            List of model names from the API.
         """
         if not self._client:
             return []
