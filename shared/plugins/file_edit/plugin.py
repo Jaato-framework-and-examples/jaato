@@ -267,11 +267,8 @@ updateFile and removeFile operations."""
 
         file_path = Path(path)
         if not file_path.exists():
-            return PermissionDisplayInfo(
-                summary=f"Update file: {path} (file does not exist)",
-                details=f"Error: File '{path}' does not exist. Use writeNewFile for new files.",
-                format_hint="text"
-            )
+            # File doesn't exist - skip permission, let executor return the error
+            return None
 
         try:
             old_content = file_path.read_text()
@@ -303,11 +300,8 @@ updateFile and removeFile operations."""
 
         file_path = Path(path)
         if file_path.exists():
-            return PermissionDisplayInfo(
-                summary=f"Create file: {path} (file already exists)",
-                details=f"Error: File '{path}' already exists. Use updateFile to modify existing files.",
-                format_hint="text"
-            )
+            # File already exists - skip permission, let executor return the error
+            return None
 
         diff_text, truncated, total_lines = generate_new_file_diff(
             content, path, max_lines=DEFAULT_MAX_LINES
@@ -330,11 +324,8 @@ updateFile and removeFile operations."""
 
         file_path = Path(path)
         if not file_path.exists():
-            return PermissionDisplayInfo(
-                summary=f"Delete file: {path} (file does not exist)",
-                details=f"Error: File '{path}' does not exist.",
-                format_hint="text"
-            )
+            # File doesn't exist - skip permission, let executor return the error
+            return None
 
         try:
             content = file_path.read_text()
