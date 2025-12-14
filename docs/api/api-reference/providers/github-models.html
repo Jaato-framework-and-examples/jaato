@@ -181,6 +181,108 @@ print(response.text)</code></pre>
         </div>
       </section>
 
+      <!-- Free Tier -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="free-tier">Free Tier (Personal Use)</h2>
+          <p>
+            <strong>All GitHub accounts</strong> have free access to GitHub Models - no
+            Copilot subscription or credit card required. Perfect for prototyping,
+            learning, and personal projects.
+          </p>
+
+          <h3>Free Tier Rate Limits</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Model Tier</th>
+                <th>RPM</th>
+                <th>RPD</th>
+                <th>Tokens/Request</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>High</strong> (GPT-4o, Claude)</td>
+                <td>10</td>
+                <td>50</td>
+                <td>8K in / 4K out</td>
+              </tr>
+              <tr>
+                <td><strong>Low</strong> (GPT-4o-mini, Llama)</td>
+                <td>15</td>
+                <td>150</td>
+                <td>8K in / 4K out</td>
+              </tr>
+              <tr>
+                <td><strong>Embedding</strong></td>
+                <td>15</td>
+                <td>150</td>
+                <td>64K in</td>
+              </tr>
+            </tbody>
+          </table>
+          <p><small>RPM = Requests per minute, RPD = Requests per day</small></p>
+
+          <h3>What You Get Free</h3>
+          <ul>
+            <li><strong>No credit card</strong> - just a GitHub account</li>
+            <li><strong>All models</strong> - GPT-4o, Claude, Gemini, Llama, Mistral</li>
+            <li><strong>Playground UI</strong> - test at <a href="https://github.com/marketplace/models" target="_blank">github.com/marketplace/models</a></li>
+            <li><strong>REST API</strong> - programmatic access with your PAT</li>
+            <li><strong>Per-model limits</strong> - each model has separate quota</li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Tip: Maximize Free Usage</div>
+            Each model has its own rate limit. Use GPT-4o-mini (150/day) for
+            simple tasks and save GPT-4o (50/day) for complex ones. Across all
+            models, you can make ~2000+ requests per day.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick start (personal account)</div>
+          <div class="code-block">
+            <pre><code class="language-text">1. Go to https://github.com/settings/tokens?type=beta
+2. Click "Generate new token"
+3. Name: "jaato-models"
+4. Expiration: 90 days
+5. Account permissions → Models → Read
+6. Click "Generate token"
+7. Copy the token</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Set token and use</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Set environment variable
+export GITHUB_TOKEN=github_pat_...your-token</code></pre>
+          </div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import load_provider
+
+provider = load_provider("github_models")
+provider.initialize()  # Uses GITHUB_TOKEN
+provider.connect("openai/gpt-4o-mini")  # Higher free limit
+
+provider.create_session()
+response = provider.send_message("Hello!")
+print(response.text)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Test with curl</div>
+          <div class="code-block">
+            <pre><code class="language-bash">curl -X POST \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-4o-mini",
+    "messages": [{"role":"user","content":"Hi"}]
+  }' \
+  https://models.inference.ai.azure.com/chat/completions</code></pre>
+          </div>
+        </div>
+      </section>
+
       <!-- Authentication Methods -->
       <section class="two-panel">
         <div class="panel-explanation">
