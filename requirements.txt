@@ -12,4 +12,5 @@ rich>=13.0.0
 reportlab
 ddgs>=7.0.0  # provides web search via DuckDuckGo
 pyyaml
+azure-ai-inference>=1.0.0b7  # GitHub Models API via Azure AI Inference SDK
 
