@@ -16,8 +16,11 @@ Enterprise features:
 """
 
 import json
+import time
+import urllib.request
+import urllib.error
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from azure.ai.inference import ChatCompletionsClient
 from azure.ai.inference.models import (
@@ -69,6 +72,9 @@ from .errors import (
     TokenNotFoundError,
     TokenPermissionError,
 )
+
+# GitHub Models catalog API endpoint
+CATALOG_API_ENDPOINT = "https://api.github.com/marketplace/models"
 
 
 # Context window limits for known models (total tokens)
@@ -146,6 +152,9 @@ class GitHubModelsProvider:
         JAATO_GITHUB_ENDPOINT: Override the API endpoint URL
     """
 
+    # Cache TTL in seconds (5 minutes)
+    _MODELS_CACHE_TTL = 300
+
     def __init__(self):
         """Initialize the provider (not yet connected)."""
         self._client: Optional[ChatCompletionsClient] = None
@@ -162,6 +171,9 @@ class GitHubModelsProvider:
         self._tools: Optional[List[ToolSchema]] = None
         self._history: List[Message] = []
         self._last_usage: TokenUsage = TokenUsage()
+
+        # Models cache: (timestamp, models_list)
+        self._models_cache: Optional[Tuple[float, List[str]]] = None
 
     @property
     def name(self) -> str:
@@ -261,21 +273,90 @@ class GitHubModelsProvider:
         return self._model_name
 
     def list_models(self, prefix: Optional[str] = None) -> List[str]:
-        """List known models.
+        """List available models from the GitHub Models catalog API.
 
-        Note: GitHub Models API doesn't provide a list endpoint through
-        azure-ai-inference, so this returns a static list of known models.
+        Fetches models from the GitHub Models marketplace API and caches
+        the results for _MODELS_CACHE_TTL seconds.
 
         Args:
             prefix: Optional filter prefix (e.g., 'openai/', 'anthropic/').
 
         Returns:
-            List of model IDs.
+            List of model IDs (e.g., 'openai/gpt-4o', 'anthropic/claude-3.5-sonnet').
         """
-        models = list(MODEL_CONTEXT_LIMITS.keys())
+        if not self._token:
+            # Fallback to static list if not initialized
+            models = list(MODEL_CONTEXT_LIMITS.keys())
+            if prefix:
+                models = [m for m in models if m.startswith(prefix)]
+            return sorted(models)
+
+        # Check cache validity
+        now = time.time()
+        if self._models_cache:
+            cache_time, cached_models = self._models_cache
+            if now - cache_time < self._MODELS_CACHE_TTL:
+                # Cache is valid
+                if prefix:
+                    return sorted([m for m in cached_models if m.startswith(prefix)])
+                return sorted(cached_models)
+
+        # Fetch from GitHub Models catalog API
+        models = self._fetch_models_from_api()
+
+        if models:
+            # Update cache
+            self._models_cache = (now, models)
+        else:
+            # API failed, fallback to static list
+            models = list(MODEL_CONTEXT_LIMITS.keys())
+
         if prefix:
             models = [m for m in models if m.startswith(prefix)]
         return sorted(models)
+
+    def _fetch_models_from_api(self) -> List[str]:
+        """Fetch available models from the GitHub Models catalog API.
+
+        Returns:
+            List of model IDs, or empty list on failure.
+        """
+        try:
+            req = urllib.request.Request(
+                CATALOG_API_ENDPOINT,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {self._token}",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode('utf-8'))
+
+            # Extract model IDs from the response
+            # Response format: list of model objects with 'name' or 'id' field
+            models = []
+            if isinstance(data, list):
+                for model in data:
+                    # Try different field names for model ID
+                    model_id = model.get('name') or model.get('id') or model.get('model_id')
+                    if model_id:
+                        models.append(model_id)
+            elif isinstance(data, dict):
+                # Response might be paginated with a 'models' key
+                model_list = data.get('models', data.get('items', []))
+                for model in model_list:
+                    model_id = model.get('name') or model.get('id') or model.get('model_id')
+                    if model_id:
+                        models.append(model_id)
+
+            return models
+        except urllib.error.HTTPError:
+            # API error, return empty to trigger fallback
+            return []
+        except Exception:
+            # Network or parsing error
+            return []
 
     # ==================== Session Management ====================
 
@@ -546,8 +627,8 @@ class GitHubModelsProvider:
                 original_error=str(error),
             ) from error
 
-        # Check for model not found
-        if "404" in error_str or "not found" in error_str:
+        # Check for model not found (various formats)
+        if any(x in error_str for x in ("404", "not found", "unknown_model", "unknown model")):
             raise ModelNotFoundError(
                 model=self._model_name or "unknown",
                 available_models=self.list_models(),
