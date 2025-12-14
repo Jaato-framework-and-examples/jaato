@@ -61,9 +61,10 @@ class RichClient:
     while model output scrolls naturally below.
     """
 
-    def __init__(self, env_file: str = ".env", verbose: bool = True):
+    def __init__(self, env_file: str = ".env", verbose: bool = True, provider: Optional[str] = None):
         self.verbose = verbose
         self.env_file = env_file
+        self._provider = provider  # CLI override for provider
         self._jaato: Optional[JaatoClient] = None
         self.registry: Optional[PluginRegistry] = None
         self.permission_plugin: Optional[PermissionPlugin] = None
@@ -239,9 +240,9 @@ class RichClient:
             print("Error: Set GOOGLE_GENAI_API_KEY for AI Studio, or PROJECT_ID and LOCATION for Vertex AI")
             return False
 
-        # Initialize JaatoClient
+        # Initialize JaatoClient with optional provider override
         try:
-            self._jaato = JaatoClient()
+            self._jaato = JaatoClient(provider_name=self._provider)
             if api_key:
                 # AI Studio mode - just need model
                 self._jaato.connect(model=model_name)
@@ -1301,6 +1302,12 @@ def main():
         type=str,
         help="Start with this prompt, then continue interactively"
     )
+    parser.add_argument(
+        "--provider",
+        type=str,
+        help="Model provider to use (e.g., 'google_genai', 'github_models'). "
+             "Overrides JAATO_PROVIDER env var."
+    )
     args = parser.parse_args()
 
     # Check TTY before proceeding (except for single prompt mode)
@@ -1312,7 +1319,8 @@ def main():
 
     client = RichClient(
         env_file=args.env_file,
-        verbose=not args.quiet
+        verbose=not args.quiet,
+        provider=args.provider
     )
 
     if not client.initialize():

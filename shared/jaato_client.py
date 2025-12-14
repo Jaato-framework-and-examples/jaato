@@ -9,6 +9,7 @@ For advanced use cases (like subagents), access the underlying runtime
 via get_runtime() to create additional sessions.
 """
 
+import os
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from datetime import datetime
 
@@ -24,7 +25,16 @@ from .plugins.model_provider.types import (
     ToolSchema,
 )
 
-# Default provider name
+
+def get_default_provider() -> str:
+    """Get the default provider from environment or fallback.
+
+    Checks JAATO_PROVIDER env var, falls back to 'google_genai'.
+    """
+    return os.environ.get("JAATO_PROVIDER", "google_genai")
+
+
+# Default provider name (for backwards compatibility)
 DEFAULT_PROVIDER = "google_genai"
 
 if TYPE_CHECKING:
@@ -71,15 +81,17 @@ class JaatoClient:
         sub_session = runtime.create_session(model="gemini-2.5-flash")
     """
 
-    def __init__(self, provider_name: str = DEFAULT_PROVIDER):
+    def __init__(self, provider_name: Optional[str] = None):
         """Initialize JaatoClient with specified provider.
 
         Args:
-            provider_name: Name of the model provider to use (default: 'google_genai').
+            provider_name: Name of the model provider to use.
+                If not specified, reads from JAATO_PROVIDER env var,
+                falling back to 'google_genai'.
         """
         self._runtime: Optional[JaatoRuntime] = None
         self._session: Optional[JaatoSession] = None
-        self._provider_name: str = provider_name
+        self._provider_name: str = provider_name or get_default_provider()
 
         # Store model name for session creation
         self._model_name: Optional[str] = None
@@ -737,4 +749,4 @@ class JaatoClient:
         return None
 
 
-__all__ = ['JaatoClient', 'DEFAULT_PROVIDER']
+__all__ = ['JaatoClient', 'DEFAULT_PROVIDER', 'get_default_provider']
