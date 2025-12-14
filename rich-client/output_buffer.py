@@ -23,7 +23,6 @@ class OutputLine:
     style: str
     display_lines: int = 1  # How many terminal lines this takes when rendered
     is_turn_start: bool = False  # True if this is the first line of a new turn
-    render_after_tools: bool = False  # True if this should render after tool tree
 
 
 @dataclass
@@ -130,10 +129,7 @@ class OutputBuffer:
             is_turn_start: Whether this is the first line of a new turn.
         """
         display_lines = self._measure_display_lines(source, text, is_turn_start)
-        # Model output should render after tool tree if there are any tools
-        # This keeps the tool tree visible above model responses
-        render_after = source == "model" and bool(self._active_tools)
-        self._lines.append(OutputLine(source, text, style, display_lines, is_turn_start, render_after))
+        self._lines.append(OutputLine(source, text, style, display_lines, is_turn_start))
 
     def append(self, source: str, text: str, mode: str) -> None:
         """Append output to the buffer.
@@ -340,12 +336,6 @@ class OutputBuffer:
         # Add lines to buffer as system messages (they'll scroll normally)
         for text, style in lines:
             self._add_line("system", text, style or "")
-
-        # Un-defer any model lines that were marked render_after_tools
-        # They're now in the correct position after the tool tree lines
-        for line in self._lines:
-            if line.render_after_tools:
-                line.render_after_tools = False
 
         # Clear active tools so they don't render separately anymore
         self._active_tools.clear()
@@ -605,10 +595,6 @@ class OutputBuffer:
         else:
             lines_to_show = all_lines
 
-        # Split lines into regular and deferred (to render after tool tree)
-        regular_lines = [line for line in lines_to_show if not line.render_after_tools]
-        deferred_lines = [line for line in lines_to_show if line.render_after_tools]
-
         # Build output text with wrapping
         output = Text()
 
@@ -624,8 +610,8 @@ class OutputBuffer:
             # Use textwrap for clean word-based wrapping
             return textwrap.wrap(text, width=available, break_long_words=True, break_on_hyphens=False)
 
-        # Render regular lines first (before tool tree)
-        for i, line in enumerate(regular_lines):
+        # Render lines (model intent text appears before tool tree)
+        for i, line in enumerate(lines_to_show):
             if i > 0:
                 output.append("\n")
 
@@ -741,7 +727,7 @@ class OutputBuffer:
 
         # Add tool call tree (after regular lines, before deferred lines)
         if self._active_tools:
-            if regular_lines:
+            if lines_to_show:
                 output.append("\n")
 
             # Check if waiting for user input (permission or clarification)
@@ -962,33 +948,11 @@ class OutputBuffer:
                         output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
         elif self._spinner_active:
             # Spinner active but no tools yet
-            if regular_lines:
+            if lines_to_show:
                 output.append("\n")
             frame = self.SPINNER_FRAMES[self._spinner_index]
             output.append(f"Model> {frame} ", style="bold cyan")
             output.append("thinking...", style="dim italic")
-
-        # Render deferred lines after tool tree (model text that came with tool calls)
-        if deferred_lines:
-            # Add separator if we have tool tree or spinner
-            if self._active_tools or self._spinner_active:
-                output.append("\n")
-
-            for i, line in enumerate(deferred_lines):
-                if i > 0:
-                    output.append("\n")
-
-                # Only model lines should be deferred, render with prefix on turn start
-                prefix_width = 7 if line.is_turn_start else 0  # "Model> " = 7 chars
-                wrapped = wrap_text(line.text, prefix_width)
-                for j, wrapped_line in enumerate(wrapped):
-                    if j > 0:
-                        output.append("\n")
-                    if j == 0 and line.is_turn_start:
-                        output.append("Model> ", style="bold cyan")
-                    elif j > 0 and line.is_turn_start:
-                        output.append("       ")  # Indent continuation lines
-                    output.append(wrapped_line)
 
         return output
 
