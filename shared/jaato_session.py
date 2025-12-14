@@ -214,6 +214,9 @@ class JaatoSession:
             for cmd in self._runtime.registry.get_exposed_user_commands():
                 self._user_commands[cmd.name] = cmd
 
+        # Register built-in model command
+        self._register_model_command()
+
         # Create provider session
         self._create_provider_session()
 
@@ -234,6 +237,98 @@ class JaatoSession:
             tools=self._tools,
             history=history
         )
+
+    def _register_model_command(self) -> None:
+        """Register the built-in /model command for listing and switching models."""
+        from .plugins.base import CommandParameter
+
+        # Define the command
+        model_cmd = UserCommand(
+            name="model",
+            description="List available models or switch to a different model",
+            share_with_model=False,
+            parameters=[
+                CommandParameter(
+                    name="model_name",
+                    description="Model to switch to (omit to list available models)",
+                    param_type="string",
+                    required=False
+                )
+            ]
+        )
+
+        # Register command
+        self._user_commands["model"] = model_cmd
+
+        # Register executor
+        if self._executor:
+            self._executor.register("model", self._execute_model_command)
+
+    def _execute_model_command(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the /model command.
+
+        Args:
+            args: Command arguments. If 'model_name' is provided, switches to that model.
+                  If omitted, lists available models.
+
+        Returns:
+            Dict with command result.
+        """
+        model_name = args.get("model_name")
+
+        if not model_name:
+            # List available models
+            models = self._runtime.list_available_models()
+            current = self._model_name
+
+            return {
+                "current_model": current,
+                "available_models": models,
+                "hint": "Use 'model <name>' to switch models"
+            }
+
+        # Switch to new model
+        available = self._runtime.list_available_models()
+        if model_name not in available:
+            return {
+                "error": f"Model '{model_name}' not found",
+                "available_models": available
+            }
+
+        # Preserve current history
+        history = self.get_history()
+
+        # Update model name
+        old_model = self._model_name
+        self._model_name = model_name
+
+        # Create new provider for the new model
+        self._provider = self._runtime.create_provider(model_name)
+
+        # Recreate session with existing history
+        self._create_provider_session(history=history)
+
+        return {
+            "success": True,
+            "previous_model": old_model,
+            "current_model": model_name,
+            "history_preserved": True,
+            "message": f"Switched from {old_model} to {model_name}"
+        }
+
+    def get_model_completions(self, prefix: str = "") -> List[str]:
+        """Get model name completions for the /model command.
+
+        Args:
+            prefix: Prefix to filter model names by.
+
+        Returns:
+            List of matching model names.
+        """
+        models = self._runtime.list_available_models()
+        if prefix:
+            models = [m for m in models if m.startswith(prefix)]
+        return sorted(models)
 
     def send_message(
         self,

@@ -577,10 +577,17 @@ class RichClient:
                 for cmd in self.permission_plugin.get_user_commands():
                     command_to_plugin[cmd.name] = self.permission_plugin
 
-        if not command_to_plugin:
-            return
+        # Built-in commands with special completion handling
+        commands_with_completions = set(command_to_plugin.keys())
+        commands_with_completions.add("model")  # Built-in model command
 
         def completion_provider(command: str, args: list) -> list:
+            # Handle built-in model command
+            if command == "model" and self._jaato:
+                prefix = args[0] if args else ""
+                return self._jaato.get_model_completions(prefix)
+
+            # Handle plugin commands
             plugin = command_to_plugin.get(command)
             if plugin and hasattr(plugin, 'get_command_completions'):
                 return plugin.get_command_completions(command, args)
@@ -588,7 +595,7 @@ class RichClient:
 
         self._input_handler.set_command_completion_provider(
             completion_provider,
-            set(command_to_plugin.keys())
+            commands_with_completions
         )
 
     def run_prompt(self, prompt: str) -> str:
