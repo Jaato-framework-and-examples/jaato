@@ -59,6 +59,7 @@
         <ul class="sidebar-nav">
           <li><a href="index.html" class="active">Overview</a></li>
           <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="github-models.html">GitHub Models</a></li>
         </ul>
       </div>
 
@@ -103,6 +104,12 @@
                 <td>Gemini 1.5, 2.0, 2.5</td>
               </tr>
               <tr>
+                <td><strong><a href="github-models.html">GitHub Models</a></strong></td>
+                <td><code>github_models</code></td>
+                <td>Available</td>
+                <td>GPT-4o, Claude 3.5, Gemini, Llama</td>
+              </tr>
+              <tr>
                 <td><strong>Anthropic</strong></td>
                 <td><code>anthropic</code></td>
                 <td>Planned</td>
@@ -131,7 +138,15 @@
                 <td>Google GenAI (AI Studio) - free tier available</td>
               </tr>
               <tr>
-                <td>Enterprise / GCP integration</td>
+                <td>Multi-model access</td>
+                <td>GitHub Models - GPT, Claude, Gemini via single API</td>
+              </tr>
+              <tr>
+                <td>GitHub Enterprise</td>
+                <td>GitHub Models - integrated billing, SSO support</td>
+              </tr>
+              <tr>
+                <td>GCP integration</td>
                 <td>Google GenAI (Vertex AI)</td>
               </tr>
               <tr>
@@ -191,6 +206,14 @@ print(f"Loaded: {provider.name}")</code></pre>
             <li><strong>Best for:</strong> GCP users, long context needs (1M+ tokens)</li>
           </ul>
 
+          <h3>GitHub Models</h3>
+          <ul>
+            <li><strong>Endpoints:</strong> GitHub Models API (unified)</li>
+            <li><strong>Auth:</strong> GitHub PAT (fine-grained recommended)</li>
+            <li><strong>Features:</strong> Multi-model (GPT, Claude, Gemini, Llama), function calling</li>
+            <li><strong>Best for:</strong> GitHub Enterprise users, multi-model experimentation</li>
+          </ul>
+
           <h3>Anthropic (Planned)</h3>
           <ul>
             <li><strong>Endpoints:</strong> Direct API, AWS Bedrock</li>
@@ -237,7 +260,8 @@ print(f"Token count: {tokens}")</code></pre>
         <div class="panel-explanation">
           <h2 id="next-steps">Next Steps</h2>
           <ul>
-            <li><a href="google-genai.html">Google GenAI Provider</a> - Setup, authentication, configuration</li>
+            <li><a href="google-genai.html">Google GenAI Provider</a> - GCP integration, Vertex AI</li>
+            <li><a href="github-models.html">GitHub Models Provider</a> - Multi-model access, enterprise SSO</li>
             <li><a href="../../core-concepts/providers.html">Provider Concepts</a> - How providers work</li>
             <li><a href="../types.html">Types Reference</a> - Provider-agnostic types</li>
           </ul>
@@ -249,18 +273,18 @@ print(f"Token count: {tokens}")</code></pre>
 ├── __init__.py
 ├── base.py              # Protocol definition
 ├── types.py             # Unified types
-└── google_genai/
+├── google_genai/
+│   ├── __init__.py
+│   ├── provider.py      # Implementation
+│   ├── converters.py    # Type conversion
+│   ├── env.py           # Environment resolution
+│   └── errors.py        # Auth exceptions
+└── github_models/
     ├── __init__.py
     ├── provider.py      # Implementation
     ├── converters.py    # Type conversion
     ├── env.py           # Environment resolution
-    └── errors.py        # Auth exceptions
-
-# Future providers:
-├── anthropic/
-│   └── provider.py
-└── openai/
-    └── provider.py</code></pre>
+    └── errors.py        # Auth exceptions</code></pre>
           </div>
         </div>
       </section>
