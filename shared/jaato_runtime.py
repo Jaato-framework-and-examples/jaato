@@ -422,8 +422,9 @@ class JaatoRuntime:
             raise RuntimeError("Runtime not connected. Call connect() first.")
 
         # Create a temporary provider to list models
+        # Note: initialize() sets up the client, connect() just selects a model
+        # We don't need to connect to list available models
         provider = load_provider(self._provider_name, self._provider_config)
-        provider.connect("gemini-2.5-flash")  # Need to connect to list
         return provider.list_models(prefix=prefix)
 
 
