@@ -2,7 +2,7 @@
 
 import sys
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from .models import (
     Answer,
@@ -18,13 +18,20 @@ class ClarificationChannel(ABC):
 
     @abstractmethod
     def request_clarification(
-        self, request: ClarificationRequest
+        self,
+        request: ClarificationRequest,
+        on_question_displayed: Optional[Callable[[str, int, int, List[str]], None]] = None,
+        on_question_answered: Optional[Callable[[str, int, str], None]] = None
     ) -> ClarificationResponse:
         """
         Present the clarification request to the user and collect responses.
 
         Args:
             request: The clarification request containing questions
+            on_question_displayed: Hook called when each question is shown.
+                Signature: (tool_name, question_index, total_questions, question_lines) -> None
+            on_question_answered: Hook called when user answers a question.
+                Signature: (tool_name, question_index, answer_summary) -> None
 
         Returns:
             ClarificationResponse with user's answers
@@ -89,7 +96,10 @@ class ConsoleChannel(ClarificationChannel):
         return self._input.readline().strip()
 
     def request_clarification(
-        self, request: ClarificationRequest
+        self,
+        request: ClarificationRequest,
+        on_question_displayed: Optional[Callable[[str, int, int, List[str]], None]] = None,
+        on_question_answered: Optional[Callable[[str, int, str], None]] = None
     ) -> ClarificationResponse:
         """Present questions to user via console and collect responses."""
         self._write()
@@ -299,7 +309,10 @@ class AutoChannel(ClarificationChannel):
         self._default_free_text = default_free_text
 
     def request_clarification(
-        self, request: ClarificationRequest
+        self,
+        request: ClarificationRequest,
+        on_question_displayed: Optional[Callable[[str, int, int, List[str]], None]] = None,
+        on_question_answered: Optional[Callable[[str, int, str], None]] = None
     ) -> ClarificationResponse:
         """Automatically answer all questions with defaults."""
         answers = []
@@ -386,43 +399,46 @@ class QueueChannel(ClarificationChannel):
             return None
 
     def request_clarification(
-        self, request: ClarificationRequest
+        self,
+        request: ClarificationRequest,
+        on_question_displayed: Optional[Callable[[str, int, int, List[str]], None]] = None,
+        on_question_answered: Optional[Callable[[str, int, str], None]] = None
     ) -> ClarificationResponse:
         """Present questions via output panel and collect responses via queue."""
-        self._output("=" * 60, "write")
-        self._output("  Clarification Needed", "append")
-        self._output("=" * 60, "append")
-        self._output("", "append")
-
-        if request.context:
-            self._output(f"  Context: {request.context}", "append")
-            self._output("", "append")
+        total_questions = len(request.questions)
 
         answers = []
         for i, question in enumerate(request.questions, 1):
-            # Show question
+            # Build question lines for this single question
+            question_lines = []
+            if i == 1 and request.context:
+                question_lines.append(f"Context: {request.context}")
+                question_lines.append("")
+
             req_status = "*required" if question.required else "optional"
-            self._output(f"  Question {i}/{len(request.questions)} [{req_status}]", "append")
-            self._output(f"    {question.text}", "append")
+            question_lines.append(f"Question {i}/{total_questions} [{req_status}]")
+            question_lines.append(f"  {question.text}")
 
             # Show choices if any
             if question.choices:
                 for j, choice in enumerate(question.choices, 1):
                     default_marker = " (default)" if question.default_choice == j else ""
-                    self._output(f"      {j}. {choice.text}{default_marker}", "append")
+                    question_lines.append(f"    {j}. {choice.text}{default_marker}")
 
             # Show input hint
             if question.question_type == QuestionType.FREE_TEXT:
                 if not question.required:
-                    self._output("    (press Enter to skip, or type 'cancel' to cancel)", "append")
+                    question_lines.append("  (press Enter to skip, or type 'cancel' to cancel)")
                 else:
-                    self._output("    (type 'cancel' to cancel)", "append")
+                    question_lines.append("  (type 'cancel' to cancel)")
             elif question.question_type == QuestionType.SINGLE_CHOICE:
-                self._output(f"    Enter choice [1-{len(question.choices)}]:", "append")
+                question_lines.append(f"  Enter choice [1-{len(question.choices)}]:")
             elif question.question_type == QuestionType.MULTIPLE_CHOICE:
-                self._output("    Enter choices (comma-separated, e.g., 1,3):", "append")
+                question_lines.append("  Enter choices (comma-separated, e.g., 1,3):")
 
-            self._output("=" * 60, "append")
+            # Notify UI about this question
+            if on_question_displayed:
+                on_question_displayed("request_clarification", i, total_questions, question_lines)
 
             # Signal waiting for input
             self._waiting_for_input = True
@@ -438,15 +454,36 @@ class QueueChannel(ClarificationChannel):
                 answer = self._parse_answer(i, question, response)
                 answers.append(answer)
 
+                # Notify UI that question was answered
+                if on_question_answered:
+                    answer_summary = self._format_answer_summary(answer, question)
+                    on_question_answered("request_clarification", i, answer_summary)
+
             finally:
                 self._waiting_for_input = False
                 if self._prompt_callback:
                     self._prompt_callback(False)
 
-            self._output("", "append")
-
-        self._output("✓ All questions answered.", "append")
         return ClarificationResponse(answers=answers)
+
+    def _format_answer_summary(self, answer: Answer, question: Question) -> str:
+        """Format a brief summary of the answer for display."""
+        if answer.skipped:
+            return "skipped"
+        if answer.free_text is not None:
+            text = answer.free_text
+            if len(text) > 30:
+                text = text[:27] + "..."
+            return f'"{text}"'
+        if answer.selected_choices:
+            if len(answer.selected_choices) == 1:
+                idx = answer.selected_choices[0]
+                if question.choices and idx <= len(question.choices):
+                    return question.choices[idx - 1].text
+                return f"choice {idx}"
+            else:
+                return f"{len(answer.selected_choices)} choices"
+        return "answered"
 
     def _parse_answer(self, question_index: int, question: Question, response: str) -> Answer:
         """Parse user response into an Answer."""

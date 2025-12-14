@@ -31,6 +31,12 @@ class ClarificationPlugin:
     def __init__(self):
         self._initialized = False
         self._channel: Optional[ClarificationChannel] = None
+        # Clarification lifecycle hooks for UI integration
+        self._on_clarification_requested: Optional[Callable[[str, List[str]], None]] = None
+        self._on_clarification_resolved: Optional[Callable[[str], None]] = None
+        # Per-question hooks for progressive display
+        self._on_question_displayed: Optional[Callable[[str, int, int, List[str]], None]] = None
+        self._on_question_answered: Optional[Callable[[str, int, str], None]] = None
 
     @property
     def name(self) -> str:
@@ -56,6 +62,33 @@ class ClarificationPlugin:
         self._channel = None
         self._initialized = False
 
+    def set_clarification_hooks(
+        self,
+        on_requested: Optional[Callable[[str, List[str]], None]] = None,
+        on_resolved: Optional[Callable[[str], None]] = None,
+        on_question_displayed: Optional[Callable[[str, int, int, List[str]], None]] = None,
+        on_question_answered: Optional[Callable[[str, int, str], None]] = None
+    ) -> None:
+        """Set hooks for clarification lifecycle events.
+
+        These hooks enable UI integration by notifying when clarification
+        requests start and complete.
+
+        Args:
+            on_requested: Called when clarification session starts.
+                Signature: (tool_name, prompt_lines) -> None
+            on_resolved: Called when clarification is resolved.
+                Signature: (tool_name) -> None
+            on_question_displayed: Called when each question is shown.
+                Signature: (tool_name, question_index, total_questions, question_lines) -> None
+            on_question_answered: Called when user answers a question.
+                Signature: (tool_name, question_index, answer_summary) -> None
+        """
+        self._on_clarification_requested = on_requested
+        self._on_clarification_resolved = on_resolved
+        self._on_question_displayed = on_question_displayed
+        self._on_question_answered = on_question_answered
+
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the tool declarations for Vertex AI."""
         return [
@@ -75,8 +108,8 @@ class ClarificationPlugin:
                         "context": {
                             "type": "string",
                             "description": (
-                                "Brief explanation of why you need clarification. "
-                                "This helps the user understand the purpose of the questions."
+                                "Technical context about what information is needed and why. "
+                                "Do NOT put conversational text here - use a text response for that."
                             ),
                         },
                         "questions": {
@@ -151,7 +184,10 @@ class ClarificationPlugin:
 
 You have access to a `request_clarification` tool that allows you to ask the user questions when you need more information.
 
-**IMPORTANT**: When you need to ask the user a question, you MUST use the `request_clarification` tool. Do NOT ask questions directly in your text response - always use the tool instead. This ensures a consistent user experience and proper input handling.
+**IMPORTANT**: When using this tool:
+1. First, provide a conversational text response explaining what you're about to do (e.g., "I can help with that. Let me ask a few questions to understand your needs better.")
+2. Then call the `request_clarification` tool with the questions
+3. The `context` parameter should contain only technical context about what information is needed, NOT your conversational response - that goes in your text output.
 
 ### When to use:
 - When the user's request is ambiguous
@@ -170,9 +206,12 @@ You have access to a `request_clarification` tool that allows you to ask the use
 5. Mark questions as optional (`required: false`) when appropriate
 
 ### Example usage:
+Your text response: "I'd be happy to help set up the configuration. I have a few questions about your deployment preferences."
+
+Then call the tool:
 ```json
 {
-  "context": "I need to know your deployment preferences to set up the configuration correctly.",
+  "context": "Deployment configuration settings",
   "questions": [
     {
       "text": "Which environment should I configure?",
@@ -239,8 +278,24 @@ The tool returns responses keyed by question number (1-based):
             # Parse the request
             request = self._parse_request(args)
 
-            # Get user responses via the channel
-            response = self._channel.request_clarification(request)
+            # Emit clarification requested hook (for initial context, not all questions)
+            if self._on_clarification_requested:
+                # Just send context, not all questions - questions come one by one
+                context_lines = []
+                if request.context:
+                    context_lines.append(f"Context: {request.context}")
+                self._on_clarification_requested("request_clarification", context_lines)
+
+            # Get user responses via the channel, passing per-question hooks
+            response = self._channel.request_clarification(
+                request,
+                on_question_displayed=self._on_question_displayed,
+                on_question_answered=self._on_question_answered
+            )
+
+            # Emit clarification resolved hook
+            if self._on_clarification_resolved:
+                self._on_clarification_resolved("request_clarification")
 
             # Format the response for the model
             if response.cancelled:
@@ -293,6 +348,30 @@ The tool returns responses keyed by question number (1-based):
 
         except Exception as e:
             return {"error": f"Failed to process clarification request: {str(e)}"}
+
+    def _build_prompt_lines(self, request: ClarificationRequest) -> List[str]:
+        """Build prompt lines for UI display from request info.
+
+        Args:
+            request: The clarification request.
+
+        Returns:
+            List of strings representing the clarification prompt.
+        """
+        lines = []
+
+        if request.context:
+            lines.append(f"Context: {request.context}")
+            lines.append("")
+
+        for i, question in enumerate(request.questions, 1):
+            req_marker = "*" if question.required else ""
+            lines.append(f"Q{i}{req_marker}: {question.text}")
+            if question.choices:
+                for j, choice in enumerate(question.choices, 1):
+                    lines.append(f"  {j}. {choice.text}")
+
+        return lines
 
     def _parse_request(self, args: Dict[str, Any]) -> ClarificationRequest:
         """Parse tool arguments into a ClarificationRequest."""

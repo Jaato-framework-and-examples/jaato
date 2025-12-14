@@ -61,6 +61,9 @@ class PermissionPlugin:
         self._original_executors: Dict[str, Callable] = {}
         self._execution_log: List[Dict[str, Any]] = []
         self._allow_all: bool = False  # When True, auto-approve all requests
+        # Permission lifecycle hooks for UI integration
+        self._on_permission_requested: Optional[Callable[[str, str, List[str]], None]] = None
+        self._on_permission_resolved: Optional[Callable[[str, str, bool, str], None]] = None
 
     def set_registry(self, registry: 'PluginRegistry') -> None:
         """Set the plugin registry for tool-to-plugin lookups.
@@ -85,6 +88,27 @@ class PermissionPlugin:
         # Forward to channel if it supports callbacks
         if self._channel and hasattr(self._channel, 'set_output_callback'):
             self._channel.set_output_callback(callback)
+
+    def set_permission_hooks(
+        self,
+        on_requested: Optional[Callable[[str, str, List[str]], None]] = None,
+        on_resolved: Optional[Callable[[str, str, bool, str], None]] = None
+    ) -> None:
+        """Set hooks for permission lifecycle events.
+
+        These hooks enable UI integration by notifying when permission
+        requests start and complete.
+
+        Args:
+            on_requested: Called when permission prompt is shown.
+                Signature: (tool_name, request_id, prompt_lines) -> None
+            on_resolved: Called when permission is resolved.
+                Signature: (tool_name, request_id, granted, method) -> None
+                method is one of: "yes", "always", "once", "never",
+                "whitelist", "blacklist", "timeout", "default"
+        """
+        self._on_permission_requested = on_requested
+        self._on_permission_resolved = on_resolved
 
     @property
     def name(self) -> str:
@@ -620,11 +644,19 @@ If a tool is denied, do not attempt to execute it."""
 
         if match.decision == PermissionDecision.ALLOW:
             self._log_decision(tool_name, args, "allow", match.reason)
-            return True, {'reason': match.reason, 'method': match.rule_type or 'policy'}
+            method = match.rule_type or 'policy'
+            # Emit resolved hook for auto-approved (whitelist)
+            if self._on_permission_resolved:
+                self._on_permission_resolved(tool_name, "", True, method)
+            return True, {'reason': match.reason, 'method': method}
 
         elif match.decision == PermissionDecision.DENY:
             self._log_decision(tool_name, args, "deny", match.reason)
-            return False, {'reason': match.reason, 'method': match.rule_type or 'policy'}
+            method = match.rule_type or 'policy'
+            # Emit resolved hook for auto-denied (blacklist)
+            if self._on_permission_resolved:
+                self._on_permission_resolved(tool_name, "", False, method)
+            return False, {'reason': match.reason, 'method': method}
 
         elif match.decision == PermissionDecision.ASK_CHANNEL:
             # Need to ask the channel
@@ -648,8 +680,21 @@ If a tool is denied, do not attempt to execute it."""
                 context=request_context,
             )
 
+            # Emit permission requested hook with prompt lines
+            if self._on_permission_requested:
+                prompt_lines = self._build_prompt_lines(tool_name, args, display_info)
+                self._on_permission_requested(tool_name, request.request_id, prompt_lines)
+
             response = self._channel.request_permission(request)
-            return self._handle_channel_response(tool_name, args, response)
+            allowed, info = self._handle_channel_response(tool_name, args, response)
+
+            # Emit permission resolved hook
+            if self._on_permission_resolved:
+                self._on_permission_resolved(
+                    tool_name, request.request_id, allowed, info.get('method', 'unknown')
+                )
+
+            return allowed, info
 
         # Unknown decision type, deny by default
         return False, {'reason': 'Unknown policy decision', 'method': 'unknown'}
@@ -756,6 +801,46 @@ If a tool is denied, do not attempt to execute it."""
                 return None
 
         return None
+
+    def _build_prompt_lines(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        display_info: Optional[PermissionDisplayInfo]
+    ) -> List[str]:
+        """Build prompt lines for UI display from request info.
+
+        Args:
+            tool_name: Name of the tool
+            args: Arguments passed to the tool
+            display_info: Optional custom display info from plugin
+
+        Returns:
+            List of strings representing the permission prompt.
+        """
+        lines = []
+
+        if display_info:
+            # Use custom display info
+            lines.append(display_info.summary)
+            if display_info.details:
+                # Split details into lines
+                for detail_line in display_info.details.split('\n'):
+                    lines.append(detail_line)
+        else:
+            # Default: show tool name and args
+            lines.append(f"Tool: {tool_name}")
+            if args:
+                args_str = str(args)
+                if len(args_str) > 100:
+                    args_str = args_str[:97] + "..."
+                lines.append(f"Args: {args_str}")
+
+        # Add options line
+        lines.append("")
+        lines.append("[y]es [n]o [a]lways [never] [once]")
+
+        return lines
 
     def get_execution_log(self) -> List[Dict[str, Any]]:
         """Get the log of permission decisions."""
