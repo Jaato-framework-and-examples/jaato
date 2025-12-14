@@ -334,18 +334,43 @@ class InteractiveClient:
                 for cmd in self.permission_plugin.get_user_commands():
                     command_to_plugin[cmd.name] = self.permission_plugin
 
-        if not command_to_plugin:
-            return
+        # Add tools enable/disable commands for completion
+        # These are built-in commands, not plugin commands, so handled specially
+        tools_commands = {'tools enable', 'tools disable'}
 
         def completion_provider(command: str, args: list) -> list:
+            # Handle tools enable/disable completions
+            if command == 'tools enable':
+                # Show disabled tools (that can be enabled) + 'all'
+                disabled = self.registry.list_disabled_tools() if self.registry else []
+                completions = [('all', 'Enable all tools')]
+                for tool in sorted(disabled):
+                    completions.append((tool, 'disabled'))
+                return completions
+            elif command == 'tools disable':
+                # Show enabled tools (that can be disabled) + 'all'
+                if self.registry:
+                    all_tools = self.registry.get_all_tool_names()
+                    enabled = [t for t in all_tools if self.registry.is_tool_enabled(t)]
+                else:
+                    enabled = []
+                completions = [('all', 'Disable all tools')]
+                for tool in sorted(enabled):
+                    completions.append((tool, 'enabled'))
+                return completions
+
+            # Fall back to plugin completion
             plugin = command_to_plugin.get(command)
             if plugin and hasattr(plugin, 'get_command_completions'):
                 return plugin.get_command_completions(command, args)
             return []
 
+        # Combine plugin commands with tools commands
+        all_commands = set(command_to_plugin.keys()) | tools_commands
+
         self._input_handler.set_command_completion_provider(
             completion_provider,
-            set(command_to_plugin.keys())
+            all_commands
         )
 
     def run_prompt(
