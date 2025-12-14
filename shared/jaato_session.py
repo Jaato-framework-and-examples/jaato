@@ -315,19 +315,22 @@ class JaatoSession:
             "message": f"Switched from {old_model} to {model_name}"
         }
 
-    def get_model_completions(self, prefix: str = "") -> List[str]:
-        """Get model name completions for the /model command.
+    def get_model_completions(self, prefix: str = "") -> List['CommandCompletion']:
+        """Get model name completions for the model command.
 
         Args:
             prefix: Prefix to filter model names by.
 
         Returns:
-            List of matching model names.
+            List of CommandCompletion objects for matching models.
         """
+        from .plugins.base import CommandCompletion
+
         models = self._runtime.list_available_models()
         if prefix:
             models = [m for m in models if m.startswith(prefix)]
-        return sorted(models)
+
+        return [CommandCompletion(value=m, description="") for m in sorted(models)]
 
     def send_message(
         self,
