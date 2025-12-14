@@ -20,7 +20,10 @@ from prompt_toolkit.document import Document
 # Note: Session commands (save, resume, sessions) are contributed by the session plugin
 DEFAULT_COMMANDS = [
     ("help", "Show help message and available commands"),
-    ("tools", "List available tools"),
+    ("tools", "Manage tools available to the model"),
+    ("tools list", "List all tools with enabled/disabled status"),
+    ("tools enable", "Enable a tool (usage: tools enable <name> or 'all')"),
+    ("tools disable", "Disable a tool (usage: tools disable <name> or 'all')"),
     ("plugins", "List available plugins with status"),
     ("reset", "Clear conversation history"),
     ("history", "Show full conversation history"),
