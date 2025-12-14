@@ -834,44 +834,57 @@ class OutputBuffer:
                         lines_to_render = prompt_lines
 
                     # Draw box around permission prompt
-                    box_width = max(len(line) for line in prompt_lines) + 4
-                    box_width = min(box_width, 60)  # Cap width
+                    # Box prefix is ~18 chars ("       │       │ "), leave room for border
+                    max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
+                    box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
+                    content_width = box_width - 4  # Space for "│ " and " │"
                     output.append("\n")
                     output.append(f"       {continuation}     ┌" + "─" * box_width + "┐", style="dim")
 
                     for prompt_line in lines_to_render:
-                        output.append("\n")
-                        # Truncate long lines
-                        display_line = prompt_line[:box_width - 2] if len(prompt_line) > box_width - 2 else prompt_line
-                        padding = box_width - len(display_line) - 2
-                        output.append(f"       {continuation}     │ ", style="dim")
-                        # Color diff lines appropriately
-                        if display_line.startswith('+') and not display_line.startswith('+++'):
-                            output.append(display_line, style="green")
-                        elif display_line.startswith('-') and not display_line.startswith('---'):
-                            output.append(display_line, style="red")
-                        elif display_line.startswith('@@'):
-                            output.append(display_line, style="cyan")
+                        # Wrap long lines instead of truncating
+                        if len(prompt_line) > content_width:
+                            wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
+                            if not wrapped:
+                                wrapped = [prompt_line[:content_width]]
                         else:
-                            output.append(display_line)
-                        output.append(" " * padding + " │", style="dim")
+                            wrapped = [prompt_line]
+
+                        for display_line in wrapped:
+                            output.append("\n")
+                            padding = box_width - len(display_line) - 4
+                            output.append(f"       {continuation}     │ ", style="dim")
+                            # Color diff lines appropriately
+                            if display_line.startswith('+') and not display_line.startswith('+++'):
+                                output.append(display_line, style="green")
+                            elif display_line.startswith('-') and not display_line.startswith('---'):
+                                output.append(display_line, style="red")
+                            elif display_line.startswith('@@'):
+                                output.append(display_line, style="cyan")
+                            else:
+                                output.append(display_line)
+                            output.append(" " * max(0, padding) + " │", style="dim")
 
                     # Show truncation indicator if needed
                     if truncated:
                         output.append("\n")
                         truncation_msg = f"[...{hidden_count} more - 'v' to view...]"
-                        padding = box_width - len(truncation_msg) - 2
+                        padding = box_width - len(truncation_msg) - 4
                         output.append(f"       {continuation}     │ ", style="dim")
                         output.append(truncation_msg, style="dim italic cyan")
-                        output.append(" " * padding + " │", style="dim")
-                        # Show last line (usually options)
+                        output.append(" " * max(0, padding) + " │", style="dim")
+                        # Show last line (usually options) - wrap if needed
                         last_line = prompt_lines[-1]
-                        output.append("\n")
-                        display_line = last_line[:box_width - 2] if len(last_line) > box_width - 2 else last_line
-                        padding = box_width - len(display_line) - 2
-                        output.append(f"       {continuation}     │ ", style="dim")
-                        output.append(display_line, style="cyan")  # Options styled cyan
-                        output.append(" " * padding + " │", style="dim")
+                        if len(last_line) > content_width:
+                            last_wrapped = textwrap.wrap(last_line, width=content_width, break_long_words=True)
+                        else:
+                            last_wrapped = [last_line]
+                        for display_line in last_wrapped:
+                            output.append("\n")
+                            padding = box_width - len(display_line) - 4
+                            output.append(f"       {continuation}     │ ", style="dim")
+                            output.append(display_line, style="cyan")  # Options styled cyan
+                            output.append(" " * max(0, padding) + " │", style="dim")
 
                     output.append("\n")
                     output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
@@ -915,34 +928,46 @@ class OutputBuffer:
                             lines_to_render = prompt_lines
 
                         # Draw box around current question
-                        box_width = max(len(line) for line in prompt_lines) + 4
-                        box_width = min(box_width, 60)  # Cap width
+                        max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
+                        box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
+                        content_width = box_width - 4
                         output.append("\n")
                         output.append(f"       {continuation}     ┌" + "─" * box_width + "┐", style="dim")
 
                         for prompt_line in lines_to_render:
-                            output.append("\n")
-                            display_line = prompt_line[:box_width - 2] if len(prompt_line) > box_width - 2 else prompt_line
-                            padding = box_width - len(display_line) - 2
-                            output.append(f"       {continuation}     │ ", style="dim")
-                            output.append(display_line)
-                            output.append(" " * padding + " │", style="dim")
+                            # Wrap long lines
+                            if len(prompt_line) > content_width:
+                                wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
+                                if not wrapped:
+                                    wrapped = [prompt_line[:content_width]]
+                            else:
+                                wrapped = [prompt_line]
+                            for display_line in wrapped:
+                                output.append("\n")
+                                padding = box_width - len(display_line) - 4
+                                output.append(f"       {continuation}     │ ", style="dim")
+                                output.append(display_line)
+                                output.append(" " * max(0, padding) + " │", style="dim")
 
                         # Show truncation indicator if needed
                         if truncated:
                             output.append("\n")
                             truncation_msg = f"[...{hidden_count} more - 'v' to view...]"
-                            padding = box_width - len(truncation_msg) - 2
+                            padding = box_width - len(truncation_msg) - 4
                             output.append(f"       {continuation}     │ ", style="dim")
                             output.append(truncation_msg, style="dim italic cyan")
-                            output.append(" " * padding + " │", style="dim")
+                            output.append(" " * max(0, padding) + " │", style="dim")
                             last_line = prompt_lines[-1]
-                            output.append("\n")
-                            display_line = last_line[:box_width - 2] if len(last_line) > box_width - 2 else last_line
-                            padding = box_width - len(display_line) - 2
-                            output.append(f"       {continuation}     │ ", style="dim")
-                            output.append(display_line, style="cyan")
-                            output.append(" " * padding + " │", style="dim")
+                            if len(last_line) > content_width:
+                                last_wrapped = textwrap.wrap(last_line, width=content_width, break_long_words=True)
+                            else:
+                                last_wrapped = [last_line]
+                            for display_line in last_wrapped:
+                                output.append("\n")
+                                padding = box_width - len(display_line) - 4
+                                output.append(f"       {continuation}     │ ", style="dim")
+                                output.append(display_line, style="cyan")
+                                output.append(" " * max(0, padding) + " │", style="dim")
 
                         output.append("\n")
                         output.append(f"       {continuation}     └" + "─" * box_width + "┘", style="dim")
