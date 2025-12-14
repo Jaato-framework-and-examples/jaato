@@ -890,6 +890,10 @@ class PTDisplay:
             self._stop_pager()
             return True
 
+        if text.lower() == 'v':
+            # Ignore 'v' when already zoomed in - we're already viewing
+            return True
+
         # Empty string or any other input advances to next page
         self._pager_current += self._pager_page_size
         if self._pager_current >= len(self._pager_lines):
