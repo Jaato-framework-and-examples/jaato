@@ -358,9 +358,8 @@ class PTDisplay:
         def handle_q(event):
             """Handle 'q' key - quit pager if active, otherwise type 'q'."""
             if getattr(self, '_pager_active', False):
-                # In pager mode - quit pager
-                if self._input_callback:
-                    self._input_callback("q")
+                # In pager mode - quit pager directly
+                self._stop_pager()
             else:
                 # Normal mode - insert 'q' character
                 event.current_buffer.insert_text("q")
