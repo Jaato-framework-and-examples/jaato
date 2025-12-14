@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitHub Models Provider - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="github-models.html" class="active">GitHub Models</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/mcp.html">MCP</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>GitHub Models Provider</h1>
+          <p class="lead">
+            Access multiple AI models (GPT, Claude, Gemini, Llama, Mistral) through
+            GitHub's unified Models API. Supports individual, organization, and
+            enterprise billing with fine-grained access control.
+          </p>
+
+          <table>
+            <tbody>
+              <tr>
+                <td><strong>Name</strong></td>
+                <td><code>github_models</code></td>
+              </tr>
+              <tr>
+                <td><strong>SDK</strong></td>
+                <td><code>azure-ai-inference</code></td>
+              </tr>
+              <tr>
+                <td><strong>Models</strong></td>
+                <td>GPT-4o, Claude 3.5, Gemini, Llama, Mistral</td>
+              </tr>
+              <tr>
+                <td><strong>Max Context</strong></td>
+                <td>Up to 200K tokens (Claude), 128K (GPT-4o)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h2 id="models">Available Models</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Models</th>
+                <th>Context</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>OpenAI</strong></td>
+                <td>gpt-4o, gpt-4o-mini, o1-preview, o1-mini</td>
+                <td>128K</td>
+              </tr>
+              <tr>
+                <td><strong>Anthropic</strong></td>
+                <td>claude-3.5-sonnet, claude-3-opus, claude-3-haiku</td>
+                <td>200K</td>
+              </tr>
+              <tr>
+                <td><strong>Google</strong></td>
+                <td>gemini-1.5-pro, gemini-1.5-flash</td>
+                <td>1M</td>
+              </tr>
+              <tr>
+                <td><strong>Meta</strong></td>
+                <td>llama-3.1-405b, llama-3.1-70b, llama-3.1-8b</td>
+                <td>128K</td>
+              </tr>
+              <tr>
+                <td><strong>Mistral</strong></td>
+                <td>mistral-large, mistral-small</td>
+                <td>32K</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick start</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import load_provider, ProviderConfig
+
+provider = load_provider("github_models")
+
+# Initialize with token
+provider.initialize(ProviderConfig(
+    api_key="github_pat_...",  # or from GITHUB_TOKEN env
+))
+
+# Connect to a model
+provider.connect("openai/gpt-4o")
+
+# Start chatting
+provider.create_session(
+    system_instruction="You are helpful."
+)
+response = provider.send_message("Hello!")
+print(response.text)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">With organization billing</div>
+          <div class="code-block">
+            <pre><code class="language-python">provider.initialize(ProviderConfig(
+    api_key="github_pat_...",
+    extra={
+        'organization': 'my-org',
+        'enterprise': 'my-enterprise'
+    }
+))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Authentication Methods -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="authentication">Authentication</h2>
+          <p>
+            GitHub Models uses GitHub tokens for authentication. The recommended
+            approach is a <strong>fine-grained Personal Access Token (PAT)</strong>
+            with the <code>models: read</code> permission.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Token Type</th>
+                <th>Prefix</th>
+                <th>Enterprise SSO</th>
+                <th>Best For</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Fine-grained PAT</strong></td>
+                <td><code>github_pat_</code></td>
+                <td>Auto-authorized</td>
+                <td>Recommended for all use cases</td>
+              </tr>
+              <tr>
+                <td><strong>Classic PAT</strong></td>
+                <td><code>ghp_</code></td>
+                <td>Manual per-org</td>
+                <td>Simpler setup, less secure</td>
+              </tr>
+              <tr>
+                <td><strong>GitHub App</strong></td>
+                <td><code>ghs_</code></td>
+                <td>Supported</td>
+                <td>Automation, CI/CD</td>
+              </tr>
+              <tr>
+                <td><strong>OAuth token</strong></td>
+                <td><code>gho_</code></td>
+                <td>Supported</td>
+                <td>User-facing apps</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Fine-Grained PAT (Recommended)</h3>
+          <p>
+            Fine-grained PATs provide granular permissions and are automatically
+            authorized for SSO-enabled organizations during creation.
+          </p>
+          <ol>
+            <li>Go to <a href="https://github.com/settings/tokens?type=beta" target="_blank">GitHub Token Settings</a></li>
+            <li>Click <strong>"Generate new token"</strong></li>
+            <li>Set name and expiration</li>
+            <li>Under <strong>Account permissions</strong> &rarr; <strong>Models</strong> &rarr; select <strong>Read</strong></li>
+            <li>Click <strong>"Generate token"</strong></li>
+          </ol>
+
+          <h3>Classic PAT</h3>
+          <p>
+            Classic PATs are simpler but less secure. No specific scope is needed
+            for GitHub Models, but you must manually authorize for each SSO-enabled
+            organization.
+          </p>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Enterprise SSO</div>
+            For organizations with SAML SSO enabled, fine-grained PATs are
+            automatically authorized during creation. Classic PATs require
+            manual authorization at
+            <a href="https://github.com/settings/tokens" target="_blank">github.com/settings/tokens</a>.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Create fine-grained PAT</div>
+          <div class="code-block">
+            <pre><code class="language-text">1. Go to https://github.com/settings/tokens?type=beta
+2. Click "Generate new token"
+3. Set token name: "jaato-models"
+4. Set expiration (e.g., 90 days)
+5. Expand "Account permissions"
+6. Find "Models" → Select "Read"
+7. Click "Generate token"
+8. Copy the token (starts with github_pat_)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Set environment variable</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># In your .env file (add to .gitignore)
+GITHUB_TOKEN=github_pat_...your-token
+
+# Or export directly (session only)
+export GITHUB_TOKEN=github_pat_...your-token</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Verify token with gh CLI</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Check authentication works
+gh api /user -q '.login'
+
+# List available organizations
+gh api /user/orgs -q '.[].login'</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Test API access</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Test GitHub Models endpoint
+curl -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://models.inference.ai.azure.com/models</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Enterprise Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="enterprise">Enterprise Configuration</h2>
+          <p>
+            GitHub Models supports enterprise billing attribution and policy
+            compliance. Usage can be tracked at the organization or enterprise level.
+          </p>
+
+          <h3>Organization Billing</h3>
+          <p>
+            Set the <code>organization</code> parameter to attribute API usage
+            to a specific organization for billing purposes.
+          </p>
+
+          <h3>Enterprise Policy</h3>
+          <p>
+            Enterprise owners control GitHub Models access through settings at:
+          </p>
+          <code>https://github.com/enterprises/{enterprise}/settings/models</code>
+          <br><br>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Policy</th>
+                <th>Effect</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Enabled</strong></td>
+                <td>GitHub Models available for all orgs</td>
+              </tr>
+              <tr>
+                <td><strong>No policy</strong></td>
+                <td>Org admins decide individually</td>
+              </tr>
+              <tr>
+                <td><strong>Disabled</strong></td>
+                <td>GitHub Models blocked enterprise-wide</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Models Disabled Error</div>
+            If you receive <code>401 "GitHub Models is disabled"</code>, contact
+            your enterprise administrator to enable GitHub Models in the enterprise
+            settings.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Organization-attributed billing</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import load_provider, ProviderConfig
+
+provider = load_provider("github_models")
+provider.initialize(ProviderConfig(
+    api_key="github_pat_...",
+    extra={
+        'organization': 'my-org',  # Bill to this org
+    }
+))
+
+# API requests now attributed to my-org</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Full enterprise config</div>
+          <div class="code-block">
+            <pre><code class="language-python">provider.initialize(ProviderConfig(
+    api_key="github_pat_...",
+    extra={
+        'organization': 'my-org',
+        'enterprise': 'my-enterprise',
+    }
+))</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Environment-based config</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env file
+GITHUB_TOKEN=github_pat_...
+JAATO_GITHUB_ORGANIZATION=my-org
+JAATO_GITHUB_ENTERPRISE=my-enterprise</code></pre>
+          </div>
+          <div class="code-block">
+            <pre><code class="language-python"># Auto-detects from environment
+provider = load_provider("github_models")
+provider.initialize()  # Uses env vars</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Find your organization</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># From GitHub URL
+# https://github.com/my-org → organization = "my-org"
+
+# Or via gh CLI
+gh api /user/orgs -q '.[].login'</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Environment Variables -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="environment">Environment Variables</h2>
+
+          <h3>Required</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Variable</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>GITHUB_TOKEN</code></td>
+                <td>GitHub PAT with <code>models: read</code> permission</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Optional</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Variable</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>JAATO_GITHUB_ORGANIZATION</code></td>
+                <td>Organization for billing attribution</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_GITHUB_ENTERPRISE</code></td>
+                <td>Enterprise name (for context/debugging)</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_GITHUB_ENDPOINT</code></td>
+                <td>Override API endpoint URL</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Default Endpoint</h3>
+          <p>
+            The default endpoint is <code>https://models.inference.ai.azure.com</code>.
+            Override with <code>JAATO_GITHUB_ENDPOINT</code> for GitHub Enterprise
+            Server or proxy configurations.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">.env for individual use</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Minimal setup
+GITHUB_TOKEN=github_pat_...your-token</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">.env for organization</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># With organization billing
+GITHUB_TOKEN=github_pat_...your-token
+JAATO_GITHUB_ORGANIZATION=my-org</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">.env for enterprise</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Full enterprise setup
+GITHUB_TOKEN=github_pat_...your-token
+JAATO_GITHUB_ORGANIZATION=my-org
+JAATO_GITHUB_ENTERPRISE=my-enterprise</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Custom endpoint (GHES)</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># For GitHub Enterprise Server
+GITHUB_TOKEN=github_pat_...
+JAATO_GITHUB_ENDPOINT=https://models.ghes.example.com</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error Handling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="errors">Error Handling</h2>
+          <p>
+            The provider uses fail-fast validation and throws specific exceptions
+            with actionable error messages.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Exception</th>
+                <th>Cause</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>TokenNotFoundError</code></td>
+                <td>No GitHub token found</td>
+              </tr>
+              <tr>
+                <td><code>TokenInvalidError</code></td>
+                <td>Token rejected or expired</td>
+              </tr>
+              <tr>
+                <td><code>TokenPermissionError</code></td>
+                <td>Missing <code>models: read</code> permission</td>
+              </tr>
+              <tr>
+                <td><code>ModelsDisabledError</code></td>
+                <td>GitHub Models disabled for org/enterprise</td>
+              </tr>
+              <tr>
+                <td><code>ModelNotFoundError</code></td>
+                <td>Invalid model ID</td>
+              </tr>
+              <tr>
+                <td><code>RateLimitError</code></td>
+                <td>Too many requests</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p>
+            All exceptions include:
+          </p>
+          <ul>
+            <li>What was checked</li>
+            <li>Why it failed</li>
+            <li>How to fix it</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Handling auth errors</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.github_models.errors import (
+    TokenNotFoundError,
+    TokenInvalidError,
+    TokenPermissionError,
+    ModelsDisabledError,
+)
+
+try:
+    provider.initialize(config)
+except TokenNotFoundError as e:
+    print(f"No token: {e}")
+    # Includes instructions to create PAT
+except TokenInvalidError as e:
+    print(f"Bad token: {e}")
+    # Identifies token type from prefix
+except TokenPermissionError as e:
+    print(f"Missing permission: {e}")
+    # Includes SSO authorization steps
+except ModelsDisabledError as e:
+    print(f"Models disabled: {e}")
+    # Shows admin settings URL</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Example error message</div>
+          <div class="code-block">
+            <pre><code class="language-text">TokenNotFoundError: No GitHub token found for authentication method: auto
+
+Checked locations:
+  - GITHUB_TOKEN: not set
+
+To fix:
+  1. Create a Personal Access Token (PAT) at https://github.com/settings/tokens
+  2. For fine-grained PAT: select 'models: read' permission
+  3. Set GITHUB_TOKEN=your-token
+
+For GitHub Enterprise with SSO:
+  - Fine-grained PATs are auto-authorized during creation
+  - Classic PATs require manual SSO authorization per organization</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Pricing -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="pricing">Pricing</h2>
+          <p>
+            GitHub Models uses a token-unit pricing model. Usage is billed at
+            <strong>$0.00001 per token unit</strong>.
+          </p>
+
+          <h3>Token Units</h3>
+          <p>
+            Token units are calculated by multiplying tokens by model-specific
+            multipliers:
+          </p>
+          <code>units = (input_tokens × input_mult) + (output_tokens × output_mult)</code>
+
+          <h3>Free Tier</h3>
+          <p>
+            All GitHub accounts have rate-limited free access to GitHub Models
+            for prototyping and experimentation. Limits vary by:
+          </p>
+          <ul>
+            <li>Model (some models have lower free limits)</li>
+            <li>GitHub Copilot plan (higher limits with paid plans)</li>
+          </ul>
+
+          <h3>Paid Usage</h3>
+          <p>
+            Organizations must explicitly enable paid usage at:
+          </p>
+          <code>https://github.com/organizations/{org}/settings/billing</code>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Token usage tracking</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Get usage from last response
+response = provider.send_message("Hello!")
+
+usage = provider.get_token_usage()
+print(f"Input tokens: {usage.prompt_tokens}")
+print(f"Output tokens: {usage.output_tokens}")
+print(f"Total tokens: {usage.total_tokens}")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Check context limits</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Context window varies by model
+provider.connect("openai/gpt-4o")
+limit = provider.get_context_limit()
+print(f"Context: {limit:,} tokens")
+# Context: 128,000 tokens
+
+provider.connect("anthropic/claude-3.5-sonnet")
+limit = provider.get_context_limit()
+print(f"Context: {limit:,} tokens")
+# Context: 200,000 tokens</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Troubleshooting -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="troubleshooting">Troubleshooting</h2>
+
+          <h3>No token found</h3>
+          <ul>
+            <li>Set <code>GITHUB_TOKEN</code> environment variable</li>
+            <li>Or pass <code>api_key</code> in <code>ProviderConfig</code></li>
+          </ul>
+
+          <h3>401 Unauthorized</h3>
+          <ul>
+            <li>Verify token hasn't expired</li>
+            <li>Check token has <code>models: read</code> permission</li>
+            <li>For classic PATs with SSO: authorize at github.com/settings/tokens</li>
+          </ul>
+
+          <h3>GitHub Models is disabled</h3>
+          <ul>
+            <li>Enterprise admin must enable at enterprise settings</li>
+            <li>Or org admin at organization settings</li>
+            <li>Check the enterprise policy allows "Enabled" or "No policy"</li>
+          </ul>
+
+          <h3>Model not found</h3>
+          <ul>
+            <li>Use full model ID: <code>provider/model-name</code></li>
+            <li>Examples: <code>openai/gpt-4o</code>, <code>anthropic/claude-3.5-sonnet</code></li>
+            <li>Check model availability in your subscription tier</li>
+          </ul>
+
+          <h3>Rate limit exceeded</h3>
+          <ul>
+            <li>Wait for the retry period</li>
+            <li>Use a different model with higher limits</li>
+            <li>Upgrade GitHub Copilot plan</li>
+            <li>Enable paid usage for organization</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Debug checklist</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># 1. Check token is set
+echo $GITHUB_TOKEN | head -c 20
+
+# 2. Test GitHub auth
+gh api /user -q '.login'
+
+# 3. Check org membership
+gh api /user/orgs -q '.[].login'
+
+# 4. Test models endpoint
+curl -s -o /dev/null -w "%{http_code}" \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://models.inference.ai.azure.com/models</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Test connectivity</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Quick test script
+from shared import load_provider
+
+provider = load_provider("github_models")
+
+try:
+    provider.initialize()
+    provider.connect("openai/gpt-4o")
+
+    response = provider.generate("Say hello")
+    print(f"Success: {response.text}")
+except Exception as e:
+    print(f"Error: {e}")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">List available models</div>
+          <div class="code-block">
+            <pre><code class="language-python"># See what models are available
+provider = load_provider("github_models")
+
+# List all known models
+models = provider.list_models()
+for model in models:
+    print(model)
+
+# Filter by provider
+openai = provider.list_models(prefix="openai/")
+anthropic = provider.list_models(prefix="anthropic/")</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>
