@@ -20,7 +20,10 @@ from prompt_toolkit.document import Document
 # Note: Session commands (save, resume, sessions) are contributed by the session plugin
 DEFAULT_COMMANDS = [
     ("help", "Show help message and available commands"),
-    ("tools", "List available tools"),
+    ("tools", "Manage tools available to the model"),
+    ("tools list", "List all tools with enabled/disabled status"),
+    ("tools enable", "Enable a tool (usage: tools enable <name> or 'all')"),
+    ("tools disable", "Disable a tool (usage: tools disable <name> or 'all')"),
     ("plugins", "List available plugins with status"),
     ("reset", "Clear conversation history"),
     ("history", "Show full conversation history"),
@@ -80,29 +83,52 @@ class CommandCompleter(Completer):
     def get_completions(
         self, document: Document, complete_event
     ) -> Iterable[Completion]:
-        """Get command completions for the current document."""
-        text = document.text_before_cursor.strip()
+        """Get command completions for the current document.
 
-        # Only complete if:
-        # - Input is a single word (no spaces)
-        # - Input doesn't contain @ (file reference)
-        # - Input doesn't start with / (slash command)
-        # - Input is at the start (no leading content)
-        if ' ' in document.text_before_cursor or '@' in text or text.startswith('/'):
+        Handles both single-word commands (help, reset) and multi-word
+        commands with subcommands (tools list, tools enable).
+        """
+        raw_text = document.text_before_cursor
+        text = raw_text.strip()
+
+        # Skip if contains @ (file reference) or starts with / (slash command)
+        if '@' in text or text.startswith('/'):
             return
 
-        # Get the word being typed
-        word = text.lower()
+        # Get the full text being typed (lowercase for matching)
+        full_text = text.lower()
+
+        # Check if user has trailing space (typing arguments, not the command)
+        has_trailing_space = raw_text.endswith(' ') and text
 
         for cmd_name, cmd_desc in self.commands:
-            if cmd_name.startswith(word):
-                # Calculate how much to complete
+            cmd_lower = cmd_name.lower()
+
+            # If user typed a command exactly and added a space, they're now
+            # typing arguments - don't offer that command as completion
+            if has_trailing_space and full_text == cmd_lower:
+                continue
+
+            # Check if this command matches what the user is typing
+            if cmd_lower.startswith(full_text):
+                # Full command matches prefix - offer completion
                 yield Completion(
                     cmd_name,
                     start_position=-len(text),
                     display=cmd_name,
                     display_meta=cmd_desc,
                 )
+            elif ' ' in cmd_name and full_text:
+                # Multi-word command: check if user is typing a partial subcommand
+                # e.g., full_text="tools l", cmd_name="tools list"
+                base_cmd = cmd_name.split()[0].lower()
+                if full_text.startswith(base_cmd) and cmd_lower.startswith(full_text):
+                    yield Completion(
+                        cmd_name,
+                        start_position=-len(text),
+                        display=cmd_name,
+                        display_meta=cmd_desc,
+                    )
 
 
 class AtFileCompleter(Completer):
