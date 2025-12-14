@@ -22,11 +22,16 @@ from typing import Any, Dict, List, Optional
 from azure.ai.inference import ChatCompletionsClient
 from azure.ai.inference.models import (
     AssistantMessage,
-    ChatCompletionsResponseFormatJSON,
     SystemMessage,
     UserMessage,
 )
 from azure.core.credentials import AzureKeyCredential
+
+# ChatCompletionsResponseFormatJSON may not be available in older SDK versions
+try:
+    from azure.ai.inference.models import ChatCompletionsResponseFormatJSON
+except ImportError:
+    ChatCompletionsResponseFormatJSON = None  # type: ignore
 
 from ..base import ModelProviderPlugin, ProviderConfig
 from ..types import (
@@ -483,7 +488,7 @@ class GitHubModelsProvider:
                 kwargs['tools'] = sdk_tools
 
         # Add response format for structured output
-        if response_schema:
+        if response_schema and ChatCompletionsResponseFormatJSON is not None:
             kwargs['response_format'] = ChatCompletionsResponseFormatJSON()
 
         return kwargs
