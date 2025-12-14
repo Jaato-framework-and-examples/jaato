@@ -83,29 +83,49 @@ class CommandCompleter(Completer):
     def get_completions(
         self, document: Document, complete_event
     ) -> Iterable[Completion]:
-        """Get command completions for the current document."""
+        """Get command completions for the current document.
+
+        Handles both single-word commands (help, reset) and multi-word
+        commands with subcommands (tools list, tools enable).
+        """
         text = document.text_before_cursor.strip()
 
-        # Only complete if:
-        # - Input is a single word (no spaces)
-        # - Input doesn't contain @ (file reference)
-        # - Input doesn't start with / (slash command)
-        # - Input is at the start (no leading content)
-        if ' ' in document.text_before_cursor or '@' in text or text.startswith('/'):
+        # Skip if contains @ (file reference) or starts with / (slash command)
+        if '@' in text or text.startswith('/'):
             return
 
-        # Get the word being typed
-        word = text.lower()
+        # Get the full text being typed (lowercase for matching)
+        full_text = text.lower()
 
         for cmd_name, cmd_desc in self.commands:
-            if cmd_name.startswith(word):
-                # Calculate how much to complete
+            cmd_lower = cmd_name.lower()
+
+            # Check if this command matches what the user is typing
+            if cmd_lower.startswith(full_text):
+                # Full command matches prefix - offer completion
                 yield Completion(
                     cmd_name,
                     start_position=-len(text),
                     display=cmd_name,
                     display_meta=cmd_desc,
                 )
+            elif full_text.startswith(cmd_lower + ' '):
+                # User typed a command prefix plus space - check for subcommand match
+                # e.g., "tools " or "tools l" should match "tools list"
+                # This handles multi-word commands where full_text is "tools l"
+                # and cmd_name is "tools list"
+                pass  # Already handled by the startswith check above
+            elif ' ' in cmd_name and full_text:
+                # Multi-word command: check if user is typing a partial subcommand
+                # e.g., full_text="tools l", cmd_name="tools list"
+                base_cmd = cmd_name.split()[0].lower()
+                if full_text.startswith(base_cmd) and cmd_lower.startswith(full_text):
+                    yield Completion(
+                        cmd_name,
+                        start_position=-len(text),
+                        display=cmd_name,
+                        display_meta=cmd_desc,
+                    )
 
 
 class AtFileCompleter(Completer):
