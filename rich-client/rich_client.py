@@ -584,8 +584,7 @@ class RichClient:
         def completion_provider(command: str, args: list) -> list:
             # Handle built-in model command
             if command == "model" and self._jaato:
-                prefix = args[0] if args else ""
-                return self._jaato.get_model_completions(prefix)
+                return self._jaato.get_model_completions(args)
 
             # Handle plugin commands
             plugin = command_to_plugin.get(command)
