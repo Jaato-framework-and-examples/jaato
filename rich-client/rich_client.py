@@ -686,11 +686,33 @@ class RichClient:
         # Built-in commands with special completion handling
         commands_with_completions = set(command_to_plugin.keys())
         commands_with_completions.add("model")  # Built-in model command
+        commands_with_completions.add("tools enable")  # Tool management
+        commands_with_completions.add("tools disable")  # Tool management
 
         def completion_provider(command: str, args: list) -> list:
             # Handle built-in model command
             if command == "model" and self._jaato:
                 return self._jaato.get_model_completions(args)
+
+            # Handle tools enable/disable completions
+            if command == 'tools enable':
+                # Show disabled tools (that can be enabled) + 'all'
+                disabled = self.registry.list_disabled_tools() if self.registry else []
+                completions = [('all', 'Enable all tools')]
+                for tool in sorted(disabled):
+                    completions.append((tool, 'disabled'))
+                return completions
+            elif command == 'tools disable':
+                # Show enabled tools (that can be disabled) + 'all'
+                if self.registry:
+                    all_tools = self.registry.get_all_tool_names()
+                    enabled = [t for t in all_tools if self.registry.is_tool_enabled(t)]
+                else:
+                    enabled = []
+                completions = [('all', 'Disable all tools')]
+                for tool in sorted(enabled):
+                    completions.append((tool, 'enabled'))
+                return completions
 
             # Handle plugin commands
             plugin = command_to_plugin.get(command)
