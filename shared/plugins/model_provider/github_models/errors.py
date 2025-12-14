@@ -321,3 +321,42 @@ class RateLimitError(GitHubModelsError):
         ])
 
         return "\n".join(lines)
+
+
+class ContextLimitError(GitHubModelsError):
+    """Request exceeds the model's context window.
+
+    Raised when the conversation history + system instructions + prompt
+    exceeds the model's maximum token limit.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        max_tokens: Optional[int] = None,
+        original_error: Optional[str] = None,
+    ):
+        self.model = model
+        self.max_tokens = max_tokens
+        self.original_error = original_error
+
+        message = self._format_message()
+        super().__init__(message)
+
+    def _format_message(self) -> str:
+        lines = [f"Request too large for model: {self.model}"]
+
+        if self.max_tokens:
+            lines.append(f"Maximum tokens: {self.max_tokens}")
+        if self.original_error:
+            lines.append(f"Error: {self.original_error}")
+
+        lines.extend([
+            "",
+            "To fix:",
+            "  1. Clear conversation history with 'clear' command",
+            "  2. Use a model with a larger context window",
+            "  3. Reduce the size of your prompt",
+        ])
+
+        return "\n".join(lines)

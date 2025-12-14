@@ -65,6 +65,7 @@ from .env import (
     get_checked_credential_locations,
 )
 from .errors import (
+    ContextLimitError,
     ModelNotFoundError,
     ModelsDisabledError,
     RateLimitError,
@@ -624,6 +625,20 @@ class GitHubModelsProvider:
         # Check for rate limit errors
         if "429" in error_str or "rate limit" in error_str:
             raise RateLimitError(
+                original_error=str(error),
+            ) from error
+
+        # Check for context/token limit errors
+        if any(x in error_str for x in ("tokens_limit_reached", "too large", "max size", "context_length")):
+            # Try to extract max tokens from error message
+            import re
+            max_tokens = None
+            match = re.search(r'max (?:size|tokens)[:\s]+(\d+)', error_str)
+            if match:
+                max_tokens = int(match.group(1))
+            raise ContextLimitError(
+                model=self._model_name or "unknown",
+                max_tokens=max_tokens,
                 original_error=str(error),
             ) from error
 
