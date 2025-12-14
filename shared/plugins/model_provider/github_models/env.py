@@ -31,8 +31,9 @@ ENV_GITHUB_ORGANIZATION = "JAATO_GITHUB_ORGANIZATION"
 ENV_GITHUB_ENTERPRISE = "JAATO_GITHUB_ENTERPRISE"
 ENV_GITHUB_ENDPOINT = "JAATO_GITHUB_ENDPOINT"
 
-# Default endpoint for GitHub Models
-DEFAULT_ENDPOINT = "https://models.inference.ai.azure.com"
+# Default endpoint for GitHub Models (new API as of May 2025)
+# The old Azure endpoint (models.inference.ai.azure.com) was deprecated July 2025
+DEFAULT_ENDPOINT = "https://models.github.ai/inference"
 
 
 def _get_env_with_fallback(*names: str, default: Optional[str] = None) -> Optional[str]:

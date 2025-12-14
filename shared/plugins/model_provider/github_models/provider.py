@@ -73,8 +73,8 @@ from .errors import (
     TokenPermissionError,
 )
 
-# GitHub Models catalog API endpoint
-CATALOG_API_ENDPOINT = "https://api.github.com/marketplace/models"
+# GitHub Models catalog API endpoint (models.github.ai as of May 2025)
+CATALOG_API_ENDPOINT = "https://models.github.ai/catalog/models"
 
 
 # Context window limits for known models (total tokens)
@@ -334,19 +334,19 @@ class GitHubModelsProvider:
                 data = json.loads(response.read().decode('utf-8'))
 
             # Extract model IDs from the response
-            # Response format: list of model objects with 'name' or 'id' field
+            # Response format: list of model objects with 'id' field (e.g., "openai/gpt-4.1")
             models = []
             if isinstance(data, list):
                 for model in data:
-                    # Try different field names for model ID
-                    model_id = model.get('name') or model.get('id') or model.get('model_id')
+                    # 'id' is the primary field for model identifier
+                    model_id = model.get('id') or model.get('name') or model.get('model_id')
                     if model_id:
                         models.append(model_id)
             elif isinstance(data, dict):
                 # Response might be paginated with a 'models' key
                 model_list = data.get('models', data.get('items', []))
                 for model in model_list:
-                    model_id = model.get('name') or model.get('id') or model.get('model_id')
+                    model_id = model.get('id') or model.get('name') or model.get('model_id')
                     if model_id:
                         models.append(model_id)
 
