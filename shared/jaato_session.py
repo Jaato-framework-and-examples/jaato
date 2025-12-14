@@ -281,11 +281,22 @@ class JaatoSession:
         Returns:
             Dict with command result.
         """
+        import os
+        debug = os.environ.get('JAATO_CMD_DEBUG', '').lower() in ('1', 'true', 'yes')
+
+        if debug:
+            print(f"[model-cmd] _execute_model_command called with args={args}")
+
         subcommand = args.get("subcommand", "").lower()
         model_name = args.get("model_name")
 
+        if debug:
+            print(f"[model-cmd] subcommand='{subcommand}', model_name='{model_name}'")
+
         # No subcommand - show help
         if not subcommand:
+            if debug:
+                print("[model-cmd] No subcommand, returning help")
             return {
                 "current_model": self._model_name,
                 "subcommands": {
@@ -296,11 +307,21 @@ class JaatoSession:
 
         # List subcommand
         if subcommand == "list":
+            if debug:
+                print(f"[model-cmd] list: provider={self._provider}, has list_models={hasattr(self._provider, 'list_models') if self._provider else 'N/A'}")
             # Use session's provider if available (faster, no new API connection)
             if self._provider and hasattr(self._provider, 'list_models'):
+                if debug:
+                    print("[model-cmd] list: calling self._provider.list_models()...")
                 models = self._provider.list_models()
+                if debug:
+                    print(f"[model-cmd] list: got {len(models)} models")
             else:
+                if debug:
+                    print("[model-cmd] list: calling self._runtime.list_available_models()...")
                 models = self._runtime.list_available_models()
+                if debug:
+                    print(f"[model-cmd] list: got {len(models)} models")
             return {
                 "current_model": self._model_name,
                 "available_models": models
