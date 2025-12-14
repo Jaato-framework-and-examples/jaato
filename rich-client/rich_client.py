@@ -798,10 +798,13 @@ class RichClient:
                     prompt_data = buffer.get_pending_prompt_for_pager()
                     if prompt_data:
                         prompt_type, prompt_lines = prompt_data
-                        # Show full prompt in pager
+                        # Show full prompt in pager (omit options line - it's in the original view)
                         title = "Permission Request" if prompt_type == "permission" else "Clarification Request"
                         lines = [(f"─── {title} ───", "bold cyan")]
                         for line in prompt_lines:
+                            # Skip the options line (e.g. "[y]es [n]o [a]lways...")
+                            if '[y]es' in line.lower() or '(type' in line.lower():
+                                continue
                             # Color diff lines
                             if line.startswith('+') and not line.startswith('+++'):
                                 lines.append((line, "green"))
@@ -812,6 +815,7 @@ class RichClient:
                             else:
                                 lines.append((line, ""))
                         lines.append(("─" * 40, "dim"))
+                        lines.append(("Press 'q' to close, Enter/Space for next page", "dim italic"))
                         self._display.show_lines(lines)
                         return
             # Don't echo answer - it's shown inline in the tool tree
