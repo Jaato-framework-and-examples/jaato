@@ -151,6 +151,17 @@ class OutputBuffer:
         if source == "clarification":
             return
 
+        # If this is new model text and there are completed tools, finalize the tree first
+        # This ensures the tool tree appears BEFORE the new response, not after
+        if source == "model" and mode == "write" and self._active_tools:
+            all_completed = all(tool.completed for tool in self._active_tools)
+            any_pending = any(
+                tool.permission_state == "pending" or tool.clarification_state == "pending"
+                for tool in self._active_tools
+            )
+            if all_completed and not any_pending:
+                self.finalize_tool_tree()
+
         if mode == "write":
             # Start a new block - this is a new turn
             self._flush_current_block()
