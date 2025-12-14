@@ -422,6 +422,147 @@ class InteractiveClient:
                 all_decls.extend(self._jaato._session_plugin.get_tool_schemas())
         return all_decls
 
+    def _handle_tools_command(self, user_input: str) -> None:
+        """Handle the tools command with subcommands.
+
+        Subcommands:
+            tools / tools list  - List all tools with enabled/disabled status
+            tools enable <name> - Enable a specific tool
+            tools disable <name> - Disable a specific tool
+            tools enable all    - Enable all tools
+            tools disable all   - Disable all tools
+
+        Args:
+            user_input: The full user input string starting with 'tools'.
+        """
+        parts = user_input.strip().split()
+        subcommand = parts[1].lower() if len(parts) > 1 else "list"
+        args = parts[2:] if len(parts) > 2 else []
+
+        if subcommand == "list" or subcommand == "tools":
+            # List all tools with status
+            self._presenter.print_tools_with_status(self._get_tool_status())
+            return
+
+        if subcommand == "enable":
+            if not args:
+                print("\n[Error: Specify a tool name or 'all']")
+                print("  Usage: tools enable <tool_name>")
+                print("         tools enable all")
+                return
+            self._tools_enable(args[0])
+            return
+
+        if subcommand == "disable":
+            if not args:
+                print("\n[Error: Specify a tool name or 'all']")
+                print("  Usage: tools disable <tool_name>")
+                print("         tools disable all")
+                return
+            self._tools_disable(args[0])
+            return
+
+        # Unknown subcommand - show help
+        print(f"\n[Unknown subcommand: {subcommand}]")
+        print("  Available subcommands:")
+        print("    tools list         - List all tools with status")
+        print("    tools enable <n>   - Enable a tool (or 'all')")
+        print("    tools disable <n>  - Disable a tool (or 'all')")
+
+    def _get_tool_status(self) -> list:
+        """Get status of all tools including enabled/disabled state."""
+        status = []
+
+        # Get registry tools with status
+        if self.registry:
+            status.extend(self.registry.get_tool_status())
+
+        # Add permission plugin tools (always enabled)
+        if self.permission_plugin:
+            for schema in self.permission_plugin.get_tool_schemas():
+                status.append({
+                    'name': schema.name,
+                    'description': schema.description,
+                    'enabled': True,
+                    'plugin': 'permission',
+                })
+
+        # Add session plugin tools (always enabled)
+        if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
+            session_plugin = self._jaato._session_plugin
+            if hasattr(session_plugin, 'get_tool_schemas'):
+                for schema in session_plugin.get_tool_schemas():
+                    status.append({
+                        'name': schema.name,
+                        'description': schema.description,
+                        'enabled': True,
+                        'plugin': 'session',
+                    })
+
+        return status
+
+    def _tools_enable(self, name: str) -> None:
+        """Enable a tool or all tools.
+
+        Args:
+            name: Tool name or 'all'.
+        """
+        if not self.registry:
+            print("\n[Error: Registry not available]")
+            return
+
+        if name.lower() == "all":
+            count = self.registry.enable_all_tools()
+            self._refresh_session_tools()
+            print(f"\n[Enabled all {count} tools]")
+            return
+
+        if self.registry.enable_tool(name):
+            self._refresh_session_tools()
+            print(f"\n[Enabled tool: {name}]")
+        else:
+            print(f"\n[Error: Tool '{name}' not found]")
+            # Show available tool names
+            available = self.registry.get_all_tool_names()
+            if available:
+                print(f"  Available tools: {', '.join(sorted(available)[:10])}")
+                if len(available) > 10:
+                    print(f"  ... and {len(available) - 10} more")
+
+    def _tools_disable(self, name: str) -> None:
+        """Disable a tool or all tools.
+
+        Args:
+            name: Tool name or 'all'.
+        """
+        if not self.registry:
+            print("\n[Error: Registry not available]")
+            return
+
+        if name.lower() == "all":
+            count = self.registry.disable_all_tools()
+            self._refresh_session_tools()
+            print(f"\n[Disabled all {count} tools]")
+            print("  Note: Permission and session tools remain available")
+            return
+
+        if self.registry.disable_tool(name):
+            self._refresh_session_tools()
+            print(f"\n[Disabled tool: {name}]")
+        else:
+            print(f"\n[Error: Tool '{name}' not found]")
+            available = self.registry.get_all_tool_names()
+            if available:
+                print(f"  Available tools: {', '.join(sorted(available)[:10])}")
+                if len(available) > 10:
+                    print(f"  ... and {len(available) - 10} more")
+
+    def _refresh_session_tools(self) -> None:
+        """Refresh the session's tools after enabling/disabling."""
+        if self._jaato and hasattr(self._jaato, '_session') and self._jaato._session:
+            self._jaato._session.refresh_tools()
+            self.log("[client] Session tools refreshed")
+
     def _export_session(self, filename: str) -> None:
         """Export current session to a YAML file for replay."""
         if not self._jaato:
@@ -473,8 +614,8 @@ class InteractiveClient:
                 self._presenter.print_help(self._get_plugin_commands_by_plugin())
                 continue
 
-            if user_input.lower() == 'tools':
-                self._presenter.print_tools(self._get_all_tool_schemas())
+            if user_input.lower().startswith('tools'):
+                self._handle_tools_command(user_input)
                 continue
 
             if user_input.lower() == 'reset':
