@@ -88,7 +88,8 @@ class CommandCompleter(Completer):
         Handles both single-word commands (help, reset) and multi-word
         commands with subcommands (tools list, tools enable).
         """
-        text = document.text_before_cursor.strip()
+        raw_text = document.text_before_cursor
+        text = raw_text.strip()
 
         # Skip if contains @ (file reference) or starts with / (slash command)
         if '@' in text or text.startswith('/'):
@@ -97,8 +98,16 @@ class CommandCompleter(Completer):
         # Get the full text being typed (lowercase for matching)
         full_text = text.lower()
 
+        # Check if user has trailing space (typing arguments, not the command)
+        has_trailing_space = raw_text.endswith(' ') and text
+
         for cmd_name, cmd_desc in self.commands:
             cmd_lower = cmd_name.lower()
+
+            # If user typed a command exactly and added a space, they're now
+            # typing arguments - don't offer that command as completion
+            if has_trailing_space and full_text == cmd_lower:
+                continue
 
             # Check if this command matches what the user is typing
             if cmd_lower.startswith(full_text):
@@ -109,12 +118,6 @@ class CommandCompleter(Completer):
                     display=cmd_name,
                     display_meta=cmd_desc,
                 )
-            elif full_text.startswith(cmd_lower + ' '):
-                # User typed a command prefix plus space - check for subcommand match
-                # e.g., "tools " or "tools l" should match "tools list"
-                # This handles multi-word commands where full_text is "tools l"
-                # and cmd_name is "tools list"
-                pass  # Already handled by the startswith check above
             elif ' ' in cmd_name and full_text:
                 # Multi-word command: check if user is typing a partial subcommand
                 # e.g., full_text="tools l", cmd_name="tools list"
