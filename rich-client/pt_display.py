@@ -280,8 +280,10 @@ class PTDisplay:
         # Check for terminal resize and update dimensions if needed
         self._update_dimensions()
 
-        # Use selected agent's buffer if registry present, otherwise use default
-        if self._agent_registry:
+        # Use pager temp buffer if pager is active, otherwise use main buffer
+        if getattr(self, '_pager_active', False) and hasattr(self, '_pager_temp_buffer'):
+            output_buffer = self._pager_temp_buffer
+        elif self._agent_registry:
             output_buffer = self._agent_registry.get_selected_buffer()
             if not output_buffer:
                 output_buffer = self._output_buffer
@@ -329,13 +331,13 @@ class PTDisplay:
         # Key bindings
         kb = KeyBindings()
 
-        @kb.add("enter")
+        @kb.add("enter", eager=True)
         def handle_enter(event):
             """Handle enter key - submit input or advance pager."""
             if getattr(self, '_pager_active', False):
                 # In pager mode - advance page
-                if self._input_callback:
-                    self._input_callback("")  # Empty string advances pager
+                self._advance_pager_page()
+                return
             else:
                 # Normal mode - submit input
                 text = self._input_buffer.text.strip()
@@ -352,16 +354,43 @@ class PTDisplay:
             if not getattr(self, '_pager_active', False):
                 event.current_buffer.insert_text('\n')
 
-        @kb.add("q")
+        @kb.add("q", eager=True)
         def handle_q(event):
             """Handle 'q' key - quit pager if active, otherwise type 'q'."""
             if getattr(self, '_pager_active', False):
-                # In pager mode - quit pager
-                if self._input_callback:
-                    self._input_callback("q")
+                # In pager mode - quit pager directly
+                self._stop_pager()
+                return  # Don't insert 'q'
             else:
                 # Normal mode - insert 'q' character
                 event.current_buffer.insert_text("q")
+
+        @kb.add("v")
+        def handle_v(event):
+            """Handle 'v' key - view full prompt if truncated, otherwise type 'v'."""
+            # Check if waiting for channel input with TRUNCATED pending prompt
+            if getattr(self, '_waiting_for_channel_input', False):
+                # Only zoom if the prompt is actually truncated
+                if self._agent_registry:
+                    buffer = self._agent_registry.get_buffer("main")
+                    if buffer and buffer.has_truncated_pending_prompt():
+                        # Trigger zoom via callback
+                        if self._input_callback:
+                            self._input_callback("v")
+                        return
+            # Normal mode - insert 'v' character
+            event.current_buffer.insert_text("v")
+
+        @kb.add(" ", eager=True)
+        def handle_space(event):
+            """Handle space key - advance pager if active, otherwise insert space."""
+            if getattr(self, '_pager_active', False):
+                # In pager mode - advance page
+                self._advance_pager_page()
+                return
+            else:
+                # Normal mode - insert space character
+                event.current_buffer.insert_text(" ")
 
         @kb.add("c-c")
         def handle_ctrl_c(event):
@@ -513,6 +542,7 @@ class PTDisplay:
             if getattr(self, '_pager_active', False):
                 return [("class:prompt.pager", "── Enter: next, q: quit ──")]
             if getattr(self, '_waiting_for_channel_input', False):
+                # 'v' hint is already shown in the output panel truncation indicator
                 return [("class:prompt.permission", "Answer> ")]
             return [("class:prompt", "You> ")]
 
@@ -766,19 +796,15 @@ class PTDisplay:
         else:
             buffer = self._output_buffer
 
-        # Check if pagination is needed
-        if len(lines) <= page_size:
-            # No pagination needed - just display all lines
-            for text, style in lines:
-                buffer.add_system_message(text, style)
-            buffer.add_system_message("", style="dim")  # Trailing blank
-            self.refresh()
-        else:
-            # Start pager mode (note: pager still uses self._output_buffer for now)
-            self._start_pager(lines, page_size)
+        # Always use pager mode for zoom view (even if content fits on one page)
+        # This ensures clean separation from original content and proper 'q' to exit
+        self._start_pager(lines, page_size)
 
     def _start_pager(self, lines: list, page_size: int) -> None:
         """Start paged display mode (internal).
+
+        Creates a temporary buffer for pager content, preserving the original
+        buffer which is restored when pager exits.
 
         Args:
             lines: List of (text, style) tuples to display.
@@ -789,11 +815,21 @@ class PTDisplay:
         self._pager_current = 0
         self._pager_active = True
 
+        # Create a temporary buffer for pager content (preserves original)
+        self._pager_temp_buffer = OutputBuffer()
+        # Copy width settings from the main buffer
+        if self._agent_registry:
+            original_buffer = self._agent_registry.get_selected_buffer()
+            if original_buffer:
+                self._pager_temp_buffer.set_width(original_buffer._console_width)
+        else:
+            self._pager_temp_buffer.set_width(self._output_buffer._console_width)
+
         self._show_pager_page()
 
     def _show_pager_page(self) -> None:
-        """Show the current pager page."""
-        if not self._pager_active:
+        """Show the current pager page in the temporary pager buffer."""
+        if not self._pager_active or not hasattr(self, '_pager_temp_buffer'):
             return
 
         lines = self._pager_lines
@@ -804,15 +840,10 @@ class PTDisplay:
         total_pages = (total_lines + page_size - 1) // page_size
         page_num = (current // page_size) + 1
 
-        # Use selected agent's buffer if registry present
-        if self._agent_registry:
-            buffer = self._agent_registry.get_selected_buffer()
-            if not buffer:
-                buffer = self._output_buffer
-        else:
-            buffer = self._output_buffer
+        # Use the temporary pager buffer (not the main buffer)
+        buffer = self._pager_temp_buffer
 
-        # Clear output for fresh page
+        # Clear the temp buffer for fresh page
         buffer.clear()
 
         # Calculate what to show
@@ -836,13 +867,24 @@ class PTDisplay:
         for text, style in lines[current:end_line]:
             buffer.add_system_message(text, style)
 
-        # Show pagination status if not last page
+        # Show navigation hint
         if not is_last_page:
             buffer.add_system_message(
-                f"── Page {page_num}/{total_pages} ── Press Enter for more, 'q' to quit ──",
+                f"── Page {page_num}/{total_pages} ── Press Enter/Space for more, 'q' to quit ──",
                 style="bold cyan"
             )
-        # Note: pager_active is deactivated in handle_pager_input when user advances past last page
+        else:
+            # Last page or single page - show how to exit
+            if total_pages > 1:
+                buffer.add_system_message(
+                    f"── Page {page_num}/{total_pages} (end) ── Press 'q' to close ──",
+                    style="bold cyan"
+                )
+            else:
+                buffer.add_system_message(
+                    "── Press 'q' to close ──",
+                    style="bold cyan"
+                )
 
         self.refresh()
 
@@ -859,24 +901,43 @@ class PTDisplay:
             return False
 
         if text.lower() == 'q':
-            # Quit pager - add blank line for separation from next command
-            self._pager_active = False
-            # Don't clear - keep current page content visible
-            self._output_buffer.add_system_message("", style="dim")
-            self.refresh()
+            # Quit pager - restore original buffer
+            self._stop_pager()
+            return True
+
+        if text.lower() == 'v':
+            # Ignore 'v' when already zoomed in - we're already viewing
             return True
 
         # Empty string or any other input advances to next page
         self._pager_current += self._pager_page_size
         if self._pager_current >= len(self._pager_lines):
-            # Reached end - last page already shown, just deactivate
-            self._pager_active = False
-            self._output_buffer.add_system_message("", style="dim")
-            self.refresh()
+            # Reached end - restore original buffer
+            self._stop_pager()
         else:
             self._show_pager_page()
 
         return True
+
+    def _stop_pager(self) -> None:
+        """Stop pager mode and restore original buffer."""
+        self._pager_active = False
+        # Clean up temporary buffer
+        if hasattr(self, '_pager_temp_buffer'):
+            del self._pager_temp_buffer
+        # Refresh to show original buffer again
+        self.refresh()
+
+    def _advance_pager_page(self) -> None:
+        """Advance to next pager page or exit if at end."""
+        if not getattr(self, '_pager_active', False):
+            return
+        self._pager_current += self._pager_page_size
+        if self._pager_current >= len(self._pager_lines):
+            # Reached end - restore original buffer
+            self._stop_pager()
+        else:
+            self._show_pager_page()
 
     @property
     def pager_active(self) -> bool:

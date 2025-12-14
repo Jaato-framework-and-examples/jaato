@@ -1,1 +1,1 @@
-Jaato Rich TUI Client - Sticky Plan Display version 2025-12-10
+Jaato Rich TUI Client - tool call list version 2025-12-13

@@ -106,16 +106,22 @@ class RichClient:
         if self.verbose and self._display:
             self._display.add_system_message(msg, style="cyan")
 
-    def _create_output_callback(self, stop_spinner_on_first: bool = False) -> Callable[[str, str, str], None]:
+    def _create_output_callback(self, stop_spinner_on_first: bool = False,
+                                  suppress_sources: Optional[set] = None) -> Callable[[str, str, str], None]:
         """Create callback for real-time output to display.
 
         Args:
             stop_spinner_on_first: If True, stop the spinner on first output.
+            suppress_sources: Set of source names to suppress (e.g., {"permission"})
         """
         first_output_received = [False]  # Use list for mutability in closure
+        suppress = suppress_sources or set()
 
         def callback(source: str, text: str, mode: str) -> None:
             if self._display:
+                # Skip suppressed sources (e.g., permission output shown in tool tree)
+                if source in suppress:
+                    return
                 # Stop spinner on first output if requested
                 if stop_spinner_on_first and not first_output_received[0]:
                     first_output_received[0] = True
@@ -366,12 +372,13 @@ class RichClient:
                     self._trace("Clarification channel callbacks set (queue)")
 
         # Set callbacks on permission plugin channel
+        # Suppress "permission" source output since it's now shown in the tool tree
         if self.permission_plugin and hasattr(self.permission_plugin, '_channel'):
             channel = self.permission_plugin._channel
             self._trace(f"Permission channel type: {type(channel).__name__}")
             if channel and hasattr(channel, 'set_callbacks'):
                 channel.set_callbacks(
-                    output_callback=self._create_output_callback(),
+                    output_callback=self._create_output_callback(suppress_sources={"permission"}),
                     input_queue=self._channel_input_queue,
                     prompt_callback=on_prompt_state_change,
                 )
@@ -461,10 +468,11 @@ class RichClient:
                     if display:
                         display.refresh()
 
-            def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds):
+            def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds,
+                                  error_message=None):
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
-                    buffer.remove_active_tool(tool_name)
+                    buffer.mark_tool_completed(tool_name, success, duration_seconds, error_message)
                     if display:
                         display.refresh()
 
@@ -481,6 +489,97 @@ class RichClient:
             subagent_plugin = self.registry.get_plugin("subagent")
             if subagent_plugin and hasattr(subagent_plugin, 'set_ui_hooks'):
                 subagent_plugin.set_ui_hooks(hooks)
+
+    def _setup_permission_hooks(self) -> None:
+        """Set up permission lifecycle hooks for UI integration.
+
+        These hooks update the tool call tree to show permission status
+        inline under each tool that requires permission.
+        """
+        if not self.permission_plugin or not self._agent_registry:
+            return
+
+        registry = self._agent_registry
+        display = self._display
+
+        def on_permission_requested(tool_name: str, request_id: str, prompt_lines: list):
+            """Called when permission prompt is shown."""
+            # Update the tool in the main agent's buffer
+            buffer = registry.get_buffer("main")
+            if buffer:
+                buffer.set_tool_permission_pending(tool_name, prompt_lines)
+                if display:
+                    display.refresh()
+
+        def on_permission_resolved(tool_name: str, request_id: str, granted: bool, method: str):
+            """Called when permission is resolved."""
+            # Update the tool in the main agent's buffer
+            buffer = registry.get_buffer("main")
+            if buffer:
+                buffer.set_tool_permission_resolved(tool_name, granted, method)
+                if display:
+                    display.refresh()
+
+        self.permission_plugin.set_permission_hooks(
+            on_requested=on_permission_requested,
+            on_resolved=on_permission_resolved
+        )
+
+    def _setup_clarification_hooks(self) -> None:
+        """Set up clarification lifecycle hooks for UI integration.
+
+        These hooks update the tool call tree to show clarification status
+        inline under the request_clarification tool, with questions shown
+        one at a time.
+        """
+        if not self.registry or not self._agent_registry:
+            return
+
+        clarification_plugin = self.registry.get_plugin("clarification")
+        if not clarification_plugin or not hasattr(clarification_plugin, 'set_clarification_hooks'):
+            return
+
+        registry = self._agent_registry
+        display = self._display
+
+        def on_clarification_requested(tool_name: str, prompt_lines: list):
+            """Called when clarification session starts (context only)."""
+            buffer = registry.get_buffer("main")
+            if buffer:
+                buffer.set_tool_clarification_pending(tool_name, prompt_lines)
+                if display:
+                    display.refresh()
+
+        def on_clarification_resolved(tool_name: str):
+            """Called when all clarification questions are answered."""
+            buffer = registry.get_buffer("main")
+            if buffer:
+                buffer.set_tool_clarification_resolved(tool_name)
+                if display:
+                    display.refresh()
+
+        def on_question_displayed(tool_name: str, question_index: int, total_questions: int, question_lines: list):
+            """Called when each question is shown."""
+            buffer = registry.get_buffer("main")
+            if buffer:
+                buffer.set_tool_clarification_question(tool_name, question_index, total_questions, question_lines)
+                if display:
+                    display.refresh()
+
+        def on_question_answered(tool_name: str, question_index: int, answer_summary: str):
+            """Called when user answers a question."""
+            buffer = registry.get_buffer("main")
+            if buffer:
+                buffer.set_tool_question_answered(tool_name, question_index, answer_summary)
+                if display:
+                    display.refresh()
+
+        clarification_plugin.set_clarification_hooks(
+            on_requested=on_clarification_requested,
+            on_resolved=on_clarification_resolved,
+            on_question_displayed=on_question_displayed,
+            on_question_answered=on_question_answered
+        )
 
     def _setup_session_plugin(self) -> None:
         """Set up session persistence plugin."""
@@ -692,9 +791,34 @@ class RichClient:
 
         # Route input to channel queue if waiting for permission/clarification
         if self._waiting_for_channel_input:
-            # Show the answer in output panel
-            if user_input:
-                self._display.append_output("user", user_input, "write")
+            # Check for 'v' to view full prompt in pager (only if truncated)
+            if user_input.lower() == 'v':
+                buffer = self._agent_registry.get_buffer("main")
+                if buffer and buffer.has_truncated_pending_prompt():
+                    prompt_data = buffer.get_pending_prompt_for_pager()
+                    if prompt_data:
+                        prompt_type, prompt_lines = prompt_data
+                        # Show full prompt in pager (omit options line - it's in the original view)
+                        title = "Permission Request" if prompt_type == "permission" else "Clarification Request"
+                        lines = [(f"─── {title} ───", "bold cyan")]
+                        for line in prompt_lines:
+                            # Skip the options line (e.g. "[y]es [n]o [a]lways...")
+                            if '[y]es' in line.lower() or '(type' in line.lower():
+                                continue
+                            # Color diff lines
+                            if line.startswith('+') and not line.startswith('+++'):
+                                lines.append((line, "green"))
+                            elif line.startswith('-') and not line.startswith('---'):
+                                lines.append((line, "red"))
+                            elif line.startswith('@@'):
+                                lines.append((line, "cyan"))
+                            else:
+                                lines.append((line, ""))
+                        lines.append(("─" * 40, "dim"))
+                        lines.append(("Press 'q' to close, Enter/Space for next page", "dim italic"))
+                        self._display.show_lines(lines)
+                        return
+            # Don't echo answer - it's shown inline in the tool tree
             self._channel_input_queue.put(user_input)
             self._trace(f"Input routed to channel queue: {user_input}")
             # Don't start spinner here - the channel may have more questions.
@@ -796,6 +920,12 @@ class RichClient:
         # Register UI hooks with jaato client and subagent plugin
         # This will create the main agent in the registry via set_ui_hooks()
         self._setup_agent_hooks()
+
+        # Set up permission hooks for inline permission display in tool tree
+        self._setup_permission_hooks()
+
+        # Set up clarification hooks for inline clarification display in tool tree
+        self._setup_clarification_hooks()
 
         # Load release name from file
         release_name = "Jaato Rich TUI Client"
