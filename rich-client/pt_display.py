@@ -796,16 +796,9 @@ class PTDisplay:
         else:
             buffer = self._output_buffer
 
-        # Check if pagination is needed
-        if len(lines) <= page_size:
-            # No pagination needed - just display all lines
-            for text, style in lines:
-                buffer.add_system_message(text, style)
-            buffer.add_system_message("", style="dim")  # Trailing blank
-            self.refresh()
-        else:
-            # Start pager mode (note: pager still uses self._output_buffer for now)
-            self._start_pager(lines, page_size)
+        # Always use pager mode for zoom view (even if content fits on one page)
+        # This ensures clean separation from original content and proper 'q' to exit
+        self._start_pager(lines, page_size)
 
     def _start_pager(self, lines: list, page_size: int) -> None:
         """Start paged display mode (internal).
@@ -874,13 +867,24 @@ class PTDisplay:
         for text, style in lines[current:end_line]:
             buffer.add_system_message(text, style)
 
-        # Show pagination status if not last page
+        # Show navigation hint
         if not is_last_page:
             buffer.add_system_message(
-                f"── Page {page_num}/{total_pages} ── Press Enter for more, 'q' to quit ──",
+                f"── Page {page_num}/{total_pages} ── Press Enter/Space for more, 'q' to quit ──",
                 style="bold cyan"
             )
-        # Note: pager_active is deactivated in handle_pager_input when user advances past last page
+        else:
+            # Last page or single page - show how to exit
+            if total_pages > 1:
+                buffer.add_system_message(
+                    f"── Page {page_num}/{total_pages} (end) ── Press 'q' to close ──",
+                    style="bold cyan"
+                )
+            else:
+                buffer.add_system_message(
+                    "── Press 'q' to close ──",
+                    style="bold cyan"
+                )
 
         self.refresh()
 
