@@ -80,13 +80,13 @@ python3 -m venv .venv
   - **Model Provider Plugins**: SDK abstraction for multi-provider support
     - `model_provider/`: Provider-agnostic types and protocol
     - `model_provider/google_genai/`: Google GenAI/Vertex AI implementation
-    - Future: `model_provider/anthropic/` for Claude API
+    - `model_provider/github_models/`: GitHub Models API (GPT, Claude, Gemini via GitHub)
 
 - **plugins/model_provider/**: Provider abstraction layer
   - `types.py`: Provider-agnostic types (`ToolSchema`, `Message`, `ProviderResponse`)
   - `base.py`: `ModelProviderPlugin` protocol definition
-  - `google_genai/provider.py`: Google GenAI implementation
-  - `google_genai/converters.py`: Type conversion utilities
+  - `google_genai/`: Google GenAI/Vertex AI implementation
+  - `github_models/`: GitHub Models API implementation (uses `azure-ai-inference` SDK)
 
 - **mcp_context_manager.py**: Multi-server MCP client manager
   - `MCPClientManager`: Manages persistent connections to multiple MCP servers
@@ -207,12 +207,25 @@ Key types in `shared/plugins/model_provider/types.py`:
 
 ## Key Environment Variables
 
+### Google GenAI / Vertex AI
 | Variable | Purpose |
 |----------|---------|
 | `PROJECT_ID` | GCP project ID |
 | `LOCATION` | Vertex AI region (e.g., `us-central1`, `global`) |
 | `MODEL_NAME` | Gemini model (e.g., `gemini-2.5-flash`) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account key JSON |
+
+### GitHub Models
+| Variable | Purpose |
+|----------|---------|
+| `GITHUB_TOKEN` | GitHub PAT with `models: read` permission |
+| `JAATO_GITHUB_ORGANIZATION` | Organization for billing attribution |
+| `JAATO_GITHUB_ENTERPRISE` | Enterprise name (for context) |
+| `JAATO_GITHUB_ENDPOINT` | Override API endpoint URL |
+
+### General
+| Variable | Purpose |
+|----------|---------|
 | `AI_USE_CHAT_FUNCTIONS` | Enable function calling mode (`1`/`true`) |
 | `AI_EXECUTE_TOOLS` | Allow generic tool execution (`1`/`true`) |
 | `AI_RETRY_ATTEMPTS` | Max retry attempts for rate limits (default: 5) |
