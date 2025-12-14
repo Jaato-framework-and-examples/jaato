@@ -192,18 +192,18 @@ class JaatoClient:
             raise RuntimeError("Client not connected. Call connect() first.")
         return self._runtime.list_available_models(prefix=prefix)
 
-    def get_model_completions(self, prefix: str = "") -> List:
-        """Get model name completions for the model command.
+    def get_model_completions(self, args: List[str]) -> List:
+        """Get completions for the model command.
 
         Args:
-            prefix: Prefix to filter model names by.
+            args: Arguments typed so far.
 
         Returns:
-            List of CommandCompletion objects for matching models.
+            List of CommandCompletion objects.
         """
         if not self._session:
             return []
-        return self._session.get_model_completions(prefix)
+        return self._session.get_model_completions(args)
 
     def connect(
         self,
