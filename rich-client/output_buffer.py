@@ -646,16 +646,20 @@ class OutputBuffer:
                         output.append("     ")  # Indent continuation lines
                     output.append(wrapped_line)
             elif line.source == "model":
-                # Model output - only show prefix on turn start
-                prefix_width = 7 if line.is_turn_start else 0  # "Model> " = 7 chars
+                # Model output - always indent to align with "Model> " prefix
+                prefix_width = 7  # "Model> " = 7 chars
                 wrapped = wrap_text(line.text, prefix_width)
                 for j, wrapped_line in enumerate(wrapped):
                     if j > 0:
                         output.append("\n")
                     if j == 0 and line.is_turn_start:
                         output.append("Model> ", style="bold cyan")
-                    elif j > 0 and line.is_turn_start:
-                        output.append("       ")  # Indent continuation lines
+                    elif j == 0:
+                        # Non-turn-start first line - indent to align
+                        output.append("       ")
+                    else:
+                        # All continuation lines get indentation
+                        output.append("       ")
                     output.append(wrapped_line)
             elif line.source == "tool":
                 # Tool output
