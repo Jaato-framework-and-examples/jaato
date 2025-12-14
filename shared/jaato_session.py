@@ -239,7 +239,7 @@ class JaatoSession:
         )
 
     def _register_model_command(self) -> None:
-        """Register the built-in /model command for listing and switching models."""
+        """Register the built-in model command for listing and switching models."""
         from .plugins.base import CommandParameter
 
         # Define the command
@@ -251,7 +251,6 @@ class JaatoSession:
                 CommandParameter(
                     name="model_name",
                     description="Model to switch to (omit to list available models)",
-                    param_type="string",
                     required=False
                 )
             ]
@@ -265,7 +264,7 @@ class JaatoSession:
             self._executor.register("model", self._execute_model_command)
 
     def _execute_model_command(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the /model command.
+        """Execute the model command.
 
         Args:
             args: Command arguments. If 'model_name' is provided, switches to that model.
