@@ -95,6 +95,10 @@ def discover_providers() -> Dict[str, Callable[[], ModelProviderPlugin]]:
     return providers
 
 
+# Track import errors for better error messages
+_provider_import_errors: Dict[str, str] = {}
+
+
 def _discover_via_directory() -> Dict[str, Callable[[], ModelProviderPlugin]]:
     """Discover providers by scanning the model_provider directory.
 
@@ -106,6 +110,9 @@ def _discover_via_directory() -> Dict[str, Callable[[], ModelProviderPlugin]]:
     import importlib
     import pkgutil
     from pathlib import Path
+
+    global _provider_import_errors
+    _provider_import_errors.clear()
 
     providers: Dict[str, Callable[[], ModelProviderPlugin]] = {}
     plugins_dir = Path(__file__).parent
@@ -134,11 +141,23 @@ def _discover_via_directory() -> Dict[str, Callable[[], ModelProviderPlugin]]:
                 except Exception:
                     # Use directory name as fallback
                     providers[item.name] = factory
-        except Exception:
-            # Skip modules that fail to import
-            pass
+        except ImportError as e:
+            # Track import errors for better error messages
+            _provider_import_errors[item.name] = str(e)
+        except Exception as e:
+            # Track other errors
+            _provider_import_errors[item.name] = f"Failed to load: {e}"
 
     return providers
+
+
+def get_provider_import_errors() -> Dict[str, str]:
+    """Get any import errors that occurred during provider discovery.
+
+    Returns:
+        Dict mapping provider names to error messages.
+    """
+    return _provider_import_errors.copy()
 
 
 def load_provider(
@@ -161,6 +180,13 @@ def load_provider(
 
     if name not in providers:
         available = list(providers.keys())
+        # Check if the provider failed to import
+        if name in _provider_import_errors:
+            error = _provider_import_errors[name]
+            raise ValueError(
+                f"Model provider '{name}' failed to load: {error}\n"
+                f"Hint: Run 'pip install -r requirements.txt' to install dependencies."
+            )
         raise ValueError(
             f"Model provider '{name}' not found. Available: {available}"
         )
@@ -189,5 +215,6 @@ __all__ = [
     # Discovery
     "discover_providers",
     "load_provider",
+    "get_provider_import_errors",
     "MODEL_PROVIDER_ENTRY_POINT",
 ]
