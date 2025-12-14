@@ -129,28 +129,16 @@ class RichClient:
 
     def _try_execute_plugin_command(self, user_input: str) -> Optional[Any]:
         """Try to execute user input as a plugin-provided command."""
-        debug = os.environ.get('JAATO_CMD_DEBUG', '').lower() in ('1', 'true', 'yes')
-
         if not self._jaato:
-            if debug:
-                print(f"[cmd-debug] No jaato client")
             return None
 
         user_commands = self._jaato.get_user_commands()
         if not user_commands:
-            if debug:
-                print(f"[cmd-debug] No user commands available")
             return None
-
-        if debug:
-            print(f"[cmd-debug] Available commands: {list(user_commands.keys())}")
 
         parts = user_input.strip().split(maxsplit=1)
         input_cmd = parts[0].lower() if parts else ""
         raw_args = parts[1] if len(parts) > 1 else ""
-
-        if debug:
-            print(f"[cmd-debug] Looking for command: '{input_cmd}'")
 
         command = None
         for cmd_name, cmd in user_commands.items():
@@ -159,24 +147,23 @@ class RichClient:
                 break
 
         if not command:
-            if debug:
-                print(f"[cmd-debug] Command '{input_cmd}' not found")
             return None
 
         args = parse_command_args(command, raw_args)
-        if debug:
-            print(f"[cmd-debug] Found command '{command.name}', args: {args}")
 
         if command.name.lower() == "save":
             args["user_inputs"] = self._original_inputs.copy()
 
         try:
-            if debug:
-                print(f"[cmd-debug] Executing command '{command.name}'...")
             result, shared = self._jaato.execute_user_command(command.name, args)
-            if debug:
-                print(f"[cmd-debug] Command result: {result}")
             self._display_command_result(command.name, result, shared)
+
+            # Update status bar if model was changed
+            if command.name.lower() == "model" and isinstance(result, dict):
+                if result.get("success") and result.get("current_model"):
+                    self._model_name = result["current_model"]
+                    if self._display:
+                        self._display.set_model_info(self._model_provider, self._model_name)
 
             if command.name.lower() == "resume" and isinstance(result, dict):
                 user_inputs = result.get("user_inputs", [])
@@ -186,8 +173,6 @@ class RichClient:
             return result
 
         except Exception as e:
-            if debug:
-                print(f"[cmd-debug] Command exception: {e}")
             if self._display:
                 self._display.show_lines([(f"Error: {e}", "red")])
             return {"error": str(e)}
