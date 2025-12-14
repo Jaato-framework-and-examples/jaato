@@ -52,6 +52,7 @@ class PluginRegistry:
         self._configs: Dict[str, Dict[str, Any]] = {}
         self._model_name: Optional[str] = model_name
         self._skipped_plugins: Dict[str, List[str]] = {}  # name -> required patterns
+        self._disabled_tools: Set[str] = set()  # Individual tools disabled by user
 
     def discover(
         self,
@@ -354,6 +355,153 @@ class PluginRegistry:
             except Exception as exc:
                 print(f"[PluginRegistry] Error getting executors from '{name}': {exc}")
         return executors
+
+    # ==================== Individual Tool Management ====================
+
+    def get_all_tool_names(self) -> List[str]:
+        """Get names of all tools from exposed plugins.
+
+        Returns:
+            List of all tool names (regardless of enabled/disabled state).
+        """
+        names = []
+        for name in self._exposed:
+            try:
+                schemas = self._plugins[name].get_tool_schemas()
+                names.extend(schema.name for schema in schemas)
+            except Exception as exc:
+                print(f"[PluginRegistry] Error getting tool names from '{name}': {exc}")
+        return names
+
+    def disable_tool(self, tool_name: str) -> bool:
+        """Disable a specific tool by name.
+
+        Disabled tools are not exposed to the model but remain available
+        for re-enabling later.
+
+        Args:
+            tool_name: Name of the tool to disable.
+
+        Returns:
+            True if tool was found and disabled, False if not found.
+        """
+        all_tools = self.get_all_tool_names()
+        if tool_name not in all_tools:
+            return False
+        self._disabled_tools.add(tool_name)
+        return True
+
+    def enable_tool(self, tool_name: str) -> bool:
+        """Enable a previously disabled tool.
+
+        Args:
+            tool_name: Name of the tool to enable.
+
+        Returns:
+            True if tool was found and enabled, False if not found.
+        """
+        all_tools = self.get_all_tool_names()
+        if tool_name not in all_tools:
+            return False
+        self._disabled_tools.discard(tool_name)
+        return True
+
+    def is_tool_enabled(self, tool_name: str) -> bool:
+        """Check if a tool is currently enabled.
+
+        Args:
+            tool_name: Name of the tool to check.
+
+        Returns:
+            True if the tool is enabled, False if disabled or not found.
+        """
+        return tool_name not in self._disabled_tools
+
+    def disable_all_tools(self) -> int:
+        """Disable all tools from exposed plugins.
+
+        Returns:
+            Number of tools disabled.
+        """
+        all_tools = self.get_all_tool_names()
+        self._disabled_tools = set(all_tools)
+        return len(all_tools)
+
+    def enable_all_tools(self) -> int:
+        """Enable all tools (clear all disabled).
+
+        Returns:
+            Number of tools that were re-enabled.
+        """
+        count = len(self._disabled_tools)
+        self._disabled_tools.clear()
+        return count
+
+    def get_tool_status(self) -> List[Dict[str, Any]]:
+        """Get status of all tools from exposed plugins.
+
+        Returns:
+            List of dicts with 'name', 'description', 'enabled', 'plugin' keys.
+        """
+        status = []
+        for plugin_name in self._exposed:
+            try:
+                schemas = self._plugins[plugin_name].get_tool_schemas()
+                for schema in schemas:
+                    status.append({
+                        'name': schema.name,
+                        'description': schema.description,
+                        'enabled': schema.name not in self._disabled_tools,
+                        'plugin': plugin_name,
+                    })
+            except Exception as exc:
+                print(f"[PluginRegistry] Error getting tool status from '{plugin_name}': {exc}")
+        return status
+
+    def get_enabled_tool_schemas(self) -> List[ToolSchema]:
+        """Get ToolSchemas from exposed plugins, excluding disabled tools.
+
+        This is what should be sent to the model - only enabled tools.
+
+        Returns:
+            List of ToolSchema objects for enabled tools only.
+        """
+        schemas = []
+        for name in self._exposed:
+            try:
+                plugin_schemas = self._plugins[name].get_tool_schemas()
+                # Filter out disabled tools
+                enabled_schemas = [s for s in plugin_schemas if s.name not in self._disabled_tools]
+                schemas.extend(enabled_schemas)
+            except Exception as exc:
+                print(f"[PluginRegistry] Error getting tool schemas from '{name}': {exc}")
+        return schemas
+
+    def get_enabled_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
+        """Get executor callables from exposed plugins, excluding disabled tools.
+
+        Returns:
+            Dict mapping tool names to executor callables for enabled tools only.
+        """
+        executors = {}
+        for name in self._exposed:
+            try:
+                plugin_executors = self._plugins[name].get_executors()
+                # Filter out disabled tools
+                for tool_name, executor in plugin_executors.items():
+                    if tool_name not in self._disabled_tools:
+                        executors[tool_name] = executor
+            except Exception as exc:
+                print(f"[PluginRegistry] Error getting executors from '{name}': {exc}")
+        return executors
+
+    def list_disabled_tools(self) -> List[str]:
+        """List all currently disabled tool names.
+
+        Returns:
+            List of disabled tool names.
+        """
+        return list(self._disabled_tools)
 
     def get_system_instructions(self) -> Optional[str]:
         """Combine system instructions from all exposed plugins.

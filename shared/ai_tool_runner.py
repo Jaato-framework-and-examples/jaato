@@ -60,6 +60,13 @@ class ToolExecutor:
     def register(self, name: str, fn: Callable[[Dict[str, Any]], Any]) -> None:
         self._map[name] = fn
 
+    def clear_executors(self) -> None:
+        """Clear all registered executors.
+
+        Useful when refreshing tools after enabling/disabling.
+        """
+        self._map.clear()
+
     def set_ledger(self, ledger: Optional[TokenLedger]) -> None:
         """Set the ledger for recording events."""
         self._ledger = ledger

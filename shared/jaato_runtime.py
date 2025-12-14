@@ -157,19 +157,23 @@ class JaatoRuntime:
         self._configure_background_plugin()
 
     def _cache_tool_configuration(self) -> None:
-        """Cache tool schemas and executors from registry."""
+        """Cache tool schemas and executors from registry.
+
+        Uses get_enabled_* methods to respect disabled tools set in the registry.
+        Call refresh_tool_cache() after enabling/disabling tools to update the cache.
+        """
         if not self._registry:
             return
 
-        # Get all exposed tool schemas
-        self._all_tool_schemas = self._registry.get_exposed_tool_schemas()
+        # Get enabled tool schemas (respects disabled tools set)
+        self._all_tool_schemas = self._registry.get_enabled_tool_schemas()
 
         # Add permission plugin schemas if available
         if self._permission_plugin:
             self._all_tool_schemas.extend(self._permission_plugin.get_tool_schemas())
 
-        # Get all exposed executors
-        self._all_executors = dict(self._registry.get_exposed_executors())
+        # Get enabled executors (respects disabled tools set)
+        self._all_executors = dict(self._registry.get_enabled_executors())
 
         # Add permission plugin executors
         if self._permission_plugin:
@@ -197,6 +201,14 @@ class JaatoRuntime:
 
         if self._permission_plugin and self._auto_approved_tools:
             self._permission_plugin.add_whitelist_tools(self._auto_approved_tools)
+
+    def refresh_tool_cache(self) -> None:
+        """Refresh the cached tool configuration.
+
+        Call this after enabling/disabling tools in the registry to update
+        the cached schemas and executors.
+        """
+        self._cache_tool_configuration()
 
     def _configure_subagent_plugin(self) -> None:
         """Configure subagent plugin with runtime reference."""
