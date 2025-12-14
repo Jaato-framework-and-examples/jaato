@@ -108,8 +108,8 @@ class ClarificationPlugin:
                         "context": {
                             "type": "string",
                             "description": (
-                                "Brief explanation of why you need clarification. "
-                                "This helps the user understand the purpose of the questions."
+                                "Technical context about what information is needed and why. "
+                                "Do NOT put conversational text here - use a text response for that."
                             ),
                         },
                         "questions": {
@@ -184,7 +184,10 @@ class ClarificationPlugin:
 
 You have access to a `request_clarification` tool that allows you to ask the user questions when you need more information.
 
-**IMPORTANT**: When you need to ask the user a question, you MUST use the `request_clarification` tool. Do NOT ask questions directly in your text response - always use the tool instead. This ensures a consistent user experience and proper input handling.
+**IMPORTANT**: When using this tool:
+1. First, provide a conversational text response explaining what you're about to do (e.g., "I can help with that. Let me ask a few questions to understand your needs better.")
+2. Then call the `request_clarification` tool with the questions
+3. The `context` parameter should contain only technical context about what information is needed, NOT your conversational response - that goes in your text output.
 
 ### When to use:
 - When the user's request is ambiguous
@@ -203,9 +206,12 @@ You have access to a `request_clarification` tool that allows you to ask the use
 5. Mark questions as optional (`required: false`) when appropriate
 
 ### Example usage:
+Your text response: "I'd be happy to help set up the configuration. I have a few questions about your deployment preferences."
+
+Then call the tool:
 ```json
 {
-  "context": "I need to know your deployment preferences to set up the configuration correctly.",
+  "context": "Deployment configuration settings",
   "questions": [
     {
       "text": "Which environment should I configure?",
