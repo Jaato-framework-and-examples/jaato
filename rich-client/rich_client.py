@@ -61,9 +61,10 @@ class RichClient:
     while model output scrolls naturally below.
     """
 
-    def __init__(self, env_file: str = ".env", verbose: bool = True):
+    def __init__(self, env_file: str = ".env", verbose: bool = True, provider: Optional[str] = None):
         self.verbose = verbose
         self.env_file = env_file
+        self._provider = provider  # CLI override for provider
         self._jaato: Optional[JaatoClient] = None
         self.registry: Optional[PluginRegistry] = None
         self.permission_plugin: Optional[PermissionPlugin] = None
@@ -163,6 +164,13 @@ class RichClient:
             result, shared = self._jaato.execute_user_command(command.name, args)
             self._display_command_result(command.name, result, shared)
 
+            # Update status bar if model was changed
+            if command.name.lower() == "model" and isinstance(result, dict):
+                if result.get("success") and result.get("current_model"):
+                    self._model_name = result["current_model"]
+                    if self._display:
+                        self._display.set_model_info(self._model_provider, self._model_name)
+
             if command.name.lower() == "resume" and isinstance(result, dict):
                 user_inputs = result.get("user_inputs", [])
                 if user_inputs:
@@ -245,9 +253,9 @@ class RichClient:
             print("Error: Set GOOGLE_GENAI_API_KEY for AI Studio, or PROJECT_ID and LOCATION for Vertex AI")
             return False
 
-        # Initialize JaatoClient
+        # Initialize JaatoClient with optional provider override
         try:
-            self._jaato = JaatoClient()
+            self._jaato = JaatoClient(provider_name=self._provider)
             if api_key:
                 # AI Studio mode - just need model
                 self._jaato.connect(model=model_name)
@@ -675,10 +683,16 @@ class RichClient:
                 for cmd in self.permission_plugin.get_user_commands():
                     command_to_plugin[cmd.name] = self.permission_plugin
 
-        if not command_to_plugin:
-            return
+        # Built-in commands with special completion handling
+        commands_with_completions = set(command_to_plugin.keys())
+        commands_with_completions.add("model")  # Built-in model command
 
         def completion_provider(command: str, args: list) -> list:
+            # Handle built-in model command
+            if command == "model" and self._jaato:
+                return self._jaato.get_model_completions(args)
+
+            # Handle plugin commands
             plugin = command_to_plugin.get(command)
             if plugin and hasattr(plugin, 'get_command_completions'):
                 return plugin.get_command_completions(command, args)
@@ -686,7 +700,7 @@ class RichClient:
 
         self._input_handler.set_command_completion_provider(
             completion_provider,
-            set(command_to_plugin.keys())
+            commands_with_completions
         )
 
     def run_prompt(self, prompt: str) -> str:
@@ -1431,6 +1445,12 @@ def main():
         type=str,
         help="Start with this prompt, then continue interactively"
     )
+    parser.add_argument(
+        "--provider",
+        type=str,
+        help="Model provider to use (e.g., 'google_genai', 'github_models'). "
+             "Overrides JAATO_PROVIDER env var."
+    )
     args = parser.parse_args()
 
     # Check TTY before proceeding (except for single prompt mode)
@@ -1442,7 +1462,8 @@ def main():
 
     client = RichClient(
         env_file=args.env_file,
-        verbose=not args.quiet
+        verbose=not args.quiet,
+        provider=args.provider
     )
 
     if not client.initialize():

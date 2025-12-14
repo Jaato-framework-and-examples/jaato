@@ -214,6 +214,9 @@ class JaatoSession:
             for cmd in self._runtime.registry.get_exposed_user_commands():
                 self._user_commands[cmd.name] = cmd
 
+        # Register built-in model command
+        self._register_model_command()
+
         # Create provider session
         self._create_provider_session()
 
@@ -234,6 +237,159 @@ class JaatoSession:
             tools=self._tools,
             history=history
         )
+
+    def _register_model_command(self) -> None:
+        """Register the built-in model command for listing and switching models."""
+        from .plugins.base import CommandParameter
+
+        # Define the command with subcommand parameter
+        model_cmd = UserCommand(
+            name="model",
+            description="Manage models: list, select <name>",
+            share_with_model=False,
+            parameters=[
+                CommandParameter(
+                    name="subcommand",
+                    description="Subcommand: list, select",
+                    required=False
+                ),
+                CommandParameter(
+                    name="model_name",
+                    description="Model name (for select)",
+                    required=False
+                )
+            ]
+        )
+
+        # Register command
+        self._user_commands["model"] = model_cmd
+
+        # Register executor
+        if self._executor:
+            self._executor.register("model", self._execute_model_command)
+
+    def _execute_model_command(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the model command.
+
+        Subcommands:
+            list   - Show available models and current model
+            select - Switch to a different model
+
+        Args:
+            args: Command arguments with 'subcommand' and optionally 'model_name'.
+
+        Returns:
+            Dict with command result.
+        """
+        subcommand = args.get("subcommand", "").lower()
+        model_name = args.get("model_name")
+
+        # No subcommand - show help
+        if not subcommand:
+            return {
+                "current_model": self._model_name,
+                "subcommands": {
+                    "list": "Show available models",
+                    "select <name>": "Switch to a different model"
+                }
+            }
+
+        # List subcommand
+        if subcommand == "list":
+            # Use session's provider if available (faster, no new API connection)
+            if self._provider and hasattr(self._provider, 'list_models'):
+                models = self._provider.list_models()
+            else:
+                models = self._runtime.list_available_models()
+            return {
+                "current_model": self._model_name,
+                "available_models": models
+            }
+
+        # Select subcommand
+        if subcommand == "select":
+            if not model_name:
+                return {
+                    "error": "Model name required",
+                    "usage": "model select <name>",
+                    "hint": "Use 'model list' to see available models"
+                }
+
+            available = self._runtime.list_available_models()
+            if model_name not in available:
+                return {
+                    "error": f"Model '{model_name}' not found",
+                    "available_models": available
+                }
+
+            # Preserve current history
+            history = self.get_history()
+
+            # Update model name
+            old_model = self._model_name
+            self._model_name = model_name
+
+            # Create new provider for the new model
+            self._provider = self._runtime.create_provider(model_name)
+
+            # Recreate session with existing history
+            self._create_provider_session(history=history)
+
+            return {
+                "success": True,
+                "previous_model": old_model,
+                "current_model": model_name,
+                "history_preserved": True,
+                "message": f"Switched from {old_model} to {model_name}"
+            }
+
+        # Unknown subcommand
+        return {
+            "error": f"Unknown subcommand: {subcommand}",
+            "valid_subcommands": ["list", "select"]
+        }
+
+    def get_model_completions(self, args: List[str]) -> List['CommandCompletion']:
+        """Get completions for the model command.
+
+        Args:
+            args: Arguments typed so far.
+
+        Returns:
+            List of CommandCompletion objects.
+        """
+        from .plugins.base import CommandCompletion
+
+        # No args yet - show subcommands
+        if not args:
+            return [
+                CommandCompletion(value="list", description="Show available models"),
+                CommandCompletion(value="select", description="Switch to a model"),
+            ]
+
+        subcommand = args[0].lower() if args else ""
+
+        # Completing subcommand
+        if len(args) == 1:
+            subcommands = [
+                ("list", "Show available models"),
+                ("select", "Switch to a model"),
+            ]
+            return [
+                CommandCompletion(value=cmd, description=desc)
+                for cmd, desc in subcommands
+                if cmd.startswith(subcommand)
+            ]
+
+        # Completing model name for 'select' subcommand
+        if subcommand == "select" and len(args) >= 2:
+            prefix = args[1] if len(args) > 1 else ""
+            models = self._runtime.list_available_models()
+            if prefix:
+                models = [m for m in models if m.startswith(prefix)]
+            return [CommandCompletion(value=m, description="") for m in sorted(models)]
+
+        return []
 
     def send_message(
         self,

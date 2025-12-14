@@ -187,8 +187,14 @@ class JaatoRuntime:
                 parts.append(perm_instructions)
         self._system_instructions = "\n\n".join(parts) if parts else None
 
-        # Get auto-approved tools
+        # Get auto-approved tools from plugins
         self._auto_approved_tools = self._registry.get_auto_approved_tools()
+
+        # Add built-in user commands to auto-approved list
+        # User commands are invoked directly by the user, not the model
+        builtin_user_commands = ["model"]
+        self._auto_approved_tools.extend(builtin_user_commands)
+
         if self._permission_plugin and self._auto_approved_tools:
             self._permission_plugin.add_whitelist_tools(self._auto_approved_tools)
 
@@ -422,8 +428,9 @@ class JaatoRuntime:
             raise RuntimeError("Runtime not connected. Call connect() first.")
 
         # Create a temporary provider to list models
+        # Note: initialize() sets up the client, connect() just selects a model
+        # We don't need to connect to list available models
         provider = load_provider(self._provider_name, self._provider_config)
-        provider.connect("gemini-2.5-flash")  # Need to connect to list
         return provider.list_models(prefix=prefix)
 
 

@@ -59,6 +59,7 @@
         <ul class="sidebar-nav">
           <li><a href="index.html" class="active">Overview</a></li>
           <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="github-models.html">GitHub Models</a></li>
         </ul>
       </div>
 
@@ -103,6 +104,12 @@
                 <td>Gemini 1.5, 2.0, 2.5</td>
               </tr>
               <tr>
+                <td><strong><a href="github-models.html">GitHub Models</a></strong></td>
+                <td><code>github_models</code></td>
+                <td>Available</td>
+                <td>GPT-4o, Claude 3.5, Gemini, Llama</td>
+              </tr>
+              <tr>
                 <td><strong>Anthropic</strong></td>
                 <td><code>anthropic</code></td>
                 <td>Planned</td>
@@ -131,7 +138,15 @@
                 <td>Google GenAI (AI Studio) - free tier available</td>
               </tr>
               <tr>
-                <td>Enterprise / GCP integration</td>
+                <td>Multi-model access</td>
+                <td>GitHub Models - GPT, Claude, Gemini via single API</td>
+              </tr>
+              <tr>
+                <td>GitHub Enterprise</td>
+                <td>GitHub Models - integrated billing, SSO support</td>
+              </tr>
+              <tr>
+                <td>GCP integration</td>
                 <td>Google GenAI (Vertex AI)</td>
               </tr>
               <tr>
@@ -169,11 +184,91 @@ client = JaatoClient(provider_name="google_genai")
 # Find what's available
 providers = discover_providers()
 print(f"Available: {providers}")
-# ['google_genai']
+# ['google_genai', 'github_models']
 
 # Load a specific provider
 provider = load_provider("google_genai")
 print(f"Loaded: {provider.name}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Provider Selection -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="selection">Provider Selection</h2>
+          <p>
+            There are three ways to select which provider to use, in order of precedence:
+          </p>
+
+          <h3>1. CLI Flag (highest priority)</h3>
+          <p>
+            Use the <code>--provider</code> flag when running the rich client.
+            This overrides all other settings.
+          </p>
+
+          <h3>2. Environment Variable</h3>
+          <p>
+            Set <code>JAATO_PROVIDER</code> in your <code>.env</code> file or shell.
+            This is the recommended approach for persistent configuration.
+          </p>
+
+          <h3>3. Code (explicit)</h3>
+          <p>
+            Pass <code>provider_name</code> to <code>JaatoClient()</code>.
+            Overrides environment variable.
+          </p>
+
+          <h3>4. Default</h3>
+          <p>
+            If nothing is specified, defaults to <code>google_genai</code>.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Variable</th>
+                <th>Values</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>JAATO_PROVIDER</code></td>
+                <td><code>google_genai</code>, <code>github_models</code></td>
+                <td>Default provider for all sessions</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">CLI flag (overrides env)</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Use GitHub Models for this session
+.venv/bin/python rich-client/rich_client.py --provider github_models
+
+# Use Google GenAI for this session
+.venv/bin/python rich-client/rich_client.py --provider google_genai</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Environment variable (.env)</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env file
+JAATO_PROVIDER=github_models
+MODEL_NAME=openai/gpt-4o</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Explicit in code</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient
+
+# Explicit provider (overrides JAATO_PROVIDER env var)
+client = JaatoClient(provider_name="github_models")
+client.connect(model="openai/gpt-4o")
+
+# Uses JAATO_PROVIDER env var, or google_genai default
+client = JaatoClient()
+client.connect(model="gemini-2.5-flash")</code></pre>
           </div>
         </div>
       </section>
@@ -189,6 +284,14 @@ print(f"Loaded: {provider.name}")</code></pre>
             <li><strong>Auth:</strong> API key, ADC, service account</li>
             <li><strong>Features:</strong> Function calling, multimodal, structured output</li>
             <li><strong>Best for:</strong> GCP users, long context needs (1M+ tokens)</li>
+          </ul>
+
+          <h3>GitHub Models</h3>
+          <ul>
+            <li><strong>Endpoints:</strong> GitHub Models API (unified)</li>
+            <li><strong>Auth:</strong> GitHub PAT (fine-grained recommended)</li>
+            <li><strong>Features:</strong> Multi-model (GPT, Claude, Gemini, Llama), function calling</li>
+            <li><strong>Best for:</strong> GitHub Enterprise users, multi-model experimentation</li>
           </ul>
 
           <h3>Anthropic (Planned)</h3>
@@ -237,7 +340,8 @@ print(f"Token count: {tokens}")</code></pre>
         <div class="panel-explanation">
           <h2 id="next-steps">Next Steps</h2>
           <ul>
-            <li><a href="google-genai.html">Google GenAI Provider</a> - Setup, authentication, configuration</li>
+            <li><a href="google-genai.html">Google GenAI Provider</a> - GCP integration, Vertex AI</li>
+            <li><a href="github-models.html">GitHub Models Provider</a> - Multi-model access, enterprise SSO</li>
             <li><a href="../../core-concepts/providers.html">Provider Concepts</a> - How providers work</li>
             <li><a href="../types.html">Types Reference</a> - Provider-agnostic types</li>
           </ul>
@@ -249,18 +353,18 @@ print(f"Token count: {tokens}")</code></pre>
 ├── __init__.py
 ├── base.py              # Protocol definition
 ├── types.py             # Unified types
-└── google_genai/
+├── google_genai/
+│   ├── __init__.py
+│   ├── provider.py      # Implementation
+│   ├── converters.py    # Type conversion
+│   ├── env.py           # Environment resolution
+│   └── errors.py        # Auth exceptions
+└── github_models/
     ├── __init__.py
     ├── provider.py      # Implementation
     ├── converters.py    # Type conversion
     ├── env.py           # Environment resolution
-    └── errors.py        # Auth exceptions
-
-# Future providers:
-├── anthropic/
-│   └── provider.py
-└── openai/
-    └── provider.py</code></pre>
+    └── errors.py        # Auth exceptions</code></pre>
           </div>
         </div>
       </section>
