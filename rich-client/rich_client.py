@@ -686,11 +686,33 @@ class RichClient:
         # Built-in commands with special completion handling
         commands_with_completions = set(command_to_plugin.keys())
         commands_with_completions.add("model")  # Built-in model command
+        commands_with_completions.add("tools enable")  # Tool management
+        commands_with_completions.add("tools disable")  # Tool management
 
         def completion_provider(command: str, args: list) -> list:
             # Handle built-in model command
             if command == "model" and self._jaato:
                 return self._jaato.get_model_completions(args)
+
+            # Handle tools enable/disable completions
+            if command == 'tools enable':
+                # Show disabled tools (that can be enabled) + 'all'
+                disabled = self.registry.list_disabled_tools() if self.registry else []
+                completions = [('all', 'Enable all tools')]
+                for tool in sorted(disabled):
+                    completions.append((tool, 'disabled'))
+                return completions
+            elif command == 'tools disable':
+                # Show enabled tools (that can be disabled) + 'all'
+                if self.registry:
+                    all_tools = self.registry.get_all_tool_names()
+                    enabled = [t for t in all_tools if self.registry.is_tool_enabled(t)]
+                else:
+                    enabled = []
+                completions = [('all', 'Disable all tools')]
+                for tool in sorted(enabled):
+                    completions.append((tool, 'enabled'))
+                return completions
 
             # Handle plugin commands
             plugin = command_to_plugin.get(command)
@@ -852,8 +874,8 @@ class RichClient:
             self._show_help()
             return
 
-        if user_input.lower() == 'tools':
-            self._show_tools()
+        if user_input.lower().startswith('tools'):
+            self._handle_tools_command(user_input)
             return
 
         if user_input.lower() == 'plugins':
@@ -987,17 +1009,219 @@ class RichClient:
                 all_decls.extend(self._jaato._session_plugin.get_tool_schemas())
         return all_decls
 
-    def _show_tools(self) -> None:
-        """Show available tools in output panel."""
+    def _handle_tools_command(self, user_input: str) -> None:
+        """Handle the tools command with subcommands.
+
+        Subcommands:
+            tools / tools list  - List all tools with enabled/disabled status
+            tools enable <name> - Enable a specific tool
+            tools disable <name> - Disable a specific tool
+            tools enable all    - Enable all tools
+            tools disable all   - Disable all tools
+
+        Args:
+            user_input: The full user input string starting with 'tools'.
+        """
         if not self._display:
             return
 
-        tools = self._get_all_tool_schemas()
-        lines = [("Available Tools:", "bold")]
-        for tool in tools:
-            lines.append((f"  {tool.name}: {tool.description}", "dim"))
+        parts = user_input.strip().split()
+        subcommand = parts[1].lower() if len(parts) > 1 else "list"
+        args = parts[2:] if len(parts) > 2 else []
 
+        if subcommand == "list" or subcommand == "tools":
+            self._show_tools_with_status()
+            return
+
+        if subcommand == "enable":
+            if not args:
+                self._display.show_lines([
+                    ("[Error: Specify a tool name or 'all']", "red"),
+                    ("  Usage: tools enable <tool_name>", "dim"),
+                    ("         tools enable all", "dim"),
+                ])
+                return
+            self._tools_enable(args[0])
+            return
+
+        if subcommand == "disable":
+            if not args:
+                self._display.show_lines([
+                    ("[Error: Specify a tool name or 'all']", "red"),
+                    ("  Usage: tools disable <tool_name>", "dim"),
+                    ("         tools disable all", "dim"),
+                ])
+                return
+            self._tools_disable(args[0])
+            return
+
+        # Unknown subcommand - show help
+        self._display.show_lines([
+            (f"[Unknown subcommand: {subcommand}]", "yellow"),
+            ("  Available subcommands:", ""),
+            ("    tools list         - List all tools with status", "dim"),
+            ("    tools enable <n>   - Enable a tool (or 'all')", "dim"),
+            ("    tools disable <n>  - Disable a tool (or 'all')", "dim"),
+        ])
+
+    def _get_tool_status(self) -> list:
+        """Get status of all tools including enabled/disabled state."""
+        status = []
+
+        # Get registry tools with status
+        if self.registry:
+            status.extend(self.registry.get_tool_status())
+
+        # Add permission plugin tools (always enabled)
+        if self.permission_plugin:
+            for schema in self.permission_plugin.get_tool_schemas():
+                status.append({
+                    'name': schema.name,
+                    'description': schema.description,
+                    'enabled': True,
+                    'plugin': 'permission',
+                })
+
+        # Add session plugin tools (always enabled)
+        if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
+            session_plugin = self._jaato._session_plugin
+            if hasattr(session_plugin, 'get_tool_schemas'):
+                for schema in session_plugin.get_tool_schemas():
+                    status.append({
+                        'name': schema.name,
+                        'description': schema.description,
+                        'enabled': True,
+                        'plugin': 'session',
+                    })
+
+        return status
+
+    def _show_tools_with_status(self) -> None:
+        """Show tools with enabled/disabled status in output panel."""
+        if not self._display:
+            return
+
+        tool_status = self._get_tool_status()
+
+        if not tool_status:
+            self._display.show_lines([("No tools available.", "yellow")])
+            return
+
+        # Group tools by plugin
+        by_plugin: dict = {}
+        for tool in tool_status:
+            plugin = tool.get('plugin', 'unknown')
+            if plugin not in by_plugin:
+                by_plugin[plugin] = []
+            by_plugin[plugin].append(tool)
+
+        # Count enabled/disabled
+        enabled_count = sum(1 for t in tool_status if t.get('enabled', True))
+        disabled_count = len(tool_status) - enabled_count
+
+        lines = [
+            (f"Tools ({enabled_count} enabled, {disabled_count} disabled):", "bold"),
+            ("  Use 'tools enable <name>' or 'tools disable <name>' to toggle", "dim"),
+            ("", ""),
+        ]
+
+        for plugin_name in sorted(by_plugin.keys()):
+            tools = by_plugin[plugin_name]
+            lines.append((f"  [{plugin_name}]", "cyan"))
+
+            for tool in sorted(tools, key=lambda t: t['name']):
+                name = tool['name']
+                desc = tool.get('description', '')
+                enabled = tool.get('enabled', True)
+
+                # Status indicator
+                status = "✓" if enabled else "○"
+                status_style = "green" if enabled else "red"
+
+                # Truncate description if too long
+                max_desc = 50
+                if len(desc) > max_desc:
+                    desc = desc[:max_desc - 3] + "..."
+
+                lines.append((f"    {status} {name}: {desc}", status_style if not enabled else ""))
+
+            lines.append(("", ""))
+
+        lines.append(("  Legend: ✓ = enabled, ○ = disabled", "dim"))
         self._display.show_lines(lines)
+
+    def _tools_enable(self, name: str) -> None:
+        """Enable a tool or all tools.
+
+        Args:
+            name: Tool name or 'all'.
+        """
+        if not self._display:
+            return
+
+        if not self.registry:
+            self._display.show_lines([("[Error: Registry not available]", "red")])
+            return
+
+        if name.lower() == "all":
+            count = self.registry.enable_all_tools()
+            self._refresh_session_tools()
+            self._display.show_lines([(f"[Enabled all {count} tools]", "green")])
+            return
+
+        if self.registry.enable_tool(name):
+            self._refresh_session_tools()
+            self._display.show_lines([(f"[Enabled tool: {name}]", "green")])
+        else:
+            lines = [(f"[Error: Tool '{name}' not found]", "red")]
+            available = self.registry.get_all_tool_names()
+            if available:
+                preview = ', '.join(sorted(available)[:10])
+                lines.append((f"  Available tools: {preview}", "dim"))
+                if len(available) > 10:
+                    lines.append((f"  ... and {len(available) - 10} more", "dim"))
+            self._display.show_lines(lines)
+
+    def _tools_disable(self, name: str) -> None:
+        """Disable a tool or all tools.
+
+        Args:
+            name: Tool name or 'all'.
+        """
+        if not self._display:
+            return
+
+        if not self.registry:
+            self._display.show_lines([("[Error: Registry not available]", "red")])
+            return
+
+        if name.lower() == "all":
+            count = self.registry.disable_all_tools()
+            self._refresh_session_tools()
+            self._display.show_lines([
+                (f"[Disabled all {count} tools]", "yellow"),
+                ("  Note: Permission and session tools remain available", "dim"),
+            ])
+            return
+
+        if self.registry.disable_tool(name):
+            self._refresh_session_tools()
+            self._display.show_lines([(f"[Disabled tool: {name}]", "yellow")])
+        else:
+            lines = [(f"[Error: Tool '{name}' not found]", "red")]
+            available = self.registry.get_all_tool_names()
+            if available:
+                preview = ', '.join(sorted(available)[:10])
+                lines.append((f"  Available tools: {preview}", "dim"))
+                if len(available) > 10:
+                    lines.append((f"  ... and {len(available) - 10} more", "dim"))
+            self._display.show_lines(lines)
+
+    def _refresh_session_tools(self) -> None:
+        """Refresh the session's tools after enabling/disabling."""
+        if self._jaato and hasattr(self._jaato, '_session') and self._jaato._session:
+            self._jaato._session.refresh_tools()
+            self.log("[client] Session tools refreshed")
 
     def _show_plugins(self) -> None:
         """Show available plugins with status and descriptions."""
@@ -1346,15 +1570,18 @@ class RichClient:
 
         help_lines = [
             ("Commands (auto-complete as you type):", "bold"),
-            ("  help          - Show this help message", "dim"),
-            ("  tools         - List tools available to the model", "dim"),
-            ("  plugins       - List available plugins with status", "dim"),
-            ("  reset         - Clear conversation history", "dim"),
-            ("  history       - Show full conversation history", "dim"),
-            ("  context       - Show context window usage", "dim"),
-            ("  export [file] - Export session to YAML (default: session_export.yaml)", "dim"),
-            ("  clear         - Clear output panel", "dim"),
-            ("  quit          - Exit the client", "dim"),
+            ("  help              - Show this help message", "dim"),
+            ("  tools [subcmd]    - Manage tools available to the model", "dim"),
+            ("                        tools list          - List all tools with status", "dim"),
+            ("                        tools enable <n>    - Enable a tool (or 'all')", "dim"),
+            ("                        tools disable <n>   - Disable a tool (or 'all')", "dim"),
+            ("  plugins           - List available plugins with status", "dim"),
+            ("  reset             - Clear conversation history", "dim"),
+            ("  history           - Show full conversation history", "dim"),
+            ("  context           - Show context window usage", "dim"),
+            ("  export [file]     - Export session to YAML (default: session_export.yaml)", "dim"),
+            ("  clear             - Clear output panel", "dim"),
+            ("  quit              - Exit the client", "dim"),
             ("", "dim"),
         ]
 

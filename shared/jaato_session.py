@@ -238,6 +238,46 @@ class JaatoSession:
             history=history
         )
 
+    def refresh_tools(self) -> None:
+        """Refresh tools from the runtime.
+
+        Call this after enabling/disabling tools in the registry to update
+        the session's tool configuration. Preserves conversation history.
+        """
+        if not self._provider or not self._executor:
+            return
+
+        # Refresh runtime's cache first
+        self._runtime.refresh_tool_cache()
+
+        # Get updated tool schemas and executors from runtime
+        self._tools = self._runtime.get_tool_schemas(self._tool_plugins)
+        executors = self._runtime.get_executors(self._tool_plugins)
+
+        # Clear and re-register executors
+        self._executor.clear_executors()
+        for name, fn in executors.items():
+            self._executor.register(name, fn)
+
+        # Re-register the model command executor
+        self._executor.register("model", self._execute_model_command)
+
+        # Re-register session plugin executors if available
+        if self._session_plugin and hasattr(self._session_plugin, 'get_executors'):
+            for name, fn in self._session_plugin.get_executors().items():
+                self._executor.register(name, fn)
+
+        # Add session plugin tool schemas if available
+        if self._session_plugin and hasattr(self._session_plugin, 'get_tool_schemas'):
+            session_schemas = self._session_plugin.get_tool_schemas()
+            if session_schemas:
+                self._tools = list(self._tools) if self._tools else []
+                self._tools.extend(session_schemas)
+
+        # Recreate provider session with updated tools (preserve history)
+        history = self.get_history()
+        self._create_provider_session(history)
+
     def _register_model_command(self) -> None:
         """Register the built-in model command for listing and switching models."""
         from .plugins.base import CommandParameter

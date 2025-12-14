@@ -52,14 +52,17 @@ class ConsolePresenter:
         """
         print("""
 Commands (auto-complete as you type):
-  help          - Show this help message
-  tools         - List tools available to the model
-  reset         - Clear conversation history
-  history       - Show full conversation history
-  context       - Show context window usage
-  export [file] - Export session to YAML for replay (default: session_export.yaml)
-  quit          - Exit the client
-  exit          - Exit the client""")
+  help              - Show this help message
+  tools [subcmd]    - Manage tools available to the model
+                        tools list          - List all tools with status
+                        tools enable <n>    - Enable a tool (or 'all')
+                        tools disable <n>   - Disable a tool (or 'all')
+  reset             - Clear conversation history
+  history           - Show full conversation history
+  context           - Show context window usage
+  export [file]     - Export session to YAML for replay (default: session_export.yaml)
+  quit              - Exit the client
+  exit              - Exit the client""")
 
         # Print plugin-contributed commands
         if plugin_commands:
@@ -137,6 +140,55 @@ Keyboard shortcuts:
         for decl in tool_schemas:
             print(f"  - {decl.name}: {decl.description}")
         print()
+
+    def print_tools_with_status(self, tool_status: List[dict]) -> None:
+        """Print tools with enabled/disabled status.
+
+        Args:
+            tool_status: List of dicts with 'name', 'description', 'enabled', 'plugin' keys.
+        """
+        if not tool_status:
+            print("\nNo tools available.")
+            return
+
+        # Group tools by plugin
+        by_plugin: dict = {}
+        for tool in tool_status:
+            plugin = tool.get('plugin', 'unknown')
+            if plugin not in by_plugin:
+                by_plugin[plugin] = []
+            by_plugin[plugin].append(tool)
+
+        # Count enabled/disabled
+        enabled_count = sum(1 for t in tool_status if t.get('enabled', True))
+        disabled_count = len(tool_status) - enabled_count
+
+        print(f"\nTools ({enabled_count} enabled, {disabled_count} disabled):")
+        print("  Use 'tools enable <name>' or 'tools disable <name>' to toggle")
+        print()
+
+        for plugin_name in sorted(by_plugin.keys()):
+            tools = by_plugin[plugin_name]
+            print(f"  [{plugin_name}]")
+
+            for tool in sorted(tools, key=lambda t: t['name']):
+                name = tool['name']
+                desc = tool.get('description', '')
+                enabled = tool.get('enabled', True)
+
+                # Status indicator
+                status = self.ui.colorize('*', 'green') if enabled else self.ui.colorize('-', 'red')
+
+                # Truncate description if too long
+                max_desc = 50
+                if len(desc) > max_desc:
+                    desc = desc[:max_desc - 3] + "..."
+
+                print(f"    {status} {name}: {desc}")
+
+            print()
+
+        print("  Legend: * = enabled, - = disabled")
 
     def print_context(self, usage: Dict[str, Any]) -> None:
         """Print context window usage statistics.
