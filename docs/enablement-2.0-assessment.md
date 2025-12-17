@@ -96,7 +96,7 @@ Skills (Executable Units)
 |---------------------------|------------------|-----------|
 | **Discovery (semantic interpretation)** | `PluginRegistry.enrich_prompt()` | **Strong** - Prompt enrichment pipeline can inject context from knowledge base |
 | **Flow (execution approaches)** | `JaatoSession.send_message()` with tool loop | **Strong** - Function calling loop handles multi-step execution |
-| **Validation (sequential checking)** | `ToolExecutor` with permission plugin | **Moderate** - Can validate before execution, needs tier-2 expansion |
+| **Validation (sequential checking)** | `ToolExecutor` with permission plugin | **Moderate** - Permission checks exist, but needs expansion to 4-tier validation (syntax, tech-specific, pattern compliance, CI/CD) |
 | **Agent orchestration** | `SubagentPlugin` + `JaatoRuntime` | **Strong** - Subagent profiles map directly to Skills |
 | **Multi-turn conversations** | `JaatoSession` with history | **Strong** - Built-in session management |
 
