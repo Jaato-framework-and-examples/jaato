@@ -96,7 +96,7 @@ Skills (Executable Units)
 |---------------------------|------------------|-----------|
 | **Discovery (semantic interpretation)** | `PluginRegistry.enrich_prompt()` | **Strong** - Prompt enrichment pipeline can inject context from knowledge base |
 | **Flow (execution approaches)** | `JaatoSession.send_message()` with tool loop | **Strong** - Function calling loop handles multi-step execution |
-| **Validation (sequential checking)** | `ToolExecutor` with permission plugin | **Moderate** - Permission checks exist, but needs expansion to 4-tier validation (syntax, tech-specific, pattern compliance, CI/CD) |
+| **Validation (sequential checking)** | None | **Gap** - Jaato has no code quality validation. PermissionPlugin handles authorization (tool access), not output validation. A new validation plugin is required. |
 | **Agent orchestration** | `SubagentPlugin` + `JaatoRuntime` | **Strong** - Subagent profiles map directly to Skills |
 | **Multi-turn conversations** | `JaatoSession` with history | **Strong** - Built-in session management |
 
@@ -288,9 +288,9 @@ class KnowledgePlugin:
         )
 ```
 
-### 4.2 Multi-Tier Validation (Medium Priority)
+### 4.2 Multi-Tier Validation (High Priority)
 
-**Gap:** Jaato validates permissions but not code quality tiers.
+**Gap:** Jaato has no code quality validation. The existing `PermissionPlugin` handles authorization (tool access control), which is unrelated to Enablement 2.0's validation requirements for checking generated output quality.
 
 **Recommendation:** Create a `validation` plugin matching Enablement 2.0's 4-tier architecture:
 
@@ -482,11 +482,11 @@ response = client.send_message(
 |--------|-------|-------|
 | Architecture Fit | 9/10 | Subagent/plugin model matches Skills/Modules |
 | MCP Integration | 10/10 | Already implemented |
-| Extensibility | 9/10 | Plugin system ready for knowledge layer |
-| Governance | 8/10 | Permission system supports compliance |
-| Knowledge Layer | 5/10 | Requires new plugin development |
-| Validation Tiers | 5/10 | Requires new plugin development |
+| Extensibility | 9/10 | Plugin system ready for new plugins |
+| Authorization | 8/10 | PermissionPlugin supports tool access control |
+| Knowledge Layer | 4/10 | Requires new plugin (no existing capability) |
+| Validation Tiers | 2/10 | Requires entirely new plugin (no existing capability) |
 
-**Overall Score: 7.7/10** - Strong foundation with focused enhancements needed.
+**Overall Score: 7.0/10** - Strong execution foundation, but knowledge and validation layers need to be built from scratch.
 
 The primary work involves creating two new plugins (knowledge, validation) while leveraging existing infrastructure for execution and orchestration. Jaato's multi-agent architecture, MCP support, and plugin extensibility make it an ideal runtime for the Enablement 2.0 vision.
