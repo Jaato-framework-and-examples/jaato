@@ -13,7 +13,10 @@ import os
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from mcp.types import Tool, CallToolResult
+from mcp.types import Tool, CallToolResult, Implementation
+
+# Client info sent to MCP servers during initialization
+_CLIENT_INFO = Implementation(name="jaato", version="0.1.0")
 
 
 @dataclass
@@ -119,7 +122,7 @@ class MCPClientManager:
         self._contexts.append(stdio_ctx)
         
         # Enter the session context
-        session_ctx = ClientSession(read, write)
+        session_ctx = ClientSession(read, write, client_info=_CLIENT_INFO)
         session = await session_ctx.__aenter__()
         self._contexts.append(session_ctx)
         
