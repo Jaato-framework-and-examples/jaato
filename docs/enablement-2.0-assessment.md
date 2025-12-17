@@ -1,5 +1,7 @@
 # Assessment: Jaato Framework for Enablement 2.0 Implementation
 
+> **Sources:** This assessment is based on the [Enablement 2.0 GitHub Repository](https://github.com/jcmunuera/enablement-2.0) (v2.2.0), including the README, model specifications, skills framework, runtime documentation, and knowledge layer structure.
+
 ## Executive Summary
 
 This assessment evaluates how the **jaato** framework ("just another agentic tool orchestrator") could serve as the runtime foundation for implementing **Enablement 2.0** - an AI-powered SDLC platform that automates code generation while maintaining organizational standards.
@@ -31,6 +33,58 @@ Enablement 2.0 addresses:
 4. Module-based generation
 5. Multi-tier validation
 6. Delivery with traceability
+
+### Discovery Process (4-Step Approach)
+
+1. **Scope Validation** - Verify requests align with SDLC work
+2. **Domain Interpretation** - Match intent to output type (CODE, DESIGN, QA, GOV)
+3. **Skill Selection** - Review OVERVIEW.md documents to identify best-fit capability
+4. **Multi-Domain Detection** - Decompose complex requests into sequential operations
+
+### Execution Flow Types
+
+| Flow | Purpose |
+|------|---------|
+| **GENERATE** | Constructs entirely new projects with multiple modules |
+| **ADD** | Extends existing projects with single/limited modules |
+| **REMOVE** | Eliminates capabilities (inverse of ADD) |
+| **REFACTOR** | Restructures code through analysis and transformation |
+| **MIGRATE** | Handles transitions between versions or frameworks |
+
+### 4-Tier Validation Architecture
+
+| Tier | Responsibility |
+|------|----------------|
+| Tier-1 | Universal validators (all domains) |
+| Tier-2 | Technology-specific validation scripts |
+| Tier-3 | Module-specific validation rules |
+| Tier-4 | External CI/CD integration (planned) |
+
+### Skill Structure
+
+Each skill follows naming convention: `skill-{domain}-{NNN}-{action}-{target}-{framework}-{library}`
+
+**Skill Contents:**
+- `SKILL.md` - Comprehensive specification for agent execution
+- `OVERVIEW.md` - Lightweight discovery summary for selection
+- `prompts/` - Agent instruction materials
+- `validation/` - Post-execution verification orchestrator
+
+**Current Skills (v2.2.0):**
+- `skill-code-001-add-circuit-breaker-java-resilience4j`
+- `skill-code-020-generate-microservice-java-spring`
+
+### ADR → ERI → Module → Skill Flow
+
+```
+ADRs (Strategic Decisions)
+    ↓ inform
+ERIs (Tactical Reference Implementations)
+    ↓ guide
+Modules (Reusable Templates)
+    ↓ used by
+Skills (Executable Units)
+```
 
 ---
 
@@ -72,24 +126,51 @@ Enablement 2.0 addresses:
 Jaato's `SubagentPlugin` maps perfectly to Enablement 2.0's "Skills" concept:
 
 ```python
-# Enablement 2.0 Skill as Jaato Profile
+# Enablement 2.0 Skill: skill-code-001-add-circuit-breaker-java-resilience4j
+# Mapped to Jaato SubagentProfile:
 profile = SubagentProfile(
-    name="code-resilience-skill",
-    description="Generate resilience patterns (Circuit Breaker, Retry, etc.)",
-    plugins=["cli", "file_edit"],
+    name="skill-code-001-add-circuit-breaker",
+    description="Adds circuit breaker functionality to existing Java code using Resilience4j",
+    plugins=["cli", "file_edit", "knowledge"],
     system_instructions="""
-    You are a code generation assistant specialized in resilience patterns.
-    Follow the enterprise reference implementations in the knowledge base.
+    You are a CODE domain specialist executing an ADD flow.
+
+    SKILL SPECIFICATION:
+    - Action: ADD (atomic transformation to existing artifact)
+    - Target: Circuit Breaker pattern
+    - Framework: Java/Spring
+    - Library: Resilience4j
+
+    EXECUTION APPROACH:
+    1. Consult ERI-CODE-002 (Circuit Breaker reference implementation)
+    2. Apply module templates from the knowledge base
+    3. Generate code following ADR-002 (Resilience Patterns)
+    4. Validate output against Tier-1 and Tier-2 validators
+
+    TRACEABILITY REQUIREMENTS:
+    - Document consulted ADRs/ERIs
+    - Record validation results in manifest.json
     """,
     max_turns=10
 )
 ```
+
+**Skill-to-Profile Mapping:**
+
+| Enablement 2.0 Skill Component | Jaato Equivalent |
+|-------------------------------|------------------|
+| `SKILL.md` | `system_instructions` in SubagentProfile |
+| `OVERVIEW.md` | `description` field |
+| `prompts/` | Additional system prompt injection |
+| `validation/` | Post-execution tool calls |
+| Skill naming convention | Profile `name` field |
 
 **Benefits:**
 - Profiles are pre-configured and reusable
 - Tool access is scoped per skill
 - Subagents share runtime resources (efficient)
 - Multi-turn support for complex generation tasks
+- `continue_subagent` supports iterative refinement
 
 ### 3.2 MCP Server Integration
 
@@ -211,45 +292,125 @@ class KnowledgePlugin:
 
 **Gap:** Jaato validates permissions but not code quality tiers.
 
-**Recommendation:** Create a `validation` plugin with:
-- **Tier 1:** Syntax validation (linting, parsing)
-- **Tier 2:** Pattern compliance (check against ERIs)
-- **Tier 3:** Integration tests (optional)
+**Recommendation:** Create a `validation` plugin matching Enablement 2.0's 4-tier architecture:
+
+| Tier | Enablement 2.0 | Jaato Implementation |
+|------|----------------|---------------------|
+| **Tier-1** | Universal validators (all domains) | Syntax linting, format checking |
+| **Tier-2** | Technology-specific validation | Java/Spring validators, framework checks |
+| **Tier-3** | Module-specific rules | Pattern compliance vs ERIs |
+| **Tier-4** | External CI/CD (planned) | Webhook integration for external tools |
 
 ```python
-# Example: ValidationPlugin
+# Example: ValidationPlugin for Enablement 2.0
 class ValidationPlugin:
     def get_tool_schemas(self) -> List[ToolSchema]:
         return [
-            ToolSchema(name='validate_tier1', ...),  # Syntax
-            ToolSchema(name='validate_tier2', ...),  # Patterns
-            ToolSchema(name='validate_output', ...),  # Combined
+            ToolSchema(
+                name='validate_tier1',
+                description='Universal validation: syntax, formatting, structure',
+                parameters={...}
+            ),
+            ToolSchema(
+                name='validate_tier2',
+                description='Technology-specific: Java/Spring, Python, etc.',
+                parameters={'technology': {'type': 'string'}, ...}
+            ),
+            ToolSchema(
+                name='validate_tier3',
+                description='Module compliance: check against ERI patterns',
+                parameters={'eri_id': {'type': 'string'}, ...}
+            ),
+            ToolSchema(
+                name='validate_output',
+                description='Run all tiers and generate manifest.json',
+                parameters={...}
+            ),
         ]
 ```
 
-### 4.3 Domain Configuration (Low Priority)
+### 4.3 Domain and Flow Configuration (Low Priority)
 
-**Gap:** No explicit domain concept (CODE, DESIGN, QA, GOV).
+**Gap:** No explicit domain concept (CODE, DESIGN, QA, GOV) or execution flow types (GENERATE, ADD, REMOVE, REFACTOR, MIGRATE).
 
-**Recommendation:** Extend `SubagentConfig` with domain awareness:
+**Recommendation:** Extend `SubagentConfig` with domain and flow awareness:
 
 ```python
 @dataclass
 class EnablementProfile(SubagentProfile):
+    # Enablement 2.0 domain
     domain: str = "CODE"  # CODE, DESIGN, QA, GOV
+
+    # Execution flow type
+    flow_type: str = "ADD"  # GENERATE, ADD, REMOVE, REFACTOR, MIGRATE
+
+    # Knowledge dependencies
     required_adrs: List[str] = field(default_factory=list)
-    execution_flow: str = "standard"
+    required_eris: List[str] = field(default_factory=list)
+
+    # Skill metadata (from naming convention)
+    skill_id: str = ""  # e.g., "001"
+    target: str = ""    # e.g., "circuit-breaker"
+    framework: str = "" # e.g., "java"
+    library: str = ""   # e.g., "resilience4j"
+
+# Example instantiation
+circuit_breaker_skill = EnablementProfile(
+    name="skill-code-001-add-circuit-breaker-java-resilience4j",
+    domain="CODE",
+    flow_type="ADD",
+    required_adrs=["ADR-002"],
+    required_eris=["ERI-CODE-002"],
+    skill_id="001",
+    target="circuit-breaker",
+    framework="java",
+    library="resilience4j",
+    plugins=["cli", "file_edit", "knowledge", "validation"],
+    max_turns=10
+)
 ```
 
-### 4.4 Traceability (Low Priority)
+### 4.4 Traceability and Manifest Generation (Low Priority)
 
 **Gap:** Token ledger tracks costs, not generation provenance.
 
-**Recommendation:** Extend ledger with:
-- Source ADRs/ERIs used
-- Skills invoked
+**Enablement 2.0 Requirement:** All outputs require documented traceability showing:
+- Selected skills
+- Consulted modules
+- Relevant ADRs/ERIs
 - Validation results
-- Generated file mappings
+- Generated via `manifest.json`
+
+**Recommendation:** Extend ledger and add manifest generation:
+
+```python
+# manifest.json structure (Enablement 2.0 requirement)
+{
+    "skill": "skill-code-001-add-circuit-breaker-java-resilience4j",
+    "domain": "CODE",
+    "flow_type": "ADD",
+    "execution_timestamp": "2025-12-17T10:30:00Z",
+    "knowledge_consulted": {
+        "adrs": ["ADR-002"],
+        "eris": ["ERI-CODE-002", "ERI-CODE-003"]
+    },
+    "modules_applied": ["resilience4j-circuit-breaker-template"],
+    "validation_results": {
+        "tier1": {"status": "passed", "checks": 5},
+        "tier2": {"status": "passed", "checks": 3},
+        "tier3": {"status": "passed", "checks": 2}
+    },
+    "generated_files": [
+        "src/main/java/com/example/CircuitBreakerConfig.java",
+        "src/main/resources/application-resilience.yml"
+    ],
+    "token_usage": {
+        "prompt_tokens": 1500,
+        "output_tokens": 800,
+        "total_tokens": 2300
+    }
+}
+```
 
 ---
 
