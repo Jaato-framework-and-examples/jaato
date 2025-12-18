@@ -253,7 +253,8 @@ class JaatoRuntime:
         self,
         model: str,
         tools: Optional[List[str]] = None,
-        system_instructions: Optional[str] = None
+        system_instructions: Optional[str] = None,
+        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
 
@@ -267,6 +268,8 @@ class JaatoRuntime:
                    exposed plugins from the registry.
             system_instructions: Optional additional system instructions to
                                 prepend to the base instructions.
+            plugin_configs: Optional per-plugin configuration overrides.
+                           Plugins will be re-initialized with these configs.
 
         Returns:
             JaatoSession configured with the specified settings.
@@ -288,7 +291,8 @@ class JaatoRuntime:
         # Configure session tools
         session.configure(
             tools=tools,
-            system_instructions=system_instructions
+            system_instructions=system_instructions,
+            plugin_configs=plugin_configs
         )
 
         return session

@@ -190,7 +190,8 @@ class JaatoSession:
     def configure(
         self,
         tools: Optional[List[str]] = None,
-        system_instructions: Optional[str] = None
+        system_instructions: Optional[str] = None,
+        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None
     ) -> None:
         """Configure the session with tools and instructions.
 
@@ -198,9 +199,21 @@ class JaatoSession:
             tools: Optional list of plugin names to expose. If None, uses all
                    exposed plugins from the runtime's registry.
             system_instructions: Optional additional system instructions.
+            plugin_configs: Optional per-plugin configuration overrides.
+                           Plugins will be re-initialized with these configs.
         """
         # Store tool plugin names
         self._tool_plugins = tools
+
+        # Re-initialize plugins with session-specific configs if provided
+        if plugin_configs and self._runtime.registry:
+            for plugin_name, config in plugin_configs.items():
+                if tools is None or plugin_name in tools:
+                    try:
+                        # expose_tool with new config will re-initialize
+                        self._runtime.registry.expose_tool(plugin_name, config)
+                    except Exception as e:
+                        print(f"Warning: Failed to configure plugin '{plugin_name}': {e}")
 
         # Create provider for this session
         self._provider = self._runtime.create_provider(self._model_name)

@@ -948,7 +948,8 @@ class SubagentPlugin:
             session = self._runtime.create_session(
                 model=model,
                 tools=profile.plugins if profile.plugins else None,
-                system_instructions=profile.system_instructions
+                system_instructions=profile.system_instructions,
+                plugin_configs=profile.plugin_configs if profile.plugin_configs else None
             )
 
             # Set agent context for permission checks
