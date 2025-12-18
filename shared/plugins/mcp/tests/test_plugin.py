@@ -89,7 +89,7 @@ class TestMCPPluginUserCommands:
 
         assert len(commands) == 1
         assert commands[0].name == 'mcp'
-        assert commands[0].share_with_model is False
+        assert commands[0].share_with_model is True
         assert len(commands[0].parameters) == 2
 
     def test_execute_user_command_help(self):
