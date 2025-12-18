@@ -57,10 +57,13 @@ class ReferencesPlugin:
                    - channel_type: Type of channel ("console", "webhook", "file")
                    - channel_config: Configuration for the channel
                    - sources: Inline sources list (overrides file)
+                   - preselected: List of source IDs to pre-select at startup.
+                                  Sources are looked up from the master catalog
+                                  and automatically added to available sources.
         """
         config = config or {}
 
-        # Try to load from file first
+        # Try to load from file first (master catalog)
         config_path = config.get("config_path")
         try:
             self._config = load_config(config_path)
@@ -68,14 +71,36 @@ class ReferencesPlugin:
             # Use defaults
             self._config = ReferencesConfig()
 
+        # Build ID -> source lookup from master catalog
+        catalog_by_id = {s.id: s for s in self._config.sources}
+
         # Allow inline sources override
         if "sources" in config:
-            self._sources = [
-                ReferenceSource.from_dict(s) if isinstance(s, dict) else s
-                for s in config["sources"]
-            ]
+            resolved_sources = []
+            for s in config["sources"]:
+                if isinstance(s, dict):
+                    resolved_sources.append(ReferenceSource.from_dict(s))
+                elif isinstance(s, str):
+                    # Look up by ID from master catalog
+                    if s in catalog_by_id:
+                        resolved_sources.append(catalog_by_id[s])
+                    else:
+                        print(f"Warning: Source ID '{s}' not found in master catalog")
+                else:
+                    resolved_sources.append(s)
+            self._sources = resolved_sources
         else:
             self._sources = self._config.sources
+
+        # Handle preselected - look up from catalog and add to sources if needed
+        preselected = config.get("preselected", [])
+        if preselected:
+            current_ids = {s.id for s in self._sources}
+            for sid in preselected:
+                if sid not in current_ids and sid in catalog_by_id:
+                    # Add from master catalog
+                    self._sources.append(catalog_by_id[sid])
+                    current_ids.add(sid)
 
         # Initialize channel
         channel_type = config.get("channel_type") or self._config.channel_type
@@ -103,7 +128,17 @@ class ReferencesPlugin:
             self._channel = ConsoleSelectionChannel()
             self._channel.initialize({})
 
-        self._selected_source_ids = []
+        # Initialize selected sources from preselected config
+        # (sources were already added above, now just validate and track IDs)
+        if preselected:
+            available_ids = {s.id for s in self._sources}
+            valid_preselected = [sid for sid in preselected if sid in available_ids]
+            invalid = set(preselected) - available_ids - set(catalog_by_id.keys())
+            if invalid:
+                print(f"Warning: Preselected reference IDs not found: {invalid}")
+            self._selected_source_ids = valid_preselected
+        else:
+            self._selected_source_ids = []
         self._initialized = True
 
     def shutdown(self) -> None:
@@ -358,21 +393,31 @@ class ReferencesPlugin:
         return "Unknown"
 
     def get_system_instructions(self) -> Optional[str]:
-        """Return system instructions with AUTO sources.
+        """Return system instructions with AUTO and pre-selected sources.
 
-        AUTO sources are included in system instructions so the model
-        knows to fetch them at the start of the session.
+        AUTO sources and pre-selected sources are included in system instructions
+        so the model knows to fetch them at the start of the session.
         """
         auto_sources = [
             s for s in self._sources
             if s.mode == InjectionMode.AUTO
         ]
 
-        if not auto_sources:
+        # Get pre-selected sources (selectable sources that were pre-selected via config)
+        preselected_sources = [
+            s for s in self._sources
+            if s.mode == InjectionMode.SELECTABLE and s.id in self._selected_source_ids
+        ]
+
+        # Sources to fetch immediately = AUTO + pre-selected
+        immediate_sources = auto_sources + preselected_sources
+
+        if not immediate_sources:
             # Still provide info about selectable sources
             selectable = [
                 s for s in self._sources
                 if s.mode == InjectionMode.SELECTABLE
+                and s.id not in self._selected_source_ids
             ]
             if not selectable:
                 return None
@@ -403,14 +448,15 @@ class ReferencesPlugin:
             ""
         ]
 
-        for source in auto_sources:
+        for source in immediate_sources:
             parts.append(source.to_instruction())
             parts.append("")
 
-        # Mention selectable sources if any
+        # Mention remaining selectable sources (not pre-selected) if any
         selectable = [
             s for s in self._sources
             if s.mode == InjectionMode.SELECTABLE
+            and s.id not in self._selected_source_ids
         ]
         if selectable:
             parts.extend([
@@ -457,7 +503,7 @@ class ReferencesPlugin:
         return self._sources.copy()
 
     def get_selected_ids(self) -> List[str]:
-        """Get IDs of sources selected during this session."""
+        """Get IDs of selected sources (includes pre-selected and user-selected)."""
         return self._selected_source_ids.copy()
 
     def reset_selections(self) -> None:
