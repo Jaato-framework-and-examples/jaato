@@ -271,56 +271,56 @@ This matches Enablement 2.0's "fast spawning" requirement for specialized agents
 
 ## 4. Implementation Gaps and Recommendations
 
-### 4.1 Knowledge Layer via References Plugin
+### 4.1 Knowledge Layer via References Plugin (Per-Profile)
 
-**No Gap:** The existing `ReferencesPlugin` already handles ADR/ERI management.
+**No Gap:** The existing `ReferencesPlugin` + `SubagentProfile.plugin_configs` handles skill-specific ADR/ERI scoping.
 
 **How it works:**
-- ADRs and ERIs are configured as `ReferenceSource` entries in `references.json`
-- **AUTO mode**: Critical ADRs injected into system instructions at startup
-- **SELECTABLE mode**: ERIs available on-demand via user selection
-- **Tags**: Filter by domain (`code`, `design`), type (`adr`, `eri`), pattern (`circuit-breaker`)
-- **Access methods**: LOCAL files, URLs, MCP servers
+- Each SubagentProfile specifies its required references via `plugin_configs`
+- References are scoped per-skill, not global
+- Only relevant ADRs/ERIs are loaded for each skill execution
 
+```python
+# Each skill profile specifies its required references
+circuit_breaker_skill = SubagentProfile(
+    name="skill-code-001-add-circuit-breaker",
+    description="Adds circuit breaker functionality using Resilience4j",
+    plugins=["cli", "file_edit", "references"],
+    plugin_configs={
+        "references": {
+            # Only these references loaded for this skill
+            "sources": ["adr-002", "eri-code-002", "eri-code-003"]
+        }
+    },
+    system_instructions="...",
+)
+
+microservice_generator_skill = SubagentProfile(
+    name="skill-code-020-generate-microservice",
+    description="Generates new Spring Boot microservice projects",
+    plugins=["cli", "file_edit", "references"],
+    plugin_configs={
+        "references": {
+            # Different references for different skill
+            "sources": ["adr-001", "adr-003", "eri-code-001", "eri-code-008"]
+        }
+    },
+    system_instructions="...",
+)
+```
+
+**Master catalog** (`references.json`) defines all available sources:
 ```json
-// references.json - Enablement 2.0 knowledge configuration
 {
   "sources": [
-    {
-      "id": "adr-002",
-      "name": "ADR-002: Resilience Patterns",
-      "description": "Strategic decision on resilience implementation standards",
-      "type": "local",
-      "path": "knowledge/ADRs/adr-002/README.md",
-      "mode": "auto",
-      "tags": ["adr", "resilience", "code"]
-    },
-    {
-      "id": "eri-code-002",
-      "name": "ERI-CODE-002: Circuit Breaker Implementation",
-      "description": "Reference implementation for circuit breaker pattern",
-      "type": "local",
-      "path": "knowledge/ERIs/eri-code-002/README.md",
-      "mode": "selectable",
-      "tags": ["eri", "code", "circuit-breaker", "resilience4j", "java"]
-    },
-    {
-      "id": "eri-code-003",
-      "name": "ERI-CODE-003: Retry Pattern",
-      "description": "Reference implementation for retry with backoff",
-      "type": "local",
-      "path": "knowledge/ERIs/eri-code-003/README.md",
-      "mode": "selectable",
-      "tags": ["eri", "code", "retry", "resilience4j", "java"]
-    }
+    {"id": "adr-001", "name": "ADR-001: API Standards", "type": "local", "path": "knowledge/ADRs/adr-001/README.md", ...},
+    {"id": "adr-002", "name": "ADR-002: Resilience Patterns", "type": "local", "path": "knowledge/ADRs/adr-002/README.md", ...},
+    {"id": "eri-code-002", "name": "ERI-CODE-002: Circuit Breaker", "type": "local", "path": "knowledge/ERIs/eri-code-002/README.md", ...}
   ]
 }
 ```
 
-**Agent usage:**
-- `listReferences` - Discover available ADRs/ERIs with tag filtering
-- `selectReferences` - Request user selection of relevant ERIs for current task
-- AUTO sources appear in system instructions automatically
+**Per-skill scoping** ensures each subagent only sees its relevant knowledge.
 
 ### 4.2 Multi-Tier Validation as Subagent Profiles
 
