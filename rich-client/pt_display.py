@@ -1035,8 +1035,16 @@ class PTDisplay:
     def set_waiting_for_channel_input(self, waiting: bool) -> None:
         """Set whether we're waiting for channel (permission/clarification) input.
 
+        When waiting for channel input (permission or clarification prompts),
+        this method also switches the completion source to show only valid
+        response options (yes, no, always, never, once) instead of the normal
+        completions (commands, files, etc.).
+
         Args:
             waiting: True if waiting for channel input, False otherwise.
         """
         self._waiting_for_channel_input = waiting
+        # Toggle permission completion mode on the input handler
+        if self._input_handler:
+            self._input_handler.set_permission_mode(waiting)
         self.refresh()

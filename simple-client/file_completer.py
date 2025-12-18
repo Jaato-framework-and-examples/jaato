@@ -605,8 +605,56 @@ class FileReferenceProcessor:
             return []
 
 
+class PermissionResponseCompleter(Completer):
+    """Complete permission response options.
+
+    Provides completion for valid permission responses when a tool is
+    awaiting permission approval. This completer is designed to temporarily
+    replace normal completions while a permission prompt is active.
+
+    Valid responses:
+    - y / yes: Allow this execution
+    - n / no: Deny this execution
+    - a / always: Allow and remember for session
+    - never: Deny and remember for session
+    - once: Allow once without remembering
+
+    Example usage:
+        "y" -> completes to "yes" (or accepts "y")
+        "a" -> completes to "always" (or accepts "a")
+    """
+
+    # Permission response options: (short, full, description)
+    PERMISSION_OPTIONS = [
+        ("y", "yes", "Allow this tool execution"),
+        ("n", "no", "Deny this tool execution"),
+        ("a", "always", "Allow and whitelist for session"),
+        ("once", "once", "Allow once without remembering"),
+        ("never", "never", "Deny and blacklist for session"),
+    ]
+
+    def get_completions(
+        self, document: Document, complete_event
+    ) -> Iterable[Completion]:
+        """Get completions for permission responses.
+
+        Provides completions for the valid permission response options.
+        """
+        text = document.text_before_cursor.strip().lower()
+
+        for short, full, description in self.PERMISSION_OPTIONS:
+            # Match against both short and full forms
+            if not text or short.startswith(text) or full.startswith(text):
+                # Use full form as the completion value
+                yield Completion(
+                    full,
+                    start_position=-len(text) if text else 0,
+                    display=f"{short}/{full}",
+                    display_meta=description,
+                )
+
+
 class SessionIdCompleter(Completer):
-    """Complete session IDs for session commands.
 
     Triggers completion when user types session commands followed by a space:
     - "delete-session " -> completes with available session IDs
@@ -823,6 +871,9 @@ class CombinedCompleter(Completer):
     - Session ID completion after session commands (delete-session, resume)
     - Plugin command argument completion (via get_command_completions protocol)
 
+    Additionally supports a "permission mode" that temporarily replaces all
+    completions with permission response options when a permission prompt is active.
+
     This allows seamless autocompletion for all use cases.
     """
 
@@ -860,6 +911,8 @@ class CombinedCompleter(Completer):
         )
         self._session_completer = SessionIdCompleter(session_provider)
         self._plugin_command_completer = PluginCommandCompleter()
+        self._permission_completer = PermissionResponseCompleter()
+        self._permission_mode: bool = False
 
     def set_command_completion_provider(
         self,
@@ -895,11 +948,45 @@ class CombinedCompleter(Completer):
         """Clear all plugin-contributed commands."""
         self._command_completer.clear_plugin_commands()
 
+    def set_permission_mode(self, enabled: bool) -> None:
+        """Enable or disable permission response completion mode.
+
+        When permission mode is enabled, only permission response options
+        (yes, no, always, never, once) are shown in completions. All normal
+        completions (commands, files, etc.) are temporarily disabled.
+
+        Use this when a permission prompt is active and the user should
+        only be able to enter valid permission responses.
+
+        Args:
+            enabled: True to enable permission-only completions,
+                    False to restore normal completion behavior.
+        """
+        self._permission_mode = enabled
+
+    @property
+    def permission_mode(self) -> bool:
+        """Check if permission completion mode is currently active.
+
+        Returns:
+            True if permission mode is enabled, False otherwise.
+        """
+        return self._permission_mode
+
     def get_completions(
         self, document: Document, complete_event
     ) -> Iterable[Completion]:
-        """Get completions from all completers."""
-        # Yield completions from all sources
+        """Get completions from all completers.
+
+        If permission mode is enabled, only yields permission response
+        completions. Otherwise yields from all normal completion sources.
+        """
+        # If permission mode is active, only show permission response options
+        if self._permission_mode:
+            yield from self._permission_completer.get_completions(document, complete_event)
+            return
+
+        # Normal mode: yield completions from all sources
         # CommandCompleter will only yield if appropriate (single word, no @ or /)
         # AtFileCompleter will only yield if @ is present
         # SlashCommandCompleter will only yield if / is present at start of word
