@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Client - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="client.html" class="active">Client</a></li>
+          <li><a href="plugins.html">Plugins</a></li>
+          <li><a href="tools.html">Tools</a></li>
+          <li><a href="providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/index.html">Overview</a></li>
+          <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Introduction -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>The Client</h1>
+          <p class="lead">
+            JaatoClient is the central orchestrator of the framework. It manages
+            connections to AI providers, coordinates tool execution, and maintains
+            conversation state.
+          </p>
+
+          <h2 id="overview">Overview</h2>
+          <p>
+            The client follows a simple lifecycle:
+          </p>
+          <ol>
+            <li><strong>Create</strong> — Instantiate with a provider</li>
+            <li><strong>Connect</strong> — Establish connection to the AI model</li>
+            <li><strong>Configure</strong> — Set up tools and plugins</li>
+            <li><strong>Converse</strong> — Send messages and receive responses</li>
+          </ol>
+
+          <p>
+            The client abstracts away provider-specific details, giving you a
+            consistent interface regardless of which AI service you're using.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Basic lifecycle</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
+
+# 1. Create
+client = JaatoClient()
+
+# 2. Connect
+client.connect(
+    project="my-project",
+    location="us-central1",
+    model="gemini-2.5-flash"
+)
+
+# 3. Configure
+registry = PluginRegistry(model_name="gemini-2.5-flash")
+registry.discover()
+registry.expose_tool("cli")
+client.configure_tools(registry)
+
+# 4. Converse
+response = client.send_message(
+    "Hello!",
+    on_output=lambda s, t, m: print(t, end="")
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Architecture -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="architecture">Architecture</h2>
+          <p>
+            The client sits between your application and the AI provider,
+            coordinating several components:
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Component</th>
+                <th>Role</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>ModelProvider</strong></td>
+                <td>Handles communication with AI services</td>
+              </tr>
+              <tr>
+                <td><strong>ToolExecutor</strong></td>
+                <td>Runs tools when the model requests them</td>
+              </tr>
+              <tr>
+                <td><strong>PluginRegistry</strong></td>
+                <td>Manages available tools and their schemas</td>
+              </tr>
+              <tr>
+                <td><strong>Session</strong></td>
+                <td>Maintains conversation history</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p>
+            When you send a message, the client:
+          </p>
+          <ol>
+            <li>Forwards the message to the provider</li>
+            <li>Receives the response (text or tool calls)</li>
+            <li>If tool calls: executes them and sends results back</li>
+            <li>Repeats until the model returns final text</li>
+          </ol>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Message flow</div>
+          <div class="diagram-container" style="padding: 24px; background: rgba(255,255,255,0.03); border-radius: 8px;">
+            <svg viewBox="0 0 320 520" style="width: 100%; max-width: 320px; height: auto;">
+              <defs>
+                <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                  <polygon points="0 0, 10 3.5, 0 7" fill="#8b8b8b"/>
+                </marker>
+              </defs>
+
+              <!-- User input -->
+              <rect x="60" y="10" width="200" height="36" rx="4" fill="#3b3b4f" stroke="#5b5b6f" stroke-width="1"/>
+              <text x="160" y="32" text-anchor="middle" fill="#e4e4e7" font-size="12" font-family="system-ui, sans-serif">You: "List files..."</text>
+
+              <!-- Arrow down -->
+              <line x1="160" y1="46" x2="160" y2="70" stroke="#8b8b8b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+              <!-- JaatoClient container -->
+              <rect x="20" y="80" width="280" height="360" rx="8" fill="none" stroke="#635bff" stroke-width="2"/>
+              <text x="160" y="102" text-anchor="middle" fill="#635bff" font-size="13" font-weight="600" font-family="system-ui, sans-serif">JaatoClient</text>
+
+              <!-- ModelProvider box -->
+              <rect x="50" y="115" width="220" height="50" rx="4" fill="#2d2d3f" stroke="#4b4b5f" stroke-width="1"/>
+              <text x="160" y="138" text-anchor="middle" fill="#a5a5b5" font-size="11" font-family="system-ui, sans-serif">ModelProvider</text>
+              <text x="160" y="154" text-anchor="middle" fill="#7a7a8a" font-size="10" font-family="system-ui, sans-serif">(sends to Gemini)</text>
+
+              <!-- Arrow down -->
+              <line x1="160" y1="165" x2="160" y2="185" stroke="#8b8b8b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+              <!-- FunctionCall response -->
+              <rect x="50" y="195" width="220" height="55" rx="4" fill="#1e1e2e" stroke="#3b3b4f" stroke-width="1"/>
+              <text x="160" y="215" text-anchor="middle" fill="#a5a5b5" font-size="10" font-family="system-ui, sans-serif">Model returns: FunctionCall</text>
+              <text x="160" y="230" text-anchor="middle" fill="#7a7a8a" font-size="9" font-family="var(--font-mono), monospace">name="execute_command"</text>
+              <text x="160" y="243" text-anchor="middle" fill="#7a7a8a" font-size="9" font-family="var(--font-mono), monospace">args={"command": "ls"}</text>
+
+              <!-- Arrow down -->
+              <line x1="160" y1="250" x2="160" y2="270" stroke="#8b8b8b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+              <!-- ToolExecutor box -->
+              <rect x="50" y="280" width="220" height="50" rx="4" fill="#2d2d3f" stroke="#4b4b5f" stroke-width="1"/>
+              <text x="160" y="303" text-anchor="middle" fill="#a5a5b5" font-size="11" font-family="system-ui, sans-serif">ToolExecutor</text>
+              <text x="160" y="319" text-anchor="middle" fill="#7a7a8a" font-size="10" font-family="system-ui, sans-serif">(runs "ls")</text>
+
+              <!-- Arrow down -->
+              <line x1="160" y1="330" x2="160" y2="350" stroke="#8b8b8b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+              <!-- Final response -->
+              <rect x="50" y="360" width="220" height="55" rx="4" fill="#1e1e2e" stroke="#3b3b4f" stroke-width="1"/>
+              <text x="160" y="382" text-anchor="middle" fill="#a5a5b5" font-size="10" font-family="system-ui, sans-serif">Model returns text:</text>
+              <text x="160" y="398" text-anchor="middle" fill="#7a7a8a" font-size="10" font-family="system-ui, sans-serif">"Here are the files</text>
+              <text x="160" y="410" text-anchor="middle" fill="#7a7a8a" font-size="10" font-family="system-ui, sans-serif">in your directory..."</text>
+
+              <!-- Arrow out of container -->
+              <line x1="160" y1="440" x2="160" y2="475" stroke="#8b8b8b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+              <!-- Response returned -->
+              <rect x="60" y="485" width="200" height="30" rx="4" fill="#10b981" fill-opacity="0.15" stroke="#10b981" stroke-width="1"/>
+              <text x="160" y="504" text-anchor="middle" fill="#10b981" font-size="11" font-family="system-ui, sans-serif">Response returned to you</text>
+            </svg>
+          </div>
+        </div>
+      </section>
+
+      <!-- Conversation State -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="conversation-state">Conversation State</h2>
+          <p>
+            The client maintains full conversation history internally. Each
+            message exchange adds to the history, enabling multi-turn conversations
+            with context.
+          </p>
+
+          <h3>History Structure</h3>
+          <p>
+            History is a list of <code>Message</code> objects, each containing:
+          </p>
+          <ul>
+            <li><code>role</code> — USER, MODEL, or TOOL</li>
+            <li><code>parts</code> — Content (text, function calls, results)</li>
+          </ul>
+
+          <h3>Turn Boundaries</h3>
+          <p>
+            A "turn" is one user message plus all model responses and tool
+            executions until the next user message. The client tracks turn
+            boundaries for operations like reverting.
+          </p>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Memory Management</div>
+            For long conversations, use a GC (garbage collection) plugin to
+            automatically manage context window limits.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Working with history</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Send some messages
+client.send_message("What's 2+2?", on_output=handler)
+client.send_message("And 3+3?", on_output=handler)
+
+# Get full history
+history = client.get_history()
+print(f"Messages: {len(history)}")
+
+for msg in history:
+    print(f"{msg.role}: {msg.text[:50]}...")
+
+# Get turn boundaries
+turns = client.get_turn_boundaries()
+print(f"Turns: {len(turns)}")
+
+# Revert to first turn
+client.revert_to_turn(0)
+
+# Or reset completely
+client.reset_session()</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Example history structure</div>
+          <div class="code-block">
+            <pre><code class="language-python"># After "List files" conversation:
+[
+  Message(role=USER, parts=[
+    Part(text="List files in current dir")
+  ]),
+  Message(role=MODEL, parts=[
+    Part(function_call=FunctionCall(
+      name="execute_command",
+      args={"command": "ls"}
+    ))
+  ]),
+  Message(role=TOOL, parts=[
+    Part(function_response=ToolResult(
+      name="execute_command",
+      result="file1.py\nfile2.py\n..."
+    ))
+  ]),
+  Message(role=MODEL, parts=[
+    Part(text="Here are the files...")
+  ])
+]</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Output Streaming -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="output-streaming">Output Streaming</h2>
+          <p>
+            The <code>on_output</code> callback provides real-time visibility
+            into what's happening during message processing.
+          </p>
+
+          <h3>Callback Signature</h3>
+          <div class="method-signature">
+            (<span class="param">source</span>: <span class="type">str</span>, <span class="param">text</span>: <span class="type">str</span>, <span class="param">mode</span>: <span class="type">str</span>) -> <span class="type">None</span>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Parameter</th>
+                <th>Values</th>
+                <th>Meaning</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>source</code></td>
+                <td><code>"model"</code>, plugin name</td>
+                <td>Who produced the output</td>
+              </tr>
+              <tr>
+                <td><code>text</code></td>
+                <td>string</td>
+                <td>The output content</td>
+              </tr>
+              <tr>
+                <td><code>mode</code></td>
+                <td><code>"write"</code>, <code>"append"</code></td>
+                <td>New block or continuation</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p>
+            Use <code>mode</code> to determine formatting: <code>"write"</code> starts
+            a new output block, <code>"append"</code> continues the previous one.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Output callback</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Simple callback
+def on_output(source, text, mode):
+    print(text, end="")
+
+# With source formatting
+def on_output(source, text, mode):
+    if mode == "write":
+        print(f"\n[{source}] ", end="")
+    print(text, end="")
+
+# Collecting output by source
+outputs = {"model": [], "cli": []}
+
+def on_output(source, text, mode):
+    if source in outputs:
+        outputs[source].append(text)
+    print(text, end="")
+
+response = client.send_message(
+    "Run ls -la",
+    on_output=on_output
+)
+
+print(f"\nModel said: {''.join(outputs['model'])}")
+print(f"CLI output: {''.join(outputs['cli'])}")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Output sequence example</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Callback receives this sequence:
+#
+# ("model", "I'll list the files", "write")
+# ("model", " for you.", "append")
+# ("cli", "file1.py\nfile2.py", "write")
+# ("model", "Here are the files:", "write")
+# ("model", "\n- file1.py", "append")
+# ("model", "\n- file2.py", "append")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Context Management -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="context-management">Context Management</h2>
+          <p>
+            AI models have limited context windows. The client provides tools
+            to monitor and manage context usage.
+          </p>
+
+          <h3>Monitoring</h3>
+          <ul>
+            <li><code>get_context_limit()</code> — Model's max tokens</li>
+            <li><code>get_context_usage()</code> — Current usage stats</li>
+            <li><code>get_turn_accounting()</code> — Per-turn token counts</li>
+          </ul>
+
+          <h3>Garbage Collection</h3>
+          <p>
+            GC plugins automatically manage context by removing or summarizing
+            old messages when approaching limits.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Strategy</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>gc_truncate</code></td>
+                <td>Remove oldest messages</td>
+              </tr>
+              <tr>
+                <td><code>gc_summarize</code></td>
+                <td>Summarize old messages</td>
+              </tr>
+              <tr>
+                <td><code>gc_hybrid</code></td>
+                <td>Combined approach</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Monitor context</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Check context limits
+limit = client.get_context_limit()
+usage = client.get_context_usage()
+
+print(f"Limit: {limit:,} tokens")
+print(f"Used: {usage['total_tokens']:,} tokens")
+print(f"Available: {limit - usage['total_tokens']:,}")
+
+# Per-turn breakdown
+for turn in client.get_turn_accounting():
+    print(f"Turn {turn['turn_id']}: "
+          f"{turn['tokens']} tokens, "
+          f"{turn['duration_ms']}ms")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Setup GC</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc_truncate import (
+    create_plugin as create_gc
+)
+from shared.plugins.gc import GCConfig
+
+# Create GC plugin
+gc = create_gc()
+gc.initialize({"preserve_recent_turns": 5})
+
+# Configure: trigger at 80% capacity
+client.set_gc_plugin(gc, GCConfig(
+    threshold_percent=80.0,
+    check_before_send=True
+))
+
+# Now context is managed automatically
+# Or trigger manually:
+result = client.manual_gc()
+print(f"Freed {result.tokens_freed} tokens")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Session Persistence -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="sessions">Session Persistence</h2>
+          <p>
+            Session plugins allow saving and resuming conversations across
+            application restarts.
+          </p>
+
+          <h3>Use Cases</h3>
+          <ul>
+            <li>Resume interrupted work</li>
+            <li>Share conversation context</li>
+            <li>Debugging and replay</li>
+            <li>Long-running tasks</li>
+          </ul>
+
+          <h3>Session Data</h3>
+          <p>
+            Sessions store:
+          </p>
+          <ul>
+            <li>Full conversation history</li>
+            <li>Tool configuration</li>
+            <li>User inputs (for replay)</li>
+            <li>Metadata (timestamps, model info)</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Save and resume</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.session import (
+    create_plugin as create_session
+)
+
+# Setup session plugin
+session = create_session()
+session.initialize({
+    "storage_path": ".jaato/sessions"
+})
+client.set_session_plugin(session)
+
+# Have a conversation...
+client.send_message("Hello!", on_output=handler)
+client.send_message("Remember: X=42", on_output=handler)
+
+# Save session
+session_id = client.save_session()
+print(f"Saved: {session_id}")
+
+# Later: resume
+client.resume_session(session_id)
+client.send_message("What is X?", on_output=handler)
+# Model remembers: "X is 42"</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">List and manage sessions</div>
+          <div class="code-block">
+            <pre><code class="language-python"># List all sessions
+for info in client.list_sessions():
+    print(f"{info.id}")
+    print(f"  Created: {info.created_at}")
+    print(f"  Messages: {info.message_count}")
+
+# Delete old session
+client.delete_session("session_abc123")
+
+# Auto-resume last session
+from shared.plugins.session import SessionConfig
+
+client.set_session_plugin(
+    session,
+    SessionConfig(auto_resume_last=True)
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Next Steps -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="next-steps">Next Steps</h2>
+          <p>
+            Now that you understand the client, explore these related concepts:
+          </p>
+          <ul>
+            <li><a href="plugins.html">Plugins</a> — How the plugin system works</li>
+            <li><a href="tools.html">Tools</a> — Tool execution in depth</li>
+            <li><a href="providers.html">Providers</a> — Multi-provider abstraction</li>
+            <li><a href="../api-reference/jaato-client.html">JaatoClient API</a> — Full method reference</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Complete example</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient, PluginRegistry
+from shared.plugins.gc_truncate import create_plugin as gc
+from shared.plugins.session import create_plugin as session
+
+# Full-featured client setup
+client = JaatoClient()
+client.connect(project, location, model)
+
+# Tools
+registry = PluginRegistry(model_name=model)
+registry.discover()
+registry.expose_tool("cli")
+registry.expose_tool("file_edit")
+client.configure_tools(registry)
+
+# Context management
+gc_plugin = gc()
+gc_plugin.initialize({"preserve_recent_turns": 10})
+client.set_gc_plugin(gc_plugin)
+
+# Session persistence
+session_plugin = session()
+session_plugin.initialize({"storage_path": ".sessions"})
+client.set_session_plugin(session_plugin)
+
+# Ready for conversation
+def handler(s, t, m):
+    print(t, end="")
+
+response = client.send_message(
+    "Help me refactor this code",
+    on_output=handler
+)</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+
+
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>

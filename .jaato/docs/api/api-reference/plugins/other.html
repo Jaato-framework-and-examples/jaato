@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Other Plugins - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../providers/index.html">Overview</a></li>
+          <li><a href="../providers/google-genai.html">Google GenAI</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="cli.html">CLI</a></li>
+          <li><a href="mcp.html">MCP</a></li>
+          <li><a href="file-edit.html">File Edit</a></li>
+          <li><a href="todo.html">Todo</a></li>
+          <li><a href="web-search.html">Web Search</a></li>
+          <li><a href="permission.html">Permission</a></li>
+          <li><a href="session.html">Session</a></li>
+          <li><a href="other.html" class="active">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Other Plugins</h1>
+          <p class="lead">
+            Additional built-in plugins for specialized functionality including
+            clarification workflows, reference handling, multimodal support,
+            subagent orchestration, and background task management.
+          </p>
+        </div>
+        <div class="panel-code"></div>
+      </section>
+
+      <!-- Clarification Plugin -->
+      <section class="two-panel" id="clarification">
+        <div class="panel-explanation">
+          <h2>Clarification Plugin</h2>
+          <p>
+            Structured question-and-answer workflow for gathering information
+            from the user before proceeding with a task.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Name</strong></td><td><code>clarification</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>askClarification</code></td></tr>
+              <tr><td><strong>Auto-approved</strong></td><td>Yes</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Question Types</h3>
+          <ul>
+            <li><code>single_choice</code>: Select one option from a list</li>
+            <li><code>multiple_choice</code>: Select multiple options</li>
+            <li><code>free_text</code>: Open-ended text response</li>
+          </ul>
+
+          <h3>Use Cases</h3>
+          <ul>
+            <li>Disambiguating vague requests</li>
+            <li>Gathering missing parameters</li>
+            <li>Confirming before destructive operations</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Usage example</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Model asks for clarification
+askClarification(
+    question="Which environment should I deploy to?",
+    question_type="single_choice",
+    options=["development", "staging", "production"]
+)
+
+# Response
+{
+  "answer": "staging",
+  "question_type": "single_choice"
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Multiple choice</div>
+          <div class="code-block">
+            <pre><code class="language-python">askClarification(
+    question="Which tests should I run?",
+    question_type="multiple_choice",
+    options=["unit", "integration", "e2e", "performance"]
+)
+
+# Response
+{
+  "answer": ["unit", "integration"],
+  "question_type": "multiple_choice"
+}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Memory Plugin -->
+      <section class="two-panel" id="memory">
+        <div class="panel-explanation">
+          <h2>Memory Plugin</h2>
+          <p>
+            Model self-curated persistent memory across sessions. The model can
+            store valuable explanations and insights, then retrieve them in future
+            sessions to build a persistent knowledge base.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Name</strong></td><td><code>memory</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>store_memory</code>, <code>retrieve_memories</code>, <code>list_memory_tags</code></td></tr>
+              <tr><td><strong>Subscribes to</strong></td><td>Prompt enrichment</td></tr>
+              <tr><td><strong>Auto-approved</strong></td><td>Yes</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Two-Phase Retrieval</h3>
+          <ol>
+            <li><strong>Prompt Enrichment</strong>: Plugin injects lightweight hints about available memories</li>
+            <li><strong>Model Decision</strong>: Model decides whether to retrieve full content</li>
+          </ol>
+
+          <h3>Session Flow</h3>
+          <p>Visual representation of how memories work across sessions:</p>
+
+          <svg viewBox="0 0 700 480" xmlns="http://www.w3.org/2000/svg" style="max-width: 100%; height: auto; margin: 20px 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+            <!-- Session 1 -->
+            <text x="10" y="25" font-weight="bold" font-size="16" fill="#2563eb">Session 1: Storing Knowledge</text>
+
+            <!-- User -->
+            <rect x="20" y="45" width="140" height="50" rx="5" fill="#e0e7ff" stroke="#6366f1" stroke-width="2"/>
+            <text x="90" y="65" text-anchor="middle" font-size="12" font-weight="600" fill="#3730a3">User</text>
+            <text x="90" y="82" text-anchor="middle" font-size="10" fill="#4338ca">"Explain Runtime/</text>
+            <text x="90" y="92" text-anchor="middle" font-size="10" fill="#4338ca">Session architecture"</text>
+
+            <!-- Arrow 1 -->
+            <path d="M 160 70 L 185 70" stroke="#6366f1" stroke-width="2" fill="none" marker-end="url(#arrowblue)"/>
+
+            <!-- Model -->
+            <rect x="185" y="45" width="140" height="50" rx="5" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+            <text x="255" y="65" text-anchor="middle" font-size="12" font-weight="600" fill="#1e3a8a">Model</text>
+            <text x="255" y="82" text-anchor="middle" font-size="10" fill="#1e40af">Generates detailed</text>
+            <text x="255" y="92" text-anchor="middle" font-size="10" fill="#1e40af">explanation...</text>
+
+            <!-- Arrow 2 -->
+            <path d="M 255 95 L 255 125" stroke="#3b82f6" stroke-width="2" fill="none" marker-end="url(#arrowblue)"/>
+
+            <!-- Store Memory Tool -->
+            <rect x="185" y="125" width="140" height="50" rx="5" fill="#bbf7d0" stroke="#10b981" stroke-width="2"/>
+            <text x="255" y="142" text-anchor="middle" font-size="11" font-weight="600" fill="#065f46">store_memory()</text>
+            <text x="255" y="157" text-anchor="middle" font-size="9" fill="#047857">tags: [architecture,</text>
+            <text x="255" y="168" text-anchor="middle" font-size="9" fill="#047857">runtime, session]</text>
+
+            <!-- Arrow 3 -->
+            <path d="M 325 150 L 375 150" stroke="#10b981" stroke-width="2" fill="none" marker-end="url(#arrowgreen)"/>
+
+            <!-- Storage -->
+            <rect x="375" y="125" width="140" height="50" rx="5" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+            <text x="445" y="142" text-anchor="middle" font-size="11" font-weight="600" fill="#78350f">Memory Storage</text>
+            <text x="445" y="157" text-anchor="middle" font-size="9" fill="#92400e">.jaato/memories.jsonl</text>
+            <text x="445" y="168" text-anchor="middle" font-size="9" fill="#92400e">✓ Saved</text>
+
+            <!-- Separator -->
+            <line x1="10" y1="210" x2="690" y2="210" stroke="#d1d5db" stroke-width="2" stroke-dasharray="5,5"/>
+
+            <!-- Session 2 -->
+            <text x="10" y="240" font-weight="bold" font-size="16" fill="#7c3aed">Session 2: Retrieving Knowledge</text>
+
+            <!-- User 2 -->
+            <rect x="20" y="260" width="140" height="50" rx="5" fill="#ede9fe" stroke="#8b5cf6" stroke-width="2"/>
+            <text x="90" y="280" text-anchor="middle" font-size="12" font-weight="600" fill="#5b21b6">User</text>
+            <text x="90" y="297" text-anchor="middle" font-size="10" fill="#6d28d9">"How to spawn</text>
+            <text x="90" y="307" text-anchor="middle" font-size="10" fill="#6d28d9">subagent efficiently?"</text>
+
+            <!-- Arrow 4 -->
+            <path d="M 160 285 L 185 285" stroke="#8b5cf6" stroke-width="2" fill="none" marker-end="url(#arrowpurple)"/>
+
+            <!-- Plugin Enrichment -->
+            <rect x="185" y="260" width="140" height="50" rx="5" fill="#fce7f3" stroke="#ec4899" stroke-width="2"/>
+            <text x="255" y="277" text-anchor="middle" font-size="11" font-weight="600" fill="#9f1239">Plugin Enrichment</text>
+            <text x="255" y="292" text-anchor="middle" font-size="9" fill="#be123c">Detects: "subagent"</text>
+            <text x="255" y="302" text-anchor="middle" font-size="9" fill="#be123c">Adds hint 💡</text>
+
+            <!-- Arrow 5 -->
+            <path d="M 325 285 L 355 285" stroke="#ec4899" stroke-width="2" fill="none" marker-end="url(#arrowpink)"/>
+
+            <!-- Model 2 with hint -->
+            <rect x="355" y="260" width="160" height="50" rx="5" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+            <text x="435" y="277" text-anchor="middle" font-size="11" font-weight="600" fill="#1e3a8a">Model (enriched prompt)</text>
+            <text x="435" y="292" text-anchor="middle" font-size="9" fill="#1e40af">Sees hint about</text>
+            <text x="435" y="302" text-anchor="middle" font-size="9" fill="#1e40af">available memory</text>
+
+            <!-- Arrow 6 -->
+            <path d="M 435 310 L 435 340" stroke="#3b82f6" stroke-width="2" fill="none" marker-end="url(#arrowblue)"/>
+
+            <!-- Retrieve Tool -->
+            <rect x="355" y="340" width="160" height="50" rx="5" fill="#bbf7d0" stroke="#10b981" stroke-width="2"/>
+            <text x="435" y="357" text-anchor="middle" font-size="11" font-weight="600" fill="#065f46">retrieve_memories()</text>
+            <text x="435" y="372" text-anchor="middle" font-size="9" fill="#047857">tags: [subagent,</text>
+            <text x="435" y="382" text-anchor="middle" font-size="9" fill="#047857">runtime]</text>
+
+            <!-- Arrow 7 (to storage) -->
+            <path d="M 355 365 L 255 365 L 255 150 L 325 150" stroke="#10b981" stroke-width="2" fill="none" marker-end="url(#arrowgreen)" stroke-dasharray="4,4"/>
+
+            <!-- Arrow 8 (from storage back) -->
+            <path d="M 375 150 L 320 150 L 320 365 L 355 365" stroke="#f59e0b" stroke-width="2" fill="none" marker-end="url(#arroworange)" stroke-dasharray="4,4"/>
+            <text x="270" y="255" font-size="9" fill="#92400e" transform="rotate(-90 270 255)">Full content</text>
+
+            <!-- Arrow 9 -->
+            <path d="M 435 390 L 435 420" stroke="#10b981" stroke-width="2" fill="none" marker-end="url(#arrowgreen)"/>
+
+            <!-- Final Response -->
+            <rect x="355" y="420" width="160" height="50" rx="5" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+            <text x="435" y="437" text-anchor="middle" font-size="11" font-weight="600" fill="#1e3a8a">Model Response</text>
+            <text x="435" y="452" text-anchor="middle" font-size="9" fill="#1e40af">Uses retrieved context</text>
+            <text x="435" y="462" text-anchor="middle" font-size="9" fill="#1e40af">to answer question</text>
+
+            <!-- Arrow markers -->
+            <defs>
+              <marker id="arrowblue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L9,3 z" fill="#3b82f6"/>
+              </marker>
+              <marker id="arrowgreen" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L9,3 z" fill="#10b981"/>
+              </marker>
+              <marker id="arrowpurple" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L9,3 z" fill="#8b5cf6"/>
+              </marker>
+              <marker id="arrowpink" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L9,3 z" fill="#ec4899"/>
+              </marker>
+              <marker id="arroworange" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L9,3 z" fill="#f59e0b"/>
+              </marker>
+            </defs>
+          </svg>
+
+          <h3>Configuration</h3>
+          <table>
+            <tbody>
+              <tr><td><code>storage_path</code></td><td>Path to JSONL storage file (default: <code>.jaato/memories.jsonl</code>)</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Use Cases</h3>
+          <ul>
+            <li>Remember architecture explanations across sessions</li>
+            <li>Build project-specific knowledge base over time</li>
+            <li>Reduce redundant explanations of the same topics</li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Self-Curated</div>
+            The model decides what to store and when to retrieve.
+            Only substantial, reusable information should be stored - not ephemeral responses.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Model stores memory</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Session 1: Model provides comprehensive explanation
+# then stores it
+store_memory(
+    content="The Runtime/Session split allows...",
+    description="jaato Runtime/Session architecture",
+    tags=["architecture", "runtime", "session", "subagents"]
+)
+
+# Response
+{
+  "status": "success",
+  "memory_id": "mem_20231211_143022",
+  "message": "Stored memory: jaato Runtime/Session architecture"
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Prompt enrichment and retrieval</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Session 2: User asks related question
+# Plugin enriches prompt with hint:
+
+💡 **Available Memories** (use retrieve_memories to access):
+  - [architecture, runtime, session, subagents]: jaato Runtime/Session architecture
+
+# Model sees hint, retrieves memory
+retrieve_memories(
+    tags=["subagents", "runtime"],
+    limit=3
+)
+
+# Response
+{
+  "status": "success",
+  "count": 1,
+  "memories": [{
+    "id": "mem_20231211_143022",
+    "description": "jaato Runtime/Session architecture",
+    "content": "The Runtime/Session split allows...",
+    "tags": ["architecture", "runtime", "session", "subagents"],
+    "stored": "2023-12-11T14:30:22",
+    "usage_count": 3
+  }]
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Configuration</div>
+          <div class="code-block">
+            <pre><code class="language-python">registry.expose_tool('memory', config={
+    'storage_path': '.jaato/memories.jsonl',
+})
+
+# Default storage location: .jaato/memories.jsonl
+# Add to .gitignore for private knowledge
+# Or commit for team-shared knowledge base</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- References Plugin -->
+      <section class="two-panel" id="references">
+        <div class="panel-explanation">
+          <h2>References Plugin</h2>
+          <p>
+            Handle <code>@file</code> and <code>@url</code> references in prompts,
+            loading content and making it available to the model.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Name</strong></td><td><code>references</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>loadReference</code></td></tr>
+              <tr><td><strong>Subscribes to</strong></td><td>Prompt enrichment</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Reference Types</h3>
+          <ul>
+            <li><code>LOCAL</code>: Local files (<code>@./path/to/file.py</code>)</li>
+            <li><code>URL</code>: Web URLs (<code>@https://example.com</code>)</li>
+            <li><code>MCP</code>: MCP resources (<code>@mcp://server/resource</code>)</li>
+            <li><code>INLINE</code>: Inline content injection</li>
+          </ul>
+
+          <h3>Prompt Enrichment</h3>
+          <p>
+            When a prompt contains <code>@references</code>, the plugin:
+          </p>
+          <ol>
+            <li>Detects references in the prompt</li>
+            <li>Loads the referenced content</li>
+            <li>Injects content into the prompt context</li>
+            <li>Removes the @ prefix from the prompt text</li>
+          </ol>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Reference syntax</div>
+          <div class="code-block">
+            <pre><code class="language-text"># Local file reference
+Explain this code: @./src/main.py
+
+# URL reference
+Summarize this article: @https://example.com/blog/post
+
+# Multiple references
+Compare @./old.py and @./new.py</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Configuration</div>
+          <div class="code-block">
+            <pre><code class="language-python">registry.expose_tool('references', config={
+    'base_path': '/home/user/project',
+    'allowed_schemes': ['file', 'https'],
+})</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Multimodal Plugin -->
+      <section class="two-panel" id="multimodal">
+        <div class="panel-explanation">
+          <h2>Multimodal Plugin</h2>
+          <p>
+            Image loading for multimodal model interactions. Enables the model
+            to analyze images referenced in prompts or loaded on demand.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Name</strong></td><td><code>multimodal</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>loadImage</code></td></tr>
+              <tr><td><strong>Model Requirements</strong></td><td><code>gemini-3-*</code>, <code>gemini-3.5-*</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3>Configuration</h3>
+          <table>
+            <tbody>
+              <tr><td><code>base_path</code></td><td>Base directory for relative paths</td></tr>
+              <tr><td><code>max_image_size_mb</code></td><td>Maximum image size in MB</td></tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Model Requirements</div>
+            This plugin requires Gemini 3+ for multimodal function responses.
+            It will be skipped on incompatible models.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Usage</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Reference image in prompt
+"What's in this image? @./screenshot.png"
+
+# Model loads image explicitly
+loadImage(path="./diagram.png")
+
+# Response includes image data
+{
+  "path": "./diagram.png",
+  "mime_type": "image/png",
+  "_multimodal": true,
+  "image_data": "base64..."
+}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Subagent Plugin -->
+      <section class="two-panel" id="subagent">
+        <div class="panel-explanation">
+          <h2>Subagent Plugin</h2>
+          <p>
+            Spawn child agents with configurable profiles for delegating
+            specialized tasks.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Name</strong></td><td><code>subagent</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>spawnAgent</code>, <code>queryAgent</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3>Agent Profiles</h3>
+          <p>
+            Predefined configurations for common agent types:
+          </p>
+          <ul>
+            <li><strong>research</strong>: Web search and analysis</li>
+            <li><strong>code-review</strong>: Code analysis and suggestions</li>
+            <li><strong>documentation</strong>: Technical writing</li>
+          </ul>
+
+          <h3>Inline Configuration</h3>
+          <p>
+            Custom agent configurations can be provided inline for
+            specialized use cases.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Spawning agents</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Use predefined profile
+spawnAgent(
+    profile="research",
+    task="Find best practices for Python async"
+)
+
+# Custom inline config
+spawnAgent(
+    config={
+        "model": "gemini-2.5-flash",
+        "tools": ["web_search", "readFile"],
+        "system_prompt": "You are a research assistant..."
+    },
+    task="Analyze competitor products"
+)
+
+# Query agent results
+queryAgent(agent_id="agent_abc123")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Background Plugin -->
+      <section class="two-panel" id="background">
+        <div class="panel-explanation">
+          <h2>Background Plugin</h2>
+          <p>
+            Manage long-running background tasks. Check status, retrieve
+            output, and cancel tasks.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Name</strong></td><td><code>background</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>checkBackgroundTask</code>, <code>getBackgroundOutput</code>, <code>cancelBackgroundTask</code>, <code>listBackgroundTasks</code></td></tr>
+              <tr><td><strong>Auto-approved</strong></td><td>All (read-only management)</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Integration with CLI Plugin</h3>
+          <p>
+            When the CLI plugin auto-backgrounds a long-running command,
+            this plugin provides tools to monitor and manage it.
+          </p>
+
+          <h3>Task Lifecycle</h3>
+          <ol>
+            <li>CLI command exceeds threshold -> backgrounded</li>
+            <li>Returns task handle immediately</li>
+            <li>Model uses background plugin to check status</li>
+            <li>Retrieve output when complete</li>
+          </ol>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Background task management</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Check task status
+checkBackgroundTask(task_id="cli_abc123")
+
+# Response
+{
+  "task_id": "cli_abc123",
+  "status": "running",
+  "elapsed_seconds": 45
+}
+
+# Get output when complete
+getBackgroundOutput(task_id="cli_abc123")
+
+# Response
+{
+  "task_id": "cli_abc123",
+  "status": "completed",
+  "result": {
+    "stdout": "Build completed successfully...",
+    "returncode": 0
+  }
+}
+
+# List all tasks
+listBackgroundTasks()
+
+# Cancel a task
+cancelBackgroundTask(task_id="cli_abc123")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- GC Plugins -->
+      <section class="two-panel" id="gc">
+        <div class="panel-explanation">
+          <h2>GC Plugins</h2>
+          <p>
+            Garbage collection plugins manage context window limits by
+            removing or summarizing old conversation history.
+          </p>
+
+          <h3>gc_truncate</h3>
+          <p>
+            Simple truncation strategy. Removes oldest messages when
+            context exceeds limit.
+          </p>
+
+          <h3>gc_summarize</h3>
+          <p>
+            Summarization strategy. Compresses old messages into a summary
+            to preserve context while reducing tokens.
+          </p>
+
+          <h3>gc_hybrid</h3>
+          <p>
+            Combined approach. Summarizes old messages, then truncates
+            if still over limit.
+          </p>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Client-Configured</div>
+            GC plugins are configured directly on the client via
+            <code>configure_gc()</code>, not through the registry.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">GC configuration</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc_truncate import TruncateGCPlugin
+
+gc_plugin = TruncateGCPlugin()
+gc_plugin.initialize({
+    'max_tokens': 100000,
+    'target_tokens': 80000,  # After GC
+    'preserve_system': True,
+    'preserve_recent_turns': 3,
+})
+
+client.configure_gc(gc_plugin=gc_plugin)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Summarization GC</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc_summarize import SummarizeGCPlugin
+
+gc_plugin = SummarizeGCPlugin()
+gc_plugin.initialize({
+    'max_tokens': 100000,
+    'summarize_threshold': 80000,
+    'summary_model': 'gemini-2.5-flash',
+})
+
+client.configure_gc(gc_plugin=gc_plugin)</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+
+
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>
