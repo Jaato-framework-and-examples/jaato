@@ -500,9 +500,19 @@ loadImage(path="./diagram.png")
           <table>
             <tbody>
               <tr><td><strong>Name</strong></td><td><code>subagent</code></td></tr>
-              <tr><td><strong>Tools</strong></td><td><code>spawnAgent</code>, <code>queryAgent</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>spawn_subagent</code>, <code>list_subagent_profiles</code></td></tr>
             </tbody>
           </table>
+
+          <h3>Profile Auto-Discovery</h3>
+          <p>
+            Profiles are automatically discovered from <code>.jaato/profiles/</code>.
+            Each <code>.json</code> or <code>.yaml</code> file is parsed as a profile definition.
+          </p>
+          <ul>
+            <li><code>auto_discover_profiles</code>: Enable/disable (default: <code>true</code>)</li>
+            <li><code>profiles_dir</code>: Directory to scan (default: <code>.jaato/profiles</code>)</li>
+          </ul>
 
           <h3>Agent Profiles</h3>
           <p>
@@ -521,26 +531,31 @@ loadImage(path="./diagram.png")
           </p>
         </div>
         <div class="panel-code">
+          <div class="code-label">Profile file (.jaato/profiles/code_assistant.json)</div>
+          <div class="code-block">
+            <pre><code class="language-json">{
+  "name": "code_assistant",
+  "description": "Code analysis agent",
+  "plugins": ["cli", "file_edit"],
+  "max_turns": 10
+}</code></pre>
+          </div>
           <div class="code-label">Spawning agents</div>
           <div class="code-block">
             <pre><code class="language-python"># Use predefined profile
-spawnAgent(
+spawn_subagent(
     profile="research",
     task="Find best practices for Python async"
 )
 
 # Custom inline config
-spawnAgent(
-    config={
-        "model": "gemini-2.5-flash",
-        "tools": ["web_search", "readFile"],
-        "system_prompt": "You are a research assistant..."
+spawn_subagent(
+    inline_config={
+        "plugins": ["web_search", "cli"],
+        "system_instructions": "You are a research assistant..."
     },
     task="Analyze competitor products"
-)
-
-# Query agent results
-queryAgent(agent_id="agent_abc123")</code></pre>
+)</code></pre>
           </div>
         </div>
       </section>
