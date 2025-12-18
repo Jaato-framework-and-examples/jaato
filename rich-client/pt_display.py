@@ -136,6 +136,11 @@ class PTDisplay:
         self._model_name: str = ""
         self._context_usage: Dict[str, Any] = {}
 
+        # Permission input filtering state
+        self._waiting_for_channel_input: bool = False
+        self._valid_input_prefixes: set = set()  # All valid prefixes for permission responses
+        self._last_valid_permission_input: str = ""  # Track last valid input for reverting
+
         # Build prompt_toolkit application
         self._app: Optional[Application] = None
         self._build_app()
@@ -166,7 +171,21 @@ class PTDisplay:
         return False
 
     def _on_input_changed(self) -> None:
-        """Called when input buffer text changes - invalidates layout for resize."""
+        """Called when input buffer text changes - invalidates layout for resize.
+
+        In permission mode, this also validates input and reverts invalid characters.
+        """
+        # In permission mode, validate input and revert if invalid
+        if self._waiting_for_channel_input and self._valid_input_prefixes:
+            current_text = self._input_buffer.text
+            if not self._is_valid_permission_input(current_text):
+                # Revert to last valid input
+                self._input_buffer.text = self._last_valid_permission_input
+                self._input_buffer.cursor_position = len(self._last_valid_permission_input)
+            else:
+                # Update last valid input
+                self._last_valid_permission_input = current_text
+
         if self._app and self._app.is_running:
             self._app.invalidate()
 
@@ -1032,6 +1051,41 @@ class PTDisplay:
         if self._app and self._app.is_running:
             self._app.loop.call_later(0.1, self._advance_spinner)
 
+    def _compute_valid_prefixes(self, response_options: list) -> set:
+        """Compute all valid prefixes for the given response options.
+
+        This generates all possible prefixes of valid responses so we can
+        proactively filter input keystroke by keystroke.
+
+        Args:
+            response_options: List of PermissionResponseOption objects.
+
+        Returns:
+            Set of all valid prefixes (lowercase), including empty string.
+        """
+        prefixes = {''}  # Empty string is always valid (nothing typed yet)
+        for option in response_options:
+            # Add all prefixes of short form (e.g., "y", "a", "n")
+            short = option.short.lower()
+            for i in range(1, len(short) + 1):
+                prefixes.add(short[:i])
+            # Add all prefixes of full form (e.g., "yes", "ye", "y")
+            full = option.full.lower()
+            for i in range(1, len(full) + 1):
+                prefixes.add(full[:i])
+        return prefixes
+
+    def _is_valid_permission_input(self, text: str) -> bool:
+        """Check if text is a valid prefix for permission input.
+
+        Args:
+            text: The current input text to validate.
+
+        Returns:
+            True if text could lead to a valid response, False otherwise.
+        """
+        return text.lower() in self._valid_input_prefixes
+
     def set_waiting_for_channel_input(
         self,
         waiting: bool,
@@ -1053,6 +1107,13 @@ class PTDisplay:
                             Each option should have: short, full, description attributes.
         """
         self._waiting_for_channel_input = waiting
+        # Compute valid prefixes for keystroke filtering
+        if waiting and response_options:
+            self._valid_input_prefixes = self._compute_valid_prefixes(response_options)
+            self._last_valid_permission_input = ""  # Reset for new permission prompt
+        else:
+            self._valid_input_prefixes = set()
+            self._last_valid_permission_input = ""
         # Toggle permission completion mode on the input handler with options
         if self._input_handler:
             self._input_handler.set_permission_mode(waiting, response_options)
