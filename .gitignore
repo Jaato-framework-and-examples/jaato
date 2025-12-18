@@ -35,3 +35,6 @@ test_traces/
 .DS_Store
 Thumbs.db
 .jaato
+
+# Test folders
+tests_enablement_2.0/
