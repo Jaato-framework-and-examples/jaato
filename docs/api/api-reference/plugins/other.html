@@ -548,6 +548,16 @@ loadImage(path="./diagram.png")
               <tr><td><code>plugin_configs</code></td><td>Per-plugin configuration overrides</td></tr>
             </tbody>
           </table>
+
+          <h3>Environment Variables</h3>
+          <table>
+            <tbody>
+              <tr><td><code>JAATO_TRACE_LOG</code></td><td>Path to trace log file for debug output. Useful with rich terminal UIs. Default: <code>/tmp/rich_client_trace.log</code></td></tr>
+              <tr><td><code>PROJECT_ID</code></td><td>GCP project ID (fallback)</td></tr>
+              <tr><td><code>LOCATION</code></td><td>Vertex AI region (fallback)</td></tr>
+              <tr><td><code>MODEL_NAME</code></td><td>Default model (fallback)</td></tr>
+            </tbody>
+          </table>
         </div>
         <div class="panel-code">
           <div class="code-label">Profile file (.jaato/profiles/code_assistant.json)</div>
