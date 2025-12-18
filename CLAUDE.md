@@ -228,8 +228,16 @@ Key types in `shared/plugins/model_provider/types.py`:
 |----------|---------|
 | `AI_USE_CHAT_FUNCTIONS` | Enable function calling mode (`1`/`true`) |
 | `AI_EXECUTE_TOOLS` | Allow generic tool execution (`1`/`true`) |
-| `AI_RETRY_ATTEMPTS` | Max retry attempts for rate limits (default: 5) |
 | `LEDGER_PATH` | Output path for token accounting JSONL |
+
+### Rate Limiting
+| Variable | Purpose |
+|----------|---------|
+| `AI_REQUEST_INTERVAL` | Minimum seconds between API requests (default: 0 = disabled) |
+| `AI_RETRY_ATTEMPTS` | Max retry attempts for rate limits (default: 5) |
+| `AI_RETRY_BASE_DELAY` | Initial retry delay in seconds (default: 1.0) |
+| `AI_RETRY_MAX_DELAY` | Maximum retry delay in seconds (default: 30.0) |
+| `AI_RETRY_LOG_SILENT` | Suppress retry logging (`1`/`true`/`yes`) |
 
 ## Additional Documentation
 
