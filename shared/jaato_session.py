@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .ai_tool_runner import ToolExecutor
-from .retry_utils import with_retry, RetryConfig
+from .retry_utils import with_retry, RetryCallback, RetryConfig
 from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
@@ -104,6 +104,9 @@ class JaatoSession:
         self._ui_hooks: Optional['AgentUIHooks'] = None
         self._agent_id: str = "main"  # Unique ID for this agent
 
+        # Retry notification callback (client-configurable)
+        self._on_retry: Optional[RetryCallback] = None
+
     @property
     def model_name(self) -> Optional[str]:
         """Get the model name for this session."""
@@ -159,6 +162,26 @@ class JaatoSession:
         """
         self._ui_hooks = hooks
         self._agent_id = agent_id
+
+    def set_retry_callback(self, callback: Optional[RetryCallback]) -> None:
+        """Set callback for retry notifications.
+
+        Clients can use this to control how retry messages are delivered:
+        - Simple interactive client: Don't set (uses console print)
+        - Rich client: Set callback to route to queue/status bar/etc.
+
+        Args:
+            callback: Function called on each retry attempt.
+                Signature: (message: str, attempt: int, max_attempts: int, delay: float) -> None
+                Set to None to revert to console output.
+
+        Example:
+            # Route retries to a queue for non-disruptive display
+            session.set_retry_callback(
+                lambda msg, att, max_att, delay: status_queue.put(msg)
+            )
+        """
+        self._on_retry = callback
 
     def configure(
         self,
@@ -514,7 +537,7 @@ class JaatoSession:
             response, _retry_stats = with_retry(
                 lambda: self._provider.send_message(message),
                 context="send_message",
-                on_output=on_output
+                on_retry=self._on_retry
             )
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
@@ -583,7 +606,7 @@ class JaatoSession:
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_tool_results(tool_results),
                     context="send_tool_results",
-                    on_output=on_output
+                    on_retry=self._on_retry
                 )
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
@@ -893,7 +916,7 @@ class JaatoSession:
             response, _retry_stats = with_retry(
                 lambda: self._provider.send_message_with_parts(parts),
                 context="send_message_with_parts",
-                on_output=on_output
+                on_retry=self._on_retry
             )
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
@@ -967,7 +990,7 @@ class JaatoSession:
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_tool_results(tool_results),
                     context="send_tool_results",
-                    on_output=on_output
+                    on_retry=self._on_retry
                 )
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
