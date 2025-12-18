@@ -40,6 +40,72 @@ class ChannelDecision(Enum):
 
 
 @dataclass
+class PermissionResponseOption:
+    """A valid response option for permission prompts.
+
+    This dataclass defines a single response option that users can give
+    when answering a permission prompt. It serves as the single source
+    of truth for valid responses, used by:
+    - Channels to display options and parse user input
+    - Clients to provide autocompletion for valid responses
+    """
+    short: str              # Short form (e.g., "y")
+    full: str               # Full form (e.g., "yes")
+    description: str        # User-facing description
+    decision: ChannelDecision  # The decision this maps to
+
+    def matches(self, input_text: str) -> bool:
+        """Check if user input matches this option.
+
+        Args:
+            input_text: User's input (case-insensitive).
+
+        Returns:
+            True if input matches short or full form.
+        """
+        lower = input_text.lower().strip()
+        return lower == self.short.lower() or lower == self.full.lower()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "short": self.short,
+            "full": self.full,
+            "description": self.description,
+            "decision": self.decision.value,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'PermissionResponseOption':
+        """Create from dictionary."""
+        return cls(
+            short=data["short"],
+            full=data["full"],
+            description=data["description"],
+            decision=ChannelDecision(data["decision"]),
+        )
+
+
+# Standard permission response options - the single source of truth
+DEFAULT_PERMISSION_OPTIONS: List['PermissionResponseOption'] = [
+    PermissionResponseOption("y", "yes", "Allow this tool execution", ChannelDecision.ALLOW),
+    PermissionResponseOption("n", "no", "Deny this tool execution", ChannelDecision.DENY),
+    PermissionResponseOption("a", "always", "Allow and whitelist for session", ChannelDecision.ALLOW_SESSION),
+    PermissionResponseOption("once", "once", "Allow once without remembering", ChannelDecision.ALLOW_ONCE),
+    PermissionResponseOption("never", "never", "Deny and blacklist for session", ChannelDecision.DENY_SESSION),
+    PermissionResponseOption("all", "all", "Allow all future requests in session", ChannelDecision.ALLOW_ALL),
+]
+
+
+def get_default_permission_options() -> List['PermissionResponseOption']:
+    """Get the default list of permission response options.
+
+    Returns a copy to prevent accidental modification of the defaults.
+    """
+    return list(DEFAULT_PERMISSION_OPTIONS)
+
+
+@dataclass
 class PermissionRequest:
     """Request sent to an channel for permission approval."""
 
@@ -53,13 +119,20 @@ class PermissionRequest:
     # Optional context for the channel
     context: Dict[str, Any] = field(default_factory=dict)
 
+    # Valid response options - defaults to standard options
+    # This allows clients to know what responses are valid for autocompletion
+    response_options: List[PermissionResponseOption] = field(
+        default_factory=get_default_permission_options
+    )
+
     @classmethod
     def create(
         cls,
         tool_name: str,
         arguments: Dict[str, Any],
         timeout: int = 30,
-        context: Optional[Dict[str, Any]] = None
+        context: Optional[Dict[str, Any]] = None,
+        response_options: Optional[List[PermissionResponseOption]] = None,
     ) -> 'PermissionRequest':
         """Create a new permission request with auto-generated ID and timestamp."""
         return cls(
@@ -69,6 +142,7 @@ class PermissionRequest:
             arguments=arguments,
             timeout_seconds=timeout,
             context=context or {},
+            response_options=response_options or get_default_permission_options(),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -81,7 +155,22 @@ class PermissionRequest:
             "timeout_seconds": self.timeout_seconds,
             "default_on_timeout": self.default_on_timeout,
             "context": self.context,
+            "response_options": [opt.to_dict() for opt in self.response_options],
         }
+
+    def get_option_for_input(self, input_text: str) -> Optional[PermissionResponseOption]:
+        """Find the response option matching user input.
+
+        Args:
+            input_text: User's input string.
+
+        Returns:
+            Matching PermissionResponseOption, or None if no match.
+        """
+        for option in self.response_options:
+            if option.matches(input_text):
+                return option
+        return None
 
 
 @dataclass
@@ -390,17 +479,9 @@ class ConsoleChannel(Channel):
         self._output_func(self._c("=" * 60, self.ANSI_BOLD))
         self._output_func("")
 
-        # Colorized options line
-        options = (
-            f"Options: "
-            f"[{self._c('y', self.ANSI_GREEN)}]es, "
-            f"[{self._c('n', self.ANSI_RED)}]o, "
-            f"[{self._c('a', self.ANSI_CYAN)}]lways, "
-            f"[{self._c('never', self.ANSI_YELLOW)}], "
-            f"[once], "
-            f"[all]"
-        )
-        self._output_func(options)
+        # Build options line from request.response_options
+        options_line = self._build_options_line(request.response_options)
+        self._output_func(options_line)
 
         try:
             response = self._read_input().strip().lower()
@@ -411,56 +492,83 @@ class ConsoleChannel(Channel):
                 reason="User cancelled input",
             )
 
-        # Parse response
-        if response in ("y", "yes"):
-            return ChannelResponse(
-                request_id=request.request_id,
-                decision=ChannelDecision.ALLOW,
-                reason="User approved",
-            )
-        elif response in ("n", "no"):
-            return ChannelResponse(
-                request_id=request.request_id,
-                decision=ChannelDecision.DENY,
-                reason="User denied",
-            )
-        elif response in ("a", "always"):
-            # Create a pattern to remember
-            pattern = self._create_remember_pattern(request)
-            return ChannelResponse(
-                request_id=request.request_id,
-                decision=ChannelDecision.ALLOW_SESSION,
-                reason="User approved for session",
-                remember=True,
-                remember_pattern=pattern,
-            )
-        elif response == "never":
-            pattern = self._create_remember_pattern(request)
-            return ChannelResponse(
-                request_id=request.request_id,
-                decision=ChannelDecision.DENY_SESSION,
-                reason="User denied for session",
-                remember=True,
-                remember_pattern=pattern,
-            )
-        elif response == "once":
-            return ChannelResponse(
-                request_id=request.request_id,
-                decision=ChannelDecision.ALLOW_ONCE,
-                reason="User approved once",
-            )
-        elif response == "all":
-            return ChannelResponse(
-                request_id=request.request_id,
-                decision=ChannelDecision.ALLOW_ALL,
-                reason="User pre-approved all future requests",
-            )
+        # Parse response using request's response_options
+        matched_option = request.get_option_for_input(response)
+        if matched_option:
+            return self._create_response_for_option(request, matched_option)
         else:
             # Unknown response, default to deny
             return ChannelResponse(
                 request_id=request.request_id,
                 decision=ChannelDecision.DENY,
                 reason=f"Unknown response: {response}",
+            )
+
+    def _build_options_line(self, options: List[PermissionResponseOption]) -> str:
+        """Build a colorized options display line from response options.
+
+        Args:
+            options: List of valid response options.
+
+        Returns:
+            Formatted options string for display.
+        """
+        # Color mapping for different decision types
+        color_map = {
+            ChannelDecision.ALLOW: self.ANSI_GREEN,
+            ChannelDecision.DENY: self.ANSI_RED,
+            ChannelDecision.ALLOW_SESSION: self.ANSI_CYAN,
+            ChannelDecision.DENY_SESSION: self.ANSI_YELLOW,
+            ChannelDecision.ALLOW_ONCE: "",  # No special color
+            ChannelDecision.ALLOW_ALL: "",   # No special color
+        }
+
+        parts = ["Options: "]
+        for i, opt in enumerate(options):
+            color = color_map.get(opt.decision, "")
+            if opt.short != opt.full:
+                # Format: [y]es
+                parts.append(f"[{self._c(opt.short, color)}]{opt.full[len(opt.short):]}")
+            else:
+                # Format: [once]
+                parts.append(f"[{self._c(opt.full, color) if color else opt.full}]")
+            if i < len(options) - 1:
+                parts.append(", ")
+
+        return "".join(parts)
+
+    def _create_response_for_option(
+        self, request: PermissionRequest, option: PermissionResponseOption
+    ) -> ChannelResponse:
+        """Create a ChannelResponse for a matched option.
+
+        Args:
+            request: The original permission request.
+            option: The matched response option.
+
+        Returns:
+            ChannelResponse with appropriate decision and metadata.
+        """
+        # Determine if this decision needs a remember pattern
+        remember_decisions = {
+            ChannelDecision.ALLOW_SESSION,
+            ChannelDecision.DENY_SESSION,
+        }
+
+        if option.decision in remember_decisions:
+            pattern = self._create_remember_pattern(request)
+            return ChannelResponse(
+                request_id=request.request_id,
+                decision=option.decision,
+                reason=f"User chose: {option.full}",
+                remember=True,
+                remember_pattern=pattern,
+            )
+        else:
+            return ChannelResponse(
+                request_id=request.request_id,
+                decision=option.decision,
+                reason=f"User chose: {option.full}",
             )
 
     def _create_remember_pattern(self, request: PermissionRequest) -> str:
@@ -796,17 +904,9 @@ class QueueChannel(ConsoleChannel):
         self._output(self._c("=" * 60, self.ANSI_BOLD), "append")
         self._output("", "append")
 
-        # Colorized options line
-        options = (
-            f"Options: "
-            f"[{self._c('y', self.ANSI_GREEN)}]es, "
-            f"[{self._c('n', self.ANSI_RED)}]o, "
-            f"[{self._c('a', self.ANSI_CYAN)}]lways, "
-            f"[{self._c('never', self.ANSI_YELLOW)}], "
-            f"[once], "
-            f"[all]"
-        )
-        self._output(options, "append")
+        # Build options line from request.response_options (uses parent's method)
+        options_line = self._build_options_line(request.response_options)
+        self._output(options_line, "append")
 
         # Signal that we're waiting for input
         self._waiting_for_input = True
@@ -831,51 +931,10 @@ class QueueChannel(ConsoleChannel):
                     reason=f"No response within {request.timeout_seconds}s",
                 )
 
-            # Parse response
-            response_lower = response_text.strip().lower()
-
-            if response_lower in ('y', 'yes'):
-                return ChannelResponse(
-                    request_id=request.request_id,
-                    decision=ChannelDecision.ALLOW,
-                    reason="User approved",
-                )
-            elif response_lower in ('n', 'no'):
-                return ChannelResponse(
-                    request_id=request.request_id,
-                    decision=ChannelDecision.DENY,
-                    reason="User denied",
-                )
-            elif response_lower in ('a', 'always'):
-                pattern = self._create_remember_pattern(request)
-                return ChannelResponse(
-                    request_id=request.request_id,
-                    decision=ChannelDecision.ALLOW_SESSION,
-                    reason="User approved for session",
-                    remember=True,
-                    remember_pattern=pattern,
-                )
-            elif response_lower == 'never':
-                pattern = self._create_remember_pattern(request)
-                return ChannelResponse(
-                    request_id=request.request_id,
-                    decision=ChannelDecision.DENY_SESSION,
-                    reason="User denied for session",
-                    remember=True,
-                    remember_pattern=pattern,
-                )
-            elif response_lower == 'once':
-                return ChannelResponse(
-                    request_id=request.request_id,
-                    decision=ChannelDecision.ALLOW_ONCE,
-                    reason="User approved once",
-                )
-            elif response_lower == 'all':
-                return ChannelResponse(
-                    request_id=request.request_id,
-                    decision=ChannelDecision.ALLOW_ALL,
-                    reason="User pre-approved all future requests",
-                )
+            # Parse response using request's response_options (uses parent's method)
+            matched_option = request.get_option_for_input(response_text)
+            if matched_option:
+                return self._create_response_for_option(request, matched_option)
             else:
                 # Invalid input - treat as deny
                 return ChannelResponse(

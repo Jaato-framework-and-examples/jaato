@@ -191,3 +191,38 @@ class InputHandler:
         """
         if self._completer:
             self._completer.set_command_completion_provider(provider, commands)
+
+    def set_permission_mode(self, enabled: bool, options: Optional[list] = None) -> None:
+        """Enable or disable permission response completion mode.
+
+        When permission mode is enabled, only permission response options
+        are shown as completions. All normal completions (commands, files,
+        etc.) are temporarily disabled.
+
+        The valid options are provided by the permission plugin, making it
+        the single source of truth for what responses are valid.
+
+        Call this when a permission prompt is shown to restrict completions
+        to valid permission responses only. Call with False when the
+        permission prompt is resolved to restore normal completions.
+
+        Args:
+            enabled: True to enable permission-only completions,
+                    False to restore normal completion behavior.
+            options: List of PermissionResponseOption objects from the
+                    permission plugin. Only used when enabled=True.
+                    Each option should have: short, full, description attributes.
+        """
+        if self._completer:
+            self._completer.set_permission_mode(enabled, options)
+
+    @property
+    def permission_mode(self) -> bool:
+        """Check if permission completion mode is currently active.
+
+        Returns:
+            True if permission mode is enabled, False otherwise.
+        """
+        if self._completer:
+            return self._completer.permission_mode
+        return False

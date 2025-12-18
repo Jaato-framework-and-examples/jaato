@@ -16,8 +16,10 @@ from .channels import (
     ChannelDecision,
     ChannelResponse,
     PermissionRequest,
+    PermissionResponseOption,
     ConsoleChannel,
     create_channel,
+    get_default_permission_options,
 )
 from ..base import UserCommand, CommandCompletion, PermissionDisplayInfo, OutputCallback
 
@@ -62,7 +64,8 @@ class PermissionPlugin:
         self._execution_log: List[Dict[str, Any]] = []
         self._allow_all: bool = False  # When True, auto-approve all requests
         # Permission lifecycle hooks for UI integration
-        self._on_permission_requested: Optional[Callable[[str, str, List[str]], None]] = None
+        # on_requested: (tool_name, request_id, prompt_lines, response_options) -> None
+        self._on_permission_requested: Optional[Callable[[str, str, List[str], List[PermissionResponseOption]], None]] = None
         self._on_permission_resolved: Optional[Callable[[str, str, bool, str], None]] = None
 
     def set_registry(self, registry: 'PluginRegistry') -> None:
@@ -91,7 +94,7 @@ class PermissionPlugin:
 
     def set_permission_hooks(
         self,
-        on_requested: Optional[Callable[[str, str, List[str]], None]] = None,
+        on_requested: Optional[Callable[[str, str, List[str], List[PermissionResponseOption]], None]] = None,
         on_resolved: Optional[Callable[[str, str, bool, str], None]] = None
     ) -> None:
         """Set hooks for permission lifecycle events.
@@ -101,7 +104,16 @@ class PermissionPlugin:
 
         Args:
             on_requested: Called when permission prompt is shown.
-                Signature: (tool_name, request_id, prompt_lines) -> None
+                Signature: (tool_name, request_id, prompt_lines, response_options) -> None
+                - tool_name: Name of the tool requesting permission
+                - request_id: Unique identifier for this request
+                - prompt_lines: Lines of text to display in the prompt
+                - response_options: List of valid PermissionResponseOption objects
+                  that can be used for autocompletion. Each option has:
+                  - short: Short form (e.g., "y")
+                  - full: Full form (e.g., "yes")
+                  - description: User-facing description
+                  - decision: The ChannelDecision this maps to
             on_resolved: Called when permission is resolved.
                 Signature: (tool_name, request_id, granted, method) -> None
                 method is one of: "yes", "always", "once", "never",
@@ -680,10 +692,12 @@ If a tool is denied, do not attempt to execute it."""
                 context=request_context,
             )
 
-            # Emit permission requested hook with prompt lines
+            # Emit permission requested hook with prompt lines and response options
             if self._on_permission_requested:
-                prompt_lines = self._build_prompt_lines(tool_name, args, display_info)
-                self._on_permission_requested(tool_name, request.request_id, prompt_lines)
+                prompt_lines = self._build_prompt_lines(tool_name, args, display_info, request.response_options)
+                self._on_permission_requested(
+                    tool_name, request.request_id, prompt_lines, request.response_options
+                )
 
             response = self._channel.request_permission(request)
             allowed, info = self._handle_channel_response(tool_name, args, response)
@@ -806,7 +820,8 @@ If a tool is denied, do not attempt to execute it."""
         self,
         tool_name: str,
         args: Dict[str, Any],
-        display_info: Optional[PermissionDisplayInfo]
+        display_info: Optional[PermissionDisplayInfo],
+        response_options: Optional[List[PermissionResponseOption]] = None
     ) -> List[str]:
         """Build prompt lines for UI display from request info.
 
@@ -814,6 +829,7 @@ If a tool is denied, do not attempt to execute it."""
             tool_name: Name of the tool
             args: Arguments passed to the tool
             display_info: Optional custom display info from plugin
+            response_options: List of valid response options (defaults to standard options)
 
         Returns:
             List of strings representing the permission prompt.
@@ -836,9 +852,18 @@ If a tool is denied, do not attempt to execute it."""
                     args_str = args_str[:97] + "..."
                 lines.append(f"Args: {args_str}")
 
-        # Add options line
+        # Add options line built from response_options
         lines.append("")
-        lines.append("[y]es [n]o [a]lways [never] [once]")
+        options = response_options or get_default_permission_options()
+        options_parts = []
+        for opt in options:
+            if opt.short != opt.full:
+                # Format: [y]es
+                options_parts.append(f"[{opt.short}]{opt.full[len(opt.short):]}")
+            else:
+                # Format: [once]
+                options_parts.append(f"[{opt.full}]")
+        lines.append(" ".join(options_parts))
 
         return lines
 
