@@ -205,12 +205,17 @@ class MCPToolPlugin:
         return [cmd.name for cmd in self.get_user_commands()]
 
     def get_user_commands(self) -> List[UserCommand]:
-        """Return user-facing commands for MCP server configuration."""
+        """Return user-facing commands for MCP server configuration.
+
+        Note: share_with_model=True ensures the model is informed about
+        MCP command results, especially important for reload which may
+        discover new tools the model should know about.
+        """
         return [
             UserCommand(
                 name='mcp',
                 description='Manage MCP server configuration (subcommands: list, show, add, remove, connect, disconnect, reload, status)',
-                share_with_model=False,
+                share_with_model=True,
                 parameters=[
                     CommandParameter(
                         name='subcommand',
@@ -595,9 +600,22 @@ Examples:
             return f"Error disconnecting from '{server_name}': {exc}"
 
     def _cmd_reload(self) -> str:
-        """Reload configuration and reconnect all servers."""
+        """Reload configuration and reconnect all servers.
+
+        Returns a detailed message including any new or removed tools,
+        which helps inform the model about changed capabilities.
+        """
         if not self._initialized:
             self.initialize()
+
+        # Capture tools before reload for comparison
+        old_tools_by_server = {
+            server: {t.name for t in tools}
+            for server, tools in self._tool_cache.items()
+        }
+        old_all_tools = set()
+        for tools in old_tools_by_server.values():
+            old_all_tools.update(tools)
 
         # Force reload from file
         self._config_cache = {}
@@ -622,11 +640,47 @@ Examples:
             failed_count = len(self._failed_servers)
             total_tools = sum(len(t) for t in self._tool_cache.values())
 
+            # Build basic status message
             msg = f"Reloaded configuration: {connected_count} servers connected, {total_tools} tools available."
             if failed_count > 0:
                 msg += f"\n{failed_count} servers failed to connect."
                 for name, err in self._failed_servers.items():
                     msg += f"\n  {name}: {err}"
+
+            # Compare tools to find new and removed
+            new_tools_by_server = {
+                server: {t.name for t in tools}
+                for server, tools in self._tool_cache.items()
+            }
+            new_all_tools = set()
+            for tools in new_tools_by_server.values():
+                new_all_tools.update(tools)
+
+            added_tools = new_all_tools - old_all_tools
+            removed_tools = old_all_tools - new_all_tools
+
+            # Report tool changes with descriptions for new tools
+            if added_tools or removed_tools:
+                msg += "\n\nTool changes:"
+
+                if added_tools:
+                    msg += f"\n\nNew tools available ({len(added_tools)}):"
+                    # Include descriptions for new tools to help the model understand capabilities
+                    for server, tools in self._tool_cache.items():
+                        server_new_tools = [t for t in tools if t.name in added_tools]
+                        if server_new_tools:
+                            msg += f"\n  From '{server}':"
+                            for tool in server_new_tools:
+                                desc = tool.description or "No description"
+                                # Truncate long descriptions
+                                if len(desc) > 100:
+                                    desc = desc[:97] + "..."
+                                msg += f"\n    - {tool.name}: {desc}"
+
+                if removed_tools:
+                    msg += f"\n\nTools no longer available ({len(removed_tools)}):"
+                    for tool_name in sorted(removed_tools):
+                        msg += f"\n  - {tool_name}"
 
             return msg
 
