@@ -312,9 +312,6 @@ class RichClient:
         # Configure tools
         self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
-        # Setup retry callback to route messages to output panel
-        self._setup_retry_callback()
-
         # Setup session plugin
         self._setup_session_plugin()
 
@@ -1005,6 +1002,9 @@ class RichClient:
         # Set up the live reporter and queue channels
         self._setup_live_reporter()
         self._setup_queue_channels()
+
+        # Set up retry callback to route rate limit messages to output panel
+        self._setup_retry_callback()
 
         # Register UI hooks with jaato client and subagent plugin
         # This will create the main agent in the registry via set_ui_hooks()
