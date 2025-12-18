@@ -90,6 +90,8 @@ class RichClient:
         import queue
         self._channel_input_queue: queue.Queue[str] = queue.Queue()
         self._waiting_for_channel_input: bool = False
+        # Pending response options from permission plugin (single source of truth)
+        self._pending_response_options: Optional[list] = None
 
         # Background model thread tracking
         self._model_thread: Optional[threading.Thread] = None
@@ -358,7 +360,11 @@ class RichClient:
             self._waiting_for_channel_input = waiting
             self._trace(f"prompt_callback: waiting={waiting}")
             if self._display:
-                self._display.set_waiting_for_channel_input(waiting)
+                # Pass the stored response options (from permission plugin)
+                # This makes the permission plugin the single source of truth
+                # for valid completion options
+                response_options = self._pending_response_options if waiting else None
+                self._display.set_waiting_for_channel_input(waiting, response_options)
                 if waiting:
                     # Channel waiting for user input - stop spinner
                     self._display.stop_spinner()
@@ -503,6 +509,9 @@ class RichClient:
 
         These hooks update the tool call tree to show permission status
         inline under each tool that requires permission.
+
+        Also stores the response_options from the permission plugin so they
+        can be passed to the input completer for context-aware autocompletion.
         """
         if not self.permission_plugin or not self._agent_registry:
             return
@@ -510,8 +519,20 @@ class RichClient:
         registry = self._agent_registry
         display = self._display
 
-        def on_permission_requested(tool_name: str, request_id: str, prompt_lines: list):
-            """Called when permission prompt is shown."""
+        def on_permission_requested(tool_name: str, request_id: str, prompt_lines: list, response_options: list):
+            """Called when permission prompt is shown.
+
+            Args:
+                tool_name: Name of the tool requesting permission.
+                request_id: Unique identifier for this request.
+                prompt_lines: Lines of text to display in the prompt.
+                response_options: List of PermissionResponseOption objects
+                    that define valid responses for autocompletion.
+            """
+            # Store the response options for the prompt_callback to use
+            # This makes the permission plugin the single source of truth
+            self._pending_response_options = response_options
+
             # Update the tool in the main agent's buffer
             buffer = registry.get_buffer("main")
             if buffer:
@@ -521,6 +542,9 @@ class RichClient:
 
         def on_permission_resolved(tool_name: str, request_id: str, granted: bool, method: str):
             """Called when permission is resolved."""
+            # Clear pending options
+            self._pending_response_options = None
+
             # Update the tool in the main agent's buffer
             buffer = registry.get_buffer("main")
             if buffer:
@@ -855,6 +879,8 @@ class RichClient:
                         self._display.show_lines(lines)
                         return
             # Don't echo answer - it's shown inline in the tool tree
+            # Note: Input is proactively filtered in PTDisplay._on_input_changed()
+            # so only valid permission responses can be typed
             self._channel_input_queue.put(user_input)
             self._trace(f"Input routed to channel queue: {user_input}")
             # Don't start spinner here - the channel may have more questions.
