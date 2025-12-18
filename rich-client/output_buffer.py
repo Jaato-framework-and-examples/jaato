@@ -551,6 +551,104 @@ class OutputBuffer:
         """Check if scrolled to the bottom."""
         return self._scroll_offset == 0
 
+    def _calculate_tool_tree_height(self) -> int:
+        """Calculate the approximate height of the tool tree in display lines.
+
+        This is used to reserve space when selecting which stored lines to display,
+        ensuring the tool tree doesn't push content off the visible area.
+
+        Returns:
+            Number of display lines the tool tree will occupy.
+        """
+        if not self._active_tools and not self._spinner_active:
+            return 0
+
+        height = 0
+
+        if self._active_tools:
+            # Header line ("Model> ✓ Processed" or "Model> ⏳ Awaiting..." etc.)
+            height += 1
+
+            for tool in self._active_tools:
+                # Tool line (always 1 line)
+                height += 1
+
+                # Error message (if failed and has error)
+                if tool.completed and not tool.success and tool.error_message:
+                    height += 1
+
+                # Permission prompt (if pending)
+                if tool.permission_state == "pending" and tool.permission_prompt_lines:
+                    height += 1  # "Permission required" header
+
+                    # Box calculation
+                    prompt_lines = tool.permission_prompt_lines
+                    max_prompt_lines = 18
+                    max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
+                    box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
+                    content_width = box_width - 4
+
+                    # Calculate actual rendered lines (with wrapping and truncation)
+                    if len(prompt_lines) > max_prompt_lines:
+                        lines_to_render = prompt_lines[:max_prompt_lines - 2]
+                        extra_lines = 2  # truncation msg + last line
+                    else:
+                        lines_to_render = prompt_lines
+                        extra_lines = 0
+
+                    rendered_lines = 0
+                    for prompt_line in lines_to_render:
+                        if len(prompt_line) > content_width:
+                            wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
+                            rendered_lines += len(wrapped) if wrapped else 1
+                        else:
+                            rendered_lines += 1
+
+                    height += 1  # top border
+                    height += rendered_lines + extra_lines
+                    height += 1  # bottom border
+
+                # Clarification prompt (if pending)
+                if tool.clarification_state == "pending":
+                    height += 1  # header ("Clarification needed" or progress)
+
+                    # Previously answered questions
+                    if tool.clarification_answered:
+                        height += len(tool.clarification_answered)
+
+                    # Current question prompt box
+                    if tool.clarification_prompt_lines:
+                        prompt_lines = tool.clarification_prompt_lines
+                        max_prompt_lines = 18
+                        max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
+                        box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
+                        content_width = box_width - 4
+
+                        if len(prompt_lines) > max_prompt_lines:
+                            lines_to_render = prompt_lines[:max_prompt_lines - 2]
+                            extra_lines = 2
+                        else:
+                            lines_to_render = prompt_lines
+                            extra_lines = 0
+
+                        rendered_lines = 0
+                        for prompt_line in lines_to_render:
+                            if len(prompt_line) > content_width:
+                                wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
+                                rendered_lines += len(wrapped) if wrapped else 1
+                            else:
+                                rendered_lines += 1
+
+                        height += 1  # top border
+                        height += rendered_lines + extra_lines
+                        height += 1  # bottom border
+
+        elif self._spinner_active:
+            # Spinner alone (no tools) - just 1 line
+            height += 1
+
+        return height
+
     def render(self, height: Optional[int] = None, width: Optional[int] = None) -> RenderableType:
         """Render the output buffer as Rich Text.
 
@@ -583,6 +681,14 @@ class OutputBuffer:
         lines_to_show: List[OutputLine] = []
 
         if height:
+            # Calculate how much space the tool tree will take (including newline separator)
+            tool_tree_height = self._calculate_tool_tree_height()
+            if tool_tree_height > 0 and all_lines:
+                tool_tree_height += 1  # Account for newline before tool tree
+
+            # Adjust available height for stored lines
+            available_for_lines = max(1, height - tool_tree_height)
+
             # Calculate total display lines
             total_display_lines = sum(line.display_lines for line in all_lines)
 
@@ -590,7 +696,7 @@ class OutputBuffer:
             # scroll_offset=0 means show the most recent content
             # scroll_offset>0 means we've scrolled up, showing older content
             end_display_line = total_display_lines - self._scroll_offset
-            start_display_line = max(0, end_display_line - height)
+            start_display_line = max(0, end_display_line - available_for_lines)
 
             # Collect lines that fall within the visible range
             current_display_line = 0
