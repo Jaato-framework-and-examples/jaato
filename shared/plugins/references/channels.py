@@ -481,34 +481,38 @@ class QueueSelectionChannel(SelectionChannel):
         context: Optional[str] = None
     ) -> List[str]:
         """Present available sources via output panel and get user selection via queue."""
-        # Build prompt lines for display
-        prompt_lines = []
-        prompt_lines.append("REFERENCE SELECTION")
-        prompt_lines.append("=" * 40)
+        # Build formatted output matching ConsoleSelectionChannel style
+        lines = []
+        lines.append("")
+        lines.append("=" * 60)
+        lines.append("REFERENCE SELECTION")
+        lines.append("=" * 60)
 
         if context:
-            prompt_lines.append(f"Context: {context}")
-            prompt_lines.append("")
+            lines.append("")
+            lines.append(f"Context: {context}")
 
-        prompt_lines.append("Available references:")
-        prompt_lines.append("")
+        lines.append("")
+        lines.append("Available references:")
+        lines.append("")
 
         for i, source in enumerate(available_sources, 1):
             tags_str = ", ".join(source.tags) if source.tags else "none"
-            prompt_lines.append(f"  [{i}] {source.name}")
-            prompt_lines.append(f"      {source.description}")
-            prompt_lines.append(f"      Type: {source.type.value} | Tags: {tags_str}")
-            prompt_lines.append("")
+            lines.append(f"  [{i}] {source.name}")
+            lines.append(f"      {source.description}")
+            lines.append(f"      Type: {source.type.value} | Tags: {tags_str}")
+            lines.append("")
 
-        prompt_lines.append("Enter selection:")
-        prompt_lines.append("  - Numbers separated by commas (e.g., '1,3,4')")
-        prompt_lines.append("  - 'all' to select all")
-        prompt_lines.append("  - 'none' or empty to skip")
+        lines.append("Enter selection:")
+        lines.append("  - Numbers separated by commas (e.g., '1,3,4')")
+        lines.append("  - 'all' to select all")
+        lines.append("  - 'none' or empty to skip")
+        lines.append("")
 
-        # Output each line
-        for i, line in enumerate(prompt_lines):
-            mode = "write" if i == 0 else "append"
-            self._output(line, mode)
+        # Output all lines as a single block for proper display
+        # Use "write" mode to start fresh, then the content is joined
+        full_output = "\n".join(lines)
+        self._output(full_output, "write")
 
         # Signal waiting for input
         self._waiting_for_input = True
@@ -537,7 +541,7 @@ class QueueSelectionChannel(SelectionChannel):
                     if 1 <= idx <= len(available_sources):
                         selected_ids.append(available_sources[idx - 1].id)
             except ValueError:
-                # Invalid input
+                self._output("Invalid input, no references selected.", "write")
                 return []
 
             return selected_ids
@@ -549,7 +553,7 @@ class QueueSelectionChannel(SelectionChannel):
 
     def notify_result(self, message: str) -> None:
         """Notify user of selection result via output callback."""
-        self._output(message, "write")
+        self._output(f"\n{message}\n", "write")
 
 
 def create_channel(channel_type: str, config: Optional[Dict[str, Any]] = None) -> SelectionChannel:
