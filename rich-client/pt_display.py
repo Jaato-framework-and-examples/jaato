@@ -354,6 +354,12 @@ class PTDisplay:
             if not getattr(self, '_pager_active', False):
                 event.current_buffer.insert_text('\n')
 
+        @kb.add("escape", "escape")
+        def handle_escape(event):
+            """Handle Escape+Escape - clear input buffer contents."""
+            if not getattr(self, '_pager_active', False):
+                event.current_buffer.reset()
+
         @kb.add("q", eager=True)
         def handle_q(event):
             """Handle 'q' key - quit pager if active, otherwise type 'q'."""
