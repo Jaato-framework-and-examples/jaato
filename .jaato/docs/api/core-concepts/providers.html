@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Providers - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="../api-reference/index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="client.html">Client</a></li>
+          <li><a href="plugins.html">Plugins</a></li>
+          <li><a href="tools.html">Tools</a></li>
+          <li><a href="providers.html" class="active">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Guides</div>
+        <ul class="sidebar-nav">
+          <li><a href="../guides/tool-plugins.html">Building Plugins</a></li>
+          <li><a href="../guides/mcp-integration.html">MCP Integration</a></li>
+          <li><a href="../guides/permissions.html">Permissions</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/index.html">Overview</a></li>
+          <li><a href="../api-reference/jaato-client.html">JaatoClient</a></li>
+          <li><a href="../api-reference/plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../api-reference/types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../api-reference/providers/index.html">Overview</a></li>
+          <li><a href="../api-reference/providers/google-genai.html">Google GenAI</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Introduction -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Providers</h1>
+          <p class="lead">
+            Providers are the abstraction layer between jaato and AI services.
+            They translate between jaato's unified types and provider-specific
+            SDKs.
+          </p>
+
+          <h2 id="why-abstraction">Why Provider Abstraction?</h2>
+          <p>
+            Different AI services have different APIs, SDKs, and data formats.
+            The provider abstraction gives you:
+          </p>
+
+          <ul>
+            <li><strong>Portability</strong> — Switch providers without code changes</li>
+            <li><strong>Consistency</strong> — Same types everywhere</li>
+            <li><strong>Isolation</strong> — SDK details hidden</li>
+            <li><strong>Extensibility</strong> — Add new providers easily</li>
+          </ul>
+
+          <p>
+            Your application code uses <code>Message</code>, <code>ToolSchema</code>,
+            and <code>ProviderResponse</code> — never provider-specific types.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Provider-agnostic code</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient, Message, Role
+
+# Your code doesn't know which provider
+client = JaatoClient()  # Uses default provider
+client.connect(project, location, model)
+
+# Same API regardless of provider
+response = client.send_message(
+    "Hello!",
+    on_output=handler
+)
+
+# History is provider-agnostic
+history = client.get_history()
+for msg in history:
+    print(f"{msg.role}: {msg.text}")
+
+# Switch provider = change one line
+client = JaatoClient(provider_name="anthropic")
+# Rest of code unchanged!</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Available Providers -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="available">Available Providers</h2>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Name</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Google GenAI</strong></td>
+                <td><code>google_genai</code></td>
+                <td>Available</td>
+              </tr>
+              <tr>
+                <td><strong>Anthropic</strong></td>
+                <td><code>anthropic</code></td>
+                <td>Planned</td>
+              </tr>
+              <tr>
+                <td><strong>OpenAI</strong></td>
+                <td><code>openai</code></td>
+                <td>Planned</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Google GenAI Provider</h3>
+          <p>
+            The default provider. Supports:
+          </p>
+          <ul>
+            <li>Vertex AI (Google Cloud)</li>
+            <li>Google AI Studio</li>
+            <li>Gemini models (1.5, 2.0, 2.5)</li>
+            <li>Function calling</li>
+            <li>Multimodal (images, documents)</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Using Google GenAI</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Default provider
+client = JaatoClient()
+
+# Explicit
+client = JaatoClient(provider_name="google_genai")
+
+# Connect to Vertex AI
+client.connect(
+    project="my-gcp-project",
+    location="us-central1",
+    model="gemini-2.5-flash"
+)
+
+# List available models
+models = client.list_available_models(prefix="gemini")
+for model in models:
+    print(model)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Discover providers</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import discover_providers, load_provider
+
+# Find available providers
+providers = discover_providers()
+print(f"Available: {providers}")
+# ['google_genai']
+
+# Load a specific provider
+provider = load_provider("google_genai")
+print(f"Loaded: {provider.name}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Provider Protocol -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="protocol">Provider Protocol</h2>
+          <p>
+            All providers implement the <code>ModelProviderPlugin</code>
+            protocol. This defines the interface that jaato uses.
+          </p>
+
+          <h3>Core Methods</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">initialize(config)</span>
+              <div class="param-desc">Setup with credentials</div>
+            </li>
+            <li>
+              <span class="param-name">connect(model)</span>
+              <div class="param-desc">Set the model to use</div>
+            </li>
+            <li>
+              <span class="param-name">create_session(...)</span>
+              <div class="param-desc">Create/reset conversation session</div>
+            </li>
+            <li>
+              <span class="param-name">send_message(msg)</span>
+              <div class="param-desc">Send text, get response</div>
+            </li>
+            <li>
+              <span class="param-name">send_tool_results(...)</span>
+              <div class="param-desc">Send tool execution results</div>
+            </li>
+            <li>
+              <span class="param-name">get_history()</span>
+              <div class="param-desc">Get conversation history</div>
+            </li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Provider protocol</div>
+          <div class="code-block">
+            <pre><code class="language-python">from typing import Protocol, List, Optional
+from shared import (
+    Message, Part, ToolSchema, ToolResult,
+    ProviderResponse, ProviderConfig
+)
+
+class ModelProviderPlugin(Protocol):
+    name: str
+
+    def initialize(self, config: ProviderConfig) -> None:
+        """Setup with credentials."""
+        ...
+
+    def connect(self, model: str) -> None:
+        """Set model to use."""
+        ...
+
+    @property
+    def is_connected(self) -> bool:
+        """Check if connected."""
+        ...
+
+    def create_session(
+        self,
+        system_instruction: Optional[str],
+        tools: List[ToolSchema],
+        history: Optional[List[Message]]
+    ) -> None:
+        """Create or reset session."""
+        ...
+
+    def send_message(self, msg: str) -> ProviderResponse:
+        """Send message, get response."""
+        ...
+
+    def send_tool_results(
+        self,
+        results: List[ToolResult]
+    ) -> ProviderResponse:
+        """Send tool results."""
+        ...
+
+    def get_history(self) -> List[Message]:
+        """Get conversation history."""
+        ...</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Type Conversion -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="type-conversion">Type Conversion</h2>
+          <p>
+            Providers convert between jaato's unified types and SDK-specific
+            types. This happens transparently inside the provider.
+          </p>
+
+          <h3>Type Mapping</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>jaato Type</th>
+                <th>Google SDK</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>Message</code></td>
+                <td><code>types.Content</code></td>
+              </tr>
+              <tr>
+                <td><code>Part</code></td>
+                <td><code>types.Part</code></td>
+              </tr>
+              <tr>
+                <td><code>ToolSchema</code></td>
+                <td><code>types.FunctionDeclaration</code></td>
+              </tr>
+              <tr>
+                <td><code>FunctionCall</code></td>
+                <td><code>types.FunctionCall</code></td>
+              </tr>
+              <tr>
+                <td><code>ToolResult</code></td>
+                <td><code>types.FunctionResponse</code></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Why Not Use SDK Types Directly?</div>
+            SDK types are provider-specific. Using jaato's types means your
+            code works with any provider — switch from Gemini to Claude
+            without changing application logic.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Type conversion (internal)</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Inside google_genai provider:
+
+from google import genai
+from shared import Message, Part, ToolSchema
+
+def to_sdk_content(msg: Message) -> genai.types.Content:
+    """Convert jaato Message to SDK Content."""
+    sdk_parts = []
+    for part in msg.parts:
+        if part.text:
+            sdk_parts.append(genai.types.Part(
+                text=part.text
+            ))
+        elif part.function_call:
+            sdk_parts.append(genai.types.Part(
+                function_call=genai.types.FunctionCall(
+                    name=part.function_call.name,
+                    args=part.function_call.args
+                )
+            ))
+    return genai.types.Content(
+        role=msg.role.value,
+        parts=sdk_parts
+    )
+
+def from_sdk_response(resp) -> ProviderResponse:
+    """Convert SDK response to jaato type."""
+    # Extract text, function calls, usage...
+    return ProviderResponse(
+        text=...,
+        function_calls=...,
+        usage=...
+    )</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Provider Configuration</h2>
+          <p>
+            Providers are configured via <code>ProviderConfig</code>, which
+            holds credentials and connection details. Each provider has its own
+            authentication requirements.
+          </p>
+
+          <h3>Common ProviderConfig Fields</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">api_key</span>
+              <span class="param-type">str</span>
+              <div class="param-desc">API key for authentication</div>
+            </li>
+            <li>
+              <span class="param-name">project</span>
+              <span class="param-type">str</span>
+              <div class="param-desc">Cloud project ID (provider-specific)</div>
+            </li>
+            <li>
+              <span class="param-name">location</span>
+              <span class="param-type">str</span>
+              <div class="param-desc">Region/location (provider-specific)</div>
+            </li>
+            <li>
+              <span class="param-name">credentials_path</span>
+              <span class="param-type">str</span>
+              <div class="param-desc">Path to credentials file</div>
+            </li>
+            <li>
+              <span class="param-name">extra</span>
+              <span class="param-type">Dict</span>
+              <div class="param-desc">Provider-specific options</div>
+            </li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Provider-Specific Documentation</div>
+            Authentication methods, environment variables, and detailed configuration
+            are documented in each provider's reference page:
+            <ul style="margin-top: 8px; margin-bottom: 0;">
+              <li><a href="../api-reference/providers/google-genai.html">Google GenAI Provider</a></li>
+            </ul>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Generic configuration pattern</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import ProviderConfig, load_provider
+
+# Load any provider
+provider = load_provider("google_genai")  # or "anthropic", "openai"
+
+# Configure with ProviderConfig
+provider.initialize(ProviderConfig(
+    api_key="...",          # Common
+    project="...",          # Provider-specific
+    location="...",         # Provider-specific
+    extra={"timeout": 60}   # Provider-specific
+))
+
+# Connect to a model
+provider.connect("model-name")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Via JaatoClient (recommended)</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient
+
+# JaatoClient handles provider setup
+client = JaatoClient()  # Default provider
+
+# Connect with credentials
+client.connect(
+    project="my-project",
+    location="us-central1",
+    model="gemini-2.5-flash"
+)
+
+# Or specify provider explicitly
+client = JaatoClient(provider_name="google_genai")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Building Providers -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="building">Building a Provider</h2>
+          <p>
+            To add a new AI service, implement the
+            <code>ModelProviderPlugin</code> protocol.
+          </p>
+
+          <h3>Steps</h3>
+          <ol>
+            <li>Create provider directory in <code>shared/plugins/model_provider/</code></li>
+            <li>Implement the protocol interface</li>
+            <li>Add type converters for the SDK</li>
+            <li>Register in provider discovery</li>
+          </ol>
+
+          <h3>Key Responsibilities</h3>
+          <ul>
+            <li>Initialize SDK client with credentials</li>
+            <li>Convert jaato types ↔ SDK types</li>
+            <li>Manage conversation session</li>
+            <li>Handle tool calling loop</li>
+            <li>Track token usage</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Provider skeleton</div>
+          <div class="code-block">
+            <pre><code class="language-python"># shared/plugins/model_provider/anthropic/provider.py
+
+from shared import (
+    ModelProviderPlugin,
+    ProviderConfig,
+    ProviderResponse,
+    Message, ToolSchema, ToolResult
+)
+import anthropic
+
+class AnthropicProvider:
+    name = "anthropic"
+
+    def __init__(self):
+        self._client = None
+        self._model = None
+        self._history = []
+
+    def initialize(self, config: ProviderConfig):
+        self._client = anthropic.Anthropic(
+            api_key=config.api_key
+        )
+
+    def connect(self, model: str):
+        self._model = model
+
+    @property
+    def is_connected(self) -> bool:
+        return self._client and self._model
+
+    def create_session(self, system, tools, history):
+        self._system = system
+        self._tools = self._convert_tools(tools)
+        self._history = history or []
+
+    def send_message(self, msg: str) -> ProviderResponse:
+        # Convert to Anthropic format
+        # Call API
+        # Convert response back
+        response = self._client.messages.create(
+            model=self._model,
+            system=self._system,
+            messages=self._to_sdk_messages(),
+            tools=self._tools
+        )
+        return self._from_sdk_response(response)
+
+    # ... converters ...</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Unified Types -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="unified-types">Unified Type System</h2>
+          <p>
+            The types in <code>shared/plugins/model_provider/types.py</code>
+            form the common vocabulary across all providers.
+          </p>
+
+          <h3>Core Types</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>Message</code></td>
+                <td>Conversation message</td>
+              </tr>
+              <tr>
+                <td><code>Part</code></td>
+                <td>Message content piece</td>
+              </tr>
+              <tr>
+                <td><code>ToolSchema</code></td>
+                <td>Tool declaration</td>
+              </tr>
+              <tr>
+                <td><code>FunctionCall</code></td>
+                <td>Model's tool request</td>
+              </tr>
+              <tr>
+                <td><code>ToolResult</code></td>
+                <td>Tool execution result</td>
+              </tr>
+              <tr>
+                <td><code>ProviderResponse</code></td>
+                <td>Model response</td>
+              </tr>
+              <tr>
+                <td><code>TokenUsage</code></td>
+                <td>Token statistics</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p>
+            See the <a href="../api-reference/types.html">Types Reference</a>
+            for complete documentation.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Using unified types</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import (
+    Message, Part, Role,
+    ToolSchema, FunctionCall, ToolResult,
+    ProviderResponse, TokenUsage
+)
+
+# Create a message
+msg = Message.from_text(Role.USER, "Hello!")
+
+# Create a tool schema
+tool = ToolSchema(
+    name="search",
+    description="Search the web",
+    parameters={
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"]
+    }
+)
+
+# These work with ANY provider
+# Google, Anthropic, OpenAI — same code</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Import patterns</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Recommended: import from shared
+from shared import Message, ToolSchema
+
+# Direct import (also works)
+from shared.plugins.model_provider.types import (
+    Message,
+    Part,
+    Role,
+    ToolSchema,
+    FunctionCall,
+    ToolResult,
+    ProviderResponse,
+    TokenUsage,
+    FinishReason,
+    Attachment
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Next Steps -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="next-steps">Next Steps</h2>
+          <ul>
+            <li><a href="../api-reference/types.html">Types Reference</a> — Full type documentation</li>
+            <li><a href="../guides/tool-plugins.html">Building Plugins</a> — Create tool plugins</li>
+            <li><a href="../getting-started/quickstart.html">Quickstart</a> — Get started with jaato</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Provider directory structure</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Provider plugins location:
+# shared/plugins/model_provider/
+#   ├── __init__.py
+#   ├── base.py          # Protocol definition
+#   ├── types.py         # Unified types
+#   └── google_genai/
+#       ├── __init__.py
+#       ├── provider.py  # Implementation
+#       └── converters.py # Type conversion
+
+# Future providers:
+#   ├── anthropic/
+#   │   ├── provider.py
+#   │   └── converters.py
+#   └── openai/
+#       ├── provider.py
+#       └── converters.py</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+
+
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>
