@@ -512,23 +512,41 @@ Keyboard shortcuts:
         print(f"\n{'=' * 60}")
 
     def format_model_output(self, text: str) -> str:
-        """Format model output with prefix and wrapping.
+        """Format model output with header and content.
 
         Args:
             text: The model's output text.
 
         Returns:
-            Formatted output string with Model> prefix.
+            Formatted output string with header line.
         """
-        model_prefix = self.ui.colorize('Model>', 'bold') + ' '
-        continuation_indent = "       "  # 7 spaces to match "Model> " width
-        wrapped = self.ui.wrap_text(text, prefix=continuation_indent, initial_prefix="")
-        return f"\n{model_prefix}{wrapped}"
+        # Get terminal width for header line
+        try:
+            import shutil
+            width = shutil.get_terminal_size().columns
+        except Exception:
+            width = 80
+
+        header_prefix = "── Model "
+        remaining = max(0, width - len(header_prefix))
+        header = self.ui.colorize(header_prefix, 'cyan') + self.ui.colorize("─" * remaining, 'dim')
+        wrapped = self.ui.wrap_text(text, prefix="", initial_prefix="")
+        return f"\n{header}\n{wrapped}"
 
     def format_prompt(self) -> str:
         """Get the formatted user prompt string.
 
         Returns:
-            Formatted prompt string like "You> ".
+            Formatted prompt string with header line.
         """
-        return f"\n{self.ui.colorize('You>', 'green')} "
+        # Get terminal width for header line
+        try:
+            import shutil
+            width = shutil.get_terminal_size().columns
+        except Exception:
+            width = 80
+
+        header_prefix = "── You "
+        remaining = max(0, width - len(header_prefix))
+        header = self.ui.colorize(header_prefix, 'green') + self.ui.colorize("─" * remaining, 'dim')
+        return f"\n{header}\n"
