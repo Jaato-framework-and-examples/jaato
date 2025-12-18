@@ -1,6 +1,6 @@
 {
   "name": "skill-code-021-generate-rest-controller-java-spring",
-  "description": "Generate REST controller with validation, error handling, and OpenAPI",
+  "description": "[GENERATE Flow] Create new REST controller with full API structure. USE WHEN: (1) need new API endpoint or resource (in new or existing project), (2) request specifies REST operations (GET, POST, PUT, DELETE) or CRUD, (3) requires input validation, error handling, or OpenAPI documentation. TRIGGERS: API/resource definition provided, entity/DTO specified, CRUD operations listed.",
   "plugins": ["cli", "file_edit", "references"],
   "plugin_configs": {
     "references": {

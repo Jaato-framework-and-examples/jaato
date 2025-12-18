@@ -1,6 +1,6 @@
 {
   "name": "skill-code-002-add-retry-java-resilience4j",
-  "description": "Add retry pattern with exponential backoff using Resilience4j",
+  "description": "[ADD Flow] Add retry pattern with exponential backoff to existing Java service. USE WHEN: (1) Java/Spring project already exists, (2) service has transient failure scenarios (network timeouts, DB connection issues, external API errors), (3) request mentions retry, transient errors, or exponential backoff. TRIGGERS: feature.type=retry, existing projectPath, targeted module changes.",
   "plugins": ["cli", "file_edit", "references"],
   "plugin_configs": {
     "references": {
