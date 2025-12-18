@@ -1,0 +1,13 @@
+{
+  "name": "skill-code-002-add-retry-java-resilience4j",
+  "description": "Add retry pattern with exponential backoff using Resilience4j",
+  "plugins": ["cli", "file_edit", "references"],
+  "plugin_configs": {
+    "references": {
+      "sources": ["adr-001-resilience-patterns", "eri-002-retry-resilience4j"]
+    }
+  },
+  "system_instructions": "You are implementing the ADD flow for retry pattern.\n\n## Execution Flow: ADD\n1. Analyze target service to identify retryable operations\n2. Fetch and apply ADR-001 resilience patterns\n3. Implement retry following ERI-002 reference\n4. Configure exponential backoff parameters\n5. Add @Retry annotations with appropriate config\n6. Output: Modified source files",
+  "max_turns": 15,
+  "auto_approved": false
+}
