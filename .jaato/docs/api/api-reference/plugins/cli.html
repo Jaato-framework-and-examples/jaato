@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CLI Plugin - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../providers/index.html">Overview</a></li>
+          <li><a href="../providers/google-genai.html">Google GenAI</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="cli.html" class="active">CLI</a></li>
+          <li><a href="mcp.html">MCP</a></li>
+          <li><a href="file-edit.html">File Edit</a></li>
+          <li><a href="todo.html">Todo</a></li>
+          <li><a href="web-search.html">Web Search</a></li>
+          <li><a href="permission.html">Permission</a></li>
+          <li><a href="session.html">Session</a></li>
+          <li><a href="other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>CLI Plugin</h1>
+          <p class="lead">
+            Execute shell commands on the local machine with output capture,
+            auto-backgrounding for long-running commands, and intelligent shell detection.
+          </p>
+
+          <table>
+            <tbody>
+              <tr>
+                <td><strong>Name</strong></td>
+                <td><code>cli</code></td>
+              </tr>
+              <tr>
+                <td><strong>Type</strong></td>
+                <td>Tool Plugin (Registry-managed)</td>
+              </tr>
+              <tr>
+                <td><strong>Tools Provided</strong></td>
+                <td><code>cli_based_tool</code></td>
+              </tr>
+              <tr>
+                <td><strong>User Commands</strong></td>
+                <td>None</td>
+              </tr>
+              <tr>
+                <td><strong>Auto-approved</strong></td>
+                <td>None (requires permission)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h2 id="features">Features</h2>
+          <ul>
+            <li><strong>Shell Detection</strong>: Automatically detects pipes, redirections, and chaining</li>
+            <li><strong>Auto-Backgrounding</strong>: Long-running commands (>10s) become background tasks</li>
+            <li><strong>Output Truncation</strong>: Prevents context overflow from large outputs</li>
+            <li><strong>Smart Duration Estimation</strong>: Recognizes slow commands (npm, cargo, etc.)</li>
+            <li><strong>PATH Extension</strong>: Add custom directories to command search path</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Basic usage</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import PluginRegistry
+
+registry = PluginRegistry()
+registry.discover()
+
+# Expose CLI plugin with defaults
+registry.expose_tool('cli')
+
+# Or with custom configuration
+registry.expose_tool('cli', config={
+    'extra_paths': ['/usr/local/bin', '/opt/bin'],
+    'max_output_chars': 100000,
+    'auto_background_threshold': 30.0,
+    'background_max_workers': 8,
+})</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Model invocation</div>
+          <div class="code-block">
+            <pre><code class="language-python"># The model calls the tool like this:
+# cli_based_tool(command="ls -la /home/user")
+
+# Shell features are supported:
+# cli_based_tool(command="find . -name '*.py' | head -20")
+# cli_based_tool(command="npm install && npm test")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration Parameters -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Configuration Parameters</h2>
+
+          <h3>extra_paths</h3>
+          <p>
+            Additional directories to add to <code>PATH</code> when executing commands.
+            Useful when tools are installed in non-standard locations.
+          </p>
+          <table>
+            <tbody>
+              <tr><td><strong>Type</strong></td><td><code>List[str]</code></td></tr>
+              <tr><td><strong>Default</strong></td><td><code>[]</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3>max_output_chars</h3>
+          <p>
+            Maximum characters to return from stdout/stderr combined.
+            Prevents context window overflow from verbose commands.
+          </p>
+          <table>
+            <tbody>
+              <tr><td><strong>Type</strong></td><td><code>int</code></td></tr>
+              <tr><td><strong>Default</strong></td><td><code>50000</code> (~12k tokens)</td></tr>
+            </tbody>
+          </table>
+
+          <h3>auto_background_threshold</h3>
+          <p>
+            Seconds before a command is automatically backgrounded.
+            Commands exceeding this duration return a task handle instead of blocking.
+          </p>
+          <table>
+            <tbody>
+              <tr><td><strong>Type</strong></td><td><code>float</code></td></tr>
+              <tr><td><strong>Default</strong></td><td><code>10.0</code></td></tr>
+            </tbody>
+          </table>
+
+          <h3>background_max_workers</h3>
+          <p>
+            Maximum concurrent background tasks. Additional tasks queue until a slot opens.
+          </p>
+          <table>
+            <tbody>
+              <tr><td><strong>Type</strong></td><td><code>int</code></td></tr>
+              <tr><td><strong>Default</strong></td><td><code>4</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Configuration examples</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Development setup - more output, longer threshold
+registry.expose_tool('cli', config={
+    'max_output_chars': 100000,
+    'auto_background_threshold': 60.0,
+})
+
+# CI/CD setup - additional tool paths
+registry.expose_tool('cli', config={
+    'extra_paths': [
+        '/opt/node/bin',
+        '/usr/local/go/bin',
+        '~/.cargo/bin',
+    ],
+})
+
+# Resource-constrained - limit background workers
+registry.expose_tool('cli', config={
+    'background_max_workers': 2,
+    'max_output_chars': 20000,
+})</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tool Reference -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="tool-reference">Tool Reference</h2>
+
+          <h3>cli_based_tool</h3>
+          <p>
+            Execute any shell command on the local machine.
+          </p>
+
+          <h4>Parameters</h4>
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Required</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>command</code></td>
+                <td><code>string</code></td>
+                <td>Yes</td>
+                <td>Shell command to execute</td>
+              </tr>
+              <tr>
+                <td><code>args</code></td>
+                <td><code>string[]</code></td>
+                <td>No</td>
+                <td>Arguments if passing executable separately</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h4>Return Value</h4>
+          <table>
+            <thead>
+              <tr>
+                <th>Field</th>
+                <th>Type</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>stdout</code></td>
+                <td><code>string</code></td>
+                <td>Command's standard output</td>
+              </tr>
+              <tr>
+                <td><code>stderr</code></td>
+                <td><code>string</code></td>
+                <td>Command's standard error</td>
+              </tr>
+              <tr>
+                <td><code>returncode</code></td>
+                <td><code>int</code></td>
+                <td>Exit code (0 = success)</td>
+              </tr>
+              <tr>
+                <td><code>truncated</code></td>
+                <td><code>bool</code></td>
+                <td>True if output was truncated</td>
+              </tr>
+              <tr>
+                <td><code>error</code></td>
+                <td><code>string</code></td>
+                <td>Error message if execution failed</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Tool schema</div>
+          <div class="code-block">
+            <pre><code class="language-json">{
+  "name": "cli_based_tool",
+  "description": "Execute any shell command...",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "command": {
+        "type": "string",
+        "description": "The shell command to execute"
+      },
+      "args": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Optional argument list"
+      }
+    },
+    "required": ["command"]
+  }
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Example responses</div>
+          <div class="code-block">
+            <pre><code class="language-json">// Successful command
+{
+  "stdout": "total 24\ndrwxr-xr-x  3 user...",
+  "stderr": "",
+  "returncode": 0
+}
+
+// Failed command
+{
+  "stdout": "",
+  "stderr": "ls: /nonexistent: No such file...",
+  "returncode": 2
+}
+
+// Truncated output
+{
+  "stdout": "... (truncated)",
+  "stderr": "",
+  "returncode": 0,
+  "truncated": true,
+  "truncation_message": "Output truncated..."
+}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Auto-Backgrounding -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="auto-backgrounding">Auto-Backgrounding</h2>
+          <p>
+            Commands that exceed the <code>auto_background_threshold</code> are
+            automatically converted to background tasks. This prevents the model
+            from blocking on long operations like builds and tests.
+          </p>
+
+          <h3>Known Slow Commands</h3>
+          <p>
+            The CLI plugin recognizes these patterns as slow operations and
+            estimates their duration for auto-backgrounding decisions:
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Pattern</th>
+                <th>Estimated Duration</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>npm install</code>, <code>yarn install</code></td><td>30s</td></tr>
+              <tr><td><code>cargo build</code></td><td>60s</td></tr>
+              <tr><td><code>mvn install</code></td><td>60s</td></tr>
+              <tr><td><code>docker build</code></td><td>60s</td></tr>
+              <tr><td><code>pytest</code>, <code>npm test</code></td><td>30s</td></tr>
+              <tr><td><code>pip install</code></td><td>20s</td></tr>
+              <tr><td><code>git clone</code></td><td>20s</td></tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Background Task Integration</div>
+            When a command is backgrounded, it integrates with the
+            <code>background</code> plugin for task management. The model receives
+            a task handle and can check status or retrieve output later.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Auto-background flow</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Model invokes a slow command:
+# cli_based_tool(command="npm install")
+
+# Plugin estimates duration (~30s) > threshold (10s)
+# Command runs in background, returns immediately:
+{
+  "background_task_id": "cli_abc123",
+  "status": "running",
+  "message": "Command backgrounded due to estimated duration"
+}
+
+# Model can check status via background plugin:
+# check_background_task(task_id="cli_abc123")
+
+{
+  "status": "completed",
+  "result": {
+    "stdout": "added 1423 packages...",
+    "stderr": "",
+    "returncode": 0
+  }
+}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Shell Detection -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="shell-detection">Shell Detection</h2>
+          <p>
+            The CLI plugin automatically detects when a command requires shell
+            interpretation and switches execution modes accordingly.
+          </p>
+
+          <h3>Shell Mode (shell=True)</h3>
+          <p>
+            Activated when the command contains:
+          </p>
+          <ul>
+            <li>Pipes: <code>|</code></li>
+            <li>Redirections: <code>&gt;</code>, <code>&lt;</code>, <code>&gt;&gt;</code></li>
+            <li>Command chaining: <code>&amp;&amp;</code>, <code>||</code>, <code>;</code></li>
+            <li>Command substitution: <code>$()</code>, backticks</li>
+            <li>Background execution: <code>&amp;</code> at end</li>
+          </ul>
+
+          <h3>Direct Mode (shell=False)</h3>
+          <p>
+            Used for simple commands without shell metacharacters. Safer and
+            slightly faster, as the command is executed directly without shell parsing.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Shell detection examples</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Direct mode (no shell metacharacters)
+cli_based_tool(command="ls -la /home/user")
+cli_based_tool(command="git status")
+cli_based_tool(command="python script.py --arg value")
+
+# Shell mode (requires shell interpretation)
+cli_based_tool(command="find . -name '*.py' | wc -l")
+cli_based_tool(command="echo 'hello' > output.txt")
+cli_based_tool(command="npm install && npm test")
+cli_based_tool(command="cat file.txt || echo 'not found'")
+cli_based_tool(command="export FOO=bar; echo $FOO")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Security note</div>
+          <div class="code-block">
+            <pre><code class="language-text">Shell mode passes commands through /bin/sh.
+This enables powerful features but also means:
+
+- Shell injection is possible if commands
+  contain untrusted input
+- The permission plugin should be used to
+  review commands before execution
+- Consider the security implications of
+  allowing shell access in your use case</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error Handling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="error-handling">Error Handling</h2>
+          <p>
+            The plugin's system instructions guide the model on handling common errors:
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Error</th>
+                <th>Guidance</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Non-zero returncode</td>
+                <td>Check stderr for details</td>
+              </tr>
+              <tr>
+                <td>"File exists"</td>
+                <td>Goal already achieved, continue</td>
+              </tr>
+              <tr>
+                <td>"Permission denied"</td>
+                <td>Try alternative approach or report blocker</td>
+              </tr>
+              <tr>
+                <td>"Command not found"</td>
+                <td>Check if tool installed, try alternative</td>
+              </tr>
+              <tr>
+                <td>"No such file"</td>
+                <td>Verify path exists first</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Output Truncation</h3>
+          <p>
+            When output exceeds <code>max_output_chars</code>, the response includes
+            a <code>truncated: true</code> flag and guidance message suggesting
+            the model use filters or limits.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Avoiding truncation</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Instead of full output:
+find /large/dir -type f
+
+# Use filters to narrow results:
+find /large/dir -type f -name "*.py" | head -50
+
+# Limit recursion depth:
+find /large/dir -maxdepth 2 -type f
+
+# Use grep to filter:
+npm list | grep -E "^[+|`]-- (react|vue)"
+
+# Limit with head/tail:
+git log --oneline | head -20</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+
+
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>
