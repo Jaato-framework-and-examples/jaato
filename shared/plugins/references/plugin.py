@@ -36,6 +36,7 @@ class ReferencesPlugin:
         self._sources: List[ReferenceSource] = []
         self._channel: Optional[SelectionChannel] = None
         self._selected_source_ids: List[str] = []  # User-selected during session
+        self._exclude_tools: List[str] = []  # Tools to exclude from schema
         self._initialized = False
         # Selection lifecycle hooks for UI integration
         self._on_selection_requested: Optional[Callable[[str, List[str]], None]] = None
@@ -60,6 +61,7 @@ class ReferencesPlugin:
                    - preselected: List of source IDs to pre-select at startup.
                                   Sources are looked up from the master catalog
                                   and automatically added to available sources.
+                   - exclude_tools: List of tool names to exclude (e.g., ["selectReferences"])
         """
         config = config or {}
 
@@ -139,6 +141,9 @@ class ReferencesPlugin:
             self._selected_source_ids = valid_preselected
         else:
             self._selected_source_ids = []
+
+        # Capture excluded tools
+        self._exclude_tools = config.get("exclude_tools", [])
         self._initialized = True
 
     def shutdown(self) -> None:
@@ -151,8 +156,11 @@ class ReferencesPlugin:
         self._initialized = False
 
     def get_tool_schemas(self) -> List[ToolSchema]:
-        """Return tool declarations for the references plugin."""
-        return [
+        """Return tool declarations for the references plugin.
+
+        Tools can be excluded via the exclude_tools config option.
+        """
+        all_tools = [
             ToolSchema(
                 name="selectReferences",
                 description=(
@@ -206,6 +214,11 @@ class ReferencesPlugin:
                 }
             )
         ]
+
+        # Filter out excluded tools
+        if self._exclude_tools:
+            return [t for t in all_tools if t.name not in self._exclude_tools]
+        return all_tools
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Return tool executors."""
