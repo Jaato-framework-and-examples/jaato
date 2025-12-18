@@ -878,6 +878,23 @@ class RichClient:
                         lines.append(("Press 'q' to close, Enter/Space for next page", "dim italic"))
                         self._display.show_lines(lines)
                         return
+            # Validate input against pending response options
+            if self._pending_response_options and user_input.lower() != 'v':
+                # Check if input matches any valid option
+                is_valid = any(
+                    option.matches(user_input)
+                    for option in self._pending_response_options
+                )
+                if not is_valid:
+                    # Build helpful error message with valid options
+                    valid_opts = ", ".join(
+                        f"{opt.short}/{opt.full}" for opt in self._pending_response_options
+                    )
+                    self._display.add_system_message(
+                        f"Invalid response: '{user_input}'. Valid options: {valid_opts}",
+                        style="red"
+                    )
+                    return
             # Don't echo answer - it's shown inline in the tool tree
             self._channel_input_queue.put(user_input)
             self._trace(f"Input routed to channel queue: {user_input}")
