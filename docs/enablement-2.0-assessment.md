@@ -6,7 +6,13 @@
 
 This assessment evaluates how the **jaato** framework ("just another agentic tool orchestrator") could serve as the runtime foundation for implementing **Enablement 2.0** - an AI-powered SDLC platform that automates code generation while maintaining organizational standards.
 
-**Overall Verdict:** Jaato is an excellent match for Enablement 2.0's runtime layer, with strong alignment in architecture patterns, plugin extensibility, and multi-agent orchestration. Validation tiers map naturally to SubagentProfiles with appropriate tools. The primary gap is the knowledge layer (ADR/ERI retrieval), which requires a new plugin.
+**Overall Verdict:** Jaato is an excellent match for Enablement 2.0's runtime layer. All major components map to existing jaato capabilities:
+- **Skills** → SubagentProfiles
+- **Validation Tiers** → SubagentProfiles with CLI/MCP tools
+- **ADRs/ERIs** → ReferencesPlugin with tagged sources
+- **Modules** → System instructions + file templates
+
+The primary work is **configuration, not development**.
 
 ---
 
@@ -113,9 +119,9 @@ Skills (Executable Units)
 
 | Enablement 2.0 Requirement | Jaato Capability | Alignment |
 |---------------------------|------------------|-----------|
-| **ADR Storage** | Not native | **Gap** - Would need knowledge plugin |
-| **ERI Repository** | Not native | **Gap** - Would need knowledge plugin |
-| **Semantic Discovery** | Prompt enrichment system | **Moderate** - Infrastructure exists, needs content layer |
+| **ADR Storage** | `ReferencesPlugin` with LOCAL/URL/MCP sources | **Strong** - ADRs configured as ReferenceSource entries with tags |
+| **ERI Repository** | `ReferencesPlugin` with AUTO/SELECTABLE modes | **Strong** - ERIs configured with appropriate tags for filtering |
+| **Semantic Discovery** | `ReferencesPlugin` tags + `listReferences`/`selectReferences` | **Strong** - Tag-based filtering and user selection |
 
 ---
 
@@ -265,28 +271,56 @@ This matches Enablement 2.0's "fast spawning" requirement for specialized agents
 
 ## 4. Implementation Gaps and Recommendations
 
-### 4.1 Knowledge Layer Plugin (High Priority)
+### 4.1 Knowledge Layer via References Plugin
 
-**Gap:** Jaato lacks native knowledge management.
+**No Gap:** The existing `ReferencesPlugin` already handles ADR/ERI management.
 
-**Recommendation:** Create a `knowledge` plugin that:
-- Indexes ADRs and ERIs from a repository
-- Provides semantic search via embedding similarity
-- Injects relevant knowledge into prompts
-- Exposes tools like `search_adr`, `get_eri`, `list_patterns`
+**How it works:**
+- ADRs and ERIs are configured as `ReferenceSource` entries in `references.json`
+- **AUTO mode**: Critical ADRs injected into system instructions at startup
+- **SELECTABLE mode**: ERIs available on-demand via user selection
+- **Tags**: Filter by domain (`code`, `design`), type (`adr`, `eri`), pattern (`circuit-breaker`)
+- **Access methods**: LOCAL files, URLs, MCP servers
 
-```python
-# Example: KnowledgePlugin
-class KnowledgePlugin:
-    def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
-        # Semantic search for relevant ADRs/ERIs
-        relevant = self.search_knowledge(prompt)
-        context = self.format_knowledge_context(relevant)
-        return PromptEnrichmentResult(
-            prompt=f"{context}\n\n{prompt}",
-            metadata={'matched_adrs': [...], 'matched_eris': [...]}
-        )
+```json
+// references.json - Enablement 2.0 knowledge configuration
+{
+  "sources": [
+    {
+      "id": "adr-002",
+      "name": "ADR-002: Resilience Patterns",
+      "description": "Strategic decision on resilience implementation standards",
+      "type": "local",
+      "path": "knowledge/ADRs/adr-002/README.md",
+      "mode": "auto",
+      "tags": ["adr", "resilience", "code"]
+    },
+    {
+      "id": "eri-code-002",
+      "name": "ERI-CODE-002: Circuit Breaker Implementation",
+      "description": "Reference implementation for circuit breaker pattern",
+      "type": "local",
+      "path": "knowledge/ERIs/eri-code-002/README.md",
+      "mode": "selectable",
+      "tags": ["eri", "code", "circuit-breaker", "resilience4j", "java"]
+    },
+    {
+      "id": "eri-code-003",
+      "name": "ERI-CODE-003: Retry Pattern",
+      "description": "Reference implementation for retry with backoff",
+      "type": "local",
+      "path": "knowledge/ERIs/eri-code-003/README.md",
+      "mode": "selectable",
+      "tags": ["eri", "code", "retry", "resilience4j", "java"]
+    }
+  ]
+}
 ```
+
+**Agent usage:**
+- `listReferences` - Discover available ADRs/ERIs with tag filtering
+- `selectReferences` - Request user selection of relevant ERIs for current task
+- AUTO sources appear in system instructions automatically
 
 ### 4.2 Multi-Tier Validation as Subagent Profiles
 
@@ -451,25 +485,25 @@ circuit_breaker_skill = EnablementProfile(
 
 ## 5. Implementation Roadmap
 
-### Phase 1: Foundation (Weeks 1-2)
-- [ ] Create `knowledge` plugin with basic ADR/ERI loading
-- [ ] Define Enablement-specific subagent profiles
-- [ ] Configure MCP server for knowledge access
+### Phase 1: Configuration
+- [ ] Configure `references.json` with ADR/ERI sources and tags
+- [ ] Define SubagentProfiles for Enablement skills (code generation, validation tiers)
+- [ ] Set up MCP servers for external tool access if needed
 
-### Phase 2: Execution (Weeks 3-4)
-- [ ] Implement module template loading in system prompts
-- [ ] Create validation plugin (Tier 1)
-- [ ] Add domain-aware permission policies
+### Phase 2: Skill Profiles
+- [ ] Create SubagentProfiles for each Enablement skill (circuit-breaker, microservice-generator, etc.)
+- [ ] Create SubagentProfiles for validation tiers (tier1-universal, tier2-java-spring, etc.)
+- [ ] Configure tool access per profile (CLI, file_edit, references)
 
-### Phase 3: Integration (Weeks 5-6)
-- [ ] Connect to existing ADR/ERI repository
-- [ ] Implement Tier 2 validation (pattern compliance)
-- [ ] Add traceability to token ledger
+### Phase 3: Integration Testing
+- [ ] Test end-to-end flow: discovery → skill execution → validation
+- [ ] Verify reference source injection (AUTO and SELECTABLE modes)
+- [ ] Test manifest.json generation for traceability
 
-### Phase 4: Production (Weeks 7-8)
-- [ ] End-to-end flow testing
-- [ ] Performance optimization
-- [ ] Documentation and onboarding
+### Phase 4: Refinement
+- [ ] Tune system prompts based on output quality
+- [ ] Add additional skills and validation profiles as needed
+- [ ] Documentation for skill authors
 
 ---
 
@@ -519,9 +553,15 @@ response = client.send_message(
 | MCP Integration | 10/10 | Already implemented |
 | Extensibility | 9/10 | Plugin system ready for new plugins |
 | Authorization | 8/10 | PermissionPlugin supports tool access control |
-| Validation Tiers | 8/10 | Validation tiers are simply SubagentProfiles with CLI/MCP tools |
-| Knowledge Layer | 4/10 | Requires new plugin (no existing capability) |
+| Validation Tiers | 8/10 | Validation tiers are SubagentProfiles with CLI/MCP tools |
+| Knowledge Layer | 9/10 | ReferencesPlugin handles ADR/ERI catalog with tags and modes |
 
-**Overall Score: 8.0/10** - Strong foundation. Validation is well-supported via subagent profiles. Primary gap is the knowledge layer plugin for ADR/ERI access.
+**Overall Score: 8.8/10** - Excellent fit. All major Enablement 2.0 components map to existing jaato capabilities.
 
-The primary work involves creating a **knowledge plugin** for ADR/ERI retrieval. Validation tiers map naturally to SubagentProfiles using existing tool plugins (CLI for linters, MCP for external systems). Jaato's multi-agent architecture is an excellent fit for the Enablement 2.0 vision.
+**Key insight:** Enablement 2.0's architecture maps directly to jaato's existing plugin system:
+- **Skills** → SubagentProfiles
+- **Validation Tiers** → SubagentProfiles with CLI/MCP tools
+- **ADRs/ERIs** → ReferencesPlugin with tagged ReferenceSource entries
+- **Modules** → System instructions + file templates
+
+The primary work is **configuration, not development** - defining profiles, configuring references, and setting up tool access.
