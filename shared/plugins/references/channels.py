@@ -405,11 +405,158 @@ class FileSelectionChannel(SelectionChannel):
                     f.unlink(missing_ok=True)
 
 
+class QueueSelectionChannel(SelectionChannel):
+    """Channel that displays prompts via callback and receives input via queue.
+
+    Designed for TUI integration where:
+    - Selection prompts are shown in an output panel
+    - User input comes through a shared queue from the main input handler
+    - No direct stdin access needed (works with full-screen terminal UIs)
+    - Supports pagination for many references
+    """
+
+    def __init__(self):
+        self._output_callback: Optional[Callable[[str, str, str], None]] = None
+        self._input_queue: Optional[Any] = None  # queue.Queue[str]
+        self._waiting_for_input: bool = False
+        self._prompt_callback: Optional[Callable[[bool], None]] = None
+        self._timeout: int = 60
+
+    @property
+    def name(self) -> str:
+        return "queue"
+
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
+        """Initialize the queue channel.
+
+        Config options:
+            timeout: Input timeout in seconds (default: 60)
+        """
+        if config:
+            self._timeout = config.get("timeout", 60)
+
+    def set_callbacks(
+        self,
+        output_callback: Optional[Callable[[str, str, str], None]] = None,
+        input_queue: Optional[Any] = None,
+        prompt_callback: Optional[Callable[[bool], None]] = None,
+        **kwargs,
+    ) -> None:
+        """Set the callbacks and queue for TUI integration.
+
+        Args:
+            output_callback: Called with (source, text, mode) to display output.
+            input_queue: Queue to receive user input from the main input handler.
+            prompt_callback: Called with True when waiting for input, False when done.
+        """
+        self._output_callback = output_callback
+        self._input_queue = input_queue
+        self._prompt_callback = prompt_callback
+
+    @property
+    def waiting_for_input(self) -> bool:
+        """Check if channel is waiting for user input."""
+        return self._waiting_for_input
+
+    def _output(self, text: str, mode: str = "append") -> None:
+        """Output text via callback."""
+        if self._output_callback:
+            self._output_callback("references", text, mode)
+
+    def _read_input(self) -> Optional[str]:
+        """Read input from the queue with timeout."""
+        import queue as queue_module
+
+        if not self._input_queue:
+            return None
+
+        try:
+            return self._input_queue.get(timeout=self._timeout)
+        except queue_module.Empty:
+            return None
+
+    def present_selection(
+        self,
+        available_sources: List[ReferenceSource],
+        context: Optional[str] = None
+    ) -> List[str]:
+        """Present available sources via output panel and get user selection via queue."""
+        # Build prompt lines for display
+        prompt_lines = []
+        prompt_lines.append("REFERENCE SELECTION")
+        prompt_lines.append("=" * 40)
+
+        if context:
+            prompt_lines.append(f"Context: {context}")
+            prompt_lines.append("")
+
+        prompt_lines.append("Available references:")
+        prompt_lines.append("")
+
+        for i, source in enumerate(available_sources, 1):
+            tags_str = ", ".join(source.tags) if source.tags else "none"
+            prompt_lines.append(f"  [{i}] {source.name}")
+            prompt_lines.append(f"      {source.description}")
+            prompt_lines.append(f"      Type: {source.type.value} | Tags: {tags_str}")
+            prompt_lines.append("")
+
+        prompt_lines.append("Enter selection:")
+        prompt_lines.append("  - Numbers separated by commas (e.g., '1,3,4')")
+        prompt_lines.append("  - 'all' to select all")
+        prompt_lines.append("  - 'none' or empty to skip")
+
+        # Output each line
+        for i, line in enumerate(prompt_lines):
+            mode = "write" if i == 0 else "append"
+            self._output(line, mode)
+
+        # Signal waiting for input
+        self._waiting_for_input = True
+        if self._prompt_callback:
+            self._prompt_callback(True)
+
+        try:
+            response = self._read_input()
+
+            if response is None:
+                return []
+
+            response = response.strip().lower()
+
+            if not response or response == 'none':
+                return []
+
+            if response == 'all':
+                return [s.id for s in available_sources]
+
+            # Parse comma-separated indices
+            selected_ids = []
+            try:
+                indices = [int(x.strip()) for x in response.split(',')]
+                for idx in indices:
+                    if 1 <= idx <= len(available_sources):
+                        selected_ids.append(available_sources[idx - 1].id)
+            except ValueError:
+                # Invalid input
+                return []
+
+            return selected_ids
+
+        finally:
+            self._waiting_for_input = False
+            if self._prompt_callback:
+                self._prompt_callback(False)
+
+    def notify_result(self, message: str) -> None:
+        """Notify user of selection result via output callback."""
+        self._output(message, "write")
+
+
 def create_channel(channel_type: str, config: Optional[Dict[str, Any]] = None) -> SelectionChannel:
     """Factory function to create an channel by type.
 
     Args:
-        channel_type: One of "console", "webhook", "file"
+        channel_type: One of "console", "webhook", "file", "queue"
         config: Optional configuration for the channel
 
     Returns:
@@ -422,6 +569,7 @@ def create_channel(channel_type: str, config: Optional[Dict[str, Any]] = None) -
         "console": ConsoleSelectionChannel,
         "webhook": WebhookSelectionChannel,
         "file": FileSelectionChannel,
+        "queue": QueueSelectionChannel,
     }
 
     if channel_type not in channels:
