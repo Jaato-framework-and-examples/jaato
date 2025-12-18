@@ -945,11 +945,21 @@ class SubagentPlugin:
 
         try:
             # Create session from runtime with profile's configuration
+            # profile.plugins is always a list (possibly empty); pass it directly
+            # Empty list = no tools, non-empty list = only those tools
             session = self._runtime.create_session(
                 model=model,
                 tools=profile.plugins if profile.plugins else None,
                 system_instructions=profile.system_instructions,
                 plugin_configs=profile.plugin_configs if profile.plugin_configs else None
+            )
+
+            # Debug: log what plugins are being used
+            logger.info(
+                "Subagent '%s' session created with tools=%s, plugin_configs keys=%s",
+                profile.name,
+                profile.plugins,
+                list(profile.plugin_configs.keys()) if profile.plugin_configs else []
             )
 
             # Set agent context for permission checks
