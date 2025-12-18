@@ -539,11 +539,15 @@ loadImage(path="./diagram.png")
             <li><strong>documentation</strong>: Technical writing</li>
           </ul>
 
-          <h3>Inline Configuration</h3>
+          <h3>Plugin Configuration</h3>
           <p>
-            Custom agent configurations can be provided inline for
-            specialized use cases.
+            Profiles can include <code>plugin_configs</code> to customize plugin behavior:
           </p>
+          <table>
+            <tbody>
+              <tr><td><code>plugin_configs</code></td><td>Per-plugin configuration overrides</td></tr>
+            </tbody>
+          </table>
         </div>
         <div class="panel-code">
           <div class="code-label">Profile file (.jaato/profiles/code_assistant.json)</div>
@@ -555,7 +559,20 @@ loadImage(path="./diagram.png")
   "max_turns": 10
 }</code></pre>
           </div>
-          <div class="code-label">Spawning agents</div>
+          <div class="code-label" style="margin-top: 24px;">Profile with plugin_configs</div>
+          <div class="code-block">
+            <pre><code class="language-json">{
+  "name": "skill-add-retry",
+  "plugins": ["cli", "file_edit", "references"],
+  "plugin_configs": {
+    "references": {
+      "preselected": ["adr-001", "eri-002"],
+      "exclude_tools": ["selectReferences"]
+    }
+  }
+}</code></pre>
+          </div>
+          <div class="code-label" style="margin-top: 24px;">Spawning agents</div>
           <div class="code-block">
             <pre><code class="language-python"># Use predefined profile
 spawn_subagent(
