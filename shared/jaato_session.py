@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .ai_tool_runner import ToolExecutor
+from .retry_utils import with_retry, RetryConfig
 from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
@@ -510,7 +511,10 @@ class JaatoSession:
         response: Optional[ProviderResponse] = None
 
         try:
-            response = self._provider.send_message(message)
+            response, _retry_stats = with_retry(
+                lambda: self._provider.send_message(message),
+                context="send_message"
+            )
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
 
@@ -574,8 +578,11 @@ class JaatoSession:
                     tool_result = self._build_tool_result(fc, executor_result)
                     tool_results.append(tool_result)
 
-                # Send tool results back
-                response = self._provider.send_tool_results(tool_results)
+                # Send tool results back (with retry for rate limits)
+                response, _retry_stats = with_retry(
+                    lambda: self._provider.send_tool_results(tool_results),
+                    context="send_tool_results"
+                )
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
 
@@ -881,7 +888,10 @@ class JaatoSession:
         response: Optional[ProviderResponse] = None
 
         try:
-            response = self._provider.send_message_with_parts(parts)
+            response, _retry_stats = with_retry(
+                lambda: self._provider.send_message_with_parts(parts),
+                context="send_message_with_parts"
+            )
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
 
@@ -950,7 +960,11 @@ class JaatoSession:
                     tool_result = self._build_tool_result(fc, executor_result)
                     tool_results.append(tool_result)
 
-                response = self._provider.send_tool_results(tool_results)
+                # Send tool results back (with retry for rate limits)
+                response, _retry_stats = with_retry(
+                    lambda: self._provider.send_tool_results(tool_results),
+                    context="send_tool_results"
+                )
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
                 function_calls = list(response.function_calls) if response.function_calls else []
