@@ -1,6 +1,6 @@
 {
   "name": "skill-qa-002-add-integration-tests-java-testcontainers",
-  "description": "Add integration tests with TestContainers for database/messaging",
+  "description": "[ADD Flow] Add integration tests with real dependencies via TestContainers. USE WHEN: (1) service has external dependencies (database, message queue, cache, external APIs), (2) request asks for integration tests or end-to-end flow verification, (3) need to verify actual infrastructure interactions, not mocks. TRIGGERS: service uses JPA/messaging/Redis, no integration test coverage, QA domain request.",
   "plugins": ["cli", "file_edit", "references"],
   "plugin_configs": {
     "references": {

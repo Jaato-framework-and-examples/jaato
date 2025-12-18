@@ -1,6 +1,6 @@
 {
   "name": "validator-tier2-java-spring",
-  "description": "Tier 2 Technology Validation: Java/Spring specific quality checks",
+  "description": "[Tier 2 - Technology] Java/Spring specific quality checks. RUN WHEN: Code is Java/Spring (detected via pom.xml, build.gradle, or .java files). RUN AFTER: Tier 1 passes. CHECKS: Maven/Gradle build, Checkstyle, SpotBugs, OWASP dependency-check, Spring config validation, package structure per ADR-003. BLOCKS IF: build fails, critical vulnerabilities, structure violations.",
   "plugins": ["cli", "references"],
   "plugin_configs": {
     "references": {
