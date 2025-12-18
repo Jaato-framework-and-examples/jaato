@@ -59,6 +59,7 @@ from .config_loader import (
     load_config,
     validate_config,
     create_default_config,
+    discover_references,
 )
 from .plugin import ReferencesPlugin, create_plugin
 
@@ -81,6 +82,7 @@ __all__ = [
     'load_config',
     'validate_config',
     'create_default_config',
+    'discover_references',
     # Plugin
     'ReferencesPlugin',
     'create_plugin',
