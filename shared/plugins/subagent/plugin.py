@@ -954,13 +954,15 @@ class SubagentPlugin:
                 plugin_configs=profile.plugin_configs if profile.plugin_configs else None
             )
 
-            # Debug: log what plugins are being used
-            logger.info(
-                "Subagent '%s' session created with tools=%s, plugin_configs keys=%s",
-                profile.name,
-                profile.plugins,
-                list(profile.plugin_configs.keys()) if profile.plugin_configs else []
-            )
+            # Debug: write to trace log file (visible even with rich client)
+            import tempfile
+            trace_path = os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+            with open(trace_path, "a") as f:
+                from datetime import datetime as dt
+                ts = dt.now().strftime("%H:%M:%S.%f")[:-3]
+                f.write(f"[{ts}] [SUBAGENT] '{profile.name}' tools={profile.plugins}\n")
+                f.write(f"[{ts}] [SUBAGENT] plugin_configs={profile.plugin_configs}\n")
+                f.flush()
 
             # Set agent context for permission checks
             session.set_agent_context(
