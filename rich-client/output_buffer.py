@@ -403,7 +403,8 @@ class OutputBuffer:
             method: How permission was resolved (yes, always, once, never, whitelist, etc.)
         """
         for tool in self._active_tools:
-            if tool.name == tool_name:
+            # Match the tool with pending permission state (only one at a time due to blocking)
+            if tool.name == tool_name and tool.permission_state == "pending":
                 tool.permission_state = "granted" if granted else "denied"
                 tool.permission_method = method
                 tool.permission_prompt_lines = None  # Clear expanded prompt
