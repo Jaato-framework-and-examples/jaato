@@ -819,6 +819,127 @@ if share:
           </div>
         </div>
       </section>
+
+      <!-- Rate Limiting -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="rate-limiting">Rate Limiting</h2>
+
+          <p>
+            jaato provides both <strong>proactive</strong> (request pacing) and
+            <strong>reactive</strong> (retry with backoff) rate limiting to handle
+            provider API limits gracefully.
+          </p>
+
+          <h3>Environment Variables</h3>
+          <p>Configure rate limiting via environment variables:</p>
+
+          <table class="param-table">
+            <thead>
+              <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>AI_REQUEST_INTERVAL</code></td>
+                <td><code>0</code></td>
+                <td>Minimum seconds between API requests (0 = disabled)</td>
+              </tr>
+              <tr>
+                <td><code>AI_RETRY_ATTEMPTS</code></td>
+                <td><code>5</code></td>
+                <td>Max retry attempts on 429 errors</td>
+              </tr>
+              <tr>
+                <td><code>AI_RETRY_BASE_DELAY</code></td>
+                <td><code>1.0</code></td>
+                <td>Initial retry delay in seconds</td>
+              </tr>
+              <tr>
+                <td><code>AI_RETRY_MAX_DELAY</code></td>
+                <td><code>30.0</code></td>
+                <td>Maximum retry delay in seconds</td>
+              </tr>
+              <tr>
+                <td><code>AI_RETRY_LOG_SILENT</code></td>
+                <td><code>false</code></td>
+                <td>Suppress retry log messages</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>set_retry_callback</h3>
+          <div class="method-signature">
+            <span class="method-name">set_retry_callback</span>(<br>
+            &nbsp;&nbsp;<span class="param">callback</span>: <span class="type">Optional[RetryCallback]</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+          <p>
+            Set a callback to receive retry notifications. Use this to route
+            retry messages to a status bar or queue instead of console output.
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">callback</span>
+              <span class="param-type">RetryCallback</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Function signature: <code>(message: str, attempt: int, max_attempts: int, delay: float) -> None</code>.
+                Set to <code>None</code> to revert to console output.
+              </div>
+            </li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Proactive pacing (.env)</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Prevent 429 errors by limiting request rate
+# Example: max 2 requests per second
+AI_REQUEST_INTERVAL=0.5
+
+# Retry configuration (reactive)
+AI_RETRY_ATTEMPTS=5
+AI_RETRY_BASE_DELAY=1.0
+AI_RETRY_MAX_DELAY=30.0</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Custom retry handler</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Route retry messages to a queue
+# (for rich UIs that don't want console spam)
+session = client.get_session()
+session.set_retry_callback(
+    lambda msg, attempt, max_att, delay:
+        status_queue.put({
+            "type": "retry",
+            "message": msg,
+            "attempt": attempt,
+            "max_attempts": max_att,
+            "delay": delay
+        })
+)
+
+# Revert to console output
+session.set_retry_callback(None)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">How it works</div>
+          <div class="code-block">
+            <pre><code class="language-text">Request Flow:
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   Request    │───>│ RequestPacer │───>│  API Call    │
+│              │    │ (proactive)  │    │              │
+└──────────────┘    │ waits if     │    └──────┬───────┘
+                    │ interval not │           │
+                    │ elapsed      │           v
+                    └──────────────┘    ┌──────────────┐
+                                        │  429 Error?  │
+                                        │  with_retry  │
+                                        │  (reactive)  │
+                                        └──────────────┘</code></pre>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 
