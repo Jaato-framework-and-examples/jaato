@@ -1,0 +1,262 @@
+{
+  "version": "1.0",
+  "description": "Enablement 2.0 SubagentProfiles - Skills and Validation Tiers",
+  "project": "${PROJECT_ID}",
+  "location": "${LOCATION}",
+  "default_model": "gemini-2.5-flash",
+  "allow_inline": false,
+  "profiles": {
+    "skill-code-001-add-circuit-breaker-java-resilience4j": {
+      "description": "Add circuit breaker pattern to Java service using Resilience4j",
+      "plugins": ["cli", "file_edit", "references"],
+      "plugin_configs": {
+        "references": {
+          "sources": [
+            {
+              "id": "adr-001-resilience-patterns",
+              "name": "ADR-001: Resilience Patterns",
+              "description": "Strategic decision on resilience patterns",
+              "type": "local",
+              "path": "./docs/adr/ADR-001-resilience-patterns.md",
+              "mode": "auto",
+              "tags": ["adr", "resilience"]
+            },
+            {
+              "id": "eri-001-circuit-breaker-resilience4j",
+              "name": "ERI-001: Circuit Breaker with Resilience4j",
+              "description": "Reference implementation for circuit breaker",
+              "type": "local",
+              "path": "./docs/eri/ERI-001-circuit-breaker-resilience4j/",
+              "mode": "auto",
+              "tags": ["eri", "circuit-breaker", "resilience4j"]
+            }
+          ]
+        }
+      },
+      "system_instructions": "You are implementing the ADD flow for circuit breaker pattern.\n\n## Execution Flow: ADD\n1. Analyze target service to identify external call points\n2. Fetch and apply ADR-001 resilience patterns\n3. Implement circuit breaker following ERI-001 reference\n4. Add required dependencies to pom.xml/build.gradle\n5. Create circuit breaker configuration\n6. Wrap external calls with @CircuitBreaker annotation\n7. Implement fallback methods\n8. Output: Modified source files",
+      "max_turns": 15,
+      "auto_approved": false,
+      "icon_name": "circuit_breaker"
+    },
+    "skill-code-002-add-retry-java-resilience4j": {
+      "description": "Add retry pattern with exponential backoff using Resilience4j",
+      "plugins": ["cli", "file_edit", "references"],
+      "plugin_configs": {
+        "references": {
+          "sources": [
+            {
+              "id": "adr-001-resilience-patterns",
+              "name": "ADR-001: Resilience Patterns",
+              "description": "Strategic decision on resilience patterns",
+              "type": "local",
+              "path": "./docs/adr/ADR-001-resilience-patterns.md",
+              "mode": "auto",
+              "tags": ["adr", "resilience"]
+            },
+            {
+              "id": "eri-002-retry-resilience4j",
+              "name": "ERI-002: Retry Pattern with Resilience4j",
+              "description": "Reference implementation for retry pattern",
+              "type": "local",
+              "path": "./docs/eri/ERI-002-retry-resilience4j/",
+              "mode": "auto",
+              "tags": ["eri", "retry", "resilience4j"]
+            }
+          ]
+        }
+      },
+      "system_instructions": "You are implementing the ADD flow for retry pattern.\n\n## Execution Flow: ADD\n1. Analyze target service to identify retryable operations\n2. Fetch and apply ADR-001 resilience patterns\n3. Implement retry following ERI-002 reference\n4. Configure exponential backoff parameters\n5. Add @Retry annotations with appropriate config\n6. Output: Modified source files",
+      "max_turns": 15,
+      "auto_approved": false
+    },
+    "skill-code-020-generate-microservice-java-spring": {
+      "description": "Generate new Spring Boot microservice following enterprise standards",
+      "plugins": ["cli", "file_edit", "references"],
+      "plugin_configs": {
+        "references": {
+          "sources": [
+            {
+              "id": "adr-003-microservice-structure",
+              "name": "ADR-003: Microservice Structure",
+              "description": "Strategic decision on microservice structure",
+              "type": "local",
+              "path": "./docs/adr/ADR-003-microservice-structure.md",
+              "mode": "auto",
+              "tags": ["adr", "microservice", "architecture"]
+            },
+            {
+              "id": "eri-003-spring-boot-microservice",
+              "name": "ERI-003: Spring Boot Microservice Template",
+              "description": "Reference implementation for microservice",
+              "type": "local",
+              "path": "./docs/eri/ERI-003-spring-boot-microservice/",
+              "mode": "auto",
+              "tags": ["eri", "microservice", "spring", "template"]
+            },
+            {
+              "id": "adr-006-logging-observability",
+              "name": "ADR-006: Logging and Observability",
+              "description": "Logging standards for new services",
+              "type": "local",
+              "path": "./docs/adr/ADR-006-logging-observability.md",
+              "mode": "auto",
+              "tags": ["adr", "logging", "observability"]
+            }
+          ]
+        }
+      },
+      "system_instructions": "You are implementing the GENERATE flow for a new microservice.\n\n## Execution Flow: GENERATE\n1. Gather service requirements (name, domain, dependencies)\n2. Fetch ADR-003 for structure guidelines\n3. Use ERI-003 template as base\n4. Generate project structure:\n   - src/main/java/{package}/\n     - Application.java\n     - config/\n     - controller/\n     - service/\n     - repository/\n     - model/\n   - src/main/resources/\n     - application.yml\n     - logback-spring.xml\n   - src/test/java/\n   - pom.xml or build.gradle\n5. Apply ADR-006 logging configuration\n6. Output: Complete project scaffold",
+      "max_turns": 20,
+      "auto_approved": false,
+      "icon_name": "microservice"
+    },
+    "skill-code-021-generate-rest-controller-java-spring": {
+      "description": "Generate REST controller with validation, error handling, and OpenAPI",
+      "plugins": ["cli", "file_edit", "references"],
+      "plugin_configs": {
+        "references": {
+          "sources": [
+            {
+              "id": "adr-002-api-design",
+              "name": "ADR-002: REST API Design Standards",
+              "description": "API design guidelines",
+              "type": "local",
+              "path": "./docs/adr/ADR-002-api-design.md",
+              "mode": "auto",
+              "tags": ["adr", "api", "rest"]
+            },
+            {
+              "id": "eri-004-rest-controller",
+              "name": "ERI-004: REST Controller Pattern",
+              "description": "Reference implementation for REST controller",
+              "type": "local",
+              "path": "./docs/eri/ERI-004-rest-controller/",
+              "mode": "auto",
+              "tags": ["eri", "rest", "controller"]
+            }
+          ]
+        }
+      },
+      "system_instructions": "You are implementing the GENERATE flow for a REST controller.\n\n## Execution Flow: GENERATE\n1. Gather endpoint requirements (resource, operations, DTOs)\n2. Fetch ADR-002 for API design standards\n3. Use ERI-004 as implementation reference\n4. Generate:\n   - Controller class with @RestController\n   - Request/Response DTOs with validation\n   - Exception handler for consistent errors\n   - OpenAPI annotations for documentation\n5. Output: Controller and related classes",
+      "max_turns": 15,
+      "auto_approved": false
+    },
+    "skill-qa-001-add-unit-tests-java-junit": {
+      "description": "Add JUnit 5 unit tests with Mockito for Java service",
+      "plugins": ["cli", "file_edit", "references"],
+      "plugin_configs": {
+        "references": {
+          "sources": [
+            {
+              "id": "adr-004-testing-strategy",
+              "name": "ADR-004: Testing Strategy",
+              "description": "Testing pyramid and coverage requirements",
+              "type": "local",
+              "path": "./docs/adr/ADR-004-testing-strategy.md",
+              "mode": "auto",
+              "tags": ["adr", "testing", "qa"]
+            },
+            {
+              "id": "eri-005-unit-test-patterns",
+              "name": "ERI-005: Unit Test Patterns",
+              "description": "Reference implementation for unit tests",
+              "type": "local",
+              "path": "./docs/eri/ERI-005-unit-test-patterns/",
+              "mode": "auto",
+              "tags": ["eri", "testing", "junit", "mockito"]
+            }
+          ]
+        }
+      },
+      "system_instructions": "You are implementing the ADD flow for unit tests.\n\n## Execution Flow: ADD\n1. Analyze target class to identify testable methods\n2. Fetch ADR-004 for coverage requirements\n3. Follow ERI-005 patterns for test structure\n4. Generate test class with:\n   - @ExtendWith(MockitoExtension.class)\n   - @Mock for dependencies\n   - @InjectMocks for subject under test\n   - Tests following Given-When-Then pattern\n   - Edge cases and error scenarios\n5. Target: 80% line coverage minimum\n6. Output: Test class in src/test/java/",
+      "max_turns": 15,
+      "auto_approved": false,
+      "icon_name": "test"
+    },
+    "skill-qa-002-add-integration-tests-java-testcontainers": {
+      "description": "Add integration tests with TestContainers for database/messaging",
+      "plugins": ["cli", "file_edit", "references"],
+      "plugin_configs": {
+        "references": {
+          "sources": [
+            {
+              "id": "adr-004-testing-strategy",
+              "name": "ADR-004: Testing Strategy",
+              "description": "Testing pyramid requirements",
+              "type": "local",
+              "path": "./docs/adr/ADR-004-testing-strategy.md",
+              "mode": "auto",
+              "tags": ["adr", "testing", "qa"]
+            },
+            {
+              "id": "eri-006-integration-test-patterns",
+              "name": "ERI-006: Integration Test Patterns",
+              "description": "Reference for TestContainers usage",
+              "type": "local",
+              "path": "./docs/eri/ERI-006-integration-test-patterns/",
+              "mode": "auto",
+              "tags": ["eri", "testing", "integration", "testcontainers"]
+            }
+          ]
+        }
+      },
+      "system_instructions": "You are implementing the ADD flow for integration tests.\n\n## Execution Flow: ADD\n1. Analyze service dependencies (DB, messaging, external APIs)\n2. Fetch ADR-004 for integration test requirements\n3. Follow ERI-006 for TestContainers setup\n4. Generate:\n   - @SpringBootTest with @Testcontainers\n   - Container definitions for dependencies\n   - Test data setup/teardown\n   - End-to-end flow verification\n5. Output: Integration test class",
+      "max_turns": 15,
+      "auto_approved": false
+    },
+    "validator-tier1-universal": {
+      "description": "Tier 1 Universal Validation: Basic code quality checks applicable to all code",
+      "plugins": ["cli"],
+      "plugin_configs": {},
+      "system_instructions": "You are a Tier 1 Universal Validator.\n\n## Validation Scope\nBasic quality gates applicable to ALL code regardless of language or framework:\n- Syntax validation (code compiles/parses)\n- Basic formatting (consistent indentation, line length)\n- No hardcoded secrets or credentials\n- No TODO/FIXME in production code\n- File naming conventions\n- Basic security patterns (no eval, no SQL concatenation)\n\n## Tools Available\n- CLI: Run linters, formatters, secret scanners\n\n## Output Format\nReturn JSON with:\n- passed: boolean\n- tier: 1\n- checks: [{name, status, message}]\n- blocking_issues: [critical problems]\n- warnings: [non-blocking suggestions]",
+      "max_turns": 5,
+      "auto_approved": true,
+      "icon_name": "validator"
+    },
+    "validator-tier2-java-spring": {
+      "description": "Tier 2 Technology Validation: Java/Spring specific quality checks",
+      "plugins": ["cli", "references"],
+      "plugin_configs": {
+        "references": {
+          "sources": [
+            {
+              "id": "adr-003-microservice-structure",
+              "name": "ADR-003: Microservice Structure",
+              "description": "Structure standards to validate against",
+              "type": "local",
+              "path": "./docs/adr/ADR-003-microservice-structure.md",
+              "mode": "auto",
+              "tags": ["adr", "microservice", "java", "spring"]
+            }
+          ]
+        }
+      },
+      "system_instructions": "You are a Tier 2 Technology-Specific Validator for Java/Spring.\n\n## Validation Scope\nJava and Spring Boot specific checks:\n- Maven/Gradle build validation (mvn compile / gradle build)\n- Checkstyle compliance\n- SpotBugs static analysis\n- Dependency vulnerability scan (OWASP dependency-check)\n- Spring configuration validation\n- Package structure per ADR-003\n- Logging configuration\n\n## Tools Available\n- CLI: Run mvn, gradle, checkstyle, spotbugs, dependency-check\n- References: ADR-003 for structure validation\n\n## Output Format\nReturn JSON with:\n- passed: boolean\n- tier: 2\n- checks: [{name, status, message, tool}]\n- blocking_issues: []\n- warnings: []",
+      "max_turns": 10,
+      "auto_approved": true,
+      "icon_name": "validator"
+    },
+    "validator-tier3-pattern-compliance": {
+      "description": "Tier 3 Module Validation: Pattern and ADR/ERI compliance verification",
+      "plugins": ["cli", "file_edit", "references"],
+      "plugin_configs": {
+        "references": {
+          "config_path": "./enablement/references.json"
+        }
+      },
+      "system_instructions": "You are a Tier 3 Pattern Compliance Validator.\n\n## Validation Scope\nVerify implementation matches ADR/ERI specifications:\n- Circuit breaker config matches ERI-001\n- Retry config matches ERI-002\n- API design matches ADR-002\n- Test coverage meets ADR-004 requirements\n- Security implementation matches ADR-005\n- Logging follows ADR-006\n\n## Validation Process\n1. Identify which patterns were applied\n2. Fetch relevant ADRs/ERIs\n3. Compare implementation against reference\n4. Report deviations and compliance score\n\n## Output Format\nReturn JSON with:\n- passed: boolean\n- tier: 3\n- compliance_score: 0-100\n- patterns_checked: [{pattern, compliant, deviations}]\n- blocking_issues: []\n- recommendations: []",
+      "max_turns": 15,
+      "auto_approved": true,
+      "icon_name": "validator"
+    },
+    "validator-tier4-cicd": {
+      "description": "Tier 4 CI/CD Validation: Final pre-deployment quality gate",
+      "plugins": ["cli"],
+      "plugin_configs": {},
+      "system_instructions": "You are a Tier 4 CI/CD Validator - the final quality gate.\n\n## Validation Scope\nFull CI/CD pipeline validation:\n- All tests pass (unit, integration, contract)\n- Code coverage meets threshold (80%+ line, 70%+ branch)\n- SonarQube quality gate passes\n- Security scan (SAST/DAST) passes\n- Docker image builds successfully\n- Kubernetes manifests valid\n- API contract tests pass\n\n## Tools Available\n- CLI: Run full test suite, sonar-scanner, docker build, kubectl validate\n\n## Output Format\nReturn JSON with:\n- passed: boolean\n- tier: 4\n- pipeline_stages: [{stage, status, duration, artifacts}]\n- blocking_issues: []\n- deployment_ready: boolean\n- deployment_notes: []",
+      "max_turns": 10,
+      "auto_approved": true,
+      "icon_name": "validator"
+    }
+  }
+}
