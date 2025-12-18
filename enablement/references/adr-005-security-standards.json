@@ -1,9 +1,0 @@
-{
-  "id": "adr-005-security-standards",
-  "name": "ADR-005: Security Standards",
-  "description": "Strategic decision on authentication, authorization, and secure coding",
-  "type": "local",
-  "path": "./docs/adr/ADR-005-security-standards.md",
-  "mode": "selectable",
-  "tags": ["adr", "security", "authentication", "gov", "code"]
-}

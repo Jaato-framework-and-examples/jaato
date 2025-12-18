@@ -1,0 +1,9 @@
+{
+  "id": "adr-009-service-architecture-patterns",
+  "name": "ADR-009: Service Architecture Patterns",
+  "description": "Strategic decision on Hexagonal Light as default microservice architecture: domain layer as pure POJOs, application layer orchestration, adapter layer for framework integration",
+  "type": "local",
+  "path": "./docs/adr/ADR-009-service-architecture-patterns.md",
+  "mode": "selectable",
+  "tags": ["adr", "architecture", "hexagonal", "microservice", "clean-architecture", "testing"]
+}

@@ -4,7 +4,7 @@
   "plugins": ["cli", "file_edit", "references"],
   "plugin_configs": {
     "references": {
-      "sources": ["adr-004-testing-strategy", "eri-006-integration-test-patterns"]
+      "sources": ["adr-009-service-architecture-patterns", "eri-code-001-hexagonal-light-java-spring"]
     }
   },
   "system_instructions": "You are implementing the ADD flow for integration tests.\n\n## Execution Flow: ADD\n1. Analyze service dependencies (DB, messaging, external APIs)\n2. Fetch ADR-004 for integration test requirements\n3. Follow ERI-006 for TestContainers setup\n4. Generate:\n   - @SpringBootTest with @Testcontainers\n   - Container definitions for dependencies\n   - Test data setup/teardown\n   - End-to-end flow verification\n5. Output: Integration test class",
