@@ -1,0 +1,14 @@
+{
+  "name": "skill-code-001-add-circuit-breaker-java-resilience4j",
+  "description": "Add circuit breaker pattern to Java service using Resilience4j",
+  "plugins": ["cli", "file_edit", "references"],
+  "plugin_configs": {
+    "references": {
+      "sources": ["adr-001-resilience-patterns", "eri-001-circuit-breaker-resilience4j"]
+    }
+  },
+  "system_instructions": "You are implementing the ADD flow for circuit breaker pattern.\n\n## Execution Flow: ADD\n1. Analyze target service to identify external call points\n2. Fetch and apply ADR-001 resilience patterns\n3. Implement circuit breaker following ERI-001 reference\n4. Add required dependencies to pom.xml/build.gradle\n5. Create circuit breaker configuration\n6. Wrap external calls with @CircuitBreaker annotation\n7. Implement fallback methods\n8. Output: Modified source files",
+  "max_turns": 15,
+  "auto_approved": false,
+  "icon_name": "circuit_breaker"
+}

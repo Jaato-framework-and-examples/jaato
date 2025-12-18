@@ -1,0 +1,10 @@
+{
+  "id": "eri-006-integration-test-patterns",
+  "name": "ERI-006: Integration Test Patterns",
+  "description": "Reference implementation: Spring Boot integration tests with TestContainers",
+  "type": "local",
+  "path": "./docs/eri/ERI-006-integration-test-patterns/",
+  "mode": "selectable",
+  "tags": ["eri", "testing", "integration", "testcontainers", "spring", "java", "qa"],
+  "fetchHint": "Read all files in this directory for complete reference implementation"
+}

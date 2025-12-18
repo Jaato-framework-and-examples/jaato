@@ -1,0 +1,9 @@
+{
+  "id": "adr-003-microservice-structure",
+  "name": "ADR-003: Microservice Structure",
+  "description": "Strategic decision on microservice project structure and layering",
+  "type": "local",
+  "path": "./docs/adr/ADR-003-microservice-structure.md",
+  "mode": "selectable",
+  "tags": ["adr", "microservice", "architecture", "code", "java", "spring"]
+}

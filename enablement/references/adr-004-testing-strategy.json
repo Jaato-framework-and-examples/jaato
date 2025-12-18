@@ -1,0 +1,9 @@
+{
+  "id": "adr-004-testing-strategy",
+  "name": "ADR-004: Testing Strategy",
+  "description": "Strategic decision on testing pyramid: unit, integration, contract, e2e",
+  "type": "local",
+  "path": "./docs/adr/ADR-004-testing-strategy.md",
+  "mode": "selectable",
+  "tags": ["adr", "testing", "qa", "junit", "java"]
+}
