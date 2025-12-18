@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .ai_tool_runner import ToolExecutor
+from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig
 from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
@@ -103,6 +104,13 @@ class JaatoSession:
         self._ui_hooks: Optional['AgentUIHooks'] = None
         self._agent_id: str = "main"  # Unique ID for this agent
 
+        # Retry notification callback (client-configurable)
+        self._on_retry: Optional[RetryCallback] = None
+
+        # Request pacing (proactive rate limiting)
+        # Reads AI_REQUEST_INTERVAL from env (default: 0 = disabled)
+        self._pacer = RequestPacer()
+
     @property
     def model_name(self) -> Optional[str]:
         """Get the model name for this session."""
@@ -158,6 +166,26 @@ class JaatoSession:
         """
         self._ui_hooks = hooks
         self._agent_id = agent_id
+
+    def set_retry_callback(self, callback: Optional[RetryCallback]) -> None:
+        """Set callback for retry notifications.
+
+        Clients can use this to control how retry messages are delivered:
+        - Simple interactive client: Don't set (uses console print)
+        - Rich client: Set callback to route to queue/status bar/etc.
+
+        Args:
+            callback: Function called on each retry attempt.
+                Signature: (message: str, attempt: int, max_attempts: int, delay: float) -> None
+                Set to None to revert to console output.
+
+        Example:
+            # Route retries to a queue for non-disruptive display
+            session.set_retry_callback(
+                lambda msg, att, max_att, delay: status_queue.put(msg)
+            )
+        """
+        self._on_retry = callback
 
     def configure(
         self,
@@ -510,7 +538,14 @@ class JaatoSession:
         response: Optional[ProviderResponse] = None
 
         try:
-            response = self._provider.send_message(message)
+            # Proactive rate limiting: wait if needed before request
+            self._pacer.pace()
+
+            response, _retry_stats = with_retry(
+                lambda: self._provider.send_message(message),
+                context="send_message",
+                on_retry=self._on_retry
+            )
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
 
@@ -574,8 +609,13 @@ class JaatoSession:
                     tool_result = self._build_tool_result(fc, executor_result)
                     tool_results.append(tool_result)
 
-                # Send tool results back
-                response = self._provider.send_tool_results(tool_results)
+                # Send tool results back (with retry for rate limits)
+                self._pacer.pace()  # Proactive rate limiting
+                response, _retry_stats = with_retry(
+                    lambda: self._provider.send_tool_results(tool_results),
+                    context="send_tool_results",
+                    on_retry=self._on_retry
+                )
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
 
@@ -881,7 +921,14 @@ class JaatoSession:
         response: Optional[ProviderResponse] = None
 
         try:
-            response = self._provider.send_message_with_parts(parts)
+            # Proactive rate limiting: wait if needed before request
+            self._pacer.pace()
+
+            response, _retry_stats = with_retry(
+                lambda: self._provider.send_message_with_parts(parts),
+                context="send_message_with_parts",
+                on_retry=self._on_retry
+            )
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
 
@@ -950,7 +997,13 @@ class JaatoSession:
                     tool_result = self._build_tool_result(fc, executor_result)
                     tool_results.append(tool_result)
 
-                response = self._provider.send_tool_results(tool_results)
+                # Send tool results back (with retry for rate limits)
+                self._pacer.pace()  # Proactive rate limiting
+                response, _retry_stats = with_retry(
+                    lambda: self._provider.send_tool_results(tool_results),
+                    context="send_tool_results",
+                    on_retry=self._on_retry
+                )
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
                 function_calls = list(response.function_calls) if response.function_calls else []
