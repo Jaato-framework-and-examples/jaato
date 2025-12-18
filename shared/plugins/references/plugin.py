@@ -426,20 +426,24 @@ class ReferencesPlugin:
         immediate_sources = auto_sources + preselected_sources
 
         if not immediate_sources:
-            # Still provide info about selectable sources
+            # Still provide info about selectable sources (if selectReferences is available)
             selectable = [
                 s for s in self._sources
                 if s.mode == InjectionMode.SELECTABLE
                 and s.id not in self._selected_source_ids
             ]
-            if not selectable:
+            # If selectReferences is excluded or no selectable sources, nothing to show
+            if not selectable or "selectReferences" in self._exclude_tools:
                 return None
 
             parts = [
                 "# Reference Sources",
                 "",
                 "Additional reference sources are available for this session.",
-                "Use `listReferences` to see available sources and their tags.",
+            ]
+            if "listReferences" not in self._exclude_tools:
+                parts.append("Use `listReferences` to see available sources and their tags.")
+            parts.extend([
                 "Use `selectReferences` when you encounter topics matching these tags",
                 "to request user selection of relevant documentation.",
                 "",
@@ -450,7 +454,7 @@ class ReferencesPlugin:
                 "Available tags: " + ", ".join(
                     sorted(set(tag for s in selectable for tag in s.tags))
                 ),
-            ]
+            ])
             return "\n".join(parts)
 
         parts = [
@@ -466,19 +470,21 @@ class ReferencesPlugin:
             parts.append("")
 
         # Mention remaining selectable sources (not pre-selected) if any
-        selectable = [
-            s for s in self._sources
-            if s.mode == InjectionMode.SELECTABLE
-            and s.id not in self._selected_source_ids
-        ]
-        if selectable:
-            parts.extend([
-                "---",
-                "",
-                "Additional reference sources are available on request.",
-                "Use `selectReferences` when you encounter topics matching these tags:",
-                ", ".join(sorted(set(tag for s in selectable for tag in s.tags))),
-            ])
+        # Only show if selectReferences tool is available
+        if "selectReferences" not in self._exclude_tools:
+            selectable = [
+                s for s in self._sources
+                if s.mode == InjectionMode.SELECTABLE
+                and s.id not in self._selected_source_ids
+            ]
+            if selectable:
+                parts.extend([
+                    "---",
+                    "",
+                    "Additional reference sources are available on request.",
+                    "Use `selectReferences` when you encounter topics matching these tags:",
+                    ", ".join(sorted(set(tag for s in selectable for tag in s.tags))),
+                ])
 
         return "\n".join(parts)
 
