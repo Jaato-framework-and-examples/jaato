@@ -1,0 +1,153 @@
+{
+  "version": "1.0",
+  "description": "Enablement 2.0 Knowledge Layer - ADRs and ERIs catalog",
+  "sources": [
+    {
+      "id": "adr-001-resilience-patterns",
+      "name": "ADR-001: Resilience Patterns",
+      "description": "Strategic decision on resilience patterns: circuit breaker, retry, timeout, bulkhead",
+      "type": "local",
+      "path": "./docs/adr/ADR-001-resilience-patterns.md",
+      "mode": "selectable",
+      "tags": ["adr", "resilience", "patterns", "code", "java"]
+    },
+    {
+      "id": "adr-002-api-design",
+      "name": "ADR-002: REST API Design Standards",
+      "description": "Strategic decision on REST API design: versioning, naming, error handling",
+      "type": "local",
+      "path": "./docs/adr/ADR-002-api-design.md",
+      "mode": "selectable",
+      "tags": ["adr", "api", "rest", "design", "code"]
+    },
+    {
+      "id": "adr-003-microservice-structure",
+      "name": "ADR-003: Microservice Structure",
+      "description": "Strategic decision on microservice project structure and layering",
+      "type": "local",
+      "path": "./docs/adr/ADR-003-microservice-structure.md",
+      "mode": "selectable",
+      "tags": ["adr", "microservice", "architecture", "code", "java", "spring"]
+    },
+    {
+      "id": "adr-004-testing-strategy",
+      "name": "ADR-004: Testing Strategy",
+      "description": "Strategic decision on testing pyramid: unit, integration, contract, e2e",
+      "type": "local",
+      "path": "./docs/adr/ADR-004-testing-strategy.md",
+      "mode": "selectable",
+      "tags": ["adr", "testing", "qa", "junit", "java"]
+    },
+    {
+      "id": "adr-005-security-standards",
+      "name": "ADR-005: Security Standards",
+      "description": "Strategic decision on authentication, authorization, and secure coding",
+      "type": "local",
+      "path": "./docs/adr/ADR-005-security-standards.md",
+      "mode": "selectable",
+      "tags": ["adr", "security", "authentication", "gov", "code"]
+    },
+    {
+      "id": "adr-006-logging-observability",
+      "name": "ADR-006: Logging and Observability",
+      "description": "Strategic decision on structured logging, metrics, and distributed tracing",
+      "type": "local",
+      "path": "./docs/adr/ADR-006-logging-observability.md",
+      "mode": "selectable",
+      "tags": ["adr", "logging", "observability", "monitoring", "code"]
+    },
+    {
+      "id": "eri-001-circuit-breaker-resilience4j",
+      "name": "ERI-001: Circuit Breaker with Resilience4j",
+      "description": "Reference implementation: Circuit breaker pattern using Resilience4j in Spring Boot",
+      "type": "local",
+      "path": "./docs/eri/ERI-001-circuit-breaker-resilience4j/",
+      "mode": "selectable",
+      "tags": ["eri", "circuit-breaker", "resilience4j", "java", "spring", "code"],
+      "fetchHint": "Read all files in this directory for complete reference implementation"
+    },
+    {
+      "id": "eri-002-retry-resilience4j",
+      "name": "ERI-002: Retry Pattern with Resilience4j",
+      "description": "Reference implementation: Retry pattern with exponential backoff using Resilience4j",
+      "type": "local",
+      "path": "./docs/eri/ERI-002-retry-resilience4j/",
+      "mode": "selectable",
+      "tags": ["eri", "retry", "resilience4j", "java", "spring", "code"],
+      "fetchHint": "Read all files in this directory for complete reference implementation"
+    },
+    {
+      "id": "eri-003-spring-boot-microservice",
+      "name": "ERI-003: Spring Boot Microservice Template",
+      "description": "Reference implementation: Complete Spring Boot microservice with standard structure",
+      "type": "local",
+      "path": "./docs/eri/ERI-003-spring-boot-microservice/",
+      "mode": "selectable",
+      "tags": ["eri", "microservice", "spring", "java", "code", "template"],
+      "fetchHint": "Read all files in this directory for complete reference implementation"
+    },
+    {
+      "id": "eri-004-rest-controller",
+      "name": "ERI-004: REST Controller Pattern",
+      "description": "Reference implementation: REST controller with validation, error handling, OpenAPI",
+      "type": "local",
+      "path": "./docs/eri/ERI-004-rest-controller/",
+      "mode": "selectable",
+      "tags": ["eri", "rest", "controller", "spring", "java", "code", "api"],
+      "fetchHint": "Read all files in this directory for complete reference implementation"
+    },
+    {
+      "id": "eri-005-unit-test-patterns",
+      "name": "ERI-005: Unit Test Patterns",
+      "description": "Reference implementation: JUnit 5 unit tests with Mockito, assertions, coverage",
+      "type": "local",
+      "path": "./docs/eri/ERI-005-unit-test-patterns/",
+      "mode": "selectable",
+      "tags": ["eri", "testing", "junit", "mockito", "java", "qa"],
+      "fetchHint": "Read all files in this directory for complete reference implementation"
+    },
+    {
+      "id": "eri-006-integration-test-patterns",
+      "name": "ERI-006: Integration Test Patterns",
+      "description": "Reference implementation: Spring Boot integration tests with TestContainers",
+      "type": "local",
+      "path": "./docs/eri/ERI-006-integration-test-patterns/",
+      "mode": "selectable",
+      "tags": ["eri", "testing", "integration", "testcontainers", "spring", "java", "qa"],
+      "fetchHint": "Read all files in this directory for complete reference implementation"
+    },
+    {
+      "id": "eri-007-security-jwt",
+      "name": "ERI-007: JWT Authentication",
+      "description": "Reference implementation: JWT-based authentication in Spring Security",
+      "type": "local",
+      "path": "./docs/eri/ERI-007-security-jwt/",
+      "mode": "selectable",
+      "tags": ["eri", "security", "jwt", "authentication", "spring", "java", "code"],
+      "fetchHint": "Read all files in this directory for complete reference implementation"
+    },
+    {
+      "id": "eri-008-structured-logging",
+      "name": "ERI-008: Structured Logging",
+      "description": "Reference implementation: Structured JSON logging with correlation IDs",
+      "type": "local",
+      "path": "./docs/eri/ERI-008-structured-logging/",
+      "mode": "selectable",
+      "tags": ["eri", "logging", "observability", "java", "spring", "code"],
+      "fetchHint": "Read all files in this directory for complete reference implementation"
+    },
+    {
+      "id": "enablement-skill-catalog",
+      "name": "Enablement 2.0 Skill Catalog",
+      "description": "Master catalog of available skills with their execution flows",
+      "type": "inline",
+      "mode": "auto",
+      "tags": ["enablement", "skills", "catalog"],
+      "content": "# Enablement 2.0 Skill Catalog\n\n## CODE Domain Skills\n- skill-code-001-add-circuit-breaker-java-resilience4j\n- skill-code-002-add-retry-java-resilience4j\n- skill-code-020-generate-microservice-java-spring\n- skill-code-021-generate-rest-controller-java-spring\n\n## QA Domain Skills\n- skill-qa-001-add-unit-tests-java-junit\n- skill-qa-002-add-integration-tests-java-testcontainers\n\n## DESIGN Domain Skills\n- skill-design-001-generate-api-spec-openapi\n\n## GOV Domain Skills\n- skill-gov-001-add-security-scan-java-owasp\n\n## Execution Flows\n- GENERATE: Create new artifacts from templates\n- ADD: Augment existing code with patterns\n- REMOVE: Remove deprecated patterns\n- REFACTOR: Transform code while preserving behavior\n- MIGRATE: Version upgrades with compatibility"
+    }
+  ],
+  "channel": {
+    "type": "console",
+    "timeout": 120
+  }
+}
