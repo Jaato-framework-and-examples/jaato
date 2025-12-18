@@ -278,3 +278,12 @@ client.configure_tools(registry)  # Subagent inherits ['cli', 'mcp']
 # Now subagents spawned will have access to cli and mcp by default
 response = client.send_message("Spawn a subagent to analyze the code")
 ```
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `JAATO_TRACE_LOG` | Path to trace log file for debug output. Useful when running with rich terminal UIs that occupy the console. Set to empty string to disable. | `/tmp/rich_client_trace.log` |
+| `PROJECT_ID` | GCP project ID (fallback if not provided in config) | - |
+| `LOCATION` | Vertex AI region (fallback if not provided in config) | - |
+| `MODEL_NAME` | Default model name (fallback if not provided in config) | `gemini-2.5-flash` |
