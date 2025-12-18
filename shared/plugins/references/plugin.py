@@ -236,7 +236,12 @@ class ReferencesPlugin:
             self._on_selection_resolved("selectReferences", selected_ids)
 
         if not selected_ids:
-            self._channel.notify_result("No reference sources selected.")
+            self._channel.notify_result([
+                "",
+                "─" * 60,
+                "No reference sources selected.",
+                "─" * 60,
+            ])
             return {
                 "status": "none_selected",
                 "message": "User did not select any reference sources."
@@ -252,10 +257,23 @@ class ReferencesPlugin:
         for source in selected_sources:
             instructions.append(source.to_instruction())
 
-        self._channel.notify_result(
-            f"Selected {len(selected_sources)} reference source(s). "
-            "Instructions provided to model."
-        )
+        # Build formatted result for display
+        result_lines = [
+            "",
+            "=" * 60,
+            f"SELECTED {len(selected_sources)} REFERENCE(S)",
+            "=" * 60,
+            "",
+        ]
+        for source in selected_sources:
+            result_lines.append(f"  ✓ {source.name}")
+            result_lines.append(f"    {source.description}")
+            result_lines.append("")
+        result_lines.append("─" * 60)
+        result_lines.append("Instructions provided to model.")
+        result_lines.append("─" * 60)
+
+        self._channel.notify_result(result_lines)
 
         return {
             "status": "success",

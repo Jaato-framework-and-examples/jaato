@@ -64,8 +64,12 @@ class SelectionChannel(ABC):
         ...
 
     @abstractmethod
-    def notify_result(self, message: str) -> None:
-        """Notify user of selection result."""
+    def notify_result(self, message) -> None:
+        """Notify user of selection result.
+
+        Args:
+            message: Either a string or a list of lines to display.
+        """
         ...
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
@@ -189,9 +193,17 @@ class ConsoleSelectionChannel(SelectionChannel):
 
         return selected_ids
 
-    def notify_result(self, message: str) -> None:
-        """Print result message to console."""
-        self._output_func(f"\n{message}\n")
+    def notify_result(self, message) -> None:
+        """Print result message to console.
+
+        Args:
+            message: Either a string or a list of lines to display.
+        """
+        if isinstance(message, list):
+            for line in message:
+                self._output_func(line)
+        else:
+            self._output_func(f"\n{message}\n")
 
 
 class WebhookSelectionChannel(SelectionChannel):
@@ -275,10 +287,18 @@ class WebhookSelectionChannel(SelectionChannel):
         except (requests.Timeout, requests.RequestException):
             return []
 
-    def notify_result(self, message: str) -> None:
-        """Send result notification to webhook."""
+    def notify_result(self, message) -> None:
+        """Send result notification to webhook.
+
+        Args:
+            message: Either a string or a list of lines to display.
+        """
         if not self._endpoint or not HAS_REQUESTS:
             return
+
+        # Convert list to string for webhook
+        if isinstance(message, list):
+            message = "\n".join(message)
 
         headers = {
             "Content-Type": "application/json",
@@ -382,10 +402,18 @@ class FileSelectionChannel(SelectionChannel):
         request_file.unlink(missing_ok=True)
         return []
 
-    def notify_result(self, message: str) -> None:
-        """Write result to results file."""
+    def notify_result(self, message) -> None:
+        """Write result to results file.
+
+        Args:
+            message: Either a string or a list of lines to display.
+        """
         if not self._base_path:
             return
+
+        # Convert list to string for file storage
+        if isinstance(message, list):
+            message = "\n".join(message)
 
         result_file = self._base_path / "results" / "latest.json"
         result_file.parent.mkdir(parents=True, exist_ok=True)
@@ -551,9 +579,17 @@ class QueueSelectionChannel(SelectionChannel):
             if self._prompt_callback:
                 self._prompt_callback(False)
 
-    def notify_result(self, message: str) -> None:
-        """Notify user of selection result via output callback."""
-        self._output(f"\n{message}\n", "write")
+    def notify_result(self, message) -> None:
+        """Notify user of selection result via output callback.
+
+        Args:
+            message: Either a string or a list of lines to display.
+        """
+        if isinstance(message, list):
+            full_output = "\n".join(message)
+            self._output(full_output, "write")
+        else:
+            self._output(f"\n{message}\n", "write")
 
 
 def create_channel(channel_type: str, config: Optional[Dict[str, Any]] = None) -> SelectionChannel:
