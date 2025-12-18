@@ -102,7 +102,12 @@ class OutputBuffer:
         rendered = Text()
         if source == "model":
             if is_turn_start:
-                rendered.append("Model> ", style="bold cyan")
+                # Header line takes full width, actual text on next line
+                return 2  # Header + first content line (minimum)
+            rendered.append(text)
+        elif source == "user":
+            if is_turn_start:
+                return 2  # Header + first content line
             rendered.append(text)
         elif source == "system":
             rendered.append(text)
@@ -317,9 +322,8 @@ class OutputBuffer:
         if not all_completed or any_pending:
             return  # Don't finalize yet
 
-        # Build the tool tree as text lines
+        # Build the tool tree as text lines (no header - tools appear inline)
         lines = []
-        lines.append(("Model> ✓ Processed", "bold green"))
 
         for i, tool in enumerate(self._active_tools):
             is_last = (i == len(self._active_tools) - 1)
@@ -328,7 +332,7 @@ class OutputBuffer:
             # Build tool line
             status_icon = "✓" if tool.success else "✗"
             status_style = "green" if tool.success else "red"
-            line_parts = [f"       {prefix} {status_icon} {tool.name}"]
+            line_parts = [f"  {prefix} {status_icon} {tool.name}"]
 
             # Add args summary (truncated) before duration
             if tool.args_summary and tool.args_summary != "{}":
@@ -364,7 +368,7 @@ class OutputBuffer:
                 error_msg = tool.error_message
                 if len(error_msg) > 60:
                     error_msg = error_msg[:57] + "..."
-                lines.append((f"       {continuation}     ⚠ {error_msg}", "dim red"))
+                lines.append((f"  {continuation}  ⚠ {error_msg}", "dim red"))
 
         # Add lines to buffer as system messages (they'll scroll normally)
         for text, style in lines:
@@ -689,7 +693,7 @@ class OutputBuffer:
             if self._spinner_active:
                 output = Text()
                 frame = self.SPINNER_FRAMES[self._spinner_index]
-                output.append(f"Model> {frame} ", style="bold cyan")
+                output.append(f"  {frame} ", style="cyan")
                 output.append("thinking...", style="dim italic")
                 return output
             return Text("Waiting for output...", style="dim italic")
@@ -763,33 +767,49 @@ class OutputBuffer:
                         output.append("\n")
                     output.append(wrapped_line, style=line.style)
             elif line.source == "user":
-                # User input - show with You> prefix on turn start
-                prefix_width = 5 if line.is_turn_start else 0  # "You> " = 5 chars
-                wrapped = wrap_text(line.text, prefix_width)
-                for j, wrapped_line in enumerate(wrapped):
-                    if j > 0:
-                        output.append("\n")
-                    if j == 0 and line.is_turn_start:
-                        output.append("You> ", style="bold green")
-                    elif j > 0 and line.is_turn_start:
-                        output.append("     ")  # Indent continuation lines
-                    output.append(wrapped_line)
+                # User input - use header line for turn start
+                if line.is_turn_start:
+                    # Render header line: ── You ───────────────────
+                    header_prefix = "── You "
+                    remaining = max(0, wrap_width - len(header_prefix))
+                    output.append(header_prefix, style="bold green")
+                    output.append("─" * remaining, style="dim green")
+                    output.append("\n")
+                    # Then render the text content
+                    wrapped = wrap_text(line.text, 0)
+                    for j, wrapped_line in enumerate(wrapped):
+                        if j > 0:
+                            output.append("\n")
+                        output.append(wrapped_line)
+                else:
+                    # Non-turn-start - just render text
+                    wrapped = wrap_text(line.text, 0)
+                    for j, wrapped_line in enumerate(wrapped):
+                        if j > 0:
+                            output.append("\n")
+                        output.append(wrapped_line)
             elif line.source == "model":
-                # Model output - always indent to align with "Model> " prefix
-                prefix_width = 7  # "Model> " = 7 chars
-                wrapped = wrap_text(line.text, prefix_width)
-                for j, wrapped_line in enumerate(wrapped):
-                    if j > 0:
-                        output.append("\n")
-                    if j == 0 and line.is_turn_start:
-                        output.append("Model> ", style="bold cyan")
-                    elif j == 0:
-                        # Non-turn-start first line - indent to align
-                        output.append("       ")
-                    else:
-                        # All continuation lines get indentation
-                        output.append("       ")
-                    output.append(wrapped_line)
+                # Model output - use header line for turn start
+                if line.is_turn_start:
+                    # Render header line: ── Model ─────────────────
+                    header_prefix = "── Model "
+                    remaining = max(0, wrap_width - len(header_prefix))
+                    output.append(header_prefix, style="bold cyan")
+                    output.append("─" * remaining, style="dim cyan")
+                    output.append("\n")
+                    # Then render the text content (no prefix needed)
+                    wrapped = wrap_text(line.text, 0)
+                    for j, wrapped_line in enumerate(wrapped):
+                        if j > 0:
+                            output.append("\n")
+                        output.append(wrapped_line)
+                else:
+                    # Non-turn-start - just render text, no prefix
+                    wrapped = wrap_text(line.text, 0)
+                    for j, wrapped_line in enumerate(wrapped):
+                        if j > 0:
+                            output.append("\n")
+                        output.append(wrapped_line)
             elif line.source == "tool":
                 # Tool output
                 prefix_width = len(f"[{line.source}] ") if line.is_turn_start else 0
@@ -880,29 +900,26 @@ class OutputBuffer:
                 for tool in self._active_tools
             )
 
-            # Show header based on state
+            # Show inline status indicator (no "Model>" prefix)
             # Awaiting user input takes precedence over other states
             if awaiting_input:
                 # Waiting for user response
-                output.append("Model> ⏳ ", style="bold yellow")
-                output.append("Awaiting...", style="dim italic")
+                output.append("  ⏳ ", style="bold yellow")
+                output.append("Awaiting input...", style="dim italic")
             elif self._spinner_active:
-                # Model is processing
+                # Model is processing - show compact indicator
                 frame = self.SPINNER_FRAMES[self._spinner_index]
-                output.append(f"Model> {frame} ", style="bold cyan")
-                output.append("thinking...", style="dim italic")
-            else:
-                # All tools completed - show "Processed" header
-                output.append("Model> ✓ ", style="bold green")
-                output.append("Processed", style="dim italic")
+                output.append(f"  {frame} ", style="cyan")
+                output.append("processing...", style="dim italic")
+            # No header when all tools completed - just show the tool tree
 
-            # Show tool calls below header
+            # Show tool calls below status indicator
             for i, tool in enumerate(self._active_tools):
                 output.append("\n")
                 is_last = (i == len(self._active_tools) - 1)
                 prefix = "└─" if is_last else "├─"
                 continuation = "   " if is_last else "│  "
-                output.append(f"       {prefix} ", style="dim")
+                output.append(f"  {prefix} ", style="dim")
 
                 if tool.completed:
                     # Completed tool - show with checkmark and duration
@@ -940,7 +957,7 @@ class OutputBuffer:
                     # Show error message on next line for failed tools
                     if not tool.success and tool.error_message:
                         output.append("\n")
-                        output.append(f"       {continuation}     ", style="dim")
+                        output.append(f"  {continuation}  ", style="dim")
                         output.append("⚠ ", style="red")
                         # Truncate error message if too long
                         error_msg = tool.error_message
@@ -958,7 +975,7 @@ class OutputBuffer:
                 if tool.permission_state == "pending" and tool.permission_prompt_lines:
                     # Expanded permission prompt
                     output.append("\n")
-                    output.append(f"       {continuation}     ", style="dim")
+                    output.append(f"  {continuation}     ", style="dim")
                     output.append("⚠ ", style="yellow")
                     output.append("Permission required", style="yellow")
 
@@ -986,7 +1003,7 @@ class OutputBuffer:
                     box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
                     content_width = box_width - 4  # Space for "│ " and " │"
                     output.append("\n")
-                    output.append(f"       {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
+                    output.append(f"  {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
 
                     for prompt_line in lines_to_render:
                         # Wrap long lines instead of truncating
@@ -1000,7 +1017,7 @@ class OutputBuffer:
                         for display_line in wrapped:
                             output.append("\n")
                             padding = box_width - len(display_line) - 4
-                            output.append(f"       {continuation}     │ ", style="dim")
+                            output.append(f"  {continuation}     │ ", style="dim")
                             # Color diff lines appropriately
                             if display_line.startswith('+') and not display_line.startswith('+++'):
                                 output.append(display_line, style="green")
@@ -1017,7 +1034,7 @@ class OutputBuffer:
                         output.append("\n")
                         truncation_msg = f"[...{hidden_count} more - 'v' to view...]"
                         padding = box_width - len(truncation_msg) - 4
-                        output.append(f"       {continuation}     │ ", style="dim")
+                        output.append(f"  {continuation}     │ ", style="dim")
                         output.append(truncation_msg, style="dim italic cyan")
                         output.append(" " * max(0, padding) + " │", style="dim")
                         # Show last line (usually options) - wrap if needed
@@ -1029,18 +1046,18 @@ class OutputBuffer:
                         for display_line in last_wrapped:
                             output.append("\n")
                             padding = box_width - len(display_line) - 4
-                            output.append(f"       {continuation}     │ ", style="dim")
+                            output.append(f"  {continuation}     │ ", style="dim")
                             output.append(display_line, style="cyan")  # Options styled cyan
                             output.append(" " * max(0, padding) + " │", style="dim")
 
                     output.append("\n")
-                    output.append(f"       {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
+                    output.append(f"  {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
 
                 # Show clarification info under this tool
                 if tool.clarification_state == "pending":
                     # Show header with progress
                     output.append("\n")
-                    output.append(f"       {continuation}     ", style="dim")
+                    output.append(f"  {continuation}     ", style="dim")
                     output.append("❓ ", style="cyan")
                     if tool.clarification_total_questions > 0:
                         output.append(f"Clarification ({tool.clarification_current_question}/{tool.clarification_total_questions})", style="cyan")
@@ -1051,7 +1068,7 @@ class OutputBuffer:
                     if tool.clarification_answered:
                         for q_idx, answer_summary in tool.clarification_answered:
                             output.append("\n")
-                            output.append(f"       {continuation}     ", style="dim")
+                            output.append(f"  {continuation}     ", style="dim")
                             output.append("  ✓ ", style="green")
                             output.append(f"Q{q_idx}: ", style="dim")
                             output.append(answer_summary, style="dim green")
@@ -1079,7 +1096,7 @@ class OutputBuffer:
                         box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
                         content_width = box_width - 4
                         output.append("\n")
-                        output.append(f"       {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
+                        output.append(f"  {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
 
                         for prompt_line in lines_to_render:
                             # Wrap long lines
@@ -1092,7 +1109,7 @@ class OutputBuffer:
                             for display_line in wrapped:
                                 output.append("\n")
                                 padding = box_width - len(display_line) - 4
-                                output.append(f"       {continuation}     │ ", style="dim")
+                                output.append(f"  {continuation}     │ ", style="dim")
                                 output.append(display_line)
                                 output.append(" " * max(0, padding) + " │", style="dim")
 
@@ -1101,7 +1118,7 @@ class OutputBuffer:
                             output.append("\n")
                             truncation_msg = f"[...{hidden_count} more - 'v' to view...]"
                             padding = box_width - len(truncation_msg) - 4
-                            output.append(f"       {continuation}     │ ", style="dim")
+                            output.append(f"  {continuation}     │ ", style="dim")
                             output.append(truncation_msg, style="dim italic cyan")
                             output.append(" " * max(0, padding) + " │", style="dim")
                             last_line = prompt_lines[-1]
@@ -1112,18 +1129,18 @@ class OutputBuffer:
                             for display_line in last_wrapped:
                                 output.append("\n")
                                 padding = box_width - len(display_line) - 4
-                                output.append(f"       {continuation}     │ ", style="dim")
+                                output.append(f"  {continuation}     │ ", style="dim")
                                 output.append(display_line, style="cyan")
                                 output.append(" " * max(0, padding) + " │", style="dim")
 
                         output.append("\n")
-                        output.append(f"       {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
+                        output.append(f"  {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
         elif self._spinner_active:
             # Spinner active but no tools yet
             if lines_to_show:
                 output.append("\n")
             frame = self.SPINNER_FRAMES[self._spinner_index]
-            output.append(f"Model> {frame} ", style="bold cyan")
+            output.append(f"  {frame} ", style="cyan")
             output.append("thinking...", style="dim italic")
 
         return output
