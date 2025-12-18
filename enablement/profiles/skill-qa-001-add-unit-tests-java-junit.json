@@ -4,10 +4,10 @@
   "plugins": ["cli", "file_edit", "references"],
   "plugin_configs": {
     "references": {
-      "sources": ["adr-004-testing-strategy", "eri-005-unit-test-patterns"]
+      "sources": ["adr-009-service-architecture-patterns", "eri-code-001-hexagonal-light-java-spring"]
     }
   },
-  "system_instructions": "You are implementing the ADD flow for unit tests.\n\n## Execution Flow: ADD\n1. Analyze target class to identify testable methods\n2. Fetch ADR-004 for coverage requirements\n3. Follow ERI-005 patterns for test structure\n4. Generate test class with:\n   - @ExtendWith(MockitoExtension.class)\n   - @Mock for dependencies\n   - @InjectMocks for subject under test\n   - Tests following Given-When-Then pattern\n   - Edge cases and error scenarios\n5. Target: 80% line coverage minimum\n6. Output: Test class in src/test/java/",
+  "system_instructions": "You are implementing the ADD flow for unit tests.\n\n## Execution Flow: ADD\n1. Analyze target class to identify testable methods\n2. Fetch ADR-009 for Hexagonal Light testing guidelines (domain tests = pure POJOs)\n3. Follow ERI-CODE-001 test patterns for structure\n4. Generate test class with:\n   - @ExtendWith(MockitoExtension.class)\n   - @Mock for dependencies (repositories)\n   - Domain service tests run WITHOUT Spring context\n   - Tests following Given-When-Then pattern\n   - Edge cases and error scenarios\n5. Target: 80% line coverage minimum\n6. Output: Test class in src/test/java/",
   "max_turns": 15,
   "auto_approved": false,
   "icon_name": "test"

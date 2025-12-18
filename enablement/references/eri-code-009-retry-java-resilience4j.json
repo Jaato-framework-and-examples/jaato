@@ -1,0 +1,10 @@
+{
+  "id": "eri-code-009-retry-java-resilience4j",
+  "name": "ERI-CODE-009: Retry Pattern (Java/Resilience4j)",
+  "description": "Reference implementation: Retry pattern with exponential backoff using Resilience4j in Spring Boot for transient failure handling",
+  "type": "local",
+  "path": "./docs/eri/eri-code-009-retry-java-resilience4j/",
+  "mode": "selectable",
+  "tags": ["eri", "retry", "resilience4j", "java", "spring", "fault-tolerance"],
+  "fetchHint": "Read ERI.md for complete reference implementation with code examples"
+}

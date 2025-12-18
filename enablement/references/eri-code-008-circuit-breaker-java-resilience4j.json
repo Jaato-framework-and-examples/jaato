@@ -1,0 +1,10 @@
+{
+  "id": "eri-code-008-circuit-breaker-java-resilience4j",
+  "name": "ERI-CODE-008: Circuit Breaker Pattern (Java/Resilience4j)",
+  "description": "Reference implementation: Circuit breaker pattern using Resilience4j in Spring Boot with fallback methods, configuration, and monitoring",
+  "type": "local",
+  "path": "./docs/eri/eri-code-008-circuit-breaker-java-resilience4j/",
+  "mode": "selectable",
+  "tags": ["eri", "circuit-breaker", "resilience4j", "java", "spring", "fault-tolerance"],
+  "fetchHint": "Read ERI.md for complete reference implementation with code examples"
+}

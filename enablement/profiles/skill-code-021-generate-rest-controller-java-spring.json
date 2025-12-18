@@ -4,10 +4,10 @@
   "plugins": ["cli", "file_edit", "references"],
   "plugin_configs": {
     "references": {
-      "sources": ["adr-002-api-design", "eri-004-rest-controller"]
+      "sources": ["adr-001-api-design-standards", "eri-code-001-hexagonal-light-java-spring"]
     }
   },
-  "system_instructions": "You are implementing the GENERATE flow for a REST controller.\n\n## Execution Flow: GENERATE\n1. Gather endpoint requirements (resource, operations, DTOs)\n2. Fetch ADR-002 for API design standards\n3. Use ERI-004 as implementation reference\n4. Generate:\n   - Controller class with @RestController\n   - Request/Response DTOs with validation\n   - Exception handler for consistent errors\n   - OpenAPI annotations for documentation\n5. Output: Controller and related classes",
+  "system_instructions": "You are implementing the GENERATE flow for a REST controller.\n\n## Execution Flow: GENERATE\n1. Gather endpoint requirements (resource, operations, DTOs)\n2. Fetch ADR-001 for API design standards (4-layer architecture)\n3. Use ERI-CODE-001 for controller placement in adapter layer\n4. Generate:\n   - Controller class with @RestController in adapter/rest/controller/\n   - Request/Response DTOs in adapter/rest/dto/ with validation\n   - Exception handler for consistent errors\n   - OpenAPI annotations for documentation\n5. Output: Controller and related classes following Hexagonal Light",
   "max_turns": 15,
   "auto_approved": false
 }

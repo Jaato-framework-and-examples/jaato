@@ -1,0 +1,10 @@
+{
+  "id": "eri-code-001-hexagonal-light-java-spring",
+  "name": "ERI-CODE-001: Hexagonal Light Architecture (Java/Spring)",
+  "description": "Reference implementation: Complete Hexagonal Light microservice with domain POJOs, application services, REST/persistence adapters, and unit tests",
+  "type": "local",
+  "path": "./docs/eri/eri-code-001-hexagonal-light-java-spring/",
+  "mode": "selectable",
+  "tags": ["eri", "hexagonal", "java", "spring", "microservice", "architecture", "template"],
+  "fetchHint": "Read ERI.md for complete reference implementation with code examples"
+}
