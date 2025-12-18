@@ -532,7 +532,8 @@ class JaatoSession:
                         self._ui_hooks.on_tool_call_start(
                             agent_id=self._agent_id,
                             tool_name=name,
-                            tool_args=args
+                            tool_args=args,
+                            call_id=fc.id
                         )
 
                     fc_start = datetime.now()
@@ -559,7 +560,8 @@ class JaatoSession:
                             tool_name=name,
                             success=fc_success,
                             duration_seconds=fc_duration,
-                            error_message=fc_error_message
+                            error_message=fc_error_message,
+                            call_id=fc.id
                         )
 
                     # Record function call timing
@@ -910,7 +912,8 @@ class JaatoSession:
                         self._ui_hooks.on_tool_call_start(
                             agent_id=self._agent_id,
                             tool_name=name,
-                            tool_args=args
+                            tool_args=args,
+                            call_id=fc.id
                         )
 
                     fc_start = datetime.now()
@@ -937,7 +940,8 @@ class JaatoSession:
                             tool_name=name,
                             success=fc_success,
                             duration_seconds=fc_duration,
-                            error_message=fc_error_message
+                            error_message=fc_error_message,
+                            call_id=fc.id
                         )
 
                     turn_data['function_calls'].append({
