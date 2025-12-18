@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..model_provider.types import ToolSchema
 
 from .models import ReferenceSource, InjectionMode
-from .channels import SelectionChannel, ConsoleSelectionChannel, create_channel
+from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
 from .config_loader import load_config, ReferencesConfig
 from ..base import UserCommand, CommandCompletion
 
@@ -37,6 +37,9 @@ class ReferencesPlugin:
         self._channel: Optional[SelectionChannel] = None
         self._selected_source_ids: List[str] = []  # User-selected during session
         self._initialized = False
+        # Selection lifecycle hooks for UI integration
+        self._on_selection_requested: Optional[Callable[[str, List[str]], None]] = None
+        self._on_selection_resolved: Optional[Callable[[str, List[str]], None]] = None
 
     @property
     def name(self) -> str:
@@ -212,8 +215,25 @@ class ReferencesPlugin:
                 "message": "No additional reference sources available for selection."
             }
 
+        # Build prompt lines for UI hooks
+        prompt_lines = []
+        if context:
+            prompt_lines.append(f"Context: {context}")
+            prompt_lines.append("")
+        prompt_lines.append(f"Available references: {len(available)}")
+        for i, source in enumerate(available, 1):
+            prompt_lines.append(f"  [{i}] {source.name}")
+
+        # Emit selection requested hook
+        if self._on_selection_requested:
+            self._on_selection_requested("selectReferences", prompt_lines)
+
         # Present to user via channel
         selected_ids = self._channel.present_selection(available, context)
+
+        # Emit selection resolved hook
+        if self._on_selection_resolved:
+            self._on_selection_resolved("selectReferences", selected_ids)
 
         if not selected_ids:
             self._channel.notify_result("No reference sources selected.")
@@ -440,10 +460,28 @@ class ReferencesPlugin:
         """Return list of channel types supported by references plugin.
 
         Returns:
-            List of supported channel types: console, webhook, file.
-            Note: Queue channel support not yet implemented.
+            List of supported channel types: console, webhook, file, queue.
         """
-        return ["console", "webhook", "file"]
+        return ["console", "webhook", "file", "queue"]
+
+    def set_selection_hooks(
+        self,
+        on_requested: Optional[Callable[[str, List[str]], None]] = None,
+        on_resolved: Optional[Callable[[str, List[str]], None]] = None
+    ) -> None:
+        """Set hooks for selection lifecycle events.
+
+        These hooks enable UI integration by notifying when selection
+        requests start and complete.
+
+        Args:
+            on_requested: Called when selection session starts.
+                Signature: (tool_name, prompt_lines) -> None
+            on_resolved: Called when selection is resolved.
+                Signature: (tool_name, selected_ids) -> None
+        """
+        self._on_selection_requested = on_requested
+        self._on_selection_resolved = on_resolved
 
     def set_channel(
         self,

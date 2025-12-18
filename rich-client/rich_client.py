@@ -285,7 +285,8 @@ class RichClient:
                 "storage_type": "memory",
             },
             "references": {
-                "channel_type": "console",
+                "channel_type": "queue",
+                # Callbacks will be set after display is created
             },
             "clarification": {
                 "channel_type": "queue",
@@ -346,7 +347,7 @@ class RichClient:
             f.flush()
 
     def _setup_queue_channels(self) -> None:
-        """Set up queue-based channels for permission and clarification.
+        """Set up queue-based channels for permission, clarification, and references.
 
         Queue channels display prompts in the output panel and receive user
         input via a shared queue. This avoids terminal mode switching issues
@@ -384,6 +385,18 @@ class RichClient:
                         prompt_callback=on_prompt_state_change,
                     )
                     self._trace("Clarification channel callbacks set (queue)")
+
+            # Set callbacks on references plugin channel
+            references_plugin = self.registry.get_plugin("references")
+            if references_plugin and hasattr(references_plugin, '_channel'):
+                channel = references_plugin._channel
+                if hasattr(channel, 'set_callbacks'):
+                    channel.set_callbacks(
+                        output_callback=self._create_output_callback(),
+                        input_queue=self._channel_input_queue,
+                        prompt_callback=on_prompt_state_change,
+                    )
+                    self._trace("References channel callbacks set (queue)")
 
         # Set callbacks on permission plugin channel
         # Suppress "permission" source output since it's now shown in the tool tree
