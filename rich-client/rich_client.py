@@ -129,10 +129,12 @@ class RichClient:
                 if stop_spinner_on_first and not first_output_received[0]:
                     first_output_received[0] = True
                     self._display.stop_spinner()
-                # Skip append_output if UI hooks are active - they handle routing with agent context
-                # This prevents duplicate output (original callback + hook callback both appending)
-                if not self._agent_registry:
-                    self._display.append_output(source, text, mode)
+                # Skip append_output for "model" source when UI hooks are active
+                # (hooks handle routing model output with agent context)
+                # But allow plugin output (references, clarification, etc.) through
+                if self._agent_registry and source == "model":
+                    return
+                self._display.append_output(source, text, mode)
         return callback
 
     def _try_execute_plugin_command(self, user_input: str) -> Optional[Any]:
