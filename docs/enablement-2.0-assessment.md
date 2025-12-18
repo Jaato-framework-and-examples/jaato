@@ -6,7 +6,7 @@
 
 This assessment evaluates how the **jaato** framework ("just another agentic tool orchestrator") could serve as the runtime foundation for implementing **Enablement 2.0** - an AI-powered SDLC platform that automates code generation while maintaining organizational standards.
 
-**Overall Verdict:** Jaato is an excellent match for Enablement 2.0's runtime layer, with strong alignment in architecture patterns, plugin extensibility, and multi-agent orchestration. The framework would require enhancements primarily in knowledge management and validation tiers, but the core infrastructure is well-suited for this use case.
+**Overall Verdict:** Jaato is an excellent match for Enablement 2.0's runtime layer, with strong alignment in architecture patterns, plugin extensibility, and multi-agent orchestration. Validation tiers map naturally to SubagentProfiles with appropriate tools. The primary gap is the knowledge layer (ADR/ERI retrieval), which requires a new plugin.
 
 ---
 
@@ -96,7 +96,7 @@ Skills (Executable Units)
 |---------------------------|------------------|-----------|
 | **Discovery (semantic interpretation)** | `PluginRegistry.enrich_prompt()` | **Strong** - Prompt enrichment pipeline can inject context from knowledge base |
 | **Flow (execution approaches)** | `JaatoSession.send_message()` with tool loop | **Strong** - Function calling loop handles multi-step execution |
-| **Validation (sequential checking)** | None | **Gap** - Jaato has no code quality validation. PermissionPlugin handles authorization (tool access), not output validation. A new validation plugin is required. |
+| **Validation (sequential checking)** | `SubagentPlugin` + tool plugins | **Strong** - Each validation tier is simply a SubagentProfile with appropriate tools (CLI for linters, knowledge plugin for ERI comparison, MCP for CI/CD webhooks) |
 | **Agent orchestration** | `SubagentPlugin` + `JaatoRuntime` | **Strong** - Subagent profiles map directly to Skills |
 | **Multi-turn conversations** | `JaatoSession` with history | **Strong** - Built-in session management |
 
@@ -288,46 +288,81 @@ class KnowledgePlugin:
         )
 ```
 
-### 4.2 Multi-Tier Validation (High Priority)
+### 4.2 Multi-Tier Validation as Subagent Profiles
 
-**Gap:** Jaato has no code quality validation. The existing `PermissionPlugin` handles authorization (tool access control), which is unrelated to Enablement 2.0's validation requirements for checking generated output quality.
+**Insight:** Each validation tier is simply a **SubagentProfile** with appropriate tools - no separate "validation plugin" is needed.
 
-**Recommendation:** Create a `validation` plugin matching Enablement 2.0's 4-tier architecture:
-
-| Tier | Enablement 2.0 | Jaato Implementation |
-|------|----------------|---------------------|
-| **Tier-1** | Universal validators (all domains) | Syntax linting, format checking |
-| **Tier-2** | Technology-specific validation | Java/Spring validators, framework checks |
-| **Tier-3** | Module-specific rules | Pattern compliance vs ERIs |
-| **Tier-4** | External CI/CD (planned) | Webhook integration for external tools |
+| Tier | SubagentProfile | Tools Required |
+|------|-----------------|----------------|
+| **Tier-1** | `validator-tier1-universal` | CLI plugin (eslint, prettier, language parsers) |
+| **Tier-2** | `validator-tier2-java-spring` | CLI plugin (maven validate, checkstyle, spring checks) |
+| **Tier-3** | `validator-tier3-pattern-compliance` | Knowledge plugin (compare output against ERIs) |
+| **Tier-4** | `validator-tier4-cicd` | MCP/CLI plugin (webhook triggers, external API calls) |
 
 ```python
-# Example: ValidationPlugin for Enablement 2.0
-class ValidationPlugin:
-    def get_tool_schemas(self) -> List[ToolSchema]:
-        return [
-            ToolSchema(
-                name='validate_tier1',
-                description='Universal validation: syntax, formatting, structure',
-                parameters={...}
-            ),
-            ToolSchema(
-                name='validate_tier2',
-                description='Technology-specific: Java/Spring, Python, etc.',
-                parameters={'technology': {'type': 'string'}, ...}
-            ),
-            ToolSchema(
-                name='validate_tier3',
-                description='Module compliance: check against ERI patterns',
-                parameters={'eri_id': {'type': 'string'}, ...}
-            ),
-            ToolSchema(
-                name='validate_output',
-                description='Run all tiers and generate manifest.json',
-                parameters={...}
-            ),
-        ]
+# Tier-1: Universal syntax/formatting validator
+tier1_validator = SubagentProfile(
+    name="validator-tier1-universal",
+    description="Universal syntax and formatting validation for all domains",
+    plugins=["cli"],  # Access to linters, formatters, parsers
+    system_instructions="""
+    You are a Tier-1 validator. Your job is to run universal checks:
+    - Syntax validation (language-appropriate parser)
+    - Formatting compliance (prettier, black, gofmt, etc.)
+    - Basic structure validation
+
+    Report all findings in a structured format.
+    """,
+    max_turns=3
+)
+
+# Tier-2: Technology-specific validator (e.g., Java/Spring)
+tier2_java_validator = SubagentProfile(
+    name="validator-tier2-java-spring",
+    description="Java/Spring technology-specific validation",
+    plugins=["cli"],  # maven, gradle, checkstyle, Spring validators
+    system_instructions="""
+    You are a Tier-2 validator for Java/Spring projects. Run:
+    - Maven/Gradle compilation check
+    - Checkstyle compliance
+    - Spring configuration validation
+    - Dependency analysis
+    """,
+    max_turns=5
+)
+
+# Tier-3: Pattern compliance validator
+tier3_pattern_validator = SubagentProfile(
+    name="validator-tier3-pattern-compliance",
+    description="Validate output against ERI patterns",
+    plugins=["cli", "knowledge"],  # Needs knowledge plugin to access ERIs
+    system_instructions="""
+    You are a Tier-3 validator. Compare generated code against:
+    - Referenced ERI patterns
+    - ADR constraints
+    - Module templates
+
+    Flag any deviations from enterprise standards.
+    """,
+    max_turns=5
+)
+
+# Tier-4: CI/CD integration validator
+tier4_cicd_validator = SubagentProfile(
+    name="validator-tier4-cicd",
+    description="External CI/CD validation hooks",
+    plugins=["cli", "mcp"],  # Webhooks, external API calls
+    system_instructions="""
+    You are a Tier-4 validator. Trigger external validation:
+    - CI pipeline execution
+    - Security scans
+    - Integration test suites
+    """,
+    max_turns=10
+)
 ```
+
+This approach leverages jaato's existing subagent architecture - **no new plugin type required**.
 
 ### 4.3 Domain and Flow Configuration (Low Priority)
 
@@ -484,9 +519,9 @@ response = client.send_message(
 | MCP Integration | 10/10 | Already implemented |
 | Extensibility | 9/10 | Plugin system ready for new plugins |
 | Authorization | 8/10 | PermissionPlugin supports tool access control |
+| Validation Tiers | 8/10 | Validation tiers are simply SubagentProfiles with CLI/MCP tools |
 | Knowledge Layer | 4/10 | Requires new plugin (no existing capability) |
-| Validation Tiers | 2/10 | Requires entirely new plugin (no existing capability) |
 
-**Overall Score: 7.0/10** - Strong execution foundation, but knowledge and validation layers need to be built from scratch.
+**Overall Score: 8.0/10** - Strong foundation. Validation is well-supported via subagent profiles. Primary gap is the knowledge layer plugin for ADR/ERI access.
 
-The primary work involves creating two new plugins (knowledge, validation) while leveraging existing infrastructure for execution and orchestration. Jaato's multi-agent architecture, MCP support, and plugin extensibility make it an ideal runtime for the Enablement 2.0 vision.
+The primary work involves creating a **knowledge plugin** for ADR/ERI retrieval. Validation tiers map naturally to SubagentProfiles using existing tool plugins (CLI for linters, MCP for external systems). Jaato's multi-agent architecture is an excellent fit for the Enablement 2.0 vision.
