@@ -686,6 +686,7 @@ class PermissionResponseCompleter(Completer):
 
 
 class SessionIdCompleter(Completer):
+    """Complete session IDs for session commands.
 
     Triggers completion when user types session commands followed by a space:
     - "delete-session " -> completes with available session IDs
