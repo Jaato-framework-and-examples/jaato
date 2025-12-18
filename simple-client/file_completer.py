@@ -612,20 +612,17 @@ class PermissionResponseCompleter(Completer):
     awaiting permission approval. This completer is designed to temporarily
     replace normal completions while a permission prompt is active.
 
-    Valid responses:
-    - y / yes: Allow this execution
-    - n / no: Deny this execution
-    - a / always: Allow and remember for session
-    - never: Deny and remember for session
-    - once: Allow once without remembering
+    The valid response options are provided dynamically from the permission
+    plugin, making the plugin the single source of truth for valid responses.
 
     Example usage:
         "y" -> completes to "yes" (or accepts "y")
         "a" -> completes to "always" (or accepts "a")
     """
 
-    # Permission response options: (short, full, description)
-    PERMISSION_OPTIONS = [
+    # Default fallback options in case none are provided
+    # Format: (short, full, description)
+    DEFAULT_OPTIONS = [
         ("y", "yes", "Allow this tool execution"),
         ("n", "no", "Deny this tool execution"),
         ("a", "always", "Allow and whitelist for session"),
@@ -633,25 +630,59 @@ class PermissionResponseCompleter(Completer):
         ("never", "never", "Deny and blacklist for session"),
     ]
 
+    def __init__(self):
+        """Initialize the permission response completer."""
+        # Current options - can be set dynamically from permission plugin
+        self._options: Optional[list] = None
+
+    def set_options(self, options: Optional[list]) -> None:
+        """Set the valid response options from the permission plugin.
+
+        Args:
+            options: List of PermissionResponseOption objects from the plugin,
+                    or None to use default fallback options.
+                    Each option should have: short, full, description attributes.
+        """
+        self._options = options
+
+    def clear_options(self) -> None:
+        """Clear the current options, reverting to defaults."""
+        self._options = None
+
     def get_completions(
         self, document: Document, complete_event
     ) -> Iterable[Completion]:
         """Get completions for permission responses.
 
-        Provides completions for the valid permission response options.
+        Uses options from the permission plugin if available,
+        otherwise falls back to default options.
         """
         text = document.text_before_cursor.strip().lower()
 
-        for short, full, description in self.PERMISSION_OPTIONS:
-            # Match against both short and full forms
-            if not text or short.startswith(text) or full.startswith(text):
-                # Use full form as the completion value
-                yield Completion(
-                    full,
-                    start_position=-len(text) if text else 0,
-                    display=f"{short}/{full}",
-                    display_meta=description,
-                )
+        # Use plugin-provided options if available, otherwise use defaults
+        if self._options:
+            for opt in self._options:
+                short = opt.short
+                full = opt.full
+                description = opt.description
+                # Match against both short and full forms
+                if not text or short.lower().startswith(text) or full.lower().startswith(text):
+                    yield Completion(
+                        full,
+                        start_position=-len(text) if text else 0,
+                        display=f"{short}/{full}",
+                        display_meta=description,
+                    )
+        else:
+            # Fallback to defaults
+            for short, full, description in self.DEFAULT_OPTIONS:
+                if not text or short.startswith(text) or full.startswith(text):
+                    yield Completion(
+                        full,
+                        start_position=-len(text) if text else 0,
+                        display=f"{short}/{full}",
+                        display_meta=description,
+                    )
 
 
 class SessionIdCompleter(Completer):
@@ -948,12 +979,15 @@ class CombinedCompleter(Completer):
         """Clear all plugin-contributed commands."""
         self._command_completer.clear_plugin_commands()
 
-    def set_permission_mode(self, enabled: bool) -> None:
+    def set_permission_mode(self, enabled: bool, options: Optional[list] = None) -> None:
         """Enable or disable permission response completion mode.
 
         When permission mode is enabled, only permission response options
-        (yes, no, always, never, once) are shown in completions. All normal
-        completions (commands, files, etc.) are temporarily disabled.
+        are shown in completions. All normal completions (commands, files,
+        etc.) are temporarily disabled.
+
+        The valid options are provided by the permission plugin, making it
+        the single source of truth for what responses are valid.
 
         Use this when a permission prompt is active and the user should
         only be able to enter valid permission responses.
@@ -961,8 +995,15 @@ class CombinedCompleter(Completer):
         Args:
             enabled: True to enable permission-only completions,
                     False to restore normal completion behavior.
+            options: List of PermissionResponseOption objects from the
+                    permission plugin. Only used when enabled=True.
+                    Each option should have: short, full, description attributes.
         """
         self._permission_mode = enabled
+        if enabled and options is not None:
+            self._permission_completer.set_options(options)
+        elif not enabled:
+            self._permission_completer.clear_options()
 
     @property
     def permission_mode(self) -> bool:
