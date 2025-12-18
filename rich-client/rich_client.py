@@ -475,18 +475,20 @@ class RichClient:
             def on_agent_history_updated(self, agent_id, history):
                 registry.update_history(agent_id, history)
 
-            def on_tool_call_start(self, agent_id, tool_name, tool_args):
+            def on_tool_call_start(self, agent_id, tool_name, tool_args, call_id=None):
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
-                    buffer.add_active_tool(tool_name, tool_args)
+                    buffer.add_active_tool(tool_name, tool_args, call_id=call_id)
                     if display:
                         display.refresh()
 
             def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds,
-                                  error_message=None):
+                                  error_message=None, call_id=None):
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
-                    buffer.mark_tool_completed(tool_name, success, duration_seconds, error_message)
+                    buffer.mark_tool_completed(
+                        tool_name, success, duration_seconds, error_message, call_id=call_id
+                    )
                     if display:
                         display.refresh()
 
