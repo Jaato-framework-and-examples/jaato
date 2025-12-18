@@ -30,6 +30,7 @@ class ActiveToolCall:
     """Represents an actively executing or completed tool call."""
     name: str
     args_summary: str  # Truncated string representation of args
+    call_id: Optional[str] = None  # Unique ID for correlating start/end of same tool call
     completed: bool = False  # True when tool execution finished
     success: bool = True  # Whether the tool succeeded (only valid when completed)
     duration_seconds: Optional[float] = None  # Execution time (only valid when completed)
@@ -229,28 +230,36 @@ class OutputBuffer:
         """Check if spinner is currently active."""
         return self._spinner_active
 
-    def add_active_tool(self, tool_name: str, tool_args: dict) -> None:
+    def add_active_tool(self, tool_name: str, tool_args: dict,
+                        call_id: Optional[str] = None) -> None:
         """Add a tool to the active tools list.
 
         Args:
             tool_name: Name of the tool being executed.
             tool_args: Arguments passed to the tool.
+            call_id: Unique identifier for this tool call (for correlation).
         """
         # Create a summary of args (truncated for display)
         args_str = str(tool_args)
         if len(args_str) > 60:
             args_str = args_str[:57] + "..."
 
-        # Don't add duplicates
+        # Don't add duplicates - check by call_id if provided, otherwise by name
         for tool in self._active_tools:
-            if tool.name == tool_name:
+            if call_id and tool.call_id == call_id:
+                return
+            # Fall back to name-based check only if no call_id provided
+            if not call_id and tool.name == tool_name and not tool.call_id:
                 return
 
-        self._active_tools.append(ActiveToolCall(name=tool_name, args_summary=args_str))
+        self._active_tools.append(ActiveToolCall(
+            name=tool_name, args_summary=args_str, call_id=call_id
+        ))
 
     def mark_tool_completed(self, tool_name: str, success: bool = True,
                             duration_seconds: Optional[float] = None,
-                            error_message: Optional[str] = None) -> None:
+                            error_message: Optional[str] = None,
+                            call_id: Optional[str] = None) -> None:
         """Mark a tool as completed (keeps it in the tree with completion status).
 
         Args:
@@ -258,9 +267,18 @@ class OutputBuffer:
             success: Whether the tool execution succeeded.
             duration_seconds: How long the tool took to execute.
             error_message: Error message if the tool failed.
+            call_id: Unique identifier for this tool call (for correlation).
         """
         for tool in self._active_tools:
-            if tool.name == tool_name and not tool.completed:
+            # Match by call_id if provided, otherwise by name (for backwards compatibility)
+            if call_id:
+                if tool.call_id == call_id and not tool.completed:
+                    tool.completed = True
+                    tool.success = success
+                    tool.duration_seconds = duration_seconds
+                    tool.error_message = error_message
+                    return
+            elif tool.name == tool_name and not tool.completed and not tool.call_id:
                 tool.completed = True
                 tool.success = success
                 tool.duration_seconds = duration_seconds
@@ -311,6 +329,10 @@ class OutputBuffer:
             status_icon = "✓" if tool.success else "✗"
             status_style = "green" if tool.success else "red"
             line_parts = [f"       {prefix} {status_icon} {tool.name}"]
+
+            # Add args summary (truncated) before duration
+            if tool.args_summary and tool.args_summary != "{}":
+                line_parts.append(f" {tool.args_summary}")
 
             if tool.duration_seconds is not None:
                 line_parts.append(f" ({tool.duration_seconds:.2f}s)")
@@ -381,7 +403,8 @@ class OutputBuffer:
             method: How permission was resolved (yes, always, once, never, whitelist, etc.)
         """
         for tool in self._active_tools:
-            if tool.name == tool_name:
+            # Match the tool with pending permission state (only one at a time due to blocking)
+            if tool.name == tool_name and tool.permission_state == "pending":
                 tool.permission_state = "granted" if granted else "denied"
                 tool.permission_method = method
                 tool.permission_prompt_lines = None  # Clear expanded prompt
@@ -887,6 +910,9 @@ class OutputBuffer:
                     status_style = "green" if tool.success else "red"
                     output.append(f"{status_icon} ", style=status_style)
                     output.append(tool.name, style="dim yellow")
+                    # Add args summary (truncated) before duration
+                    if tool.args_summary and tool.args_summary != "{}":
+                        output.append(f" {tool.args_summary}", style="dim")
                     if tool.duration_seconds is not None:
                         output.append(f" ({tool.duration_seconds:.2f}s)", style="dim")
                     # Add collapsed permission result on same line
@@ -926,7 +952,7 @@ class OutputBuffer:
                     output.append("○ ", style="yellow")
                     output.append(tool.name, style="yellow")
                     if tool.args_summary and tool.args_summary != "{}":
-                        output.append(f"({tool.args_summary})", style="dim")
+                        output.append(f" {tool.args_summary}", style="dim")
 
                 # Show permission info under this tool (only when pending)
                 if tool.permission_state == "pending" and tool.permission_prompt_lines:
