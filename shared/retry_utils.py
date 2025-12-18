@@ -26,6 +26,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar
 
+# Type alias for output callback (matches JaatoSession's OutputCallback)
+# Signature: (source: str, text: str, mode: str) -> None
+OutputCallback = Callable[[str, str, str], None]
+
 # Import Google exceptions for detection
 try:
     from google.api_core import exceptions as google_exceptions
@@ -174,6 +178,7 @@ def with_retry(
     fn: Callable[[], T],
     config: Optional[RetryConfig] = None,
     context: str = "API call",
+    on_output: Optional[OutputCallback] = None,
 ) -> Tuple[T, RetryStats]:
     """Execute a function with automatic retry on transient errors.
 
@@ -181,6 +186,10 @@ def with_retry(
         fn: Function to execute (should take no arguments).
         config: Retry configuration (uses defaults if None).
         context: Description for logging (e.g., "send_message").
+        on_output: Optional callback for retry status messages.
+            Signature: (source: str, text: str, mode: str) -> None
+            If provided, retry messages go through this callback instead of print().
+            source="retry", mode="write" for each retry message.
 
     Returns:
         Tuple of (result, RetryStats).
@@ -191,7 +200,8 @@ def with_retry(
     Example:
         response, stats = with_retry(
             lambda: provider.send_message(message),
-            context="send_message"
+            context="send_message",
+            on_output=my_callback
         )
         if stats.attempts > 1:
             print(f"Succeeded after {stats.attempts} attempts")
@@ -243,7 +253,14 @@ def with_retry(
                 err_cls = exc.__class__.__name__
                 tag = "rate-limit" if classification["rate_limit"] else "transient"
                 exc_msg = str(exc)[:140].replace('\n', ' ')
-                print(f"[AI Retry {attempt}/{config.max_attempts}] {context} ({tag}): {err_cls}: {exc_msg} | sleep {delay:.2f}s")
+                msg = f"[AI Retry {attempt}/{config.max_attempts}] {context} ({tag}): {err_cls}: {exc_msg} | sleep {delay:.2f}s"
+
+                if on_output:
+                    # Route through output callback (source="retry", mode="write")
+                    on_output("retry", msg, "write")
+                else:
+                    # Fallback to print
+                    print(msg)
 
             time.sleep(delay)
 

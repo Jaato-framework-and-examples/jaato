@@ -513,7 +513,8 @@ class JaatoSession:
         try:
             response, _retry_stats = with_retry(
                 lambda: self._provider.send_message(message),
-                context="send_message"
+                context="send_message",
+                on_output=on_output
             )
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
@@ -581,7 +582,8 @@ class JaatoSession:
                 # Send tool results back (with retry for rate limits)
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_tool_results(tool_results),
-                    context="send_tool_results"
+                    context="send_tool_results",
+                    on_output=on_output
                 )
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
@@ -890,7 +892,8 @@ class JaatoSession:
         try:
             response, _retry_stats = with_retry(
                 lambda: self._provider.send_message_with_parts(parts),
-                context="send_message_with_parts"
+                context="send_message_with_parts",
+                on_output=on_output
             )
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
@@ -963,7 +966,8 @@ class JaatoSession:
                 # Send tool results back (with retry for rate limits)
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_tool_results(tool_results),
-                    context="send_tool_results"
+                    context="send_tool_results",
+                    on_output=on_output
                 )
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
