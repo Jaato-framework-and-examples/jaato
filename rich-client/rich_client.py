@@ -1006,7 +1006,7 @@ class RichClient:
                 style="dim"
             )
         self._display.add_system_message(
-            "Type 'help' for commands, 'quit' to exit",
+            "Type 'help' for commands, 'quit' to exit, Esc+Esc to clear input",
             style="dim"
         )
         self._display.add_system_message("", style="dim")
@@ -1653,6 +1653,7 @@ class RichClient:
             ("  Ctrl+A/E  - Jump to start/end of line", "dim"),
             ("  TAB/Enter - Accept selected completion", "dim"),
             ("  Escape    - Dismiss completion menu", "dim"),
+            ("  Esc+Esc   - Clear input", "dim"),
             ("  PgUp/PgDn - Scroll output up/down", "dim"),
             ("  Home/End  - Scroll to top/bottom of output", "dim"),
             ("", "dim"),
