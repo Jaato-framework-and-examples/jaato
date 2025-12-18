@@ -312,6 +312,9 @@ class RichClient:
         # Configure tools
         self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
+        # Setup retry callback to route messages to output panel
+        self._setup_retry_callback()
+
         # Setup session plugin
         self._setup_session_plugin()
 
@@ -397,6 +400,30 @@ class RichClient:
                     prompt_callback=on_prompt_state_change,
                 )
                 self._trace("Permission channel callbacks set (queue)")
+
+    def _setup_retry_callback(self) -> None:
+        """Set up retry callback to route rate limit messages to output panel.
+
+        Routes retry notifications through the output callback system instead
+        of printing directly to console, so they appear in the output panel.
+        """
+        if not self._jaato:
+            return
+
+        session = self._jaato.get_session()
+        if not session:
+            return
+
+        # Create output callback for retry messages
+        output_callback = self._create_output_callback()
+
+        def on_retry(message: str, attempt: int, max_attempts: int, delay: float) -> None:
+            """Route retry messages to output panel."""
+            # Use source="retry" so UI can style appropriately
+            output_callback("retry", message, "write")
+
+        session.set_retry_callback(on_retry)
+        self._trace("Retry callback configured for output panel")
 
     def _setup_agent_hooks(self) -> None:
         """Set up agent lifecycle hooks for UI integration."""
