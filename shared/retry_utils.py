@@ -1,23 +1,29 @@
-"""Retry utilities for transient API errors.
+"""Retry and rate limiting utilities for API calls.
 
-Provides retry logic with exponential backoff for rate limit and transient
-errors from various model providers.
+Provides:
+- Retry logic with exponential backoff for transient errors
+- Request pacing to proactively avoid rate limits
 
 Usage:
-    from shared.retry_utils import with_retry, RetryConfig
+    from shared.retry_utils import with_retry, RetryConfig, RequestPacer
 
-    # Using default config (reads from environment)
+    # Retry on errors (reactive)
     result = with_retry(lambda: provider.send_message(msg))
 
-    # With custom config
-    config = RetryConfig(max_attempts=3, base_delay=2.0)
-    result = with_retry(lambda: provider.send_message(msg), config=config)
+    # Request pacing (proactive) - shared pacer instance
+    pacer = RequestPacer()
+    pacer.pace()  # waits if needed before request
+    result = provider.send_message(msg)
 
 Environment Variables:
+    # Retry (reactive)
     AI_RETRY_ATTEMPTS: Max retry attempts (default: 5)
     AI_RETRY_BASE_DELAY: Initial delay in seconds (default: 1.0)
     AI_RETRY_MAX_DELAY: Maximum delay in seconds (default: 30.0)
     AI_RETRY_LOG_SILENT: Suppress retry logging when set to '1', 'true', or 'yes'
+
+    # Pacing (proactive)
+    AI_REQUEST_INTERVAL: Minimum seconds between requests (default: 0 = disabled)
 """
 
 import os
@@ -275,7 +281,77 @@ def with_retry(
     raise RuntimeError("Retry loop exited without result or exception")
 
 
+class RequestPacer:
+    """Enforces minimum interval between API requests to avoid rate limits.
+
+    This provides proactive rate limiting by ensuring requests are spaced
+    at least `min_interval` seconds apart.
+
+    Usage:
+        pacer = RequestPacer()  # reads AI_REQUEST_INTERVAL from env
+        pacer.pace()  # call before each API request
+
+    The pacer is thread-safe for single-writer scenarios (one session).
+    For multi-session use, create one pacer per session or use a shared
+    instance with external synchronization.
+    """
+
+    def __init__(self, min_interval: Optional[float] = None):
+        """Initialize the pacer.
+
+        Args:
+            min_interval: Minimum seconds between requests.
+                If None, reads from AI_REQUEST_INTERVAL env var (default: 0).
+        """
+        if min_interval is not None:
+            self._min_interval = min_interval
+        else:
+            self._min_interval = float(os.environ.get("AI_REQUEST_INTERVAL", "0"))
+        self._last_request_time: Optional[float] = None
+
+    @property
+    def min_interval(self) -> float:
+        """Get the minimum interval between requests."""
+        return self._min_interval
+
+    @property
+    def enabled(self) -> bool:
+        """Check if pacing is enabled (interval > 0)."""
+        return self._min_interval > 0
+
+    def pace(self) -> float:
+        """Wait if needed to maintain minimum request interval.
+
+        Call this before each API request. Returns immediately if enough
+        time has passed since the last request, otherwise sleeps.
+
+        Returns:
+            Seconds waited (0 if no wait was needed).
+        """
+        if not self.enabled:
+            return 0.0
+
+        now = time.time()
+        waited = 0.0
+
+        if self._last_request_time is not None:
+            elapsed = now - self._last_request_time
+            if elapsed < self._min_interval:
+                wait_time = self._min_interval - elapsed
+                time.sleep(wait_time)
+                waited = wait_time
+                now = time.time()
+
+        self._last_request_time = now
+        return waited
+
+    def reset(self) -> None:
+        """Reset the pacer (next request won't wait)."""
+        self._last_request_time = None
+
+
 __all__ = [
+    'RequestPacer',
     'RetryCallback',
     'RetryConfig',
     'RetryStats',

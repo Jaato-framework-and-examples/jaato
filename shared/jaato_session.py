@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .ai_tool_runner import ToolExecutor
-from .retry_utils import with_retry, RetryCallback, RetryConfig
+from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig
 from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
@@ -106,6 +106,10 @@ class JaatoSession:
 
         # Retry notification callback (client-configurable)
         self._on_retry: Optional[RetryCallback] = None
+
+        # Request pacing (proactive rate limiting)
+        # Reads AI_REQUEST_INTERVAL from env (default: 0 = disabled)
+        self._pacer = RequestPacer()
 
     @property
     def model_name(self) -> Optional[str]:
@@ -534,6 +538,9 @@ class JaatoSession:
         response: Optional[ProviderResponse] = None
 
         try:
+            # Proactive rate limiting: wait if needed before request
+            self._pacer.pace()
+
             response, _retry_stats = with_retry(
                 lambda: self._provider.send_message(message),
                 context="send_message",
@@ -603,6 +610,7 @@ class JaatoSession:
                     tool_results.append(tool_result)
 
                 # Send tool results back (with retry for rate limits)
+                self._pacer.pace()  # Proactive rate limiting
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_tool_results(tool_results),
                     context="send_tool_results",
@@ -913,6 +921,9 @@ class JaatoSession:
         response: Optional[ProviderResponse] = None
 
         try:
+            # Proactive rate limiting: wait if needed before request
+            self._pacer.pace()
+
             response, _retry_stats = with_retry(
                 lambda: self._provider.send_message_with_parts(parts),
                 context="send_message_with_parts",
@@ -987,6 +998,7 @@ class JaatoSession:
                     tool_results.append(tool_result)
 
                 # Send tool results back (with retry for rate limits)
+                self._pacer.pace()  # Proactive rate limiting
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_tool_results(tool_results),
                     context="send_tool_results",
