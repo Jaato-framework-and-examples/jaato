@@ -4,7 +4,7 @@
   "plugins": ["cli", "file_edit", "references"],
   "plugin_configs": {
     "references": {
-      "sources": ["adr-004-testing-strategy", "eri-005-unit-test-patterns"]
+      "preselected": ["adr-004-testing-strategy", "eri-005-unit-test-patterns"]
     }
   },
   "system_instructions": "You are implementing the ADD flow for unit tests.\n\n## Execution Flow: ADD\n1. Analyze target class to identify testable methods\n2. Fetch ADR-004 for coverage requirements\n3. Follow ERI-005 patterns for test structure\n4. Generate test class with:\n   - @ExtendWith(MockitoExtension.class)\n   - @Mock for dependencies\n   - @InjectMocks for subject under test\n   - Tests following Given-When-Then pattern\n   - Edge cases and error scenarios\n5. Target: 80% line coverage minimum\n6. Output: Test class in src/test/java/",

@@ -4,7 +4,7 @@
   "plugins": ["cli", "file_edit", "references"],
   "plugin_configs": {
     "references": {
-      "sources": [
+      "preselected": [
         "adr-003-microservice-structure",
         "adr-006-logging-observability",
         "eri-003-spring-boot-microservice"
