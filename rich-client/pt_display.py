@@ -1032,19 +1032,28 @@ class PTDisplay:
         if self._app and self._app.is_running:
             self._app.loop.call_later(0.1, self._advance_spinner)
 
-    def set_waiting_for_channel_input(self, waiting: bool) -> None:
+    def set_waiting_for_channel_input(
+        self,
+        waiting: bool,
+        response_options: Optional[list] = None
+    ) -> None:
         """Set whether we're waiting for channel (permission/clarification) input.
 
         When waiting for channel input (permission or clarification prompts),
         this method also switches the completion source to show only valid
-        response options (yes, no, always, never, once) instead of the normal
-        completions (commands, files, etc.).
+        response options instead of the normal completions (commands, files, etc.).
+
+        The valid response options are provided by the permission plugin,
+        making it the single source of truth for what responses are valid.
 
         Args:
             waiting: True if waiting for channel input, False otherwise.
+            response_options: List of PermissionResponseOption objects from the
+                            permission plugin. Only used when waiting=True.
+                            Each option should have: short, full, description attributes.
         """
         self._waiting_for_channel_input = waiting
-        # Toggle permission completion mode on the input handler
+        # Toggle permission completion mode on the input handler with options
         if self._input_handler:
-            self._input_handler.set_permission_mode(waiting)
+            self._input_handler.set_permission_mode(waiting, response_options)
         self.refresh()
