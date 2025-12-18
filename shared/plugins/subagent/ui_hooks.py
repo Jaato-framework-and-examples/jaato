@@ -178,7 +178,8 @@ class AgentUIHooks(Protocol):
         self,
         agent_id: str,
         tool_name: str,
-        tool_args: Dict[str, Any]
+        tool_args: Dict[str, Any],
+        call_id: Optional[str] = None
     ) -> None:
         """Called when a tool starts executing.
 
@@ -189,6 +190,7 @@ class AgentUIHooks(Protocol):
             agent_id: Which agent initiated the tool call.
             tool_name: Name of the tool being called.
             tool_args: Arguments passed to the tool.
+            call_id: Unique identifier for this tool call (for correlation).
         """
         ...
 
@@ -198,7 +200,8 @@ class AgentUIHooks(Protocol):
         tool_name: str,
         success: bool,
         duration_seconds: float,
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        call_id: Optional[str] = None
     ) -> None:
         """Called when a tool finishes executing.
 
@@ -208,5 +211,6 @@ class AgentUIHooks(Protocol):
             success: Whether the tool executed successfully.
             duration_seconds: How long the tool took to execute.
             error_message: Error message if the tool failed.
+            call_id: Unique identifier for this tool call (for correlation).
         """
         ...
