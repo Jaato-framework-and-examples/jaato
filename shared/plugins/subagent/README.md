@@ -52,6 +52,7 @@ The subagent plugin uses the shared `JaatoRuntime` to create lightweight session
 - **Plugin Inheritance**: Subagents automatically inherit the parent's plugin configuration by default
 - **Optional Overrides**: Use `inline_config` to override specific properties (plugins, max_turns, system_instructions)
 - **Predefined Profiles**: Configure named profiles for common subagent configurations
+- **Profile Auto-Discovery**: Automatically discover profiles from `.jaato/profiles/` directory (JSON/YAML files)
 - **Connection Inheritance**: Subagents automatically inherit parent's GCP project, location, and model
 - **Auto-Approved Listing**: `list_subagent_profiles` is auto-whitelisted for permission checks
 
@@ -124,6 +125,44 @@ spawn_subagent(
 
 ## Configuration
 
+### Profile Auto-Discovery
+
+The subagent plugin automatically discovers profile definitions from `.jaato/profiles/` directory. Each `.json` or `.yaml` file in this directory is parsed as a profile definition.
+
+**Directory structure:**
+```
+.jaato/
+└── profiles/
+    ├── code_assistant.json
+    ├── research_agent.yaml
+    └── custom_agent.json
+```
+
+**Example profile file (`.jaato/profiles/code_assistant.json`):**
+```json
+{
+  "name": "code_assistant",
+  "description": "Subagent for code analysis and review",
+  "plugins": ["cli", "file_edit"],
+  "system_instructions": "You are a code review specialist.",
+  "max_turns": 10,
+  "auto_approved": false
+}
+```
+
+**Configuration options:**
+- `auto_discover_profiles`: Enable/disable auto-discovery (default: `true`)
+- `profiles_dir`: Directory to scan for profiles (default: `.jaato/profiles`)
+
+```python
+plugin.initialize({
+    'auto_discover_profiles': True,      # Enable auto-discovery
+    'profiles_dir': '.jaato/profiles',   # Custom profiles directory
+})
+```
+
+**Merge behavior:** Discovered profiles are merged with explicitly configured profiles. Explicit profiles take precedence on name conflicts.
+
 ### Plugin Initialization
 
 ```python
@@ -149,6 +188,8 @@ plugin.initialize({
     },
     'allow_inline': True,                # Allow inline_config (default: True)
     'inline_allowed_plugins': [],        # Restrict inline plugins (empty = all allowed)
+    'auto_discover_profiles': True,      # Auto-discover from profiles_dir (default: True)
+    'profiles_dir': '.jaato/profiles',   # Directory to scan for profiles
 })
 ```
 

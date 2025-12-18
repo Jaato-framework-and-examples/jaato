@@ -147,27 +147,6 @@
 
     <p>Subagent profiles are configured in the subagent plugin configuration. Each profile defines a specialized agent with specific capabilities, model settings, and visual representation.</p>
 
-    <h3>Profile Auto-Discovery</h3>
-
-    <p>Profiles can be automatically discovered from a directory (default: <code>.jaato/profiles/</code>). Each <code>.json</code> or <code>.yaml</code> file in this directory is parsed as a profile definition.</p>
-
-    <div class="example">
-<pre><span class="comment"># Directory structure</span>
-.jaato/
-└── profiles/
-    ├── code_assistant.json
-    ├── research_agent.yaml
-    └── custom_agent.json</pre>
-    </div>
-
-    <p><strong>Configuration options:</strong></p>
-    <ul>
-        <li><code>auto_discover_profiles</code> <span class="param-type">(boolean)</span> - Enable/disable auto-discovery (default: <code>true</code>)</li>
-        <li><code>profiles_dir</code> <span class="param-type">(string)</span> - Directory to scan for profiles (default: <code>.jaato/profiles</code>)</li>
-    </ul>
-
-    <p><strong>Merge behavior:</strong> Discovered profiles are merged with explicitly configured profiles. Explicit profiles take precedence on name conflicts.</p>
-
     <h3>Configuration Schema</h3>
 
     <p>A subagent profile supports the following fields:</p>
