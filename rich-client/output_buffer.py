@@ -330,6 +330,10 @@ class OutputBuffer:
             status_style = "green" if tool.success else "red"
             line_parts = [f"       {prefix} {status_icon} {tool.name}"]
 
+            # Add args summary (truncated) before duration
+            if tool.args_summary and tool.args_summary != "{}":
+                line_parts.append(f" {tool.args_summary}")
+
             if tool.duration_seconds is not None:
                 line_parts.append(f" ({tool.duration_seconds:.2f}s)")
 
@@ -905,6 +909,9 @@ class OutputBuffer:
                     status_style = "green" if tool.success else "red"
                     output.append(f"{status_icon} ", style=status_style)
                     output.append(tool.name, style="dim yellow")
+                    # Add args summary (truncated) before duration
+                    if tool.args_summary and tool.args_summary != "{}":
+                        output.append(f" {tool.args_summary}", style="dim")
                     if tool.duration_seconds is not None:
                         output.append(f" ({tool.duration_seconds:.2f}s)", style="dim")
                     # Add collapsed permission result on same line
@@ -944,7 +951,7 @@ class OutputBuffer:
                     output.append("○ ", style="yellow")
                     output.append(tool.name, style="yellow")
                     if tool.args_summary and tool.args_summary != "{}":
-                        output.append(f"({tool.args_summary})", style="dim")
+                        output.append(f" {tool.args_summary}", style="dim")
 
                 # Show permission info under this tool (only when pending)
                 if tool.permission_state == "pending" and tool.permission_prompt_lines:
