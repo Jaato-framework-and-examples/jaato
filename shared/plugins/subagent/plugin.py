@@ -12,7 +12,7 @@ import os
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from datetime import datetime
 
-from .config import SubagentConfig, SubagentProfile, SubagentResult
+from .config import SubagentConfig, SubagentProfile, SubagentResult, discover_profiles
 from ..base import UserCommand, CommandCompletion
 from ..model_provider.types import ToolSchema
 
@@ -110,10 +110,19 @@ class SubagentPlugin:
                 - profiles: Dict of named subagent profiles
                 - allow_inline: Whether to allow inline subagent creation
                 - inline_allowed_plugins: Plugins allowed for inline creation
+                - auto_discover_profiles: Whether to auto-discover profiles from
+                  profiles_dir (default: True)
+                - profiles_dir: Directory to scan for profile files
+                  (default: .jaato/profiles)
 
         If project/location are not provided in config, the plugin will
         attempt to read them from environment variables (PROJECT_ID, LOCATION,
         MODEL_NAME). The connection can also be set later via set_connection().
+
+        Profile auto-discovery scans profiles_dir for .json and .yaml/.yml files,
+        each containing a single profile definition. Discovered profiles are
+        merged with explicitly configured profiles, with explicit profiles
+        taking precedence on name conflicts.
         """
         if config:
             self._config = SubagentConfig.from_dict(config)
@@ -133,6 +142,19 @@ class SubagentPlugin:
             if self._config.default_model == 'gemini-2.5-flash' and env_conn['model']:
                 self._config.default_model = env_conn['model']
                 logger.debug("Using MODEL_NAME from environment: %s", env_conn['model'])
+
+        # Auto-discover profiles from profiles_dir if enabled
+        if self._config.auto_discover_profiles:
+            discovered = discover_profiles(self._config.profiles_dir)
+            # Merge discovered profiles, with explicit profiles taking precedence
+            for name, profile in discovered.items():
+                if name not in self._config.profiles:
+                    self._config.profiles[name] = profile
+                else:
+                    logger.debug(
+                        "Skipping discovered profile '%s' - explicit profile exists",
+                        name
+                    )
 
         # Lazy import the classes we need
         from ..registry import PluginRegistry

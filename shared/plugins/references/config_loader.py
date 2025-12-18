@@ -1,9 +1,11 @@
 """Configuration loading and validation for the references plugin.
 
 This module handles loading references.json files and validating their structure.
+It also supports auto-discovery of individual reference files from a directory.
 """
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,10 +13,102 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .models import ReferenceSource, SourceType, InjectionMode
 
+logger = logging.getLogger(__name__)
+
+
+def discover_references(
+    references_dir: str,
+    base_path: Optional[str] = None
+) -> List[ReferenceSource]:
+    """Discover reference sources from individual JSON files in a directory.
+
+    Each .json file in the directory should contain a single reference source
+    definition with fields: id, name, description, type, path/url/content, mode, tags.
+
+    Args:
+        references_dir: Directory path to scan (relative or absolute).
+        base_path: Base path for resolving relative references_dir.
+                   Defaults to current working directory.
+
+    Returns:
+        List of ReferenceSource instances discovered from the directory.
+    """
+    if base_path is None:
+        base_path = os.getcwd()
+
+    # Resolve the references directory path
+    refs_path = Path(references_dir)
+    if not refs_path.is_absolute():
+        refs_path = Path(base_path) / refs_path
+
+    if not refs_path.exists():
+        logger.debug("References directory does not exist: %s", refs_path)
+        return []
+
+    if not refs_path.is_dir():
+        logger.warning("References path is not a directory: %s", refs_path)
+        return []
+
+    sources: List[ReferenceSource] = []
+
+    # Scan for reference files
+    for file_path in sorted(refs_path.iterdir()):
+        if not file_path.is_file():
+            continue
+
+        if file_path.suffix != '.json':
+            continue
+
+        try:
+            content = file_path.read_text(encoding='utf-8')
+            data = json.loads(content)
+
+            if not isinstance(data, dict):
+                logger.warning("Reference file must contain a dict: %s", file_path)
+                continue
+
+            # Validate required fields
+            if not data.get("id") or not data.get("name"):
+                logger.warning(
+                    "Reference file missing required fields (id, name): %s",
+                    file_path
+                )
+                continue
+
+            source = ReferenceSource.from_dict(data)
+            sources.append(source)
+            logger.debug("Discovered reference '%s' from %s", source.id, file_path)
+
+        except json.JSONDecodeError as e:
+            logger.warning("Invalid JSON in reference file %s: %s", file_path, e)
+        except Exception as e:
+            logger.warning("Error reading reference file %s: %s", file_path, e)
+
+    if sources:
+        logger.info(
+            "Discovered %d reference(s) from %s: %s",
+            len(sources),
+            refs_path,
+            ", ".join(s.id for s in sources)
+        )
+
+    return sources
+
 
 @dataclass
 class ReferencesConfig:
-    """Structured representation of a references configuration file."""
+    """Structured representation of a references configuration file.
+
+    Attributes:
+        version: Config format version.
+        sources: List of reference sources.
+        channel_type: Type of channel for user interaction.
+        channel_timeout: Timeout for channel operations.
+        channel_endpoint: Webhook endpoint URL (for webhook channel).
+        channel_base_path: Base path (for file channel).
+        auto_discover_references: Whether to auto-discover references from references_dir.
+        references_dir: Directory to scan for reference files (default: .jaato/references).
+    """
 
     version: str = "1.0"
     sources: List[ReferenceSource] = field(default_factory=list)
@@ -24,6 +118,10 @@ class ReferencesConfig:
     channel_timeout: int = 60
     channel_endpoint: Optional[str] = None  # For webhook
     channel_base_path: Optional[str] = None  # For file
+
+    # Auto-discovery configuration
+    auto_discover_references: bool = True
+    references_dir: str = ".jaato/references"
 
 
 class ConfigValidationError(Exception):
@@ -137,19 +235,24 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
 
 def load_config(
     path: Optional[str] = None,
-    env_var: str = "REFERENCES_CONFIG_PATH"
+    env_var: str = "REFERENCES_CONFIG_PATH",
+    auto_discover: bool = True,
+    references_dir: str = ".jaato/references"
 ) -> ReferencesConfig:
     """Load and validate a references configuration file.
 
     Args:
         path: Direct path to config file. If None, uses env_var or defaults.
         env_var: Environment variable name for config path
+        auto_discover: Whether to auto-discover references from references_dir.
+        references_dir: Directory to scan for individual reference files.
 
     Returns:
-        ReferencesConfig instance
+        ReferencesConfig instance with merged sources from config file
+        and auto-discovered references.
 
     Raises:
-        FileNotFoundError: If config file doesn't exist
+        FileNotFoundError: If config file doesn't exist (when path is explicit)
         ConfigValidationError: If config validation fails
         json.JSONDecodeError: If config file is not valid JSON
     """
@@ -169,40 +272,64 @@ def load_config(
                 path = str(default_path)
                 break
 
-    if path is None:
-        # Return default config if no file found
-        return ReferencesConfig()
-
-    # Load and parse
-    config_path = Path(path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"References config file not found: {path}")
-
-    with open(config_path, 'r', encoding='utf-8') as f:
-        raw_config = json.load(f)
-
-    # Validate
-    is_valid, errors = validate_config(raw_config)
-    if not is_valid:
-        raise ConfigValidationError(errors)
-
-    # Parse sources
-    sources = [
-        ReferenceSource.from_dict(s)
-        for s in raw_config.get("sources", [])
-    ]
-
-    # Parse channel config
-    channel = raw_config.get("channel", {})
-
-    return ReferencesConfig(
-        version=str(raw_config.get("version", "1.0")),
-        sources=sources,
-        channel_type=channel.get("type", "console"),
-        channel_timeout=channel.get("timeout", 60),
-        channel_endpoint=channel.get("endpoint"),
-        channel_base_path=channel.get("base_path"),
+    # Start with defaults
+    config = ReferencesConfig(
+        auto_discover_references=auto_discover,
+        references_dir=references_dir
     )
+
+    # Load from config file if found
+    if path is not None:
+        config_path = Path(path)
+        if not config_path.exists():
+            raise FileNotFoundError(f"References config file not found: {path}")
+
+        with open(config_path, 'r', encoding='utf-8') as f:
+            raw_config = json.load(f)
+
+        # Validate
+        is_valid, errors = validate_config(raw_config)
+        if not is_valid:
+            raise ConfigValidationError(errors)
+
+        # Parse sources
+        sources = [
+            ReferenceSource.from_dict(s)
+            for s in raw_config.get("sources", [])
+        ]
+
+        # Parse channel config
+        channel = raw_config.get("channel", {})
+
+        # Parse auto-discover settings from config (can override function args)
+        config = ReferencesConfig(
+            version=str(raw_config.get("version", "1.0")),
+            sources=sources,
+            channel_type=channel.get("type", "console"),
+            channel_timeout=channel.get("timeout", 60),
+            channel_endpoint=channel.get("endpoint"),
+            channel_base_path=channel.get("base_path"),
+            auto_discover_references=raw_config.get("auto_discover_references", auto_discover),
+            references_dir=raw_config.get("references_dir", references_dir),
+        )
+
+    # Auto-discover references if enabled
+    if config.auto_discover_references:
+        discovered = discover_references(config.references_dir)
+        if discovered:
+            # Build set of existing IDs to avoid duplicates
+            existing_ids = {s.id for s in config.sources}
+            # Merge discovered sources, explicit sources take precedence
+            for source in discovered:
+                if source.id not in existing_ids:
+                    config.sources.append(source)
+                else:
+                    logger.debug(
+                        "Skipping discovered reference '%s' - explicit source exists",
+                        source.id
+                    )
+
+    return config
 
 
 def create_default_config(path: str) -> None:

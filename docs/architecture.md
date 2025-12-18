@@ -604,8 +604,11 @@ classDiagram
 
     class SubagentPlugin {
         +name = "subagent"
+        +auto_discover_profiles: bool
+        +profiles_dir: str
         +spawn_subagent()
         +list_subagent_profiles()
+        +discover_profiles()
         +profiles user command
     }
 
