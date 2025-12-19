@@ -5,5 +5,5 @@
   "type": "local",
   "path": "./docs/adr/ADR-002-api-design.md",
   "mode": "selectable",
-  "tags": ["adr", "api", "rest", "design", "code"]
+  "tags": ["ADR-002", "adr", "api", "rest", "design", "code"]
 }

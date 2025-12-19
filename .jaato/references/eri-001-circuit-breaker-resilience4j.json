@@ -5,6 +5,6 @@
   "type": "local",
   "path": "./docs/eri/ERI-001-circuit-breaker-resilience4j/",
   "mode": "selectable",
-  "tags": ["eri", "circuit-breaker", "resilience4j", "java", "spring", "code"],
+  "tags": ["ERI-001", "eri", "circuit-breaker", "resilience4j", "java", "spring", "code"],
   "fetchHint": "Read all files in this directory for complete reference implementation"
 }

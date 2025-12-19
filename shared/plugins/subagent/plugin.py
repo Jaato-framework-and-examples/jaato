@@ -945,11 +945,32 @@ class SubagentPlugin:
 
         try:
             # Create session from runtime with profile's configuration
+            # profile.plugins is always a list (possibly empty); pass it directly
+            # Empty list = no tools, non-empty list = only those tools
             session = self._runtime.create_session(
                 model=model,
                 tools=profile.plugins if profile.plugins else None,
-                system_instructions=profile.system_instructions
+                system_instructions=profile.system_instructions,
+                plugin_configs=profile.plugin_configs if profile.plugin_configs else None
             )
+
+            # Debug: write to trace log file (visible even with rich client)
+            # Use JAATO_TRACE_LOG env var, or default to /tmp/rich_client_trace.log
+            import tempfile
+            trace_path = os.environ.get(
+                'JAATO_TRACE_LOG',
+                os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+            )
+            if trace_path:
+                try:
+                    with open(trace_path, "a") as f:
+                        from datetime import datetime as dt
+                        ts = dt.now().strftime("%H:%M:%S.%f")[:-3]
+                        f.write(f"[{ts}] [SUBAGENT] '{profile.name}' tools={profile.plugins}\n")
+                        f.write(f"[{ts}] [SUBAGENT] plugin_configs={profile.plugin_configs}\n")
+                        f.flush()
+                except (IOError, OSError):
+                    pass  # Silently skip if trace file cannot be written
 
             # Set agent context for permission checks
             session.set_agent_context(

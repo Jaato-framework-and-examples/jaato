@@ -5,6 +5,6 @@
   "type": "local",
   "path": "./docs/eri/ERI-004-rest-controller/",
   "mode": "selectable",
-  "tags": ["eri", "rest", "controller", "spring", "java", "code", "api"],
+  "tags": ["ERI-004", "eri", "rest", "controller", "spring", "java", "code", "api"],
   "fetchHint": "Read all files in this directory for complete reference implementation"
 }

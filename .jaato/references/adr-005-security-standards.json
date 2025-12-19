@@ -5,5 +5,5 @@
   "type": "local",
   "path": "./docs/adr/ADR-005-security-standards.md",
   "mode": "selectable",
-  "tags": ["adr", "security", "authentication", "gov", "code"]
+  "tags": ["ADR-005", "adr", "security", "authentication", "gov", "code"]
 }
