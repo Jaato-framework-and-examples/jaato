@@ -2,8 +2,11 @@
 
 import importlib
 import importlib.metadata
+import os
 import pkgutil
 import sys
+import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Set, Callable, Any, Optional, Protocol, runtime_checkable
 
@@ -15,6 +18,22 @@ PLUGIN_ENTRY_POINT_GROUPS = {
     "tool": "jaato.plugins",
     "gc": "jaato.gc_plugins",
 }
+
+
+def _trace(msg: str) -> None:
+    """Write trace message to log file for debugging."""
+    trace_path = os.environ.get(
+        'JAATO_TRACE_LOG',
+        os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+    )
+    if trace_path:
+        try:
+            with open(trace_path, "a") as f:
+                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                f.write(f"[{ts}] [PluginRegistry] {msg}\n")
+                f.flush()
+        except (IOError, OSError):
+            pass
 
 
 class PluginRegistry:
@@ -127,7 +146,7 @@ class PluginRegistry:
 
                     # For tool plugins, verify protocol implementation
                     if plugin_kind == "tool" and not isinstance(plugin, ToolPlugin):
-                        print(f"[PluginRegistry] Entry point '{ep.name}': "
+                        _trace(f" Entry point '{ep.name}': "
                               f"plugin does not implement ToolPlugin protocol")
                         continue
 
@@ -135,7 +154,7 @@ class PluginRegistry:
                     discovered.append(plugin.name)
 
                 except Exception as exc:
-                    print(f"[PluginRegistry] Error loading entry point '{ep.name}': {exc}")
+                    _trace(f" Error loading entry point '{ep.name}': {exc}")
 
         except Exception as exc:
             # Entry points not available (package not installed)
@@ -187,14 +206,14 @@ class PluginRegistry:
 
                     # For tool plugins, verify protocol implementation
                     if plugin_kind == "tool" and not isinstance(plugin, ToolPlugin):
-                        print(f"[PluginRegistry] {name}: plugin does not implement ToolPlugin protocol")
+                        _trace(f" {name}: plugin does not implement ToolPlugin protocol")
                         continue
 
                     self._plugins[plugin.name] = plugin
                     discovered.append(plugin.name)
 
             except Exception as exc:
-                print(f"[PluginRegistry] Error loading plugin '{name}': {exc}")
+                _trace(f" Error loading plugin '{name}': {exc}")
 
         return discovered
 
@@ -290,7 +309,7 @@ class PluginRegistry:
             requirements = plugin.get_model_requirements()
             if requirements and not model_matches_requirements(self._model_name, requirements):
                 self._skipped_plugins[name] = requirements
-                print(f"[PluginRegistry] Plugin '{name}' skipped: "
+                _trace(f" Plugin '{name}' skipped: "
                       f"model '{self._model_name}' not in {requirements}")
                 return False
 
@@ -343,7 +362,7 @@ class PluginRegistry:
             try:
                 schemas.extend(self._plugins[name].get_tool_schemas())
             except Exception as exc:
-                print(f"[PluginRegistry] Error getting tool schemas from '{name}': {exc}")
+                _trace(f" Error getting tool schemas from '{name}': {exc}")
         return schemas
 
     def get_exposed_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
@@ -353,7 +372,7 @@ class PluginRegistry:
             try:
                 executors.update(self._plugins[name].get_executors())
             except Exception as exc:
-                print(f"[PluginRegistry] Error getting executors from '{name}': {exc}")
+                _trace(f" Error getting executors from '{name}': {exc}")
         return executors
 
     # ==================== Individual Tool Management ====================
@@ -370,7 +389,7 @@ class PluginRegistry:
                 schemas = self._plugins[name].get_tool_schemas()
                 names.extend(schema.name for schema in schemas)
             except Exception as exc:
-                print(f"[PluginRegistry] Error getting tool names from '{name}': {exc}")
+                _trace(f" Error getting tool names from '{name}': {exc}")
         return names
 
     def disable_tool(self, tool_name: str) -> bool:
@@ -455,7 +474,7 @@ class PluginRegistry:
                         'plugin': plugin_name,
                     })
             except Exception as exc:
-                print(f"[PluginRegistry] Error getting tool status from '{plugin_name}': {exc}")
+                _trace(f" Error getting tool status from '{plugin_name}': {exc}")
         return status
 
     def get_enabled_tool_schemas(self) -> List[ToolSchema]:
@@ -474,7 +493,7 @@ class PluginRegistry:
                 enabled_schemas = [s for s in plugin_schemas if s.name not in self._disabled_tools]
                 schemas.extend(enabled_schemas)
             except Exception as exc:
-                print(f"[PluginRegistry] Error getting tool schemas from '{name}': {exc}")
+                _trace(f" Error getting tool schemas from '{name}': {exc}")
         return schemas
 
     def get_enabled_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
@@ -492,7 +511,7 @@ class PluginRegistry:
                     if tool_name not in self._disabled_tools:
                         executors[tool_name] = executor
             except Exception as exc:
-                print(f"[PluginRegistry] Error getting executors from '{name}': {exc}")
+                _trace(f" Error getting executors from '{name}': {exc}")
         return executors
 
     def list_disabled_tools(self) -> List[str]:
@@ -517,7 +536,7 @@ class PluginRegistry:
                 if plugin_instructions:
                     instructions.append(plugin_instructions)
             except Exception as exc:
-                print(f"[PluginRegistry] Error getting system instructions from '{name}': {exc}")
+                _trace(f" Error getting system instructions from '{name}': {exc}")
 
         if not instructions:
             return None
@@ -538,7 +557,7 @@ class PluginRegistry:
                     if auto_approved:
                         tools.extend(auto_approved)
             except Exception as exc:
-                print(f"[PluginRegistry] Error getting auto-approved tools from '{name}': {exc}")
+                _trace(f" Error getting auto-approved tools from '{name}': {exc}")
         return tools
 
     def get_exposed_user_commands(self) -> List[UserCommand]:
@@ -563,7 +582,7 @@ class PluginRegistry:
                     if user_commands:
                         commands.extend(user_commands)
             except Exception as exc:
-                print(f"[PluginRegistry] Error getting user commands from '{name}': {exc}")
+                _trace(f" Error getting user commands from '{name}': {exc}")
         return commands
 
     def get_plugin_for_tool(self, tool_name: str) -> Optional['ToolPlugin']:
@@ -615,7 +634,7 @@ class PluginRegistry:
                         plugin.subscribes_to_prompt_enrichment()):
                     subscribers.append(plugin)
             except Exception as exc:
-                print(f"[PluginRegistry] Error checking enrichment subscription for '{name}': {exc}")
+                _trace(f" Error checking enrichment subscription for '{name}': {exc}")
         return subscribers
 
     def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
@@ -642,6 +661,6 @@ class PluginRegistry:
                     if result.metadata:
                         combined_metadata[plugin.name] = result.metadata
             except Exception as exc:
-                print(f"[PluginRegistry] Error in prompt enrichment for '{plugin.name}': {exc}")
+                _trace(f" Error in prompt enrichment for '{plugin.name}': {exc}")
 
         return PromptEnrichmentResult(prompt=current_prompt, metadata=combined_metadata)
