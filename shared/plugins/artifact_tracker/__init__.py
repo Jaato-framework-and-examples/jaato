@@ -12,7 +12,7 @@ Example usage:
     # Create and initialize plugin
     plugin = create_plugin()
     plugin.initialize({
-        "storage_path": ".artifact_tracker.json",
+        "storage_path": ".jaato/.artifact_tracker.json",  # default location
     })
 
     # Use via tool executors (for LLM)
