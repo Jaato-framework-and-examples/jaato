@@ -917,11 +917,11 @@ class OutputBuffer:
         if self._active_tools:
             if lines_to_show:
                 output.append("\n\n")  # Extra blank line for visual separation
-                # Add separator line with F3 hint
+                # Add separator line with toggle hint (F3 or Ctrl+T)
                 if self._tools_expanded:
-                    output.append("  ─ ─ ─  F3 to collapse", style="dim")
+                    output.append("  ─ ─ ─  F3/Ctrl+T to collapse", style="dim")
                 else:
-                    output.append("  ─ ─ ─  F3 to expand", style="dim")
+                    output.append("  ─ ─ ─  F3/Ctrl+T to expand", style="dim")
                 output.append("\n")
 
             # Check if waiting for user input (permission or clarification)

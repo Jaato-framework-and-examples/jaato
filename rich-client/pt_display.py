@@ -518,8 +518,9 @@ class PTDisplay:
                 self._app.invalidate()
 
         @kb.add("f3")
+        @kb.add("c-t")  # Ctrl+T as alternative (F3 may be intercepted by some terminals)
         def handle_f3(event):
-            """Handle F3 - toggle tool view between collapsed/expanded."""
+            """Handle F3 or Ctrl+T - toggle tool view between collapsed/expanded."""
             self._output_buffer.toggle_tools_expanded()
             self._app.invalidate()
 
