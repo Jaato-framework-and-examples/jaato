@@ -70,6 +70,7 @@ class OutputBuffer:
         self._measure_console: Optional[Console] = None
         self._console_width: int = 80
         self._last_source: Optional[str] = None  # Track source for turn detection
+        self._last_turn_source: Optional[str] = None  # Track user/model turns (ignores system/tool)
         self._scroll_offset: int = 0  # Lines scrolled up from bottom (0 = at bottom)
         self._spinner_active: bool = False
         self._spinner_index: int = 0
@@ -169,9 +170,15 @@ class OutputBuffer:
                 self.finalize_tool_tree()
 
         if mode == "write":
-            # Start a new block - this is a new turn
+            # Start a new block
             self._flush_current_block()
-            self._current_block = (source, [text], True)  # True = is new turn
+            # Only show header when switching between user and model turns
+            # (not for every model response within same agentic loop)
+            is_new_turn = False
+            if source in ("user", "model"):
+                is_new_turn = (self._last_turn_source != source)
+                self._last_turn_source = source
+            self._current_block = (source, [text], is_new_turn)
         elif mode == "append" and self._current_block:
             # Append to current block
             self._current_block[1].append(text)
@@ -210,6 +217,8 @@ class OutputBuffer:
         """Clear all output."""
         self._lines.clear()
         self._current_block = None
+        self._last_source = None
+        self._last_turn_source = None
         self._scroll_offset = 0
         self._spinner_active = False
         self._active_tools.clear()
@@ -323,7 +332,8 @@ class OutputBuffer:
             return  # Don't finalize yet
 
         # Build the tool tree as text lines (no header - tools appear inline)
-        lines = []
+        # Add blank line for visual separation
+        lines = [("", "")]
 
         for i, tool in enumerate(self._active_tools):
             is_last = (i == len(self._active_tools) - 1)
@@ -892,7 +902,7 @@ class OutputBuffer:
         # Add tool call tree (after regular lines, before deferred lines)
         if self._active_tools:
             if lines_to_show:
-                output.append("\n")
+                output.append("\n\n")  # Extra blank line for visual separation
 
             # Check if waiting for user input (permission or clarification)
             awaiting_input = any(
