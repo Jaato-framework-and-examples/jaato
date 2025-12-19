@@ -517,10 +517,9 @@ class PTDisplay:
                 self._agent_registry.cycle_selection()
                 self._app.invalidate()
 
-        @kb.add("f3")
-        @kb.add("c-t")  # Ctrl+T as alternative (F3 may be intercepted by some terminals)
-        def handle_f3(event):
-            """Handle F3 or Ctrl+T - toggle tool view between collapsed/expanded."""
+        @kb.add("c-t")
+        def handle_ctrl_t(event):
+            """Handle Ctrl+T - toggle tool view between collapsed/expanded."""
             # Use selected agent's buffer if registry present
             if self._agent_registry:
                 buffer = self._agent_registry.get_selected_buffer()
