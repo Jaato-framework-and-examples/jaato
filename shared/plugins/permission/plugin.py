@@ -6,6 +6,8 @@ through blacklist/whitelist rules and interactive channel approval.
 
 import fnmatch
 import os
+import tempfile
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..model_provider.types import ToolSchema
 
@@ -63,6 +65,8 @@ class PermissionPlugin:
         self._original_executors: Dict[str, Callable] = {}
         self._execution_log: List[Dict[str, Any]] = []
         self._allow_all: bool = False  # When True, auto-approve all requests
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
         # Permission lifecycle hooks for UI integration
         # on_requested: (tool_name, request_id, prompt_lines, response_options) -> None
         self._on_permission_requested: Optional[Callable[[str, str, List[str], List[PermissionResponseOption]], None]] = None
@@ -126,6 +130,22 @@ class PermissionPlugin:
     def name(self) -> str:
         return "permission"
 
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [PERMISSION{agent_prefix}] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the permission plugin.
 
@@ -141,6 +161,9 @@ class PermissionPlugin:
         """
         # Load configuration
         config = config or {}
+
+        # Extract agent name for trace logging
+        self._agent_name = config.get("agent_name")
 
         # Try to load from file first
         config_path = config.get("config_path")
@@ -178,9 +201,11 @@ class PermissionPlugin:
             self._channel = ConsoleChannel()
 
         self._initialized = True
+        self._trace(f"initialize: channel={channel_type}, allow_all={self._allow_all}")
 
     def shutdown(self) -> None:
         """Shutdown the permission plugin."""
+        self._trace("shutdown: cleaning up")
         if self._channel:
             self._channel.shutdown()
         self._policy = None
@@ -601,6 +626,7 @@ If a tool is denied, do not attempt to execute it."""
         tool_name = args.get("tool_name", "")
         tool_args = args.get("arguments", {})
         intent = args.get("intent", "")
+        self._trace(f"askPermission: tool={tool_name}, intent={intent!r}")
 
         if not tool_name:
             return {"error": "tool_name is required"}
@@ -643,6 +669,8 @@ If a tool is denied, do not attempt to execute it."""
                        'sanitization', 'session_whitelist', 'session_blacklist',
                        'user_approved', 'user_denied', 'allow_all', 'timeout')
         """
+        self._trace(f"check_permission: tool={tool_name}")
+
         # Check if user pre-approved all requests
         if self._allow_all:
             self._log_decision(tool_name, args, "allow", "Pre-approved all requests")

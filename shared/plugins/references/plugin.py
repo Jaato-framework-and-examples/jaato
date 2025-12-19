@@ -42,6 +42,8 @@ class ReferencesPlugin:
         self._selected_source_ids: List[str] = []  # User-selected during session
         self._exclude_tools: List[str] = []  # Tools to exclude from schema
         self._initialized = False
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
         # Selection lifecycle hooks for UI integration
         self._on_selection_requested: Optional[Callable[[str, List[str]], None]] = None
         self._on_selection_resolved: Optional[Callable[[str, List[str]], None]] = None
@@ -64,7 +66,8 @@ class ReferencesPlugin:
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [REFERENCES] {msg}\n")
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [REFERENCES{agent_prefix}] {msg}\n")
                     f.flush()
             except (IOError, OSError):
                 pass  # Silently skip if trace file cannot be written
@@ -87,6 +90,9 @@ class ReferencesPlugin:
                    - exclude_tools: List of tool names to exclude (e.g., ["selectReferences"])
         """
         config = config or {}
+
+        # Extract agent name for trace logging
+        self._agent_name = config.get("agent_name")
 
         # Try to load from file first (master catalog)
         config_path = config.get("config_path")

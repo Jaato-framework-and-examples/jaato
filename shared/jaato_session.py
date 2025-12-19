@@ -210,6 +210,9 @@ class JaatoSession:
             for plugin_name, config in plugin_configs.items():
                 if tools is None or plugin_name in tools:
                     try:
+                        # Inject agent_name into plugin config for trace logging
+                        if self._agent_name and "agent_name" not in config:
+                            config = {**config, "agent_name": self._agent_name}
                         # expose_tool with new config will re-initialize
                         self._runtime.registry.expose_tool(plugin_name, config)
                     except Exception as e:
