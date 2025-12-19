@@ -5,5 +5,5 @@
   "type": "local",
   "path": "./docs/adr/ADR-004-testing-strategy.md",
   "mode": "selectable",
-  "tags": ["adr", "testing", "qa", "junit", "java"]
+  "tags": ["ADR-004", "adr", "testing", "qa", "junit", "java"]
 }

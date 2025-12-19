@@ -5,5 +5,5 @@
   "type": "local",
   "path": "./docs/adr/ADR-006-logging-observability.md",
   "mode": "selectable",
-  "tags": ["adr", "logging", "observability", "monitoring", "code"]
+  "tags": ["ADR-006", "adr", "logging", "observability", "monitoring", "code"]
 }

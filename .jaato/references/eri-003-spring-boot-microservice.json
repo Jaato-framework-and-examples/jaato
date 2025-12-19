@@ -5,6 +5,6 @@
   "type": "local",
   "path": "./docs/eri/ERI-003-spring-boot-microservice/",
   "mode": "selectable",
-  "tags": ["eri", "microservice", "spring", "java", "code", "template"],
+  "tags": ["ERI-003", "eri", "microservice", "spring", "java", "code", "template"],
   "fetchHint": "Read all files in this directory for complete reference implementation"
 }

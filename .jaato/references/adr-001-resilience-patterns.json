@@ -5,5 +5,5 @@
   "type": "local",
   "path": "./docs/adr/ADR-001-resilience-patterns.md",
   "mode": "selectable",
-  "tags": ["adr", "resilience", "patterns", "code", "java"]
+  "tags": ["ADR-001", "adr", "resilience", "patterns", "code", "java"]
 }

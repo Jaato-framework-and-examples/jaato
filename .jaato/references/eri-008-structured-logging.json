@@ -5,6 +5,6 @@
   "type": "local",
   "path": "./docs/eri/ERI-008-structured-logging/",
   "mode": "selectable",
-  "tags": ["eri", "logging", "observability", "java", "spring", "code"],
+  "tags": ["ERI-008", "eri", "logging", "observability", "java", "spring", "code"],
   "fetchHint": "Read all files in this directory for complete reference implementation"
 }
