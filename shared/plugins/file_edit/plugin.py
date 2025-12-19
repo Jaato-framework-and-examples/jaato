@@ -81,8 +81,8 @@ class FileEditPlugin:
         self._ensure_gitignore()
 
         self._initialized = True
-        backup_dir = str(self._backup_manager._backup_dir) if self._backup_manager else "none"
-        self._trace(f"initialize: backup_dir={backup_dir}")
+        backup_dir_str = str(self._backup_manager._base_dir) if self._backup_manager else "none"
+        self._trace(f"initialize: backup_dir={backup_dir_str}")
 
     def shutdown(self) -> None:
         """Shutdown the plugin."""
