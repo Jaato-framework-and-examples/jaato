@@ -383,6 +383,7 @@ updateFile and removeFile operations."""
     def _execute_read_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute readFile tool."""
         path = args.get("path", "")
+        self._trace(f"readFile: path={path}")
 
         if not path:
             return {"error": "path is required"}
@@ -409,6 +410,7 @@ updateFile and removeFile operations."""
         """Execute updateFile tool."""
         path = args.get("path", "")
         new_content = args.get("new_content", "")
+        self._trace(f"updateFile: path={path}, content_len={len(new_content)}")
 
         if not path:
             return {"error": "path is required"}
@@ -443,6 +445,7 @@ updateFile and removeFile operations."""
         """Execute writeNewFile tool."""
         path = args.get("path", "")
         content = args.get("content", "")
+        self._trace(f"writeNewFile: path={path}, content_len={len(content)}")
 
         if not path:
             return {"error": "path is required"}
@@ -467,6 +470,7 @@ updateFile and removeFile operations."""
     def _execute_remove_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute removeFile tool."""
         path = args.get("path", "")
+        self._trace(f"removeFile: path={path}")
 
         if not path:
             return {"error": "path is required"}
@@ -499,6 +503,7 @@ updateFile and removeFile operations."""
     def _execute_undo_file_change(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute undoFileChange tool."""
         path = args.get("path", "")
+        self._trace(f"undoFileChange: path={path}")
 
         if not path:
             return {"error": "path is required"}

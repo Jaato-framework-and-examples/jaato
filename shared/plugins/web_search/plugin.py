@@ -151,12 +151,13 @@ Tips for effective searches:
         Returns:
             Dict containing search results or error.
         """
+        query = args.get('query')
+        max_results = args.get('max_results', self._max_results)
+        self._trace(f"web_search: query={query!r}, max_results={max_results}")
+
         try:
-            query = args.get('query')
             if not query:
                 return {'error': 'web_search: query must be provided'}
-
-            max_results = args.get('max_results', self._max_results)
 
             # Lazy import to avoid startup cost if plugin not used
             try:
