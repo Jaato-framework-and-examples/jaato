@@ -75,6 +75,7 @@ class OutputBuffer:
         self._spinner_active: bool = False
         self._spinner_index: int = 0
         self._active_tools: List[ActiveToolCall] = []  # Currently executing tools
+        self._tools_expanded: bool = False  # Toggle between collapsed/expanded tool view
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -312,8 +313,22 @@ class OutputBuffer:
         """Clear all active tools."""
         self._active_tools.clear()
 
+    def toggle_tools_expanded(self) -> bool:
+        """Toggle between collapsed and expanded tool view.
+
+        Returns:
+            True if now expanded, False if now collapsed.
+        """
+        self._tools_expanded = not self._tools_expanded
+        return self._tools_expanded
+
+    @property
+    def tools_expanded(self) -> bool:
+        """Check if tool view is currently expanded."""
+        return self._tools_expanded
+
     def finalize_tool_tree(self) -> None:
-        """Convert tool tree to a collapsed summary line.
+        """Convert tool tree to stored lines (collapsed or expanded based on setting).
 
         Called when a turn is complete to make the tool summary scroll
         with the rest of the content instead of staying fixed.
@@ -331,20 +346,43 @@ class OutputBuffer:
         if not all_completed or any_pending:
             return  # Don't finalize yet
 
-        # Build collapsed summary: "  ▸ 3 tools: createPlan ✓ startPlan ✓ updateStep ✓"
         tool_count = len(self._active_tools)
-        tool_summaries = []
-
-        for tool in self._active_tools:
-            status_icon = "✓" if tool.success else "✗"
-            tool_summaries.append(f"{tool.name} {status_icon}")
-
-        summary_line = f"  ▸ {tool_count} tool{'s' if tool_count != 1 else ''}: " + " ".join(tool_summaries)
 
         # Add separator line for visual distinction
         self._add_line("system", "", "")
         self._add_line("system", "  ─ ─ ─", "dim")
-        self._add_line("system", summary_line, "dim")
+
+        if self._tools_expanded:
+            # Expanded view - each tool on its own line
+            header = f"  ▾ {tool_count} tool{'s' if tool_count != 1 else ''}:"
+            self._add_line("system", header, "dim")
+
+            for i, tool in enumerate(self._active_tools):
+                is_last = (i == len(self._active_tools) - 1)
+                connector = "└─" if is_last else "├─"
+                status_icon = "✓" if tool.success else "✗"
+
+                # Build tool line with duration if available
+                tool_line = f"    {connector} {tool.name} {status_icon}"
+                if tool.duration_seconds is not None:
+                    tool_line += f" ({tool.duration_seconds:.1f}s)"
+
+                self._add_line("system", tool_line, "dim")
+
+                # Add error message if failed
+                if not tool.success and tool.error_message:
+                    continuation = "   " if is_last else "│  "
+                    error_line = f"    {continuation}   ⚠ {tool.error_message[:60]}"
+                    self._add_line("system", error_line, "dim red")
+        else:
+            # Collapsed view - all tools on one line
+            tool_summaries = []
+            for tool in self._active_tools:
+                status_icon = "✓" if tool.success else "✗"
+                tool_summaries.append(f"{tool.name} {status_icon}")
+
+            summary_line = f"  ▸ {tool_count} tool{'s' if tool_count != 1 else ''}: " + " ".join(tool_summaries)
+            self._add_line("system", summary_line, "dim")
 
         # Clear active tools so they don't render separately anymore
         self._active_tools.clear()
@@ -565,17 +603,22 @@ class OutputBuffer:
         height = 0
 
         if self._active_tools:
-            # Header line ("Model> ✓ Processed" or "Model> ⏳ Awaiting..." etc.)
-            height += 1
+            if self._tools_expanded:
+                # Expanded view: header + each tool on its own line
+                height += 1  # Header line
 
-            for tool in self._active_tools:
-                # Tool line (always 1 line)
+                for tool in self._active_tools:
+                    height += 1  # Tool line
+
+                    # Error message (if failed and has error)
+                    if tool.completed and not tool.success and tool.error_message:
+                        height += 1
+            else:
+                # Collapsed view: just one summary line
                 height += 1
 
-                # Error message (if failed and has error)
-                if tool.completed and not tool.success and tool.error_message:
-                    height += 1
-
+            # Check for pending prompts (same logic for both views)
+            for tool in self._active_tools:
                 # Permission prompt (if pending)
                 if tool.permission_state == "pending" and tool.permission_prompt_lines:
                     height += 1  # "Permission required" header
@@ -879,33 +922,69 @@ class OutputBuffer:
                     pending_tool = tool
                     break
 
-            # Build collapsed summary line
-            tool_summaries = []
-            for tool in self._active_tools:
-                if tool.completed:
-                    status_icon = "✓" if tool.success else "✗"
-                else:
-                    status_icon = "○"
-                tool_summaries.append(f"{tool.name} {status_icon}")
-
             tool_count = len(self._active_tools)
 
-            if pending_tool:
-                # Waiting for user response - show awaiting indicator
-                output.append("  ⏳ ", style="bold yellow")
-                output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
-                output.append(" ".join(tool_summaries), style="dim")
-            elif self._spinner_active:
-                # Model is processing - show spinner with summary
-                frame = self.SPINNER_FRAMES[self._spinner_index]
-                output.append(f"  {frame} ", style="cyan")
-                output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
-                output.append(" ".join(tool_summaries), style="dim")
+            if self._tools_expanded:
+                # Expanded view - show each tool on its own line
+                if pending_tool:
+                    output.append("  ⏳ ", style="bold yellow")
+                elif self._spinner_active:
+                    frame = self.SPINNER_FRAMES[self._spinner_index]
+                    output.append(f"  {frame} ", style="cyan")
+                else:
+                    output.append("  ▾ ", style="dim")
+                output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}:", style="dim")
+
+                # Show each tool on its own line
+                for i, tool in enumerate(self._active_tools):
+                    is_last = (i == len(self._active_tools) - 1)
+                    connector = "└─" if is_last else "├─"
+
+                    if tool.completed:
+                        status_icon = "✓" if tool.success else "✗"
+                        status_style = "green" if tool.success else "red"
+                    else:
+                        status_icon = "○"
+                        status_style = "dim"
+
+                    output.append("\n")
+                    output.append(f"    {connector} ", style="dim")
+                    output.append(tool.name, style="dim")
+                    output.append(f" {status_icon}", style=status_style)
+
+                    # Show duration if available
+                    if tool.completed and tool.duration_seconds is not None:
+                        output.append(f" ({tool.duration_seconds:.1f}s)", style="dim")
+
+                    # Show error message if failed
+                    if tool.completed and not tool.success and tool.error_message:
+                        output.append("\n")
+                        continuation = "   " if is_last else "│  "
+                        output.append(f"    {continuation} ", style="dim")
+                        output.append(f"  ⚠ {tool.error_message[:60]}", style="red dim")
             else:
-                # All completed - show collapsed summary
-                output.append("  ▸ ", style="dim")
-                output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
-                output.append(" ".join(tool_summaries), style="dim")
+                # Collapsed view - all tools on one line
+                tool_summaries = []
+                for tool in self._active_tools:
+                    if tool.completed:
+                        status_icon = "✓" if tool.success else "✗"
+                    else:
+                        status_icon = "○"
+                    tool_summaries.append(f"{tool.name} {status_icon}")
+
+                if pending_tool:
+                    output.append("  ⏳ ", style="bold yellow")
+                    output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
+                    output.append(" ".join(tool_summaries), style="dim")
+                elif self._spinner_active:
+                    frame = self.SPINNER_FRAMES[self._spinner_index]
+                    output.append(f"  {frame} ", style="cyan")
+                    output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
+                    output.append(" ".join(tool_summaries), style="dim")
+                else:
+                    output.append("  ▸ ", style="dim")
+                    output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
+                    output.append(" ".join(tool_summaries), style="dim")
 
             # Show permission/clarification prompt for pending tool (expanded)
             if pending_tool:

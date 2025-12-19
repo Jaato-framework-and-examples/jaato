@@ -517,6 +517,12 @@ class PTDisplay:
                 self._agent_registry.cycle_selection()
                 self._app.invalidate()
 
+        @kb.add("f3")
+        def handle_f3(event):
+            """Handle F3 - toggle tool view between collapsed/expanded."""
+            self._output_buffer.toggle_tools_expanded()
+            self._app.invalidate()
+
         # Status bar at top (always visible, 1 line)
         status_bar = Window(
             FormattedTextControl(self._get_status_bar_content),
