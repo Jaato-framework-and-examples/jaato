@@ -231,13 +231,14 @@ class OutputBuffer:
 
         result = []
         for i, line_text in enumerate(lines_text):
-            display_lines = self._calculate_display_lines(line_text)
+            is_turn_start_line = (i == 0 and is_new_turn)
+            display_lines = self._measure_display_lines(source, line_text, is_turn_start_line)
             result.append(OutputLine(
                 source=source,
                 text=line_text,
                 style="line",
                 display_lines=display_lines,
-                is_turn_start=(i == 0 and is_new_turn)
+                is_turn_start=is_turn_start_line
             ))
         return result
 
