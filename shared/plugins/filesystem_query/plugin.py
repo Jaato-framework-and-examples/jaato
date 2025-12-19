@@ -83,8 +83,9 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
                 name="glob_files",
                 description=(
                     "Find files matching a glob pattern (e.g., '**/*.py', 'src/**/*.ts'). "
-                    "Returns a list of matching file paths with metadata. "
-                    "Use this to locate files by name pattern before reading or editing them."
+                    "ALWAYS use this instead of `find` or `ls` CLI commands. "
+                    "Returns structured JSON with file paths and metadata. "
+                    "Automatically excludes node_modules, __pycache__, .git, etc."
                 ),
                 parameters={
                     "type": "object",
@@ -128,8 +129,9 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
                 name="grep_content",
                 description=(
                     "Search file contents using a regular expression pattern. "
-                    "Returns matching lines with file paths, line numbers, and context. "
-                    "Use this to find code, function definitions, or specific text."
+                    "ALWAYS use this instead of `grep`, `rg`, or `ack` CLI commands. "
+                    "Returns structured JSON with file paths, line numbers, and context. "
+                    "Automatically excludes node_modules, __pycache__, .git, and binary files."
                 ),
                 parameters={
                     "type": "object",
@@ -193,7 +195,14 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the model."""
-        return """You have access to filesystem query tools for exploring the codebase:
+        return """You have access to filesystem query tools for exploring the codebase.
+
+IMPORTANT: Always prefer these tools over CLI commands:
+- Use `glob_files` instead of `find`, `ls -R`, or shell globbing
+- Use `grep_content` instead of `grep`, `rg`, or `ack`
+
+These tools provide structured JSON output, automatic exclusion of noise directories
+(node_modules, __pycache__, .git, etc.), and don't require shell escaping.
 
 ## glob_files
 Find files by name pattern. Use glob syntax:
@@ -211,7 +220,6 @@ Search file contents with regex:
 
 Tips:
 - Use glob_files first to locate files, then grep_content to search within them
-- Both tools respect .gitignore-style exclusions (node_modules, __pycache__, etc.)
 - Use file_glob parameter in grep_content to limit search to specific file types
 - Results are limited to prevent overwhelming output; adjust max_results if needed
 """
