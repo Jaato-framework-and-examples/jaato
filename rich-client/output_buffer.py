@@ -348,12 +348,9 @@ class OutputBuffer:
 
         tool_count = len(self._active_tools)
 
-        # Add separator line for visual distinction with F3 hint
+        # Add separator line for visual distinction (no F3 hint for finalized trees)
         self._add_line("system", "", "")
-        if self._tools_expanded:
-            self._add_line("system", "  ─ ─ ─  F3 to collapse", "dim")
-        else:
-            self._add_line("system", "  ─ ─ ─  F3 to expand", "dim")
+        self._add_line("system", "  ─ ─ ─", "dim")
 
         if self._tools_expanded:
             # Expanded view - each tool on its own line
@@ -386,6 +383,9 @@ class OutputBuffer:
 
             summary_line = f"  ▸ {tool_count} tool{'s' if tool_count != 1 else ''}: " + " ".join(tool_summaries)
             self._add_line("system", summary_line, "dim")
+
+        # Add blank line for spacing before next model response
+        self._add_line("system", "", "")
 
         # Clear active tools so they don't render separately anymore
         self._active_tools.clear()
