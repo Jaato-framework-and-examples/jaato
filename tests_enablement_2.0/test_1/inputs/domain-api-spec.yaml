@@ -1,0 +1,289 @@
+openapi: 3.0.3
+info:
+  title: Customer Domain API
+  description: |
+    Domain API for Customer management.
+    Provides normalized access to customer data following REST best practices.
+    
+    This API abstracts the underlying System APIs (mainframe) and exposes
+    a clean, standardized interface for domain consumers.
+  version: 1.0.0
+  contact:
+    name: Customer Domain Team
+    email: customer-domain@bank.com
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://api.bank.com/customer
+    description: Production
+
+tags:
+  - name: customers
+    description: Customer operations
+
+paths:
+  /api/v1/customers:
+    post:
+      tags:
+        - customers
+      summary: Create a new customer
+      description: Creates a new customer record in the system
+      operationId: createCustomer
+      requestBody:
+        description: Customer data to create
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCustomerRequest'
+            example:
+              firstName: "John"
+              lastName: "Doe"
+              email: "john.doe@email.com"
+              dateOfBirth: "1990-05-15"
+      responses:
+        '201':
+          description: Customer created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+          headers:
+            Location:
+              description: URL of the created resource
+              schema:
+                type: string
+                example: /api/v1/customers/550e8400-e29b-41d4-a716-446655440000
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/customers/{customerId}:
+    get:
+      tags:
+        - customers
+      summary: Get customer by ID
+      description: Retrieves a customer by their unique identifier
+      operationId: getCustomerById
+      parameters:
+        - $ref: '#/components/parameters/CustomerId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Customer found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+              example:
+                id: "550e8400-e29b-41d4-a716-446655440000"
+                firstName: "John"
+                lastName: "Doe"
+                email: "john.doe@email.com"
+                dateOfBirth: "1990-05-15"
+                status: "ACTIVE"
+                createdAt: "2024-01-15T10:30:00Z"
+                updatedAt: "2024-01-15T10:30:00Z"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+components:
+  parameters:
+    CustomerId:
+      name: customerId
+      in: path
+      description: Unique customer identifier (UUID)
+      required: true
+      schema:
+        type: string
+        format: uuid
+        example: "550e8400-e29b-41d4-a716-446655440000"
+    
+    CorrelationId:
+      name: X-Correlation-ID
+      in: header
+      description: Correlation ID for distributed tracing
+      required: false
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    Customer:
+      type: object
+      description: Customer entity with all attributes
+      required:
+        - id
+        - firstName
+        - lastName
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique customer identifier
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        firstName:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Customer's first name
+          example: "John"
+        lastName:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Customer's last name
+          example: "Doe"
+        email:
+          type: string
+          format: email
+          description: Customer's email address
+          example: "john.doe@email.com"
+        dateOfBirth:
+          type: string
+          format: date
+          description: Customer's date of birth
+          example: "1990-05-15"
+        status:
+          $ref: '#/components/schemas/CustomerStatus'
+        createdAt:
+          type: string
+          format: date-time
+          description: Timestamp when customer was created
+          readOnly: true
+        updatedAt:
+          type: string
+          format: date-time
+          description: Timestamp when customer was last updated
+          readOnly: true
+
+    CreateCustomerRequest:
+      type: object
+      description: Request payload for creating a new customer
+      required:
+        - firstName
+        - lastName
+      properties:
+        firstName:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Customer's first name
+        lastName:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Customer's last name
+        email:
+          type: string
+          format: email
+          description: Customer's email address
+        dateOfBirth:
+          type: string
+          format: date
+          description: Customer's date of birth
+
+    CustomerStatus:
+      type: string
+      description: Customer account status
+      enum:
+        - ACTIVE
+        - INACTIVE
+        - BLOCKED
+        - PENDING_VERIFICATION
+      example: "ACTIVE"
+
+    Error:
+      type: object
+      description: Standard error response
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: Error code
+          example: "CUSTOMER_NOT_FOUND"
+        message:
+          type: string
+          description: Human-readable error message
+          example: "Customer with ID 550e8400-e29b-41d4-a716-446655440000 not found"
+        details:
+          type: array
+          description: Additional error details
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+        correlationId:
+          type: string
+          format: uuid
+          description: Correlation ID for tracing
+
+  responses:
+    BadRequest:
+      description: Invalid request parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: "VALIDATION_ERROR"
+            message: "Request validation failed"
+            details:
+              - field: "email"
+                message: "Invalid email format"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: "CUSTOMER_NOT_FOUND"
+            message: "Customer not found"
+
+    Conflict:
+      description: Resource already exists
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: "CUSTOMER_EXISTS"
+            message: "Customer with this email already exists"
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: "INTERNAL_ERROR"
+            message: "An unexpected error occurred"
+
+    ServiceUnavailable:
+      description: Service temporarily unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: "SERVICE_UNAVAILABLE"
+            message: "Backend service is temporarily unavailable"

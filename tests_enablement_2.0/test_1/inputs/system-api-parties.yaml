@@ -1,0 +1,247 @@
+openapi: 3.0.3
+info:
+  title: Parties System API
+  description: |
+    System API exposing Party data from the core banking mainframe (CICS/COBOL).
+    
+    **IMPORTANT:** This API exposes legacy data structures. Field names follow
+    mainframe naming conventions (abbreviated, uppercase). Consuming services
+    should implement mapping to their domain models.
+    
+    **Data Source:** CUSTMAST (Customer Master File) on IBM z/OS
+    **Transactions:** 
+    - CUST-INQ (Read)
+    - CUST-ADD (Create)
+  version: 2.1.0
+  contact:
+    name: Core Banking Integration Team
+    email: mainframe-integration@bank.com
+
+servers:
+  - url: http://localhost:8081
+    description: Local mock
+  - url: https://systemapi.bank.internal/parties
+    description: Production (internal only)
+
+tags:
+  - name: parties
+    description: Party (Customer) operations from mainframe
+
+paths:
+  /parties:
+    post:
+      tags:
+        - parties
+      summary: Create party record
+      description: |
+        Creates a new party record in CUSTMAST.
+        Invokes CICS transaction CUST-ADD.
+      operationId: createParty
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PartyCreateRequest'
+            example:
+              CUST_FNAME: "JOHN"
+              CUST_LNAME: "DOE"
+              CUST_EMAIL_ADDR: "JOHN.DOE@EMAIL.COM"
+              CUST_DOB: "1990-05-15"
+      responses:
+        '200':
+          description: Party created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartyResponse'
+        '400':
+          $ref: '#/components/responses/SystemError'
+        '500':
+          $ref: '#/components/responses/SystemError'
+
+  /parties/{partyId}:
+    get:
+      tags:
+        - parties
+      summary: Retrieve party by ID
+      description: |
+        Retrieves party data from CUSTMAST by customer ID.
+        Invokes CICS transaction CUST-INQ.
+      operationId: getPartyById
+      parameters:
+        - name: partyId
+          in: path
+          description: Customer ID (mainframe format)
+          required: true
+          schema:
+            type: string
+            maxLength: 36
+            example: "550E8400E29B41D4A716446655440000"
+        - name: X-Correlation-ID
+          in: header
+          description: Correlation ID for tracing
+          schema:
+            type: string
+        - name: X-Source-System
+          in: header
+          description: Calling system identifier
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Party found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartyResponse'
+              example:
+                CUST_ID: "550E8400E29B41D4A716446655440000"
+                CUST_FNAME: "JOHN"
+                CUST_LNAME: "DOE"
+                CUST_EMAIL_ADDR: "JOHN.DOE@EMAIL.COM"
+                CUST_DOB: "1990-05-15"
+                CUST_STATUS: "A"
+                CUST_CRT_TS: "2024-01-15-10.30.00.000000"
+                CUST_UPD_TS: "2024-01-15-10.30.00.000000"
+                SYS_RC: "00"
+                SYS_MSG: "SUCCESS"
+        '404':
+          description: Party not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartyResponse'
+              example:
+                CUST_ID: ""
+                SYS_RC: "04"
+                SYS_MSG: "RECORD NOT FOUND"
+        '500':
+          $ref: '#/components/responses/SystemError'
+
+components:
+  schemas:
+    PartyResponse:
+      type: object
+      description: |
+        Party record from CUSTMAST.
+        Field names follow COBOL copybook CUST-REC.
+      properties:
+        CUST_ID:
+          type: string
+          maxLength: 36
+          description: Customer unique identifier (UUID without hyphens)
+          example: "550E8400E29B41D4A716446655440000"
+        CUST_FNAME:
+          type: string
+          maxLength: 30
+          description: Customer first name (uppercase)
+          example: "JOHN"
+        CUST_LNAME:
+          type: string
+          maxLength: 30
+          description: Customer last name (uppercase)
+          example: "DOE"
+        CUST_EMAIL_ADDR:
+          type: string
+          maxLength: 100
+          description: Email address (uppercase)
+          example: "JOHN.DOE@EMAIL.COM"
+        CUST_DOB:
+          type: string
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+          description: Date of birth (YYYY-MM-DD)
+          example: "1990-05-15"
+        CUST_STATUS:
+          type: string
+          maxLength: 1
+          description: |
+            Customer status code:
+            - A = Active
+            - I = Inactive  
+            - B = Blocked
+            - P = Pending verification
+          enum: ["A", "I", "B", "P"]
+          example: "A"
+        CUST_CRT_TS:
+          type: string
+          maxLength: 26
+          description: Creation timestamp (DB2 format YYYY-MM-DD-HH.MM.SS.MMMMMM)
+          example: "2024-01-15-10.30.00.000000"
+        CUST_UPD_TS:
+          type: string
+          maxLength: 26
+          description: Last update timestamp (DB2 format)
+          example: "2024-01-15-10.30.00.000000"
+        SYS_RC:
+          type: string
+          maxLength: 2
+          description: |
+            System return code:
+            - 00 = Success
+            - 04 = Not found
+            - 08 = Validation error
+            - 12 = System error
+          example: "00"
+        SYS_MSG:
+          type: string
+          maxLength: 100
+          description: System message
+          example: "SUCCESS"
+
+    PartyCreateRequest:
+      type: object
+      description: Request to create a new party record
+      required:
+        - CUST_FNAME
+        - CUST_LNAME
+      properties:
+        CUST_FNAME:
+          type: string
+          maxLength: 30
+          description: Customer first name (will be uppercased)
+        CUST_LNAME:
+          type: string
+          maxLength: 30
+          description: Customer last name (will be uppercased)
+        CUST_EMAIL_ADDR:
+          type: string
+          maxLength: 100
+          description: Email address
+        CUST_DOB:
+          type: string
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+          description: Date of birth (YYYY-MM-DD)
+
+    SystemError:
+      type: object
+      description: System error response from mainframe
+      properties:
+        SYS_RC:
+          type: string
+          description: Return code
+          example: "12"
+        SYS_MSG:
+          type: string
+          description: Error message
+          example: "CICS TRANSACTION ABEND - ASRA"
+        SYS_ABEND_CD:
+          type: string
+          description: CICS abend code if applicable
+          example: "ASRA"
+        SYS_TIMESTAMP:
+          type: string
+          description: Error timestamp
+          example: "2024-01-15-10.30.00.000000"
+
+  responses:
+    SystemError:
+      description: System error from mainframe
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SystemError'
+          example:
+            SYS_RC: "12"
+            SYS_MSG: "SYSTEM ERROR - CONTACT SUPPORT"
+            SYS_TIMESTAMP: "2024-01-15-10.30.00.000000"
