@@ -428,7 +428,8 @@ class PTDisplay:
             if self._is_running_callback and self._is_running_callback():
                 if self._stop_callback:
                     self._stop_callback()
-                    self._output_buffer.add_system_message("[Stopping...]", style="yellow")
+                    # Show cancellation message in output
+                    self._output_buffer.append("model", "\n\n[Cancelled by user]", "append")
                     self._app.invalidate()
                 return
             # Otherwise exit the application
