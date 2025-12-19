@@ -9,6 +9,9 @@ The model is responsible for fetching content using appropriate tools (CLI, MCP,
 This plugin only manages the catalog and user interaction.
 """
 
+import os
+import tempfile
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from ..model_provider.types import ToolSchema
@@ -45,6 +48,25 @@ class ReferencesPlugin:
     @property
     def name(self) -> str:
         return self._name
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging.
+
+        Uses JAATO_TRACE_LOG env var, or defaults to /tmp/rich_client_trace.log.
+        Silently skips if trace file cannot be written.
+        """
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [REFERENCES] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass  # Silently skip if trace file cannot be written
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the plugin with configuration.
@@ -146,8 +168,17 @@ class ReferencesPlugin:
         self._exclude_tools = config.get("exclude_tools", [])
         self._initialized = True
 
+        # Trace logging for debugging
+        channel_type = config.get("channel_type") or self._config.channel_type
+        self._trace(f"initialize: sources={len(self._sources)}, channel={channel_type}")
+        if self._selected_source_ids:
+            self._trace(f"initialize: preselected={self._selected_source_ids}")
+        if self._exclude_tools:
+            self._trace(f"initialize: exclude_tools={self._exclude_tools}")
+
     def shutdown(self) -> None:
         """Shutdown the plugin and clean up resources."""
+        self._trace("shutdown: cleaning up resources")
         if self._channel:
             self._channel.shutdown()
         self._channel = None
@@ -233,15 +264,16 @@ class ReferencesPlugin:
         Presents available selectable sources to user via the configured channel,
         then returns instructions for the model to fetch selected references.
         """
+        context = args.get("context")
+        filter_tags = args.get("filter_tags", [])
+        self._trace(f"selectReferences: context={context!r}, filter_tags={filter_tags}")
+
         # Early check: no sources configured at all
         if not self._sources:
             return {
                 "status": "no_sources",
                 "message": "No reference sources available."
             }
-
-        context = args.get("context")
-        filter_tags = args.get("filter_tags", [])
 
         # Get selectable sources not yet selected
         available = [
@@ -258,10 +290,14 @@ class ReferencesPlugin:
             ]
 
         if not available:
+            self._trace("selectReferences: no sources available for selection")
             return {
                 "status": "no_sources",
                 "message": "No additional reference sources available for selection."
             }
+
+        available_ids = [s.id for s in available]
+        self._trace(f"selectReferences: available={available_ids}")
 
         # Build prompt lines for UI hooks
         prompt_lines = []
@@ -282,6 +318,8 @@ class ReferencesPlugin:
         # Emit selection resolved hook
         if self._on_selection_resolved:
             self._on_selection_resolved("selectReferences", selected_ids)
+
+        self._trace(f"selectReferences: selected={selected_ids}")
 
         if not selected_ids:
             self._channel.notify_result([
@@ -335,6 +373,10 @@ class ReferencesPlugin:
 
     def _execute_list(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List all available reference sources."""
+        filter_tags = args.get("filter_tags", [])
+        mode_filter = args.get("mode", "all")
+        self._trace(f"listReferences: mode={mode_filter}, filter_tags={filter_tags}")
+
         # Early check: no sources configured at all
         if not self._sources:
             return {
@@ -343,9 +385,6 @@ class ReferencesPlugin:
                 "selected_count": 0,
                 "message": "No reference sources available."
             }
-
-        filter_tags = args.get("filter_tags", [])
-        mode_filter = args.get("mode", "all")
 
         sources = self._sources
 
@@ -364,12 +403,16 @@ class ReferencesPlugin:
 
         # Handle empty case with clear message
         if not sources:
+            self._trace("listReferences: no sources match filters")
             return {
                 "sources": [],
                 "total": 0,
                 "selected_count": 0,
                 "message": "No reference sources available."
             }
+
+        source_ids = [s.id for s in sources]
+        self._trace(f"listReferences: returning {len(sources)} sources={source_ids}")
 
         return {
             "sources": [
