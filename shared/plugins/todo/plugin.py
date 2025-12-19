@@ -362,6 +362,7 @@ class TodoPlugin:
         """Execute the createPlan tool."""
         title = args.get("title", "")
         steps = args.get("steps", [])
+        self._trace(f"createPlan: title={title!r}, steps={len(steps)}")
 
         if not title:
             return {"error": "title is required"}
@@ -409,6 +410,7 @@ class TodoPlugin:
         that they agree with the proposed plan and the model can proceed.
         """
         message = args.get("message", "")
+        self._trace(f"startPlan: message={message!r}")
 
         # Get current plan
         plan = self._get_current_plan()
@@ -446,6 +448,7 @@ class TodoPlugin:
         status_str = args.get("status", "")
         result = args.get("result")
         error = args.get("error")
+        self._trace(f"updateStep: step_id={step_id}, status={status_str}")
 
         if not step_id:
             return {"error": "step_id is required"}
@@ -505,6 +508,7 @@ class TodoPlugin:
     def _execute_get_plan_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the getPlanStatus tool."""
         plan_id = args.get("plan_id")
+        self._trace(f"getPlanStatus: plan_id={plan_id}")
 
         # Get plan (specified, current, or most recent)
         if plan_id and self._storage:
@@ -546,6 +550,7 @@ class TodoPlugin:
         """Execute the completePlan tool."""
         status_str = args.get("status", "")
         summary = args.get("summary")
+        self._trace(f"completePlan: status={status_str}")
 
         if not status_str:
             return {"error": "status is required"}
@@ -598,6 +603,7 @@ class TodoPlugin:
         """Execute the addStep tool."""
         description = args.get("description", "")
         after_step_id = args.get("after_step_id")
+        self._trace(f"addStep: description={description!r}, after={after_step_id}")
 
         if not description:
             return {"error": "description is required"}
