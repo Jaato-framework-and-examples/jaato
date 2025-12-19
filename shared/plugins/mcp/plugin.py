@@ -57,6 +57,116 @@ class LogEntry:
         return ' '.join(parts)
 
 
+class LogCapture:
+    """File-like object that captures MCP server stderr and routes to log buffer.
+
+    This class uses an OS pipe to provide a real file descriptor that can be
+    passed to subprocess stderr. A background thread reads from the pipe and
+    routes messages to the MCP plugin's internal log buffer via a callback.
+
+    The MCP library's stdio_client requires a file-like object with a valid
+    fileno() for subprocess stderr redirection. Pure Python wrappers don't work
+    because subprocess needs a real file descriptor.
+    """
+
+    def __init__(self, log_callback: Callable[[str, str, Optional[str], Optional[str]], None]):
+        """Initialize the log capture with an OS pipe.
+
+        Args:
+            log_callback: Function to call with (level, event, server, details).
+                         Should match the signature of MCPToolPlugin._log_event.
+        """
+        self._log_callback = log_callback
+        # Create a pipe - write end for subprocess, read end for our thread
+        self._read_fd, self._write_fd = os.pipe()
+        # Wrap write end as a file object (this is what fileno() returns)
+        self._write_file = os.fdopen(self._write_fd, 'w', encoding='utf-8')
+        self._closed = False
+        self._reader_thread: Optional[threading.Thread] = None
+        # Start background thread to read from pipe
+        self._start_reader()
+
+    def _start_reader(self) -> None:
+        """Start background thread to read from the pipe."""
+        def reader():
+            try:
+                # Wrap read end as file for line-by-line reading
+                with os.fdopen(self._read_fd, 'r', encoding='utf-8', errors='replace') as read_file:
+                    for line in read_file:
+                        line = line.rstrip('\n\r')
+                        if line:
+                            self._log_callback(LOG_DEBUG, "Server output", None, line)
+            except (OSError, ValueError):
+                # Pipe closed or other error during shutdown
+                pass
+
+        self._reader_thread = threading.Thread(target=reader, daemon=True)
+        self._reader_thread.start()
+
+    def write(self, text: str) -> int:
+        """Write text to the pipe (called by MCP library for compatibility)."""
+        if self._closed:
+            return 0
+        try:
+            self._write_file.write(text)
+            self._write_file.flush()
+            return len(text)
+        except (OSError, ValueError):
+            return 0
+
+    def flush(self) -> None:
+        """Flush the write buffer."""
+        if not self._closed:
+            try:
+                self._write_file.flush()
+            except (OSError, ValueError):
+                pass
+
+    def close(self) -> None:
+        """Close the log capture and stop the reader thread."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._write_file.close()
+        except (OSError, ValueError):
+            pass
+        # Reader thread will exit when it sees the pipe closed
+
+    def fileno(self) -> int:
+        """Return the write end file descriptor for subprocess redirection."""
+        return self._write_fd
+
+    # Required for TextIO compatibility
+    @property
+    def encoding(self) -> str:
+        return 'utf-8'
+
+    @property
+    def errors(self) -> str | None:
+        return None
+
+    @property
+    def mode(self) -> str:
+        return 'w'
+
+    @property
+    def name(self) -> str:
+        return '<mcp_log_capture>'
+
+    def isatty(self) -> bool:
+        return False
+
+    def readable(self) -> bool:
+        return False
+
+    def seekable(self) -> bool:
+        return False
+
+    def writable(self) -> bool:
+        return True
+
+
 class MCPToolPlugin:
     """Plugin that provides MCP (Model Context Protocol) tool execution.
 
@@ -1018,7 +1128,9 @@ Examples:
                     for name, conn in mgr._connections.items()
                 }
 
-            manager = MCPClientManager()
+            # Create stderr capture that routes to internal log buffer
+            errlog = LogCapture(self._log_event)
+            manager = MCPClientManager(errlog=errlog)
             async with manager:
                 # Initial connection to all configured servers
                 server_list = list(servers.items())
