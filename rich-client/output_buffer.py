@@ -348,9 +348,12 @@ class OutputBuffer:
 
         tool_count = len(self._active_tools)
 
-        # Add separator line for visual distinction
+        # Add separator line for visual distinction with F3 hint
         self._add_line("system", "", "")
-        self._add_line("system", "  ─ ─ ─", "dim")
+        if self._tools_expanded:
+            self._add_line("system", "  ─ ─ ─  F3 to collapse", "dim")
+        else:
+            self._add_line("system", "  ─ ─ ─  F3 to expand", "dim")
 
         if self._tools_expanded:
             # Expanded view - each tool on its own line
@@ -914,6 +917,12 @@ class OutputBuffer:
         if self._active_tools:
             if lines_to_show:
                 output.append("\n\n")  # Extra blank line for visual separation
+                # Add separator line with F3 hint
+                if self._tools_expanded:
+                    output.append("  ─ ─ ─  F3 to collapse", style="dim")
+                else:
+                    output.append("  ─ ─ ─  F3 to expand", style="dim")
+                output.append("\n")
 
             # Check if waiting for user input (permission or clarification)
             pending_tool = None
