@@ -1166,9 +1166,16 @@ class OutputBuffer:
                         output.append("\n")
                         output.append(f"  {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
         elif self._spinner_active:
-            # Spinner active but no tools yet
+            # Spinner active but no tools yet - show model header first
             if lines_to_show:
-                output.append("\n")
+                output.append("\n\n")  # Blank line before header
+                # Show model header if this is a new turn
+                if self._last_turn_source != "model":
+                    header_prefix = "── Model "
+                    remaining = max(0, wrap_width - len(header_prefix))
+                    output.append(header_prefix, style="bold cyan")
+                    output.append("─" * remaining, style="dim cyan")
+                    output.append("\n")
             frame = self.SPINNER_FRAMES[self._spinner_index]
             output.append(f"  {frame} ", style="cyan")
             output.append("thinking...", style="dim italic")
