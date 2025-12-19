@@ -935,12 +935,18 @@ class OutputBuffer:
                     break
 
             tool_count = len(self._active_tools)
+            # Check if any tools are still executing (not completed)
+            any_uncompleted = any(not tool.completed for tool in self._active_tools)
+            # Show spinner if: spinner is active OR any tool is still executing
+            # Also show spinner if all tools completed but not finalized yet (turn still in progress)
+            all_completed = all(tool.completed for tool in self._active_tools)
+            show_spinner = self._spinner_active or any_uncompleted or (all_completed and not pending_tool)
 
             if self._tools_expanded:
                 # Expanded view - show each tool on its own line
                 if pending_tool:
                     output.append("  ⏳ ", style="bold yellow")
-                elif self._spinner_active:
+                elif show_spinner:
                     frame = self.SPINNER_FRAMES[self._spinner_index]
                     output.append(f"  {frame} ", style="cyan")
                 else:
@@ -990,7 +996,7 @@ class OutputBuffer:
                     output.append("  ⏳ ", style="bold yellow")
                     output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
                     output.append(" ".join(tool_summaries), style="dim")
-                elif self._spinner_active:
+                elif show_spinner:
                     frame = self.SPINNER_FRAMES[self._spinner_index]
                     output.append(f"  {frame} ", style="cyan")
                     output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
