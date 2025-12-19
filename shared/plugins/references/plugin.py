@@ -114,8 +114,9 @@ class ReferencesPlugin:
                     resolved_sources.append(s)
 
             # Resolve relative paths for inline sources against provided base or CWD
+            # Make paths relative to CWD so model doesn't see absolute paths
             inline_base_path = config.get("base_path", os.getcwd())
-            resolve_source_paths(resolved_sources, inline_base_path)
+            resolve_source_paths(resolved_sources, inline_base_path, relative_to=os.getcwd())
             self._sources = resolved_sources
         else:
             self._sources = self._config.sources
