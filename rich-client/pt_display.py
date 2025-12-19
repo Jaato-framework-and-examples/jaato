@@ -521,7 +521,15 @@ class PTDisplay:
         @kb.add("c-t")  # Ctrl+T as alternative (F3 may be intercepted by some terminals)
         def handle_f3(event):
             """Handle F3 or Ctrl+T - toggle tool view between collapsed/expanded."""
-            self._output_buffer.toggle_tools_expanded()
+            # Use selected agent's buffer if registry present
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.toggle_tools_expanded()
+                else:
+                    self._output_buffer.toggle_tools_expanded()
+            else:
+                self._output_buffer.toggle_tools_expanded()
             self._app.invalidate()
 
         # Status bar at top (always visible, 1 line)
