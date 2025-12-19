@@ -594,6 +594,15 @@ class SubagentPlugin:
                         mode=mode
                     )
 
+            # Emit the follow-up message to UI before execution
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_output(
+                    agent_id=agent_id,
+                    source="user",
+                    text=message,
+                    mode="write"
+                )
+
             # Send follow-up message
             response = session.send_message(message, on_output=subagent_output_callback)
 
@@ -991,6 +1000,15 @@ class SubagentPlugin:
                         text=text,
                         mode=mode
                     )
+
+            # Emit the initial prompt to UI before execution
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_output(
+                    agent_id=agent_id,
+                    source="user",
+                    text=prompt,
+                    mode="write"
+                )
 
             # Run the conversation with output capture
             response = session.send_message(prompt, on_output=subagent_output_callback)
