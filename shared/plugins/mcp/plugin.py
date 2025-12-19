@@ -113,15 +113,34 @@ class MCPToolPlugin:
     def name(self) -> str:
         return "mcp"
 
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        import tempfile
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [MCP] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the MCP plugin by starting the background thread."""
         if self._initialized:
             return
+        self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True
+        self._trace(f"initialize: connected_servers={list(self._connected_servers)}")
 
     def shutdown(self) -> None:
         """Shutdown the MCP plugin and clean up resources."""
+        self._trace("shutdown: cleaning up")
         if self._request_queue:
             self._request_queue.put((None, None))  # Signal shutdown
         if self._thread and self._thread.is_alive():
@@ -1205,6 +1224,8 @@ Examples:
         Returns:
             Dict with 'result' containing tool invocation details or 'error'.
         """
+        self._trace(f"execute: tool={toolname}")
+
         # Ensure MCP thread is running
         if not self._initialized:
             self.initialize()

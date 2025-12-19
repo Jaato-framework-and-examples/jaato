@@ -10,6 +10,8 @@ Progress is reported through configurable transport protocols
 (console, webhook, file) matching the permissions plugin pattern.
 """
 
+import os
+import tempfile
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -44,6 +46,21 @@ class TodoPlugin:
     @property
     def name(self) -> str:
         return "todo"
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [TODO] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the TODO plugin.
@@ -97,9 +114,11 @@ class TodoPlugin:
             self._reporter = ConsoleReporter()
 
         self._initialized = True
+        self._trace(f"initialize: storage={storage_type}, reporter={reporter_type}")
 
     def shutdown(self) -> None:
         """Shutdown the TODO plugin."""
+        self._trace("shutdown: cleaning up")
         if self._reporter:
             self._reporter.shutdown()
         self._storage = None
