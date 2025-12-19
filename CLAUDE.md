@@ -199,12 +199,14 @@ Key cancellation types in `shared/plugins/model_provider/types.py`:
 
 Provider streaming methods:
 - `supports_streaming()`: Check if provider supports streaming
+- `supports_stop()`: Check if provider supports mid-turn cancellation
 - `send_message_streaming(message, on_chunk, cancel_token)`: Stream with cancellation
 - `send_tool_results_streaming(results, on_chunk, cancel_token)`: Stream tool responses
 
 Session/client methods:
 - `client.stop()` / `session.request_stop()`: Request cancellation
 - `client.is_processing` / `session.is_running`: Check if message in progress
+- `client.supports_stop` / `session.supports_stop`: Check if stop is supported
 - `client.set_streaming_enabled(bool)`: Toggle streaming mode
 
 ### Plugin Type System

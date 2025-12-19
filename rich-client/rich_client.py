@@ -1016,6 +1016,12 @@ class RichClient:
         # Set model info in status bar
         self._display.set_model_info(self._model_provider, self._model_name)
 
+        # Set up stop callbacks for Ctrl-C handling
+        self._display.set_stop_callbacks(
+            stop_callback=lambda: self._jaato.stop() if self._jaato else False,
+            is_running_callback=lambda: self._jaato.is_processing if self._jaato else False
+        )
+
         # Set up the live reporter and queue channels
         self._setup_live_reporter()
         self._setup_queue_channels()

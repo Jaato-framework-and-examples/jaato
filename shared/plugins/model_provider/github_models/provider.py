@@ -721,6 +721,14 @@ class GitHubModelsProvider:
         """
         return True
 
+    def supports_stop(self) -> bool:
+        """Check if mid-turn cancellation (stop) is supported.
+
+        Returns:
+            True - GitHub Models supports stop via streaming cancellation.
+        """
+        return True
+
     # ==================== Streaming ====================
 
     def send_message_streaming(

@@ -844,6 +844,12 @@ if share:
           <h3 id="is-processing">is_processing <span class="badge badge-property">property</span></h3>
           <p>Returns <code>True</code> if a message is currently being processed.</p>
 
+          <h3 id="supports-stop">supports_stop <span class="badge badge-property">property</span></h3>
+          <p>
+            Returns <code>True</code> if the current provider supports mid-turn cancellation.
+            Check this before calling <code>stop()</code> to know if it will be effective.
+          </p>
+
           <h3>set_streaming_enabled</h3>
           <div class="method-signature">
             <span class="method-name">set_streaming_enabled</span>(<span class="param">enabled</span>: <span class="type">bool</span>) -> <span class="type">None</span>

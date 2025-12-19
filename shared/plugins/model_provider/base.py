@@ -414,3 +414,14 @@ class ModelProviderPlugin(Protocol):
             ProviderResponse with accumulated text and/or function calls.
         """
         ...
+
+    def supports_stop(self) -> bool:
+        """Check if this provider supports mid-turn cancellation (stop).
+
+        Stop capability requires streaming support since cancellation is
+        implemented by breaking out of the streaming loop.
+
+        Returns:
+            True if stop/cancel is supported, False otherwise.
+        """
+        ...

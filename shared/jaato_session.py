@@ -236,6 +236,26 @@ class JaatoSession:
         """
         self._use_streaming = enabled
 
+    @property
+    def supports_stop(self) -> bool:
+        """Check if the current provider supports mid-turn cancellation.
+
+        Stop capability requires both streaming support and provider
+        implementation of cancellation handling.
+
+        Returns:
+            True if stop is supported, False otherwise.
+        """
+        if not self._provider:
+            return False
+        # Check if provider has supports_stop method and it returns True
+        if hasattr(self._provider, 'supports_stop'):
+            return self._provider.supports_stop()
+        # Fallback: if streaming is supported, stop is supported
+        if hasattr(self._provider, 'supports_streaming'):
+            return self._provider.supports_streaming()
+        return False
+
     def configure(
         self,
         tools: Optional[List[str]] = None,

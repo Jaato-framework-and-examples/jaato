@@ -141,6 +141,10 @@ class PTDisplay:
         self._valid_input_prefixes: set = set()  # All valid prefixes for permission responses
         self._last_valid_permission_input: str = ""  # Track last valid input for reverting
 
+        # Stop callback for interrupting model generation
+        self._stop_callback: Optional[Callable[[], bool]] = None
+        self._is_running_callback: Optional[Callable[[], bool]] = None
+
         # Build prompt_toolkit application
         self._app: Optional[Application] = None
         self._build_app()
@@ -419,7 +423,15 @@ class PTDisplay:
 
         @kb.add("c-c")
         def handle_ctrl_c(event):
-            """Handle Ctrl-C - exit."""
+            """Handle Ctrl-C - stop if running, exit if not."""
+            # If model is running, stop it instead of exiting
+            if self._is_running_callback and self._is_running_callback():
+                if self._stop_callback:
+                    self._stop_callback()
+                    self._output_buffer.add_system_message("[Stopping...]", style="yellow")
+                    self._app.invalidate()
+                return
+            # Otherwise exit the application
             event.app.exit(exception=KeyboardInterrupt())
 
         @kb.add("c-d")
@@ -705,6 +717,22 @@ class PTDisplay:
         self._model_provider = provider
         self._model_name = model
         self.refresh()
+
+    def set_stop_callbacks(
+        self,
+        stop_callback: Callable[[], bool],
+        is_running_callback: Callable[[], bool]
+    ) -> None:
+        """Set callbacks for model stop functionality.
+
+        These callbacks enable Ctrl-C to stop model generation when running.
+
+        Args:
+            stop_callback: Called to request stop. Returns True if stop was requested.
+            is_running_callback: Called to check if model is running.
+        """
+        self._stop_callback = stop_callback
+        self._is_running_callback = is_running_callback
 
     def update_context_usage(self, usage: Dict[str, Any]) -> None:
         """Update context usage display in status bar.

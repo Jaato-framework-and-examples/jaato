@@ -194,6 +194,17 @@ class JaatoClient:
             return self._session.is_running
         return False
 
+    @property
+    def supports_stop(self) -> bool:
+        """Check if the current provider supports mid-turn cancellation.
+
+        Returns:
+            True if stop() will be effective, False otherwise.
+        """
+        if self._session:
+            return self._session.supports_stop
+        return False
+
     def set_streaming_enabled(self, enabled: bool) -> None:
         """Enable or disable streaming mode.
 
