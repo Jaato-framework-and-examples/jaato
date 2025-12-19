@@ -726,10 +726,10 @@ class OutputBuffer:
         lines_to_show: List[OutputLine] = []
 
         if height:
-            # Calculate how much space the tool tree will take (including newline separator)
+            # Calculate how much space the tool tree will take (including separator)
             tool_tree_height = self._calculate_tool_tree_height()
             if tool_tree_height > 0 and all_lines:
-                tool_tree_height += 1  # Account for newline before tool tree
+                tool_tree_height += 4  # Account for separator (\n\n + line + \n)
 
             # Adjust available height for stored lines
             available_for_lines = max(1, height - tool_tree_height)
