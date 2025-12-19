@@ -341,8 +341,9 @@ class OutputBuffer:
 
         summary_line = f"  ▸ {tool_count} tool{'s' if tool_count != 1 else ''}: " + " ".join(tool_summaries)
 
-        # Add blank line for visual separation, then the summary
+        # Add separator line for visual distinction
         self._add_line("system", "", "")
+        self._add_line("system", "  ─ ─ ─", "dim")
         self._add_line("system", summary_line, "dim")
 
         # Clear active tools so they don't render separately anymore
