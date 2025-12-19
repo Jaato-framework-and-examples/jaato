@@ -5,6 +5,8 @@ import re
 import shutil
 import shlex
 import subprocess
+import tempfile
+from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 
 from ..base import UserCommand
@@ -86,10 +88,28 @@ class CLIToolPlugin(BackgroundCapableMixin):
         self._max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS
         self._auto_background_threshold: float = DEFAULT_AUTO_BACKGROUND_THRESHOLD
         self._initialized = False
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
 
     @property
     def name(self) -> str:
         return "cli"
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [CLI{agent_prefix}] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the CLI plugin.
@@ -102,6 +122,8 @@ class CLIToolPlugin(BackgroundCapableMixin):
                 - background_max_workers: Max concurrent background tasks (default: 4)
         """
         if config:
+            # Extract agent name for trace logging
+            self._agent_name = config.get("agent_name")
             if 'extra_paths' in config:
                 paths = config['extra_paths']
                 if paths:
@@ -113,9 +135,11 @@ class CLIToolPlugin(BackgroundCapableMixin):
             if 'background_max_workers' in config:
                 self._bg_max_workers = config['background_max_workers']
         self._initialized = True
+        self._trace(f"initialize: extra_paths={self._extra_paths}, max_output={self._max_output_chars}, auto_bg_threshold={self._auto_background_threshold}")
 
     def shutdown(self) -> None:
         """Shutdown the CLI plugin."""
+        self._trace("shutdown: cleaning up")
         self._extra_paths = []
         self._initialized = False
         # Cleanup background executor
@@ -322,6 +346,10 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
 
             if not command:
                 return {'error': 'cli_based_tool: command must be provided'}
+
+            # Truncate command for logging (avoid huge commands in trace)
+            cmd_preview = command[:100] + "..." if len(command) > 100 else command
+            self._trace(f"execute: {cmd_preview}")
 
             # Prepare environment with extended PATH if extra_paths is provided
             env = os.environ.copy()

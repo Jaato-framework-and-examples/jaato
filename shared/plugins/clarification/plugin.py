@@ -1,5 +1,8 @@
 """Clarification plugin for requesting user input with multiple questions and choices."""
 
+import os
+import tempfile
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from ..model_provider.types import ToolSchema
@@ -31,6 +34,8 @@ class ClarificationPlugin:
     def __init__(self):
         self._initialized = False
         self._channel: Optional[ClarificationChannel] = None
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
         # Clarification lifecycle hooks for UI integration
         self._on_clarification_requested: Optional[Callable[[str, List[str]], None]] = None
         self._on_clarification_resolved: Optional[Callable[[str], None]] = None
@@ -42,6 +47,22 @@ class ClarificationPlugin:
     def name(self) -> str:
         return "clarification"
 
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [CLARIFICATION{agent_prefix}] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the plugin with configuration.
 
@@ -51,14 +72,18 @@ class ClarificationPlugin:
                 - channel_config: Dict of config for the channel
         """
         config = config or {}
+        # Extract agent name for trace logging
+        self._agent_name = config.get("agent_name")
         channel_type = config.get("channel_type", "console")
         channel_config = config.get("channel_config", {})
 
         self._channel = create_channel(channel_type, **channel_config)
         self._initialized = True
+        self._trace(f"initialize: channel={channel_type}")
 
     def shutdown(self) -> None:
         """Clean up plugin resources."""
+        self._trace("shutdown: cleaning up")
         self._channel = None
         self._initialized = False
 
@@ -271,6 +296,10 @@ The tool returns responses keyed by question number (1-based):
         Returns:
             Dict with either 'responses' (answers) or 'error'
         """
+        context = args.get("context", "")
+        questions = args.get("questions", [])
+        self._trace(f"request_clarification: context={context!r}, questions={len(questions)}")
+
         if not self._initialized or not self._channel:
             return {"error": "Plugin not initialized"}
 
