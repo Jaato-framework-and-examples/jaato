@@ -78,13 +78,19 @@ def discover_references(
             source = ReferenceSource.from_dict(data)
 
             # Resolve relative paths against the reference file's directory
+            # Make paths relative to CWD so model doesn't see absolute paths
             if source.type == SourceType.LOCAL and source.path:
                 source_path = Path(source.path)
-                if not source_path.is_absolute():
-                    resolved = (file_path.parent / source_path).resolve()
-                    source.resolved_path = str(resolved)
+                if source_path.is_absolute():
+                    absolute_path = source_path.resolve()
                 else:
-                    source.resolved_path = str(source_path.resolve())
+                    absolute_path = (file_path.parent / source_path).resolve()
+                # Convert to CWD-relative path
+                try:
+                    source.resolved_path = os.path.relpath(absolute_path, os.getcwd())
+                except ValueError:
+                    # On Windows, relpath fails for paths on different drives
+                    source.resolved_path = str(absolute_path)
 
             sources.append(source)
             logger.debug("Discovered reference '%s' from %s", source.id, file_path)
@@ -148,19 +154,23 @@ class ConfigValidationError(Exception):
 
 def resolve_source_paths(
     sources: List[ReferenceSource],
-    base_path: str
+    base_path: str,
+    relative_to: Optional[str] = None
 ) -> None:
     """Resolve relative paths in LOCAL sources against a base directory.
 
-    For LOCAL type sources with relative paths, computes the absolute path
+    For LOCAL type sources with relative paths, computes the resolved path
     and stores it in resolved_path. This helps the model find files when
     the config was loaded from a different directory.
 
     Args:
         sources: List of ReferenceSource instances to process (modified in-place).
         base_path: Base directory to resolve relative paths against.
+        relative_to: If provided, make resolved paths relative to this directory
+                     (typically CWD). If None, stores absolute paths.
     """
     base = Path(base_path)
+    cwd = Path(relative_to) if relative_to else None
 
     for source in sources:
         if source.type != SourceType.LOCAL:
@@ -170,17 +180,27 @@ def resolve_source_paths(
 
         source_path = Path(source.path)
 
-        # Only resolve if path is relative
-        if not source_path.is_absolute():
-            resolved = (base / source_path).resolve()
-            source.resolved_path = str(resolved)
-            logger.debug(
-                "Resolved path for '%s': %s -> %s",
-                source.id, source.path, source.resolved_path
-            )
+        # Resolve to absolute first (handles .. and other path components)
+        if source_path.is_absolute():
+            absolute_path = source_path.resolve()
         else:
-            # Already absolute, just normalize
-            source.resolved_path = str(source_path.resolve())
+            absolute_path = (base / source_path).resolve()
+
+        # Make relative to CWD if requested
+        if cwd:
+            try:
+                resolved = os.path.relpath(absolute_path, cwd)
+            except ValueError:
+                # On Windows, relpath fails for paths on different drives
+                resolved = str(absolute_path)
+        else:
+            resolved = str(absolute_path)
+
+        source.resolved_path = resolved
+        logger.debug(
+            "Resolved path for '%s': %s -> %s",
+            source.id, source.path, source.resolved_path
+        )
 
 
 def validate_source(source: Dict[str, Any], index: int, errors: List[str]) -> None:
@@ -353,7 +373,8 @@ def load_config(
         ]
 
         # Resolve relative paths for LOCAL sources against config file directory
-        resolve_source_paths(sources, config_base_path)
+        # Make paths relative to CWD so model doesn't see absolute paths
+        resolve_source_paths(sources, config_base_path, relative_to=os.getcwd())
 
         # Parse channel config
         channel = raw_config.get("channel", {})
