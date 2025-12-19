@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ..background.mixin import BackgroundCapableMixin
+from ..base import UserCommand
 from ..model_provider.types import ToolSchema
 from .config_loader import (
     FilesystemQueryConfig,
@@ -192,6 +193,10 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that don't require permission (read-only operations)."""
         return ["glob_files", "grep_content"]
+
+    def get_user_commands(self) -> List[UserCommand]:
+        """Return user-facing commands (none for this plugin)."""
+        return []
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the model."""
