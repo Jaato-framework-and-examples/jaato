@@ -34,7 +34,12 @@ test_traces/
 # OS files
 .DS_Store
 Thumbs.db
-.jaato
+# .jaato - allow tracked subdirectories
+!.jaato/
+.jaato/*
+!.jaato/docs/
+!.jaato/profiles/
+!.jaato/references/
 
 # Test folders
 tests_enablement_2.0/
