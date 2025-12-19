@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 def discover_references(
     references_dir: str,
-    base_path: Optional[str] = None
+    base_path: Optional[str] = None,
+    project_root: Optional[str] = None
 ) -> List[ReferenceSource]:
     """Discover reference sources from individual JSON files in a directory.
 
@@ -29,6 +30,9 @@ def discover_references(
         references_dir: Directory path to scan (relative or absolute).
         base_path: Base path for resolving relative references_dir.
                    Defaults to current working directory.
+        project_root: Root directory for making resolved paths relative.
+                      This should be where the agent operates from.
+                      Defaults to parent of references_dir if it's under .jaato/.
 
     Returns:
         List of ReferenceSource instances discovered from the directory.
@@ -40,6 +44,16 @@ def discover_references(
     refs_path = Path(references_dir)
     if not refs_path.is_absolute():
         refs_path = Path(base_path) / refs_path
+
+    # Determine project root for relative path computation
+    if project_root is None:
+        # If refs_path is under .jaato/, project root is parent of .jaato
+        resolved_refs = refs_path.resolve()
+        if '.jaato' in resolved_refs.parts:
+            jaato_idx = resolved_refs.parts.index('.jaato')
+            project_root = str(Path(*resolved_refs.parts[:jaato_idx]))
+        else:
+            project_root = str(resolved_refs.parent)
 
     if not refs_path.exists():
         logger.debug("References directory does not exist: %s", refs_path)
@@ -78,16 +92,16 @@ def discover_references(
             source = ReferenceSource.from_dict(data)
 
             # Resolve relative paths against the reference file's directory
-            # Make paths relative to CWD so model doesn't see absolute paths
+            # Make paths relative to project root (where agent operates)
             if source.type == SourceType.LOCAL and source.path:
                 source_path = Path(source.path)
                 if source_path.is_absolute():
                     absolute_path = source_path.resolve()
                 else:
                     absolute_path = (file_path.parent / source_path).resolve()
-                # Convert to CWD-relative path
+                # Convert to project-root-relative path
                 try:
-                    source.resolved_path = os.path.relpath(absolute_path, os.getcwd())
+                    source.resolved_path = os.path.relpath(absolute_path, project_root)
                 except ValueError:
                     # On Windows, relpath fails for paths on different drives
                     source.resolved_path = str(absolute_path)
@@ -357,6 +371,8 @@ def load_config(
 
         # Capture the config file's directory for resolving relative paths
         config_base_path = str(config_path.parent.resolve())
+        # Project root is typically the parent of .jaato/ or where config resides
+        project_root = str(config_path.parent.parent.resolve()) if config_path.parent.name == '.jaato' else config_base_path
 
         with open(config_path, 'r', encoding='utf-8') as f:
             raw_config = json.load(f)
@@ -373,8 +389,8 @@ def load_config(
         ]
 
         # Resolve relative paths for LOCAL sources against config file directory
-        # Make paths relative to CWD so model doesn't see absolute paths
-        resolve_source_paths(sources, config_base_path, relative_to=os.getcwd())
+        # Make paths relative to project root (not CWD which may differ from where agent operates)
+        resolve_source_paths(sources, config_base_path, relative_to=project_root)
 
         # Parse channel config
         channel = raw_config.get("channel", {})
