@@ -37,7 +37,8 @@ class ReferenceSource:
     mode: InjectionMode
 
     # Type-specific access info (model uses these to fetch)
-    path: Optional[str] = None           # For LOCAL type
+    path: Optional[str] = None           # For LOCAL type (original path from config)
+    resolved_path: Optional[str] = None  # For LOCAL type (absolute path resolved at load time)
     url: Optional[str] = None            # For URL type
     server: Optional[str] = None         # For MCP type
     tool: Optional[str] = None           # For MCP type
@@ -63,7 +64,12 @@ class ReferenceSource:
             parts.append(f"**Tags**: {', '.join(self.tags)}")
 
         if self.type == SourceType.LOCAL:
-            parts.append(f"**Location**: `{self.path}`")
+            # Show resolved (absolute) path if available, with original as reference
+            if self.resolved_path and self.resolved_path != self.path:
+                parts.append(f"**Location**: `{self.resolved_path}`")
+                parts.append(f"*(configured as: `{self.path}`)*")
+            else:
+                parts.append(f"**Location**: `{self.path}`")
             parts.append("**Access**: Read this file using the CLI tool")
         elif self.type == SourceType.URL:
             parts.append(f"**URL**: {self.url}")
@@ -93,6 +99,8 @@ class ReferenceSource:
 
         if self.path is not None:
             result["path"] = self.path
+        if self.resolved_path is not None:
+            result["resolved_path"] = self.resolved_path
         if self.url is not None:
             result["url"] = self.url
         if self.server is not None:
@@ -130,6 +138,7 @@ class ReferenceSource:
             type=source_type,
             mode=mode,
             path=data.get("path"),
+            resolved_path=data.get("resolved_path"),
             url=data.get("url"),
             server=data.get("server"),
             tool=data.get("tool"),
