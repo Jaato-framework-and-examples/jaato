@@ -4,12 +4,16 @@ Provides tools for reading, modifying, and managing files with
 integrated permission approval (showing diffs) and automatic backups.
 """
 
+import logging
 import os
 import shutil
 import tempfile
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from ..base import UserCommand, PermissionDisplayInfo
 from ..model_provider.types import ToolSchema
@@ -101,8 +105,8 @@ class FileEditPlugin:
                     agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
                     f.write(f"[{ts}] [FILE_EDIT{agent_prefix}] {msg}\n")
                     f.flush()
-            except (IOError, OSError):
-                pass
+            except (IOError, OSError) as exc:
+                logger.debug(f"Failed to write trace: {exc}")
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the file edit plugin.
@@ -280,9 +284,9 @@ class FileEditPlugin:
                 if content and not content.endswith("\n"):
                     f.write("\n")
                 f.write(".jaato\n")
-        except OSError:
-            # If we can't read/write gitignore, just skip
-            pass
+        except OSError as exc:
+            # If we can't read/write gitignore, just log and skip
+            logger.debug(f"Failed to update .gitignore: {exc}")
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for file editing tools."""
@@ -706,9 +710,10 @@ will show you a preview and require approval before execution. Backups are autom
         try:
             old_content = file_path.read_text()
         except OSError as e:
+            logger.warning(f"Failed to read file for update permission display: {path}", exc_info=True)
             return PermissionDisplayInfo(
                 summary=f"Update file: {path} (read error)",
-                details=f"Error reading file: {e}",
+                details=f"Error reading file: {e}\nTraceback: {traceback.format_exc()}",
                 format_hint="text"
             )
 
@@ -763,9 +768,10 @@ will show you a preview and require approval before execution. Backups are autom
         try:
             content = file_path.read_text()
         except OSError as e:
+            logger.warning(f"Failed to read file for delete permission display: {path}", exc_info=True)
             return PermissionDisplayInfo(
                 summary=f"Delete file: {path} (read error)",
-                details=f"Error reading file: {e}",
+                details=f"Error reading file: {e}\nTraceback: {traceback.format_exc()}",
                 format_hint="text"
             )
 

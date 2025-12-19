@@ -713,7 +713,8 @@ Tips:
 
             return False
 
-        except (OSError, PermissionError):
+        except (OSError, PermissionError) as exc:
+            logger.debug(f"Cannot read file {path} for binary check: {exc}")
             return True  # Can't read, treat as binary
 
     # --- StreamingCapable implementation ---

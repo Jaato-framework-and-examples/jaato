@@ -8,12 +8,16 @@ execution with support for:
 """
 
 import json
+import logging
 import os
 import subprocess
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 from shared.token_accounting import TokenLedger
 from shared.plugins.base import OutputCallback
@@ -246,7 +250,8 @@ class ToolExecutor:
                 try:
                     return _generic_executor(name, args, debug=False)
                 except Exception as exc:
-                    return False, {'error': str(exc)}
+                    logger.error(f"Generic executor failed for {name}", exc_info=True)
+                    return False, {'error': str(exc), 'traceback': traceback.format_exc()}
             return False, {'error': f'No executor registered for {name}'}
 
         try:
@@ -256,7 +261,8 @@ class ToolExecutor:
                 result = fn(args)
             return True, result
         except Exception as exc:
-            return False, {'error': str(exc)}
+            logger.error(f"Tool execution failed for {name}", exc_info=True)
+            return False, {'error': str(exc), 'traceback': traceback.format_exc()}
 
     def _execute_with_auto_background(
         self,
@@ -371,7 +377,8 @@ class ToolExecutor:
         debug = False
         try:
             debug = os.environ.get('AI_TOOL_RUNNER_DEBUG', '').lower() in ('1', 'true', 'yes')
-        except Exception:
+        except Exception as exc:
+            logger.debug(f"Error checking debug env var: {exc}")
             debug = False
 
         # Set thread-local callback for parallel execution support
@@ -427,6 +434,7 @@ class ToolExecutor:
                 if debug:
                     print(f"[ai_tool_runner] permission granted for {name}: {perm_info.get('reason', '')}")
             except Exception as perm_exc:
+                logger.error(f"Permission check failed for {name}", exc_info=True)
                 if debug:
                     print(f"[ai_tool_runner] permission check failed for {name}: {perm_exc}")
                 # Record permission error to ledger
@@ -435,9 +443,10 @@ class ToolExecutor:
                         'tool': name,
                         'args': args,
                         'error': str(perm_exc),
+                        'traceback': traceback.format_exc(),
                     })
                 # On permission check failure, deny by default for safety
-                return False, {'error': f'Permission check failed: {perm_exc}'}
+                return False, {'error': f'Permission check failed: {perm_exc}', 'traceback': traceback.format_exc()}
 
         # Check for auto-background capability
         if self._auto_background_enabled and self._registry:
@@ -453,6 +462,7 @@ class ToolExecutor:
                             name, args, bg_plugin, threshold, permission_meta
                         )
                 except Exception as e:
+                    logger.warning(f"Auto-background check failed for {name}", exc_info=True)
                     if debug:
                         print(f"[ai_tool_runner] auto-background check failed for {name}: {e}")
                     # Fall through to normal execution
@@ -488,9 +498,10 @@ class ToolExecutor:
                         res['_permission'] = permission_meta
                     return ok, res
                 except Exception as exc:
+                    logger.error(f"Generic executor failed for {name}", exc_info=True)
                     if debug:
                         print(f"[ai_tool_runner] generic executor failed for {name}: {exc}")
-                    return False, {'error': str(exc)}
+                    return False, {'error': str(exc), 'traceback': traceback.format_exc()}
             else:
                 return False, {'error': f'No executor registered for {name}'}
         try:
@@ -505,9 +516,10 @@ class ToolExecutor:
                 result['_permission'] = permission_meta
             return True, result
         except Exception as exc:
+            logger.error(f"Tool execution failed for {name}", exc_info=True)
             if debug:
                 print(f"[ai_tool_runner] execute: {name} raised {exc}")
-            return False, {'error': str(exc)}
+            return False, {'error': str(exc), 'traceback': traceback.format_exc()}
 
 
 def _generic_executor(name: str, args: Dict[str, Any], debug: bool = False) -> Tuple[bool, Any]:
@@ -532,7 +544,8 @@ def _generic_executor(name: str, args: Dict[str, Any], debug: bool = False) -> T
             out = proc.stdout or proc.stderr or ''
             return True, {'raw': out}
         except Exception as exc:
-            return False, {'error': str(exc)}
+            logger.error(f"Generic executor subprocess failed for {name}", exc_info=True)
+            return False, {'error': str(exc), 'traceback': traceback.format_exc()}
 
     # MCP client placeholder: look for 'mcp' prefix
     if lname.startswith('mcp') or lname.startswith('mcp_'):

@@ -1,11 +1,16 @@
-import os
-import time
-import random
-import json
 import datetime
-from typing import List, Dict, Any, Optional, TYPE_CHECKING
+import json
+import logging
+import os
+import random
 import ssl
+import time
+import traceback
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
+
 from .ssl_helper import log_ssl_guidance, is_ssl_cert_failure
+
+logger = logging.getLogger(__name__)
 
 from google.api_core import exceptions as google_exceptions
 
@@ -119,7 +124,7 @@ class TokenLedger:
                         err_cls = "Exception"
                     tag = "rate-limit" if classification["rate_limit"] else "transient"
                     exc_msg = str(exc)[:140].replace('\n', ' ')
-                    print(f"[AI Retry {attempt}/{max_attempts}] {tag}: {err_cls}: {exc_msg} | sleep {sleep_sec:.2f}s")
+                    logger.info(f"[AI Retry {attempt}/{max_attempts}] {tag}: {err_cls}: {exc_msg} | sleep {sleep_sec:.2f}s")
                 time.sleep(sleep_sec)
         usage = getattr(response, "usage_metadata", None)
         if usage:
@@ -173,7 +178,7 @@ class TokenLedger:
                     f.write(json.dumps(enriched) + "\n")
             return path
         except Exception as exc:
-            print(f"(Ledger write failed: {exc})")
+            logger.error(f"Ledger write failed: {exc}", exc_info=True)
             return None
 
     def events(self) -> List[Dict[str, Any]]:
