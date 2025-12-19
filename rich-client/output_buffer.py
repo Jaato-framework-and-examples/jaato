@@ -779,6 +779,9 @@ class OutputBuffer:
             elif line.source == "user":
                 # User input - use header line for turn start
                 if line.is_turn_start:
+                    # Add blank line before header for visual separation (if not first line)
+                    if i > 0:
+                        output.append("\n")
                     # Render header line: ── You ───────────────────
                     header_prefix = "── You "
                     remaining = max(0, wrap_width - len(header_prefix))
@@ -801,6 +804,9 @@ class OutputBuffer:
             elif line.source == "model":
                 # Model output - use header line for turn start
                 if line.is_turn_start:
+                    # Add blank line before header for visual separation (if not first line)
+                    if i > 0:
+                        output.append("\n")
                     # Render header line: ── Model ─────────────────
                     header_prefix = "── Model "
                     remaining = max(0, wrap_width - len(header_prefix))
