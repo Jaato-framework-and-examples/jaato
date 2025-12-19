@@ -194,3 +194,8 @@ class EnvironmentPlugin:
     def get_user_commands(self) -> List:
         """No user commands provided."""
         return []
+
+
+def create_plugin() -> EnvironmentPlugin:
+    """Factory function to create the environment plugin instance."""
+    return EnvironmentPlugin()
