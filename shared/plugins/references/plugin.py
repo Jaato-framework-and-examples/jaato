@@ -16,9 +16,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..model_provider.types import ToolSchema
 
-from .models import ReferenceSource, InjectionMode
+from .models import ReferenceSource, InjectionMode, SourceType
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
-from .config_loader import load_config, ReferencesConfig
+from .config_loader import load_config, ReferencesConfig, resolve_source_paths
 from ..base import UserCommand, CommandCompletion
 
 
@@ -112,6 +112,10 @@ class ReferencesPlugin:
                         print(f"Warning: Source ID '{s}' not found in master catalog")
                 else:
                     resolved_sources.append(s)
+
+            # Resolve relative paths for inline sources against provided base or CWD
+            inline_base_path = config.get("base_path", os.getcwd())
+            resolve_source_paths(resolved_sources, inline_base_path)
             self._sources = resolved_sources
         else:
             self._sources = self._config.sources
@@ -171,6 +175,12 @@ class ReferencesPlugin:
         # Trace logging for debugging
         channel_type = config.get("channel_type") or self._config.channel_type
         self._trace(f"initialize: sources={len(self._sources)}, channel={channel_type}")
+
+        # Log resolved paths for LOCAL sources
+        for source in self._sources:
+            if source.type == SourceType.LOCAL and source.resolved_path:
+                self._trace(f"initialize: resolved '{source.id}': {source.path} -> {source.resolved_path}")
+
         if self._selected_source_ids:
             self._trace(f"initialize: preselected={self._selected_source_ids}")
         if self._exclude_tools:
