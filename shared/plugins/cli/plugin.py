@@ -88,6 +88,8 @@ class CLIToolPlugin(BackgroundCapableMixin):
         self._max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS
         self._auto_background_threshold: float = DEFAULT_AUTO_BACKGROUND_THRESHOLD
         self._initialized = False
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
 
     @property
     def name(self) -> str:
@@ -103,7 +105,8 @@ class CLIToolPlugin(BackgroundCapableMixin):
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [CLI] {msg}\n")
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [CLI{agent_prefix}] {msg}\n")
                     f.flush()
             except (IOError, OSError):
                 pass
@@ -119,6 +122,8 @@ class CLIToolPlugin(BackgroundCapableMixin):
                 - background_max_workers: Max concurrent background tasks (default: 4)
         """
         if config:
+            # Extract agent name for trace logging
+            self._agent_name = config.get("agent_name")
             if 'extra_paths' in config:
                 paths = config['extra_paths']
                 if paths:

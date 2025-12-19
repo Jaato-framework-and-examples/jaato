@@ -83,6 +83,8 @@ class MCPToolPlugin:
         # Interaction log
         self._log: deque = deque(maxlen=MAX_LOG_ENTRIES)
         self._log_lock = threading.Lock()
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
 
     def _log_event(
         self,
@@ -124,7 +126,8 @@ class MCPToolPlugin:
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [MCP] {msg}\n")
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [MCP{agent_prefix}] {msg}\n")
                     f.flush()
             except (IOError, OSError):
                 pass
@@ -133,6 +136,9 @@ class MCPToolPlugin:
         """Initialize the MCP plugin by starting the background thread."""
         if self._initialized:
             return
+        # Extract agent name for trace logging
+        if config:
+            self._agent_name = config.get("agent_name")
         self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True
