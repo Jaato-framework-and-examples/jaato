@@ -42,6 +42,8 @@ class TodoPlugin:
         self._reporter: Optional[TodoReporter] = None
         self._initialized = False
         self._current_plan_id: Optional[str] = None
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
 
     @property
     def name(self) -> str:
@@ -57,7 +59,8 @@ class TodoPlugin:
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [TODO] {msg}\n")
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [TODO{agent_prefix}] {msg}\n")
                     f.flush()
             except (IOError, OSError):
                 pass
@@ -77,6 +80,9 @@ class TodoPlugin:
                    - storage_path: Path for file-based storage
         """
         config = config or {}
+
+        # Extract agent name for trace logging
+        self._agent_name = config.get("agent_name")
 
         # Try to load from file first
         config_path = config.get("config_path")

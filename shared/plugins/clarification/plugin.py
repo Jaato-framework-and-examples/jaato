@@ -34,6 +34,8 @@ class ClarificationPlugin:
     def __init__(self):
         self._initialized = False
         self._channel: Optional[ClarificationChannel] = None
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
         # Clarification lifecycle hooks for UI integration
         self._on_clarification_requested: Optional[Callable[[str, List[str]], None]] = None
         self._on_clarification_resolved: Optional[Callable[[str], None]] = None
@@ -55,7 +57,8 @@ class ClarificationPlugin:
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [CLARIFICATION] {msg}\n")
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [CLARIFICATION{agent_prefix}] {msg}\n")
                     f.flush()
             except (IOError, OSError):
                 pass
@@ -69,6 +72,8 @@ class ClarificationPlugin:
                 - channel_config: Dict of config for the channel
         """
         config = config or {}
+        # Extract agent name for trace logging
+        self._agent_name = config.get("agent_name")
         channel_type = config.get("channel_type", "console")
         channel_config = config.get("channel_config", {})
 

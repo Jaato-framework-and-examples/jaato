@@ -30,6 +30,8 @@ class WebSearchPlugin:
         self._safesearch: str = 'moderate'
         self._initialized = False
         self._ddgs = None
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
 
     @property
     def name(self) -> str:
@@ -45,7 +47,8 @@ class WebSearchPlugin:
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [WEB_SEARCH] {msg}\n")
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [WEB_SEARCH{agent_prefix}] {msg}\n")
                     f.flush()
             except (IOError, OSError):
                 pass
@@ -61,6 +64,8 @@ class WebSearchPlugin:
                 - safesearch: Safe search level (default: 'moderate')
         """
         if config:
+            # Extract agent name for trace logging
+            self._agent_name = config.get("agent_name")
             if 'max_results' in config:
                 self._max_results = config['max_results']
             if 'timeout' in config:

@@ -39,6 +39,8 @@ class FileEditPlugin:
     def __init__(self):
         self._backup_manager: Optional[BackupManager] = None
         self._initialized = False
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
 
     @property
     def name(self) -> str:
@@ -54,7 +56,8 @@ class FileEditPlugin:
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [FILE_EDIT] {msg}\n")
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [FILE_EDIT{agent_prefix}] {msg}\n")
                     f.flush()
             except (IOError, OSError):
                 pass
@@ -69,6 +72,9 @@ class FileEditPlugin:
                 - backup_dir: Custom backup directory (default: .jaato/backups)
         """
         config = config or {}
+
+        # Extract agent name for trace logging
+        self._agent_name = config.get("agent_name")
 
         # Initialize backup manager
         backup_dir = config.get("backup_dir")

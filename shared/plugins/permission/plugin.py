@@ -65,6 +65,8 @@ class PermissionPlugin:
         self._original_executors: Dict[str, Callable] = {}
         self._execution_log: List[Dict[str, Any]] = []
         self._allow_all: bool = False  # When True, auto-approve all requests
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
         # Permission lifecycle hooks for UI integration
         # on_requested: (tool_name, request_id, prompt_lines, response_options) -> None
         self._on_permission_requested: Optional[Callable[[str, str, List[str], List[PermissionResponseOption]], None]] = None
@@ -138,7 +140,8 @@ class PermissionPlugin:
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [PERMISSION] {msg}\n")
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [PERMISSION{agent_prefix}] {msg}\n")
                     f.flush()
             except (IOError, OSError):
                 pass
@@ -158,6 +161,9 @@ class PermissionPlugin:
         """
         # Load configuration
         config = config or {}
+
+        # Extract agent name for trace logging
+        self._agent_name = config.get("agent_name")
 
         # Try to load from file first
         config_path = config.get("config_path")
