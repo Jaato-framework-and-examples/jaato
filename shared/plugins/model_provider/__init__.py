@@ -34,8 +34,12 @@ Usage:
 # Plugin kind identifier for registry discovery
 PLUGIN_KIND = "model_provider"
 
+import logging
 import sys
+import traceback
 from typing import Callable, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 from .base import (
     ModelProviderPlugin,
@@ -77,7 +81,8 @@ def discover_providers() -> Dict[str, Callable[[], ModelProviderPlugin]]:
             from importlib.metadata import entry_points
             all_eps = entry_points()
             eps = all_eps.get(MODEL_PROVIDER_ENTRY_POINT, [])
-    except Exception:
+    except Exception as exc:
+        logger.debug(f"Failed to load entry points: {exc}")
         eps = []
 
     providers: Dict[str, Callable[[], ModelProviderPlugin]] = {}
@@ -85,9 +90,8 @@ def discover_providers() -> Dict[str, Callable[[], ModelProviderPlugin]]:
         try:
             factory = ep.load()
             providers[ep.name] = factory
-        except Exception:
-            # Skip providers that fail to load
-            pass
+        except Exception as exc:
+            logger.warning(f"Failed to load provider entry point '{ep.name}'", exc_info=True)
 
     # Also try to discover via directory scanning for development
     providers.update(_discover_via_directory())
@@ -138,7 +142,8 @@ def _discover_via_directory() -> Dict[str, Callable[[], ModelProviderPlugin]]:
                 try:
                     instance = factory()
                     providers[instance.name] = factory
-                except Exception:
+                except Exception as exc:
+                    logger.debug(f"Could not instantiate provider from {item.name}, using directory name: {exc}")
                     # Use directory name as fallback
                     providers[item.name] = factory
         except ImportError as e:

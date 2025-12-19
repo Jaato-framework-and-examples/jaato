@@ -5,12 +5,16 @@ This module provides validation to prevent:
 - Shell injection attacks (command chaining, variable expansion)
 """
 
+import logging
 import os
 import re
 import shlex
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 # Shell metacharacters that could enable injection attacks
@@ -157,6 +161,7 @@ def check_dangerous_command(command: str, config: SanitizationConfig) -> Sanitiz
 
     except ValueError as e:
         # shlex.split failed - malformed command
+        logger.debug(f"Malformed command detected during sanitization: {e}")
         violations.append(f"Malformed command: {e}")
 
     if violations:
@@ -182,8 +187,9 @@ def extract_paths_from_command(command: str) -> List[str]:
 
     try:
         parts = shlex.split(command)
-    except ValueError:
+    except ValueError as e:
         # Malformed command, return empty
+        logger.debug(f"Malformed command during path extraction: {e}")
         return paths
 
     for part in parts[1:]:  # Skip the command itself
@@ -224,6 +230,7 @@ def resolve_path(path: str, cwd: str) -> Tuple[bool, str]:
 
         return True, resolved
     except Exception as e:
+        logger.debug(f"Failed to resolve path '{path}': {e}")
         return False, str(e)
 
 
