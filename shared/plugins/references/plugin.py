@@ -468,6 +468,10 @@ class ReferencesPlugin:
         # Sources to fetch immediately = AUTO + pre-selected
         immediate_sources = auto_sources + preselected_sources
 
+        auto_ids = [s.id for s in auto_sources]
+        preselected_ids = [s.id for s in preselected_sources]
+        self._trace(f"get_system_instructions: auto={auto_ids}, preselected={preselected_ids}")
+
         if not immediate_sources:
             # Still provide info about selectable sources (if selectReferences is available)
             selectable = [
@@ -477,6 +481,7 @@ class ReferencesPlugin:
             ]
             # If selectReferences is excluded or no selectable sources, nothing to show
             if not selectable or "selectReferences" in self._exclude_tools:
+                self._trace("get_system_instructions: no sources to inject")
                 return None
 
             parts = [
@@ -498,6 +503,8 @@ class ReferencesPlugin:
                     sorted(set(tag for s in selectable for tag in s.tags))
                 ),
             ])
+            selectable_ids = [s.id for s in selectable]
+            self._trace(f"get_system_instructions: injecting selectable hints={selectable_ids}")
             return "\n".join(parts)
 
         parts = [
@@ -529,6 +536,8 @@ class ReferencesPlugin:
                     ", ".join(sorted(set(tag for s in selectable for tag in s.tags))),
                 ])
 
+        immediate_ids = [s.id for s in immediate_sources]
+        self._trace(f"get_system_instructions: injecting immediate sources={immediate_ids}")
         return "\n".join(parts)
 
     def get_auto_approved_tools(self) -> List[str]:
