@@ -16,6 +16,8 @@ The plugin persists state to a JSON file so artifacts survive session restarts.
 
 import json
 import os
+import tempfile
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from .models import (
@@ -85,6 +87,23 @@ class ArtifactTrackerPlugin:
         self._registry: Optional[ArtifactRegistry] = None
         self._storage_path: Optional[str] = None
         self._initialized = False
+        self._agent_name: Optional[str] = None
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [ARTIFACT_TRACKER{agent_prefix}] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
 
     @property
     def name(self) -> str:
@@ -99,6 +118,7 @@ class ArtifactTrackerPlugin:
                 - auto_load: Whether to load existing state (default: True)
         """
         config = config or {}
+        self._agent_name = config.get("agent_name")
 
         # Set storage path
         self._storage_path = config.get("storage_path", DEFAULT_STORAGE_PATH)
@@ -111,9 +131,11 @@ class ArtifactTrackerPlugin:
             self._load_state()
 
         self._initialized = True
+        self._trace(f"initialize: storage_path={self._storage_path}")
 
     def shutdown(self) -> None:
         """Shutdown the plugin and save state."""
+        self._trace("shutdown")
         if self._registry:
             self._save_state()
         self._registry = None
@@ -523,6 +545,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         related_to = args.get("related_to", [])
         tags = args.get("tags", [])
         notes = args.get("notes")
+        self._trace(f"trackArtifact: path={path}, type={type_str}")
 
         if not path:
             return {"error": "path is required"}
@@ -572,6 +595,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
     def _execute_update_artifact(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the updateArtifact tool."""
         path = args.get("path", "")
+        self._trace(f"updateArtifact: path={path}")
 
         if not path:
             return {"error": "path is required"}
@@ -629,6 +653,9 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
 
     def _execute_list_artifacts(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the listArtifacts tool."""
+        type_filter = args.get("artifact_type")
+        needs_review = args.get("needs_review", False)
+        self._trace(f"listArtifacts: type_filter={type_filter}, needs_review={needs_review}")
         if not self._registry:
             return {"error": "Plugin not initialized"}
 
@@ -636,7 +663,6 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         artifacts = self._registry.get_all()
 
         # Apply filters
-        type_filter = args.get("artifact_type")
         if type_filter:
             try:
                 artifact_type = ArtifactType(type_filter)
@@ -674,6 +700,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         """Execute the flagForReview tool."""
         path = args.get("path", "")
         reason = args.get("reason", "")
+        self._trace(f"flagForReview: path={path}")
 
         if not path:
             return {"error": "path is required"}
@@ -710,6 +737,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         paths_array = args.get("paths", [])
         notes = args.get("notes")
         was_updated = args.get("was_updated", False)
+        self._trace(f"acknowledgeReview: path={single_path}, paths_count={len(paths_array)}")
 
         # Build list of paths to acknowledge
         paths_to_ack = []
@@ -776,6 +804,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         """Execute the checkRelated tool."""
         path = args.get("path", "")
         verbose = args.get("verbose", True)  # Default to verbose for discoverability
+        self._trace(f"checkRelated: path={path}")
 
         if not path:
             return {"error": "path is required"}
@@ -840,6 +869,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         """
         single_path = args.get("path", "")
         paths_array = args.get("paths", [])
+        self._trace(f"removeArtifact: path={single_path}, paths_count={len(paths_array)}")
 
         # Build list of paths to remove
         paths_to_remove = []
@@ -902,6 +932,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         """
         path = args.get("path", "")
         reason = args.get("reason", "")
+        self._trace(f"notifyChange: path={path}")
 
         if not path:
             return {"error": "path is required"}
