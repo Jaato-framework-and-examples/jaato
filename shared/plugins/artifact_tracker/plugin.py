@@ -28,8 +28,8 @@ from ..model_provider.types import ToolSchema
 from ..base import UserCommand
 
 
-# Default storage location
-DEFAULT_STORAGE_PATH = ".artifact_tracker.json"
+# Default storage location (inside .jaato directory)
+DEFAULT_STORAGE_PATH = ".jaato/.artifact_tracker.json"
 
 
 def _normalize_path(path: str) -> str:
@@ -138,6 +138,10 @@ class ArtifactTrackerPlugin:
             return
 
         try:
+            # Ensure parent directory exists
+            storage_path = os.path.abspath(self._storage_path)
+            os.makedirs(os.path.dirname(storage_path), exist_ok=True)
+
             with open(self._storage_path, 'w') as f:
                 json.dump(self._registry.to_dict(), f, indent=2)
         except IOError as e:
