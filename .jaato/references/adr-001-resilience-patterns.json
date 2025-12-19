@@ -1,9 +1,0 @@
-{
-  "id": "adr-001-resilience-patterns",
-  "name": "ADR-001: Resilience Patterns",
-  "description": "Strategic decision on resilience patterns: circuit breaker, retry, timeout, bulkhead",
-  "type": "local",
-  "path": "./docs/adr/ADR-001-resilience-patterns.md",
-  "mode": "selectable",
-  "tags": ["ADR-001", "adr", "resilience", "patterns", "code", "java"]
-}
