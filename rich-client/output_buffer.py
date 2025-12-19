@@ -195,8 +195,9 @@ class OutputBuffer:
         """Flush the current block to lines."""
         if self._current_block:
             source, parts, is_new_turn = self._current_block
-            # Join parts with newlines - each append is a separate line
-            full_text = '\n'.join(parts)
+            # Concatenate streaming chunks directly (no separator)
+            # Then split by newlines for display
+            full_text = ''.join(parts)
             lines = full_text.split('\n')
             for i, line in enumerate(lines):
                 # Only first line of a new turn gets the prefix
