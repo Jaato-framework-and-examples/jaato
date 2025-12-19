@@ -4,10 +4,10 @@
   "plugins": ["cli", "file_edit", "references"],
   "plugin_configs": {
     "references": {
-      "sources": ["skill-001-circuit-breaker-java-resilience4j", "skill-020-microservice-java-spring"]
+      "sources": ["enablement-consumer-prompt", "skill-001-circuit-breaker-java-resilience4j", "skill-020-microservice-java-spring"]
     }
   },
-  "system_instructions": "Verify implementation matches skill specifications and module templates. Report compliance score and deviations.",
+  "system_instructions": "First read enablement-consumer-prompt for validation framework. Verify implementation matches skill specifications and module templates.",
   "max_turns": 15,
   "auto_approved": true,
   "icon_name": "validator"

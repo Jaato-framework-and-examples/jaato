@@ -1,9 +1,13 @@
 {
   "name": "validator-tier2-java-spring",
   "description": "[Tier 2 - Technology] Java/Spring specific quality checks. RUN WHEN: Code is Java/Spring. RUN AFTER: Tier 1 passes. CHECKS: Maven/Gradle build, Checkstyle, SpotBugs, OWASP dependency-check.",
-  "plugins": ["cli"],
-  "plugin_configs": {},
-  "system_instructions": "Run Java/Spring quality checks: build validation, static analysis, dependency vulnerability scan.",
+  "plugins": ["cli", "references"],
+  "plugin_configs": {
+    "references": {
+      "sources": ["enablement-consumer-prompt"]
+    }
+  },
+  "system_instructions": "First read enablement-consumer-prompt for validation framework. Run Java/Spring quality checks: build, static analysis, dependency scan.",
   "max_turns": 10,
   "auto_approved": true,
   "icon_name": "validator"
