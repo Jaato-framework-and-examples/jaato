@@ -275,6 +275,33 @@ def tool_results_to_sdk_parts(results: List[ToolResult]) -> List[types.Part]:
 
 # ==================== Streaming Helpers ====================
 
+def extract_text_from_chunk(chunk) -> Optional[str]:
+    """Extract text from a streaming chunk without triggering SDK warnings.
+
+    The SDK's chunk.text accessor prints warnings when there are non-text
+    parts (like function calls). This function safely extracts text by
+    iterating through parts directly.
+
+    Args:
+        chunk: A streaming chunk from send_message_stream.
+
+    Returns:
+        Text content if present, None otherwise.
+    """
+    if not chunk or not hasattr(chunk, 'candidates') or not chunk.candidates:
+        return None
+
+    texts = []
+    for candidate in chunk.candidates:
+        if hasattr(candidate, 'content') and candidate.content:
+            for part in (candidate.content.parts or []):
+                # Check for text attribute directly, avoid using chunk.text
+                if hasattr(part, 'text') and part.text:
+                    texts.append(part.text)
+
+    return ''.join(texts) if texts else None
+
+
 def function_call_from_sdk(fc) -> Optional[FunctionCall]:
     """Convert SDK FunctionCall to internal FunctionCall.
 

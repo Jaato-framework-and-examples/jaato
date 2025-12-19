@@ -34,6 +34,7 @@ from ..types import (
     Part,
 )
 from .converters import (
+    extract_text_from_chunk,
     history_from_sdk,
     history_to_sdk,
     message_from_sdk,
@@ -849,10 +850,11 @@ class GoogleGenAIProvider:
                     finish_reason = FinishReason.CANCELLED
                     break
 
-                # Extract text from chunk
-                if chunk.text:
-                    accumulated_text.append(chunk.text)
-                    on_chunk(chunk.text)
+                # Extract text from chunk safely (avoids SDK warning about non-text parts)
+                chunk_text = extract_text_from_chunk(chunk)
+                if chunk_text:
+                    accumulated_text.append(chunk_text)
+                    on_chunk(chunk_text)
 
                 # Extract function calls if present
                 if hasattr(chunk, 'candidates') and chunk.candidates:
@@ -960,10 +962,11 @@ class GoogleGenAIProvider:
                     finish_reason = FinishReason.CANCELLED
                     break
 
-                # Extract text from chunk
-                if chunk.text:
-                    accumulated_text.append(chunk.text)
-                    on_chunk(chunk.text)
+                # Extract text from chunk safely (avoids SDK warning about non-text parts)
+                chunk_text = extract_text_from_chunk(chunk)
+                if chunk_text:
+                    accumulated_text.append(chunk_text)
+                    on_chunk(chunk_text)
 
                 # Extract function calls if present
                 if hasattr(chunk, 'candidates') and chunk.candidates:
