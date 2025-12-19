@@ -205,6 +205,32 @@ class OutputBuffer:
             self._last_source = source
             self._current_block = None
 
+    def _get_current_block_lines(self) -> List[OutputLine]:
+        """Get lines from current block without flushing it.
+
+        This allows render() to display streaming content without
+        breaking the append chain.
+        """
+        if not self._current_block:
+            return []
+
+        source, parts, is_new_turn = self._current_block
+        # Concatenate streaming chunks directly (no separator)
+        full_text = ''.join(parts)
+        lines_text = full_text.split('\n')
+
+        result = []
+        for i, line_text in enumerate(lines_text):
+            display_lines = self._calculate_display_lines(line_text)
+            result.append(OutputLine(
+                source=source,
+                text=line_text,
+                style="line",
+                display_lines=display_lines,
+                is_turn_start=(i == 0 and is_new_turn)
+            ))
+        return result
+
     def add_system_message(self, message: str, style: str = "dim") -> None:
         """Add a system message to the buffer.
 
@@ -708,10 +734,11 @@ class OutputBuffer:
         Returns:
             Rich renderable for the output panel.
         """
-        self._flush_current_block()
+        # Get current block lines without flushing (preserves streaming state)
+        current_block_lines = self._get_current_block_lines()
 
         # If buffer is empty but spinner is active, show only spinner
-        if not self._lines:
+        if not self._lines and not current_block_lines:
             if self._spinner_active:
                 output = Text()
                 frame = self.SPINNER_FRAMES[self._spinner_index]
@@ -726,7 +753,8 @@ class OutputBuffer:
 
         # Work backwards from the end, using stored display line counts
         # First skip _scroll_offset lines, then collect 'height' lines
-        all_lines = list(self._lines)
+        # Include current block lines (streaming content) at the end
+        all_lines = list(self._lines) + current_block_lines
         lines_to_show: List[OutputLine] = []
 
         if height:
