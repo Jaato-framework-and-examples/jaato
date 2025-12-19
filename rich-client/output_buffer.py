@@ -313,9 +313,9 @@ class OutputBuffer:
         self._active_tools.clear()
 
     def finalize_tool_tree(self) -> None:
-        """Convert tool tree to regular scrollable lines.
+        """Convert tool tree to a collapsed summary line.
 
-        Called when a turn is complete to make the tool tree scroll
+        Called when a turn is complete to make the tool summary scroll
         with the rest of the content instead of staying fixed.
         """
         if not self._active_tools:
@@ -331,58 +331,19 @@ class OutputBuffer:
         if not all_completed or any_pending:
             return  # Don't finalize yet
 
-        # Build the tool tree as text lines (no header - tools appear inline)
-        # Add blank line for visual separation
-        lines = [("", "")]
+        # Build collapsed summary: "  ▸ 3 tools: createPlan ✓ startPlan ✓ updateStep ✓"
+        tool_count = len(self._active_tools)
+        tool_summaries = []
 
-        for i, tool in enumerate(self._active_tools):
-            is_last = (i == len(self._active_tools) - 1)
-            prefix = "└─" if is_last else "├─"
-
-            # Build tool line
+        for tool in self._active_tools:
             status_icon = "✓" if tool.success else "✗"
-            status_style = "green" if tool.success else "red"
-            line_parts = [f"  {prefix} {status_icon} {tool.name}"]
+            tool_summaries.append(f"{tool.name} {status_icon}")
 
-            # Add args summary (truncated) before duration
-            if tool.args_summary and tool.args_summary != "{}":
-                line_parts.append(f" {tool.args_summary}")
+        summary_line = f"  ▸ {tool_count} tool{'s' if tool_count != 1 else ''}: " + " ".join(tool_summaries)
 
-            if tool.duration_seconds is not None:
-                line_parts.append(f" ({tool.duration_seconds:.2f}s)")
-
-            # Add permission result
-            if tool.permission_state in ("granted", "denied"):
-                if tool.permission_state == "granted":
-                    method_label = tool.permission_method or "allowed"
-                    if method_label == "whitelist":
-                        line_parts.append(" ✓ auto-approved (whitelist)")
-                    else:
-                        line_parts.append(f" ✓ allowed ({method_label})")
-                else:
-                    method_label = tool.permission_method or "denied"
-                    if method_label == "blacklist":
-                        line_parts.append(" ✗ blocked (blacklist)")
-                    else:
-                        line_parts.append(f" ✗ denied ({method_label})")
-
-            # Add clarification result
-            if tool.clarification_state == "resolved":
-                line_parts.append(" ✓ answered")
-
-            lines.append(("".join(line_parts), ""))
-
-            # Add error message if failed
-            if not tool.success and tool.error_message:
-                continuation = "   " if is_last else "│  "
-                error_msg = tool.error_message
-                if len(error_msg) > 60:
-                    error_msg = error_msg[:57] + "..."
-                lines.append((f"  {continuation}  ⚠ {error_msg}", "dim red"))
-
-        # Add lines to buffer as system messages (they'll scroll normally)
-        for text, style in lines:
-            self._add_line("system", text, style or "")
+        # Add blank line for visual separation, then the summary
+        self._add_line("system", "", "")
+        self._add_line("system", summary_line, "dim")
 
         # Clear active tools so they don't render separately anymore
         self._active_tools.clear()
@@ -905,90 +866,53 @@ class OutputBuffer:
                         output.append(" " * (len(f"[{line.source}] ")))  # Indent continuation
                     output.append_text(Text.from_ansi(wrapped_line))
 
-        # Add tool call tree (after regular lines, before deferred lines)
+        # Add tool call summary (after regular lines)
         if self._active_tools:
             if lines_to_show:
                 output.append("\n\n")  # Extra blank line for visual separation
 
             # Check if waiting for user input (permission or clarification)
-            awaiting_input = any(
-                tool.permission_state == "pending" or tool.clarification_state == "pending"
-                for tool in self._active_tools
-            )
+            pending_tool = None
+            for tool in self._active_tools:
+                if tool.permission_state == "pending" or tool.clarification_state == "pending":
+                    pending_tool = tool
+                    break
 
-            # Show inline status indicator (no "Model>" prefix)
-            # Awaiting user input takes precedence over other states
-            if awaiting_input:
-                # Waiting for user response
+            # Build collapsed summary line
+            tool_summaries = []
+            for tool in self._active_tools:
+                if tool.completed:
+                    status_icon = "✓" if tool.success else "✗"
+                else:
+                    status_icon = "○"
+                tool_summaries.append(f"{tool.name} {status_icon}")
+
+            tool_count = len(self._active_tools)
+
+            if pending_tool:
+                # Waiting for user response - show awaiting indicator
                 output.append("  ⏳ ", style="bold yellow")
-                output.append("Awaiting input...", style="dim italic")
+                output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
+                output.append(" ".join(tool_summaries), style="dim")
             elif self._spinner_active:
-                # Model is processing - show compact indicator
+                # Model is processing - show spinner with summary
                 frame = self.SPINNER_FRAMES[self._spinner_index]
                 output.append(f"  {frame} ", style="cyan")
-                output.append("processing...", style="dim italic")
-            # No header when all tools completed - just show the tool tree
+                output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
+                output.append(" ".join(tool_summaries), style="dim")
+            else:
+                # All completed - show collapsed summary
+                output.append("  ▸ ", style="dim")
+                output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
+                output.append(" ".join(tool_summaries), style="dim")
 
-            # Show tool calls below status indicator
-            for i, tool in enumerate(self._active_tools):
-                output.append("\n")
-                is_last = (i == len(self._active_tools) - 1)
-                prefix = "└─" if is_last else "├─"
-                continuation = "   " if is_last else "│  "
-                output.append(f"  {prefix} ", style="dim")
+            # Show permission/clarification prompt for pending tool (expanded)
+            if pending_tool:
+                continuation = "   "  # No tree structure needed
 
-                if tool.completed:
-                    # Completed tool - show with checkmark and duration
-                    status_icon = "✓" if tool.success else "✗"
-                    status_style = "green" if tool.success else "red"
-                    output.append(f"{status_icon} ", style=status_style)
-                    output.append(tool.name, style="dim yellow")
-                    # Add args summary (truncated) before duration
-                    if tool.args_summary and tool.args_summary != "{}":
-                        output.append(f" {tool.args_summary}", style="dim")
-                    if tool.duration_seconds is not None:
-                        output.append(f" ({tool.duration_seconds:.2f}s)", style="dim")
-                    # Add collapsed permission result on same line
-                    if tool.permission_state in ("granted", "denied"):
-                        output.append(" ", style="dim")
-                        if tool.permission_state == "granted":
-                            output.append("✓ ", style="green")
-                            method_label = tool.permission_method or "allowed"
-                            if method_label == "whitelist":
-                                output.append("auto-approved (whitelist)", style="dim green")
-                            else:
-                                output.append(f"allowed ({method_label})", style="dim green")
-                        else:
-                            output.append("✗ ", style="red")
-                            method_label = tool.permission_method or "denied"
-                            if method_label == "blacklist":
-                                output.append("blocked (blacklist)", style="dim red")
-                            else:
-                                output.append(f"denied ({method_label})", style="dim red")
-                    # Add collapsed clarification result on same line
-                    if tool.clarification_state == "resolved":
-                        output.append(" ", style="dim")
-                        output.append("✓ ", style="cyan")
-                        output.append("answered", style="dim cyan")
-                    # Show error message on next line for failed tools
-                    if not tool.success and tool.error_message:
-                        output.append("\n")
-                        output.append(f"  {continuation}  ", style="dim")
-                        output.append("⚠ ", style="red")
-                        # Truncate error message if too long
-                        error_msg = tool.error_message
-                        if len(error_msg) > 60:
-                            error_msg = error_msg[:57] + "..."
-                        output.append(error_msg, style="dim red")
-                else:
-                    # Active tool - show with spinner indicator
-                    output.append("○ ", style="yellow")
-                    output.append(tool.name, style="yellow")
-                    if tool.args_summary and tool.args_summary != "{}":
-                        output.append(f" {tool.args_summary}", style="dim")
-
-                # Show permission info under this tool (only when pending)
-                if tool.permission_state == "pending" and tool.permission_prompt_lines:
+                # Show permission info (only when pending)
+                if pending_tool.permission_state == "pending" and pending_tool.permission_prompt_lines:
+                    tool = pending_tool
                     # Expanded permission prompt
                     output.append("\n")
                     output.append(f"  {continuation}     ", style="dim")
@@ -1069,8 +993,9 @@ class OutputBuffer:
                     output.append("\n")
                     output.append(f"  {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
 
-                # Show clarification info under this tool
-                if tool.clarification_state == "pending":
+                # Show clarification info for pending tool
+                if pending_tool.clarification_state == "pending":
+                    tool = pending_tool
                     # Show header with progress
                     output.append("\n")
                     output.append(f"  {continuation}     ", style="dim")
