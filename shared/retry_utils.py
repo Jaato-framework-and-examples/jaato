@@ -30,7 +30,10 @@ import os
 import random
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .plugins.model_provider.types import CancelToken
 
 # Type alias for retry callback - client provides this to handle retry notifications
 # Signature: (message: str, attempt: int, max_attempts: int, delay: float) -> None
@@ -180,11 +183,48 @@ def calculate_backoff(
     return delay
 
 
+def interruptible_sleep(
+    delay: float,
+    cancel_token: Optional['CancelToken'] = None,
+    poll_interval: float = 0.1
+) -> bool:
+    """Sleep for the specified delay, but can be interrupted by cancellation.
+
+    Args:
+        delay: Seconds to sleep.
+        cancel_token: Optional CancelToken to check for cancellation.
+        poll_interval: How often to check for cancellation (default 0.1s).
+
+    Returns:
+        True if sleep completed normally, False if cancelled.
+
+    Raises:
+        CancelledException: If cancel_token is set and cancellation is requested.
+    """
+    if cancel_token is None:
+        # No cancellation token, just do normal sleep
+        time.sleep(delay)
+        return True
+
+    # Sleep in small increments, checking for cancellation
+    end_time = time.monotonic() + delay
+    while time.monotonic() < end_time:
+        if cancel_token.is_cancelled:
+            # Import here to avoid circular import
+            from .plugins.model_provider.types import CancelledException
+            raise CancelledException("Cancelled during retry backoff")
+        remaining = end_time - time.monotonic()
+        time.sleep(min(poll_interval, max(0, remaining)))
+
+    return True
+
+
 def with_retry(
     fn: Callable[[], T],
     config: Optional[RetryConfig] = None,
     context: str = "API call",
     on_retry: Optional[RetryCallback] = None,
+    cancel_token: Optional['CancelToken'] = None,
 ) -> Tuple[T, RetryStats]:
     """Execute a function with automatic retry on transient errors.
 
@@ -196,12 +236,15 @@ def with_retry(
             Signature: (message: str, attempt: int, max_attempts: int, delay: float) -> None
             If provided, retry messages go through this callback.
             If not provided, messages are printed to console (unless config.silent).
+        cancel_token: Optional CancelToken to check for cancellation.
+            If cancelled, raises CancelledException.
 
     Returns:
         Tuple of (result, RetryStats).
 
     Raises:
         The last exception if all retries are exhausted or error is non-transient.
+        CancelledException: If cancel_token is set and cancellation is requested.
 
     Example:
         # Simple client - uses console output (default)
@@ -216,6 +259,14 @@ def with_retry(
             context="send_message",
             on_retry=lambda msg, att, max_att, delay: queue.put(msg)
         )
+
+        # With cancellation support
+        token = CancelToken()
+        response, stats = with_retry(
+            lambda: provider.send_message(message),
+            context="send_message",
+            cancel_token=token
+        )
     """
     if config is None:
         config = RetryConfig()
@@ -226,11 +277,21 @@ def with_retry(
     for attempt in range(1, config.max_attempts + 1):
         stats.attempts = attempt
 
+        # Check for cancellation before each attempt
+        if cancel_token and cancel_token.is_cancelled:
+            from .plugins.model_provider.types import CancelledException
+            raise CancelledException("Cancelled before retry attempt")
+
         try:
             result = fn()
             return result, stats
 
         except Exception as exc:
+            # Check if this is a CancelledException - don't retry those
+            exc_name = exc.__class__.__name__
+            if exc_name == 'CancelledException':
+                raise
+
             last_exc = exc
             stats.last_error = exc
 
@@ -241,7 +302,7 @@ def with_retry(
             stats.errors.append({
                 "attempt": attempt,
                 "error": str(exc)[:200],
-                "error_type": exc.__class__.__name__,
+                "error_type": exc_name,
                 **classification,
             })
 
@@ -260,7 +321,7 @@ def with_retry(
             stats.total_delay += delay
 
             # Build retry message
-            err_cls = exc.__class__.__name__
+            err_cls = exc_name
             tag = "rate-limit" if classification["rate_limit"] else "transient"
             exc_msg = str(exc)[:140].replace('\n', ' ')
             msg = f"[AI Retry {attempt}/{config.max_attempts}] {context} ({tag}): {err_cls}: {exc_msg} | sleep {delay:.2f}s"
@@ -273,7 +334,8 @@ def with_retry(
                 # Default: print to console (unless silent)
                 print(msg)
 
-            time.sleep(delay)
+            # Use interruptible sleep that respects cancellation
+            interruptible_sleep(delay, cancel_token)
 
     # Should not reach here, but just in case
     if last_exc:
@@ -358,5 +420,6 @@ __all__ = [
     'classify_error',
     'calculate_backoff',
     'get_retry_after',
+    'interruptible_sleep',
     'with_retry',
 ]

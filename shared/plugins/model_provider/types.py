@@ -7,9 +7,10 @@ These types are used throughout the plugin system and JaatoClient to enable
 support for multiple AI providers (Google GenAI, Anthropic, etc.).
 """
 
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 
 class Role(str, Enum):
@@ -171,6 +172,7 @@ class FinishReason(str, Enum):
     TOOL_USE = "tool_use"      # Stopped to execute tools
     SAFETY = "safety"          # Safety filter triggered
     ERROR = "error"            # Error occurred
+    CANCELLED = "cancelled"    # Cancelled via CancelToken
     UNKNOWN = "unknown"        # Unknown reason
 
 
@@ -206,3 +208,128 @@ class ProviderResponse:
     def has_structured_output(self) -> bool:
         """Check if the response contains structured output."""
         return self.structured_output is not None
+
+
+class CancelledException(Exception):
+    """Raised when an operation is cancelled via CancelToken."""
+
+    def __init__(self, message: str = "Operation was cancelled"):
+        self.message = message
+        super().__init__(self.message)
+
+
+class CancelToken:
+    """Thread-safe cancellation token for stopping operations.
+
+    Used to signal cancellation requests across threads. Supports:
+    - Simple cancellation via cancel()
+    - Polling via is_cancelled property
+    - Blocking wait via wait()
+    - Callback registration for cancellation notifications
+
+    Example:
+        token = CancelToken()
+
+        # In worker thread
+        def work():
+            while not token.is_cancelled:
+                do_work_chunk()
+
+        # In main thread
+        token.cancel()  # Signals worker to stop
+
+    Thread Safety:
+        All methods are thread-safe and can be called from any thread.
+    """
+
+    def __init__(self):
+        """Initialize a new cancel token."""
+        self._cancelled = False
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._callbacks: List[Callable[[], None]] = []
+
+    def cancel(self) -> None:
+        """Request cancellation.
+
+        This is idempotent - calling cancel() multiple times has no effect
+        after the first call. All registered callbacks are invoked once.
+        """
+        with self._lock:
+            if self._cancelled:
+                return
+            self._cancelled = True
+            callbacks = list(self._callbacks)
+
+        # Set event to wake up any waiters
+        self._event.set()
+
+        # Invoke callbacks outside lock to avoid deadlock
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                pass  # Swallow callback errors
+
+    @property
+    def is_cancelled(self) -> bool:
+        """Check if cancellation has been requested.
+
+        Returns:
+            True if cancel() has been called, False otherwise.
+        """
+        return self._cancelled
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Wait for cancellation or timeout.
+
+        Blocks until cancel() is called or timeout expires.
+
+        Args:
+            timeout: Maximum seconds to wait. None means wait forever.
+
+        Returns:
+            True if cancelled, False if timeout expired.
+        """
+        return self._event.wait(timeout=timeout)
+
+    def raise_if_cancelled(self) -> None:
+        """Raise CancelledException if cancelled.
+
+        Convenience method for checking cancellation at safe points.
+
+        Raises:
+            CancelledException: If cancel() has been called.
+        """
+        if self._cancelled:
+            raise CancelledException()
+
+    def on_cancel(self, callback: Callable[[], None]) -> None:
+        """Register a callback to be invoked when cancelled.
+
+        If already cancelled, callback is invoked immediately.
+
+        Args:
+            callback: Function to call when cancellation is requested.
+        """
+        with self._lock:
+            if self._cancelled:
+                # Already cancelled, invoke immediately
+                try:
+                    callback()
+                except Exception:
+                    pass
+                return
+            self._callbacks.append(callback)
+
+    def reset(self) -> None:
+        """Reset the token for reuse.
+
+        Warning: This is not safe if the token is still being used
+        by other threads. Only call this when you're certain no
+        other code is using this token.
+        """
+        with self._lock:
+            self._cancelled = False
+            self._event.clear()
+            self._callbacks.clear()
