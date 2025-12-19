@@ -91,14 +91,23 @@ def discover_references(
 
             source = ReferenceSource.from_dict(data)
 
-            # Resolve relative paths against the reference file's directory
+            # Resolve relative paths for LOCAL sources
             # Make paths relative to project root (where agent operates)
             if source.type == SourceType.LOCAL and source.path:
                 source_path = Path(source.path)
                 if source_path.is_absolute():
                     absolute_path = source_path.resolve()
                 else:
-                    absolute_path = (file_path.parent / source_path).resolve()
+                    # Check if path is project-relative (starts with .jaato/)
+                    # These should be resolved against project_root, not file_path.parent
+                    path_str = str(source_path)
+                    if path_str.startswith('.jaato/') or path_str.startswith('./.jaato/'):
+                        # Strip leading ./ if present for clean join
+                        clean_path = path_str[2:] if path_str.startswith('./') else path_str
+                        absolute_path = (Path(project_root) / clean_path).resolve()
+                    else:
+                        # Regular relative path - resolve against reference file's directory
+                        absolute_path = (file_path.parent / source_path).resolve()
                 # Convert to project-root-relative path
                 try:
                     source.resolved_path = os.path.relpath(absolute_path, project_root)
@@ -198,7 +207,15 @@ def resolve_source_paths(
         if source_path.is_absolute():
             absolute_path = source_path.resolve()
         else:
-            absolute_path = (base / source_path).resolve()
+            # Check if path is project-relative (starts with .jaato/)
+            # These should be resolved against cwd (project root), not base_path
+            path_str = str(source_path)
+            if cwd and (path_str.startswith('.jaato/') or path_str.startswith('./.jaato/')):
+                # Strip leading ./ if present for clean join
+                clean_path = path_str[2:] if path_str.startswith('./') else path_str
+                absolute_path = (cwd / clean_path).resolve()
+            else:
+                absolute_path = (base / source_path).resolve()
 
         # Make relative to CWD if requested
         if cwd:
