@@ -185,6 +185,7 @@ async for event in client.events():
   - `base.py`: `ModelProviderPlugin` protocol definition
   - `google_genai/`: Google GenAI/Vertex AI implementation
   - `github_models/`: GitHub Models API implementation (uses `azure-ai-inference` SDK)
+  - `anthropic/`: Anthropic Claude implementation (uses `anthropic` SDK)
 
 - **mcp_context_manager.py**: Multi-server MCP client manager
   - `MCPClientManager`: Manages persistent connections to multiple MCP servers
@@ -418,6 +419,18 @@ Key types in `shared/plugins/model_provider/types.py`:
 | `JAATO_GITHUB_ORGANIZATION` | Organization for billing attribution |
 | `JAATO_GITHUB_ENTERPRISE` | Enterprise name (for context) |
 | `JAATO_GITHUB_ENDPOINT` | Override API endpoint URL |
+
+### Anthropic Claude
+| Variable | Purpose |
+|----------|---------|
+| `ANTHROPIC_API_KEY` | Anthropic API key (required) |
+
+Configuration options via `ProviderConfig.extra`:
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enable_caching` | bool | False | Enable prompt caching (90% cost reduction) |
+| `enable_thinking` | bool | False | Enable extended thinking (reasoning traces) |
+| `thinking_budget` | int | 10000 | Max thinking tokens when enabled |
 
 ### General
 | Variable | Purpose |
