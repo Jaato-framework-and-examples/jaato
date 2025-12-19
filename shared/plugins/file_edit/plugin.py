@@ -98,7 +98,9 @@ class FileEditPlugin:
         return [
             ToolSchema(
                 name="readFile",
-                description="Read the contents of a file. Returns the file content as text.",
+                description="Read the contents of a file. ALWAYS use this instead of `cat`, `head`, "
+                           "`tail`, or `less` CLI commands. Returns file content as text with proper "
+                           "encoding handling and structured metadata.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -204,8 +206,16 @@ class FileEditPlugin:
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for file editing tools."""
-        return """You have access to file editing tools:
+        return """You have access to file editing tools.
 
+IMPORTANT: Always prefer these tools over CLI commands:
+- Use `readFile` instead of `cat`, `head`, `tail`, or `less`
+- Use `updateFile`/`writeNewFile` instead of `echo >`, `sed`, or heredocs
+- Use `removeFile` instead of `rm`
+
+These tools provide structured output, automatic backups, and proper encoding handling.
+
+Tools available:
 - `readFile(path)`: Read file contents. Safe operation, no approval needed.
 - `updateFile(path, new_content)`: Update an existing file. Shows diff for approval and creates backup.
 - `writeNewFile(path, content)`: Create a new file. Shows content for approval. Fails if file exists.
