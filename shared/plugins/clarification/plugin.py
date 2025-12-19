@@ -1,5 +1,8 @@
 """Clarification plugin for requesting user input with multiple questions and choices."""
 
+import os
+import tempfile
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from ..model_provider.types import ToolSchema
@@ -42,6 +45,21 @@ class ClarificationPlugin:
     def name(self) -> str:
         return "clarification"
 
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [CLARIFICATION] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the plugin with configuration.
 
@@ -56,9 +74,11 @@ class ClarificationPlugin:
 
         self._channel = create_channel(channel_type, **channel_config)
         self._initialized = True
+        self._trace(f"initialize: channel={channel_type}")
 
     def shutdown(self) -> None:
         """Clean up plugin resources."""
+        self._trace("shutdown: cleaning up")
         self._channel = None
         self._initialized = False
 

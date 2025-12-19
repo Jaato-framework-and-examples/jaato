@@ -4,6 +4,9 @@ Provides tools for reading, modifying, and managing files with
 integrated permission approval (showing diffs) and automatic backups.
 """
 
+import os
+import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -41,6 +44,21 @@ class FileEditPlugin:
     def name(self) -> str:
         return "file_edit"
 
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [FILE_EDIT] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the file edit plugin.
 
@@ -63,9 +81,12 @@ class FileEditPlugin:
         self._ensure_gitignore()
 
         self._initialized = True
+        backup_dir = str(self._backup_manager._backup_dir) if self._backup_manager else "none"
+        self._trace(f"initialize: backup_dir={backup_dir}")
 
     def shutdown(self) -> None:
         """Shutdown the plugin."""
+        self._trace("shutdown: cleaning up")
         self._backup_manager = None
         self._initialized = False
 

@@ -1,5 +1,8 @@
 """Web search plugin for performing internet searches."""
 
+import os
+import tempfile
+from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 
 from ..base import UserCommand
@@ -32,6 +35,21 @@ class WebSearchPlugin:
     def name(self) -> str:
         return "web_search"
 
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [WEB_SEARCH] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the web search plugin.
 
@@ -52,9 +70,11 @@ class WebSearchPlugin:
             if 'safesearch' in config:
                 self._safesearch = config['safesearch']
         self._initialized = True
+        self._trace(f"initialize: max_results={self._max_results}, region={self._region}")
 
     def shutdown(self) -> None:
         """Shutdown the web search plugin."""
+        self._trace("shutdown: cleaning up")
         self._ddgs = None
         self._initialized = False
 

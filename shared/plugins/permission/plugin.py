@@ -6,6 +6,8 @@ through blacklist/whitelist rules and interactive channel approval.
 
 import fnmatch
 import os
+import tempfile
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..model_provider.types import ToolSchema
 
@@ -126,6 +128,21 @@ class PermissionPlugin:
     def name(self) -> str:
         return "permission"
 
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [PERMISSION] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the permission plugin.
 
@@ -178,9 +195,11 @@ class PermissionPlugin:
             self._channel = ConsoleChannel()
 
         self._initialized = True
+        self._trace(f"initialize: channel={channel_type}, allow_all={self._allow_all}")
 
     def shutdown(self) -> None:
         """Shutdown the permission plugin."""
+        self._trace("shutdown: cleaning up")
         if self._channel:
             self._channel.shutdown()
         self._policy = None
@@ -643,6 +662,8 @@ If a tool is denied, do not attempt to execute it."""
                        'sanitization', 'session_whitelist', 'session_blacklist',
                        'user_approved', 'user_denied', 'allow_all', 'timeout')
         """
+        self._trace(f"check_permission: tool={tool_name}")
+
         # Check if user pre-approved all requests
         if self._allow_all:
             self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
