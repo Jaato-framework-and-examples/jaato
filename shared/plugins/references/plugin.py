@@ -12,6 +12,7 @@ This plugin only manages the catalog and user interaction.
 import os
 import tempfile
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ..model_provider.types import ToolSchema
@@ -177,10 +178,13 @@ class ReferencesPlugin:
         channel_type = config.get("channel_type") or self._config.channel_type
         self._trace(f"initialize: sources={len(self._sources)}, channel={channel_type}")
 
-        # Log resolved paths for LOCAL sources
+        # Log resolved paths for LOCAL sources (indicate if directory)
         for source in self._sources:
             if source.type == SourceType.LOCAL and source.resolved_path:
-                self._trace(f"initialize: resolved '{source.id}': {source.path} -> {source.resolved_path}")
+                path_obj = Path(source.resolved_path)
+                is_dir = path_obj.is_dir() if path_obj.exists() else False
+                path_type = "dir" if is_dir else "file"
+                self._trace(f"initialize: resolved '{source.id}' ({path_type}): {source.path} -> {source.resolved_path}")
 
         if self._selected_source_ids:
             self._trace(f"initialize: preselected={self._selected_source_ids}")
