@@ -883,9 +883,9 @@ class GoogleGenAIProvider:
                 # Extract usage if available
                 if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
                     usage = TokenUsage(
-                        prompt_tokens=getattr(chunk.usage_metadata, 'prompt_token_count', 0),
-                        output_tokens=getattr(chunk.usage_metadata, 'candidates_token_count', 0),
-                        total_tokens=getattr(chunk.usage_metadata, 'total_token_count', 0)
+                        prompt_tokens=getattr(chunk.usage_metadata, 'prompt_token_count', 0) or 0,
+                        output_tokens=getattr(chunk.usage_metadata, 'candidates_token_count', 0) or 0,
+                        total_tokens=getattr(chunk.usage_metadata, 'total_token_count', 0) or 0
                     )
 
         except Exception as e:
@@ -995,9 +995,9 @@ class GoogleGenAIProvider:
                 # Extract usage if available
                 if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
                     usage = TokenUsage(
-                        prompt_tokens=getattr(chunk.usage_metadata, 'prompt_token_count', 0),
-                        output_tokens=getattr(chunk.usage_metadata, 'candidates_token_count', 0),
-                        total_tokens=getattr(chunk.usage_metadata, 'total_token_count', 0)
+                        prompt_tokens=getattr(chunk.usage_metadata, 'prompt_token_count', 0) or 0,
+                        output_tokens=getattr(chunk.usage_metadata, 'candidates_token_count', 0) or 0,
+                        total_tokens=getattr(chunk.usage_metadata, 'total_token_count', 0) or 0
                     )
 
         except Exception as e:
