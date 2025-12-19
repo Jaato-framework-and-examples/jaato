@@ -50,6 +50,7 @@ jaato includes **20 built-in plugins** organized into categories for tool orches
 | <img src="docs/api/assets/images/plugins/plugin-cli.png" width="32"> | **cli** | Execute shell commands with intelligent auto-backgrounding for long-running processes |
 | <img src="docs/api/assets/images/plugins/plugin-mcp.png" width="32"> | **mcp** | Connect to Model Context Protocol servers for external tool integrations |
 | <img src="docs/api/assets/images/plugins/plugin-background.png" width="32"> | **background** | Orchestrate parallel background tasks across all BackgroundCapable plugins |
+| <img src="docs/api/assets/images/plugins/plugin-environment.png" width="32"> | **environment** | Query execution environment (OS, shell, architecture) for platform-appropriate commands |
 
 #### File & Content Management
 | | Plugin | Description |
