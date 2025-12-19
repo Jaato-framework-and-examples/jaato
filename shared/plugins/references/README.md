@@ -279,6 +279,39 @@ plugin.initialize({
 })
 ```
 
+### Subagent Profile Configuration
+
+When configuring the references plugin for subagent profiles, you can use additional options:
+
+```json
+{
+  "name": "my-skill-agent",
+  "plugins": ["cli", "file_edit", "references"],
+  "plugin_configs": {
+    "references": {
+      "preselected": ["adr-001-patterns", "eri-001-implementation"],
+      "exclude_tools": ["selectReferences"]
+    }
+  }
+}
+```
+
+**Config Options:**
+
+| Option | Description |
+|--------|-------------|
+| `preselected` | List of source IDs to pre-select at startup. Sources are looked up from the master catalog and automatically included in system instructions. |
+| `exclude_tools` | List of tool names to exclude (e.g., `["selectReferences"]`). Useful when all references are pre-selected and no user interaction is needed. |
+| `sources` | Can be a list of source IDs (strings) or full source objects. IDs are resolved from the master catalog. |
+
+**Pre-selected References:**
+
+When `preselected` is specified:
+1. Sources are automatically looked up from the master catalog
+2. They are included in system instructions alongside AUTO sources
+3. The model fetches them immediately without user interaction
+4. They appear as "selected" in `listReferences` output
+
 ## Environment Variables
 
 | Variable | Description |
