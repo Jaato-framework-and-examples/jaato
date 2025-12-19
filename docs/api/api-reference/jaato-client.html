@@ -820,6 +820,110 @@ if share:
         </div>
       </section>
 
+      <!-- Streaming & Cancellation -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="streaming-cancellation">Streaming & Cancellation</h2>
+
+          <p>
+            jaato supports interruptible requests with streaming output and
+            graceful cancellation. This allows stopping long-running operations
+            mid-turn.
+          </p>
+
+          <h3>stop</h3>
+          <div class="method-signature">
+            <span class="method-name">stop</span>() -> <span class="type">bool</span>
+          </div>
+          <p>
+            Request cancellation of the current operation. Thread-safe.
+            Returns <code>True</code> if a cancellation was requested, <code>False</code>
+            if no operation was in progress.
+          </p>
+
+          <h3 id="is-processing">is_processing <span class="badge badge-property">property</span></h3>
+          <p>Returns <code>True</code> if a message is currently being processed.</p>
+
+          <h3>set_streaming_enabled</h3>
+          <div class="method-signature">
+            <span class="method-name">set_streaming_enabled</span>(<span class="param">enabled</span>: <span class="type">bool</span>) -> <span class="type">None</span>
+          </div>
+          <p>
+            Enable or disable streaming mode. When enabled, uses provider's streaming
+            API for real-time token output and cancellation support.
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">enabled</span>
+              <span class="param-type">bool</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Whether to enable streaming mode.</div>
+            </li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Streaming Requirements</div>
+            Streaming must be enabled for cancellation to take effect mid-generation.
+            Without streaming, cancellation will only interrupt between API calls
+            (e.g., during retry backoff or between tool executions).
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Cancellation example</div>
+          <div class="code-block">
+            <pre><code class="language-python">import threading
+from shared import JaatoClient, CancelledException
+
+client = JaatoClient()
+client.connect(project, location, model)
+# ... configure tools ...
+
+# Enable streaming for mid-generation cancellation
+client.set_streaming_enabled(True)
+
+# Cancel after 10 seconds
+def cancel_after_timeout():
+    time.sleep(10)
+    if client.is_processing:
+        print("Timeout - stopping...")
+        client.stop()
+
+timer = threading.Thread(target=cancel_after_timeout)
+timer.start()
+
+try:
+    response = client.send_message(
+        "Write a very long essay...",
+        on_output=lambda s, t, m: print(t, end="")
+    )
+    print(f"\n\nFinished normally")
+except CancelledException:
+    print(f"\n\nRequest was cancelled")
+finally:
+    timer.join()</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Streaming output</div>
+          <div class="code-block">
+            <pre><code class="language-python"># With streaming enabled, tokens arrive
+# incrementally via the on_output callback
+client.set_streaming_enabled(True)
+
+def on_output(source, text, mode):
+    # mode="write" for new block
+    # mode="append" for continuation
+    print(text, end="", flush=True)
+
+response = client.send_message(
+    "Count from 1 to 100",
+    on_output=on_output
+)
+# Output appears token-by-token!</code></pre>
+          </div>
+        </div>
+      </section>
+
       <!-- Rate Limiting -->
       <section class="two-panel">
         <div class="panel-explanation">
