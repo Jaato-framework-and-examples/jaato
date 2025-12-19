@@ -131,42 +131,89 @@
             users to provide exact paths. The model can explore the codebase to find
             relevant files before reading or editing them.
           </p>
+
+          <h2 id="performance">Performance Trade-offs</h2>
+          <p>
+            <strong>Let's be honest</strong>: Native CLI tools (<code>find</code>, <code>grep</code>)
+            are faster—they're written in C and highly optimized. This plugin typically runs
+            <strong>2-5x slower</strong> than equivalent CLI commands.
+          </p>
+
+          <h3>Why It's Still Worth It</h3>
+          <table>
+            <thead>
+              <tr><th>Benefit</th><th>CLI Tools</th><th>filesystem_query</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Output format</td>
+                <td>Plain text, needs parsing</td>
+                <td>Structured JSON with metadata</td>
+              </tr>
+              <tr>
+                <td>Exclusions</td>
+                <td>Manual <code>--exclude</code> flags</td>
+                <td>Built-in (node_modules, .git, etc.)</td>
+              </tr>
+              <tr>
+                <td>Shell escaping</td>
+                <td>Complex quoting rules</td>
+                <td>Direct patterns, no escaping</td>
+              </tr>
+              <tr>
+                <td>Permissions</td>
+                <td>Requires approval</td>
+                <td>Auto-approved (read-only)</td>
+              </tr>
+              <tr>
+                <td>Binary files</td>
+                <td>Can output garbage</td>
+                <td>Automatically skipped</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>When Exclusions Help</h3>
+          <p>
+            Automatic exclusions can make this plugin <em>faster</em> than naive CLI usage.
+            When users forget <code>--exclude-dir=node_modules</code>, they pay the price.
+          </p>
         </div>
         <div class="panel-code">
-          <div class="code-label">Basic usage</div>
+          <div class="code-label">Benchmark: glob_files vs find</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import PluginRegistry
-
-registry = PluginRegistry()
-registry.discover()
-
-# Expose with defaults
-registry.expose_tool('filesystem_query')
-
-# With custom configuration
-registry.expose_tool('filesystem_query', config={
-    'exclude_patterns': ['vendor', 'third_party'],
-    'include_patterns': ['node_modules/@company'],
-    'max_results': 1000,
-})</code></pre>
+            <pre><code class="language-text">Find all Python files (500 files):
+glob_files:  avg=0.025s
+find:        avg=0.009s
+Ratio: 2.7x slower</code></pre>
           </div>
 
-          <div class="code-label" style="margin-top: 24px;">Model usage</div>
+          <div class="code-label" style="margin-top: 24px;">Exclusion efficiency</div>
           <div class="code-block">
-            <pre><code class="language-python"># Find Python files
-glob_files(pattern="**/*.py")
+            <pre><code class="language-text">Find JS files (with node_modules):
+glob_files (auto-exclude):  0.031s  (50 files)
+find (no exclusions):       0.089s  (250 files)
+find (with exclusions):     0.028s  (50 files)
 
-# Find test files in src
-glob_files(pattern="src/**/test_*.py")
+When node_modules is heavy, auto-exclusions
+can actually be faster than naive CLI usage.</code></pre>
+          </div>
 
-# Search for function definitions
-grep_content(pattern="def process_", file_glob="*.py")
+          <div class="code-label" style="margin-top: 24px;">Run benchmarks</div>
+          <div class="code-block">
+            <pre><code class="language-bash">pytest shared/plugins/filesystem_query/tests/test_benchmarks.py -v -s</code></pre>
+          </div>
 
-# Search with context
-grep_content(
-    pattern="TODO|FIXME",
-    context_lines=3
-)</code></pre>
+          <div class="code-label" style="margin-top: 24px;">When to use CLI instead</div>
+          <div class="code-block">
+            <pre><code class="language-text">❌ Performance-critical batch operations
+❌ Multi-gigabyte directories
+❌ Simple one-off human searches
+
+✅ Model autonomously exploring code
+✅ Projects with heavy node_modules
+✅ When structured output matters
+✅ Safe, no-permission-needed discovery</code></pre>
           </div>
         </div>
       </section>

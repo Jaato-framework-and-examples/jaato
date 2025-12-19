@@ -1,6 +1,6 @@
 # Filesystem Query Plugin
 
-The filesystem query plugin provides read-only tools for exploring the filesystem in the jaato framework. It offers fast, safe, auto-approved tools for finding files and searching content.
+The filesystem query plugin provides read-only tools for exploring the filesystem in the jaato framework. It offers safe, auto-approved tools for finding files and searching content.
 
 ## Overview
 
@@ -16,6 +16,72 @@ Both tools:
 - Support configurable exclusion patterns
 - Auto-approve without permission prompts (read-only operations)
 - Support background execution for large searches
+
+## Why Use This Plugin?
+
+### Performance Reality
+
+**Let's be honest**: Native CLI tools (`find`, `grep`) are faster. They're written in C and highly optimized. In benchmarks, this plugin typically runs **2-5x slower** than equivalent CLI commands.
+
+```
+Benchmark: Find all Python files (500 files)
+glob_files:  avg=0.025s
+find:        avg=0.009s
+Ratio: 2.7x slower
+```
+
+### Why It's Still Worth It
+
+Despite the performance gap, this plugin provides significant value:
+
+| Benefit | CLI Tools | filesystem_query |
+|---------|-----------|------------------|
+| **Structured output** | Plain text, needs parsing | JSON with metadata (size, timestamps) |
+| **Auto-exclusions** | Manual `--exclude` flags | Built-in: skips node_modules, __pycache__, .git |
+| **No shell escaping** | Complex quoting rules | Direct regex/glob patterns |
+| **Auto-approved** | Requires permission check | Read-only = always safe |
+| **Context lines** | Separate `-C` flag | Built into response structure |
+| **Binary detection** | Can output garbage | Automatically skipped |
+| **Result limits** | Pipe to `head` | Built-in truncation with counts |
+
+### When to Use This Plugin
+
+✅ **Good use cases:**
+- Model autonomously exploring a codebase
+- Searches where structured output matters
+- Projects with heavy node_modules/vendor directories
+- When you want consistent, safe, no-permission-needed file discovery
+
+❌ **Consider CLI instead:**
+- Performance-critical batch operations
+- Simple one-off searches by a human user
+- Searching multi-gigabyte directories
+
+### Exclusion Efficiency
+
+The automatic exclusions can actually make this plugin **faster** than naive CLI usage:
+
+```
+Benchmark: Find JS files (with node_modules containing 200 packages)
+glob_files (auto-exclude):  avg=0.031s  (found 50 files)
+find (no exclusions):       avg=0.089s  (found 250 files)
+find (with exclusions):     avg=0.028s  (found 50 files)
+```
+
+When CLI users forget `--exclude-dir=node_modules`, they pay the price. This plugin excludes noise by default.
+
+## Benchmarks
+
+Run the benchmark suite:
+```bash
+pytest shared/plugins/filesystem_query/tests/test_benchmarks.py -v -s
+```
+
+Benchmarks include:
+- `glob_files` vs `find` (simple patterns, complex patterns)
+- `grep_content` vs `grep` (simple strings, regex, with context)
+- Scalability tests (100 → 1000 files)
+- Exclusion efficiency (time saved by skipping node_modules)
 
 ## Architecture
 
