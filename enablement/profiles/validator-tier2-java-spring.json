@@ -4,7 +4,7 @@
   "plugins": ["cli", "references"],
   "plugin_configs": {
     "references": {
-      "sources": ["enablement-consumer-prompt"],
+      "preselected": ["enablement-consumer-prompt"],
       "exclude_tools": ["selectReferences"]
     }
   },

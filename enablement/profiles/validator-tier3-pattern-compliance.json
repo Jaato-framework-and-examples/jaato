@@ -4,7 +4,7 @@
   "plugins": ["cli", "file_edit", "references"],
   "plugin_configs": {
     "references": {
-      "sources": ["enablement-consumer-prompt", "skill-001-circuit-breaker-java-resilience4j", "skill-020-microservice-java-spring"],
+      "preselected": ["enablement-consumer-prompt", "skill-001-circuit-breaker-java-resilience4j", "skill-020-microservice-java-spring"],
       "exclude_tools": ["selectReferences"]
     }
   },
