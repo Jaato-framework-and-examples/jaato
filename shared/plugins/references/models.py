@@ -3,8 +3,10 @@
 Defines core data structures for reference sources and their metadata.
 """
 
+import os
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
@@ -37,7 +39,8 @@ class ReferenceSource:
     mode: InjectionMode
 
     # Type-specific access info (model uses these to fetch)
-    path: Optional[str] = None           # For LOCAL type
+    path: Optional[str] = None           # For LOCAL type (original path from config)
+    resolved_path: Optional[str] = None  # For LOCAL type (absolute path resolved at load time)
     url: Optional[str] = None            # For URL type
     server: Optional[str] = None         # For MCP type
     tool: Optional[str] = None           # For MCP type
@@ -63,8 +66,34 @@ class ReferenceSource:
             parts.append(f"**Tags**: {', '.join(self.tags)}")
 
         if self.type == SourceType.LOCAL:
-            parts.append(f"**Location**: `{self.path}`")
-            parts.append("**Access**: Read this file using the CLI tool")
+            # Use resolved path if available, otherwise original path
+            effective_path = self.resolved_path if self.resolved_path else self.path
+            path_obj = Path(effective_path) if effective_path else None
+
+            # Check if path is a directory
+            if path_obj and path_obj.is_dir():
+                # List files in directory recursively
+                files = self._list_directory_files(path_obj)
+                if files:
+                    parts.append(f"**Location**: Directory `{effective_path}` containing {len(files)} file(s):")
+                    if self.resolved_path and self.resolved_path != self.path:
+                        parts.append(f"*(configured as: `{self.path}`)*")
+                    parts.append("")
+                    for f in files:
+                        parts.append(f"  - `{f}`")
+                    parts.append("")
+                    parts.append("**Access**: Read each file listed above using the CLI tool")
+                else:
+                    parts.append(f"**Location**: Directory `{effective_path}` (empty)")
+                    parts.append("**Access**: Directory contains no readable files")
+            else:
+                # Regular file
+                if self.resolved_path and self.resolved_path != self.path:
+                    parts.append(f"**Location**: `{self.resolved_path}`")
+                    parts.append(f"*(configured as: `{self.path}`)*")
+                else:
+                    parts.append(f"**Location**: `{self.path}`")
+                parts.append("**Access**: Read this file using the CLI tool")
         elif self.type == SourceType.URL:
             parts.append(f"**URL**: {self.url}")
             parts.append("**Access**: Fetch this URL to incorporate the content")
@@ -80,6 +109,31 @@ class ReferenceSource:
 
         return "\n".join(parts)
 
+    def _list_directory_files(self, directory: Path, max_files: int = 50) -> List[str]:
+        """List files in a directory recursively.
+
+        Args:
+            directory: Path to the directory to list.
+            max_files: Maximum number of files to return (to avoid overwhelming output).
+
+        Returns:
+            List of file paths relative to the directory, sorted alphabetically.
+        """
+        files: List[str] = []
+        try:
+            for item in sorted(directory.rglob("*")):
+                if item.is_file():
+                    # Get path relative to the directory
+                    rel_path = item.relative_to(directory)
+                    # Use the full path from resolved_path base for the model
+                    full_rel_path = str(Path(self.resolved_path or self.path) / rel_path)
+                    files.append(full_rel_path)
+                    if len(files) >= max_files:
+                        break
+        except (PermissionError, OSError):
+            pass  # Skip directories we can't read
+        return files
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         result = {
@@ -93,6 +147,8 @@ class ReferenceSource:
 
         if self.path is not None:
             result["path"] = self.path
+        if self.resolved_path is not None:
+            result["resolved_path"] = self.resolved_path
         if self.url is not None:
             result["url"] = self.url
         if self.server is not None:
@@ -130,6 +186,7 @@ class ReferenceSource:
             type=source_type,
             mode=mode,
             path=data.get("path"),
+            resolved_path=data.get("resolved_path"),
             url=data.get("url"),
             server=data.get("server"),
             tool=data.get("tool"),

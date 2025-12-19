@@ -150,6 +150,31 @@ The subagent plugin automatically discovers profile definitions from `.jaato/pro
 }
 ```
 
+**Profile with plugin-specific configuration:**
+```json
+{
+  "name": "skill-add-retry",
+  "description": "Add retry pattern to Java services",
+  "plugins": ["cli", "file_edit", "references"],
+  "plugin_configs": {
+    "references": {
+      "preselected": ["adr-001-resilience-patterns", "eri-002-retry"],
+      "exclude_tools": ["selectReferences"]
+    }
+  },
+  "system_instructions": "Implement retry pattern following the pre-selected references.",
+  "max_turns": 15
+}
+```
+
+The `plugin_configs` field allows per-plugin configuration overrides:
+
+| Plugin | Config Option | Description |
+|--------|---------------|-------------|
+| `references` | `preselected` | List of source IDs to pre-select at startup |
+| `references` | `exclude_tools` | List of tools to hide (e.g., `["selectReferences"]`) |
+| `references` | `sources` | Override available sources (IDs or full objects) |
+
 **Configuration options:**
 - `auto_discover_profiles`: Enable/disable auto-discovery (default: `true`)
 - `profiles_dir`: Directory to scan for profiles (default: `.jaato/profiles`)
@@ -253,3 +278,12 @@ client.configure_tools(registry)  # Subagent inherits ['cli', 'mcp']
 # Now subagents spawned will have access to cli and mcp by default
 response = client.send_message("Spawn a subagent to analyze the code")
 ```
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `JAATO_TRACE_LOG` | Path to trace log file for debug output. Useful when running with rich terminal UIs that occupy the console. Set to empty string to disable. | `/tmp/rich_client_trace.log` |
+| `PROJECT_ID` | GCP project ID (fallback if not provided in config) | - |
+| `LOCATION` | Vertex AI region (fallback if not provided in config) | - |
+| `MODEL_NAME` | Default model name (fallback if not provided in config) | `gemini-2.5-flash` |

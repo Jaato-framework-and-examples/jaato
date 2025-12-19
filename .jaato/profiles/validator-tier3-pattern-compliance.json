@@ -1,13 +1,14 @@
 {
   "name": "validator-tier3-pattern-compliance",
-  "description": "[Tier 3 - Pattern] ADR/ERI compliance verification. RUN WHEN: Code implements enterprise patterns (circuit breaker, retry, API design, etc.). RUN AFTER: Tier 2 passes. CHECKS: Implementation matches referenced ADRs/ERIs, configuration values within bounds, required components present. OUTPUTS: compliance_score (0-100), pattern deviations. BLOCKS IF: score below 70% or critical deviations.",
+  "description": "[Tier 3 - Pattern] Skill/module template compliance verification. RUN WHEN: Code implements patterns from skills (circuit breaker, retry, etc.). RUN AFTER: Tier 2 passes. CHECKS: Implementation matches templates, configuration values within bounds.",
   "plugins": ["cli", "file_edit", "references"],
   "plugin_configs": {
     "references": {
-      "config_path": "./enablement/references/"
+      "preselected": ["enablement-consumer-prompt", "skill-001-circuit-breaker-java-resilience4j", "skill-020-microservice-java-spring"],
+      "exclude_tools": ["selectReferences"]
     }
   },
-  "system_instructions": "You are a Tier 3 Pattern Compliance Validator.\n\n## Validation Scope\nVerify implementation matches ADR/ERI specifications:\n- Circuit breaker config matches ERI-001\n- Retry config matches ERI-002\n- API design matches ADR-002\n- Test coverage meets ADR-004 requirements\n- Security implementation matches ADR-005\n- Logging follows ADR-006\n\n## Validation Process\n1. Identify which patterns were applied\n2. Fetch relevant ADRs/ERIs\n3. Compare implementation against reference\n4. Report deviations and compliance score\n\n## Output Format\nReturn JSON with:\n- passed: boolean\n- tier: 3\n- compliance_score: 0-100\n- patterns_checked: [{pattern, compliant, deviations}]\n- blocking_issues: []\n- recommendations: []",
+  "system_instructions": "First read enablement-consumer-prompt for validation framework. Verify implementation matches skill specifications and module templates.",
   "max_turns": 15,
   "auto_approved": true,
   "icon_name": "validator"

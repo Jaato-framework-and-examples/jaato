@@ -4,6 +4,9 @@ Provides tools for reading, modifying, and managing files with
 integrated permission approval (showing diffs) and automatic backups.
 """
 
+import os
+import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -36,10 +39,28 @@ class FileEditPlugin:
     def __init__(self):
         self._backup_manager: Optional[BackupManager] = None
         self._initialized = False
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
 
     @property
     def name(self) -> str:
         return "file_edit"
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [FILE_EDIT{agent_prefix}] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the file edit plugin.
@@ -52,6 +73,9 @@ class FileEditPlugin:
         """
         config = config or {}
 
+        # Extract agent name for trace logging
+        self._agent_name = config.get("agent_name")
+
         # Initialize backup manager
         backup_dir = config.get("backup_dir")
         if backup_dir:
@@ -63,9 +87,12 @@ class FileEditPlugin:
         self._ensure_gitignore()
 
         self._initialized = True
+        backup_dir_str = str(self._backup_manager._base_dir) if self._backup_manager else "none"
+        self._trace(f"initialize: backup_dir={backup_dir_str}")
 
     def shutdown(self) -> None:
         """Shutdown the plugin."""
+        self._trace("shutdown: cleaning up")
         self._backup_manager = None
         self._initialized = False
 
@@ -366,6 +393,7 @@ updateFile and removeFile operations."""
     def _execute_read_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute readFile tool."""
         path = args.get("path", "")
+        self._trace(f"readFile: path={path}")
 
         if not path:
             return {"error": "path is required"}
@@ -392,6 +420,7 @@ updateFile and removeFile operations."""
         """Execute updateFile tool."""
         path = args.get("path", "")
         new_content = args.get("new_content", "")
+        self._trace(f"updateFile: path={path}, content_len={len(new_content)}")
 
         if not path:
             return {"error": "path is required"}
@@ -426,6 +455,7 @@ updateFile and removeFile operations."""
         """Execute writeNewFile tool."""
         path = args.get("path", "")
         content = args.get("content", "")
+        self._trace(f"writeNewFile: path={path}, content_len={len(content)}")
 
         if not path:
             return {"error": "path is required"}
@@ -450,6 +480,7 @@ updateFile and removeFile operations."""
     def _execute_remove_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute removeFile tool."""
         path = args.get("path", "")
+        self._trace(f"removeFile: path={path}")
 
         if not path:
             return {"error": "path is required"}
@@ -482,6 +513,7 @@ updateFile and removeFile operations."""
     def _execute_undo_file_change(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute undoFileChange tool."""
         path = args.get("path", "")
+        self._trace(f"undoFileChange: path={path}")
 
         if not path:
             return {"error": "path is required"}

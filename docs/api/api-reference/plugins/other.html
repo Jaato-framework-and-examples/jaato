@@ -383,56 +383,71 @@ retrieve_memories(
         <div class="panel-explanation">
           <h2>References Plugin</h2>
           <p>
-            Handle <code>@file</code> and <code>@url</code> references in prompts,
-            loading content and making it available to the model.
+            Manages a catalog of documentation and reference sources. Sources can be
+            automatically injected or user-selected on demand.
           </p>
 
           <table>
             <tbody>
               <tr><td><strong>Name</strong></td><td><code>references</code></td></tr>
-              <tr><td><strong>Tools</strong></td><td><code>loadReference</code></td></tr>
-              <tr><td><strong>Subscribes to</strong></td><td>Prompt enrichment</td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>selectReferences</code>, <code>listReferences</code></td></tr>
+              <tr><td><strong>Auto-approved</strong></td><td>Yes</td></tr>
             </tbody>
           </table>
 
-          <h3>Reference Types</h3>
+          <h3>Source Types</h3>
           <ul>
-            <li><code>LOCAL</code>: Local files (<code>@./path/to/file.py</code>)</li>
-            <li><code>URL</code>: Web URLs (<code>@https://example.com</code>)</li>
-            <li><code>MCP</code>: MCP resources (<code>@mcp://server/resource</code>)</li>
-            <li><code>INLINE</code>: Inline content injection</li>
+            <li><code>LOCAL</code>: Local files on filesystem</li>
+            <li><code>URL</code>: HTTP/HTTPS URLs</li>
+            <li><code>MCP</code>: MCP server tool calls</li>
+            <li><code>INLINE</code>: Content embedded in config</li>
           </ul>
 
-          <h3>Prompt Enrichment</h3>
-          <p>
-            When a prompt contains <code>@references</code>, the plugin:
-          </p>
-          <ol>
-            <li>Detects references in the prompt</li>
-            <li>Loads the referenced content</li>
-            <li>Injects content into the prompt context</li>
-            <li>Removes the @ prefix from the prompt text</li>
-          </ol>
+          <h3>Injection Modes</h3>
+          <ul>
+            <li><code>AUTO</code>: Included in system instructions at startup</li>
+            <li><code>SELECTABLE</code>: User chooses via <code>selectReferences</code> tool</li>
+          </ul>
+
+          <h3>Subagent Configuration</h3>
+          <table>
+            <tbody>
+              <tr><td><code>preselected</code></td><td>List of source IDs to pre-select at startup</td></tr>
+              <tr><td><code>exclude_tools</code></td><td>List of tools to hide (e.g., <code>["selectReferences"]</code>)</td></tr>
+              <tr><td><code>sources</code></td><td>Override available sources (IDs or full objects)</td></tr>
+            </tbody>
+          </table>
         </div>
         <div class="panel-code">
-          <div class="code-label">Reference syntax</div>
+          <div class="code-label">references.json catalog</div>
           <div class="code-block">
-            <pre><code class="language-text"># Local file reference
-Explain this code: @./src/main.py
-
-# URL reference
-Summarize this article: @https://example.com/blog/post
-
-# Multiple references
-Compare @./old.py and @./new.py</code></pre>
+            <pre><code class="language-json">{
+  "version": "1.0",
+  "sources": [
+    {
+      "id": "api-spec",
+      "name": "API Specification",
+      "type": "local",
+      "path": "./docs/openapi.yaml",
+      "mode": "auto",
+      "tags": ["api", "endpoints"]
+    }
+  ]
+}</code></pre>
           </div>
 
-          <div class="code-label" style="margin-top: 24px;">Configuration</div>
+          <div class="code-label" style="margin-top: 24px;">Subagent profile with pre-selected references</div>
           <div class="code-block">
-            <pre><code class="language-python">registry.expose_tool('references', config={
-    'base_path': '/home/user/project',
-    'allowed_schemes': ['file', 'https'],
-})</code></pre>
+            <pre><code class="language-json">{
+  "name": "my-skill-agent",
+  "plugins": ["cli", "file_edit", "references"],
+  "plugin_configs": {
+    "references": {
+      "preselected": ["adr-001", "eri-001"],
+      "exclude_tools": ["selectReferences"]
+    }
+  }
+}</code></pre>
           </div>
         </div>
       </section>
@@ -524,11 +539,25 @@ loadImage(path="./diagram.png")
             <li><strong>documentation</strong>: Technical writing</li>
           </ul>
 
-          <h3>Inline Configuration</h3>
+          <h3>Plugin Configuration</h3>
           <p>
-            Custom agent configurations can be provided inline for
-            specialized use cases.
+            Profiles can include <code>plugin_configs</code> to customize plugin behavior:
           </p>
+          <table>
+            <tbody>
+              <tr><td><code>plugin_configs</code></td><td>Per-plugin configuration overrides</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Environment Variables</h3>
+          <table>
+            <tbody>
+              <tr><td><code>JAATO_TRACE_LOG</code></td><td>Path to trace log file for debug output. Useful with rich terminal UIs. Default: <code>/tmp/rich_client_trace.log</code></td></tr>
+              <tr><td><code>PROJECT_ID</code></td><td>GCP project ID (fallback)</td></tr>
+              <tr><td><code>LOCATION</code></td><td>Vertex AI region (fallback)</td></tr>
+              <tr><td><code>MODEL_NAME</code></td><td>Default model (fallback)</td></tr>
+            </tbody>
+          </table>
         </div>
         <div class="panel-code">
           <div class="code-label">Profile file (.jaato/profiles/code_assistant.json)</div>
@@ -540,7 +569,20 @@ loadImage(path="./diagram.png")
   "max_turns": 10
 }</code></pre>
           </div>
-          <div class="code-label">Spawning agents</div>
+          <div class="code-label" style="margin-top: 24px;">Profile with plugin_configs</div>
+          <div class="code-block">
+            <pre><code class="language-json">{
+  "name": "skill-add-retry",
+  "plugins": ["cli", "file_edit", "references"],
+  "plugin_configs": {
+    "references": {
+      "preselected": ["adr-001", "eri-002"],
+      "exclude_tools": ["selectReferences"]
+    }
+  }
+}</code></pre>
+          </div>
+          <div class="code-label" style="margin-top: 24px;">Spawning agents</div>
           <div class="code-block">
             <pre><code class="language-python"># Use predefined profile
 spawn_subagent(

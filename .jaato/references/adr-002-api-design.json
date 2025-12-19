@@ -1,9 +1,0 @@
-{
-  "id": "adr-002-api-design",
-  "name": "ADR-002: REST API Design Standards",
-  "description": "Strategic decision on REST API design: versioning, naming, error handling",
-  "type": "local",
-  "path": "./docs/adr/ADR-002-api-design.md",
-  "mode": "selectable",
-  "tags": ["adr", "api", "rest", "design", "code"]
-}

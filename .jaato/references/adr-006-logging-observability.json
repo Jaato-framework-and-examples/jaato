@@ -1,9 +1,0 @@
-{
-  "id": "adr-006-logging-observability",
-  "name": "ADR-006: Logging and Observability",
-  "description": "Strategic decision on structured logging, metrics, and distributed tracing",
-  "type": "local",
-  "path": "./docs/adr/ADR-006-logging-observability.md",
-  "mode": "selectable",
-  "tags": ["adr", "logging", "observability", "monitoring", "code"]
-}

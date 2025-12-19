@@ -517,6 +517,20 @@ class PTDisplay:
                 self._agent_registry.cycle_selection()
                 self._app.invalidate()
 
+        @kb.add("c-t")
+        def handle_ctrl_t(event):
+            """Handle Ctrl+T - toggle tool view between collapsed/expanded."""
+            # Use selected agent's buffer if registry present
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.toggle_tools_expanded()
+                else:
+                    self._output_buffer.toggle_tools_expanded()
+            else:
+                self._output_buffer.toggle_tools_expanded()
+            self._app.invalidate()
+
         # Status bar at top (always visible, 1 line)
         status_bar = Window(
             FormattedTextControl(self._get_status_bar_content),
