@@ -1,9 +1,0 @@
-{
-  "id": "adr-001-api-design-standards",
-  "name": "ADR-001: API Design Standards",
-  "description": "Strategic decision on 4-layer API architecture (API-led Connectivity): Experience, Composable, Domain, System APIs with SAGA orchestration",
-  "type": "local",
-  "path": "./docs/adr/ADR-001-api-design-standards.md",
-  "mode": "selectable",
-  "tags": ["adr", "api", "rest", "design", "architecture", "saga", "orchestration"]
-}

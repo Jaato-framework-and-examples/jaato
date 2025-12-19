@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-017-persistence-systemapi",
+  "name": "MOD-017: System API Persistence",
+  "description": "Templates for System API delegation persistence. Runtime dependency of skill-020.",
+  "type": "local",
+  "path": "./.jaato/docs/modules/mod-code-017-persistence-systemapi/",
+  "mode": "selectable",
+  "tags": ["module", "persistence", "system-api", "mainframe", "java", "templates"],
+  "fetchHint": "Read MODULE.md for adapter and mapping templates"
+}

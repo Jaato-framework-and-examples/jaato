@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-004-rate-limiter-java-resilience4j",
+  "name": "MOD-004: Rate Limiter Templates (Java/Resilience4j)",
+  "description": "Reusable code templates for rate limiting pattern. Runtime dependency of skill-020.",
+  "type": "local",
+  "path": "./.jaato/docs/modules/mod-code-004-rate-limiter-java-resilience4j/",
+  "mode": "selectable",
+  "tags": ["module", "rate-limiter", "resilience4j", "java", "templates"],
+  "fetchHint": "Read MODULE.md for templates with {{placeholder}} variables"
+}

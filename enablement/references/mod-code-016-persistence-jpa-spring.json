@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-016-persistence-jpa-spring",
+  "name": "MOD-016: JPA Persistence (Spring Data)",
+  "description": "Templates for JPA persistence adapter. Runtime dependency of skill-020.",
+  "type": "local",
+  "path": "./.jaato/docs/modules/mod-code-016-persistence-jpa-spring/",
+  "mode": "selectable",
+  "tags": ["module", "persistence", "jpa", "spring-data", "java", "templates"],
+  "fetchHint": "Read MODULE.md for entity and repository templates"
+}

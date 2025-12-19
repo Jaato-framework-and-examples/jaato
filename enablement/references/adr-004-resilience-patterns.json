@@ -1,9 +1,0 @@
-{
-  "id": "adr-004-resilience-patterns",
-  "name": "ADR-004: Resilience Patterns",
-  "description": "Strategic decision on resilience patterns: circuit breaker, retry, timeout, bulkhead, rate limiter, fallback for fault-tolerant microservices",
-  "type": "local",
-  "path": "./docs/adr/ADR-004-resilience-patterns.md",
-  "mode": "selectable",
-  "tags": ["adr", "resilience", "circuit-breaker", "retry", "fault-tolerance", "microservices"]
-}

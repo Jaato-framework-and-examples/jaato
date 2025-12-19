@@ -1,13 +1,9 @@
 {
   "name": "validator-tier2-java-spring",
-  "description": "[Tier 2 - Technology] Java/Spring specific quality checks. RUN WHEN: Code is Java/Spring (detected via pom.xml, build.gradle, or .java files). RUN AFTER: Tier 1 passes. CHECKS: Maven/Gradle build, Checkstyle, SpotBugs, OWASP dependency-check, Spring config validation, Hexagonal Light structure per ADR-009. BLOCKS IF: build fails, critical vulnerabilities, structure violations.",
-  "plugins": ["cli", "references"],
-  "plugin_configs": {
-    "references": {
-      "sources": ["adr-009-service-architecture-patterns"]
-    }
-  },
-  "system_instructions": "You are a Tier 2 Technology-Specific Validator for Java/Spring.\n\n## Validation Scope\nJava and Spring Boot specific checks:\n- Maven/Gradle build validation (mvn compile / gradle build)\n- Checkstyle compliance\n- SpotBugs static analysis\n- Dependency vulnerability scan (OWASP dependency-check)\n- Spring configuration validation\n- Package structure per ADR-003\n- Logging configuration\n\n## Tools Available\n- CLI: Run mvn, gradle, checkstyle, spotbugs, dependency-check\n- References: ADR-003 for structure validation\n\n## Output Format\nReturn JSON with:\n- passed: boolean\n- tier: 2\n- checks: [{name, status, message, tool}]\n- blocking_issues: []\n- warnings: []",
+  "description": "[Tier 2 - Technology] Java/Spring specific quality checks. RUN WHEN: Code is Java/Spring. RUN AFTER: Tier 1 passes. CHECKS: Maven/Gradle build, Checkstyle, SpotBugs, OWASP dependency-check.",
+  "plugins": ["cli"],
+  "plugin_configs": {},
+  "system_instructions": "Run Java/Spring quality checks: build validation, static analysis, dependency vulnerability scan.",
   "max_turns": 10,
   "auto_approved": true,
   "icon_name": "validator"
