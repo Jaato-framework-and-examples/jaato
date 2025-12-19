@@ -177,6 +177,143 @@ sequenceDiagram
     JC-->>App: "Here are the files: ..."
 ```
 
+## Streaming & Cancellation
+
+The framework supports streaming responses and mid-turn cancellation for responsive user experiences.
+
+### Cancellation Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         User Signal (Ctrl+C, UI button)                      │
+└─────────────────────────────────────────┬───────────────────────────────────┘
+                                          │
+                                          ▼
+                              ┌───────────────────────┐
+                              │   JaatoClient.stop()  │
+                              └───────────┬───────────┘
+                                          │
+                                          ▼
+                              ┌───────────────────────┐
+                              │ JaatoSession          │
+                              │   .request_stop()     │
+                              │   ↓                   │
+                              │ CancelToken.cancel()  │
+                              └───────────┬───────────┘
+                                          │
+                     ┌────────────────────┼────────────────────┐
+                     ▼                    ▼                    ▼
+          ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+          │ Streaming Loop  │  │   Retry Logic   │  │  Tool Execution │
+          │ checks token    │  │ checks between  │  │ checks between  │
+          │ between chunks  │  │    attempts     │  │     tools       │
+          └─────────────────┘  └─────────────────┘  └─────────────────┘
+```
+
+### CancelToken
+
+The `CancelToken` class provides thread-safe cancellation signaling:
+
+```python
+from shared.plugins.model_provider.types import CancelToken, CancelledException
+
+token = CancelToken()
+
+# In worker thread: poll for cancellation
+while not token.is_cancelled:
+    do_work_chunk()
+
+# In main thread: request stop
+token.cancel()  # Signals all waiters
+
+# Or use blocking wait with timeout
+cancelled = token.wait(timeout=5.0)
+
+# Or register callbacks
+token.on_cancel(lambda: cleanup())
+```
+
+### Streaming Provider Support
+
+Model providers can implement streaming for real-time output:
+
+```python
+# Check if provider supports streaming
+if provider.supports_streaming():
+    response = provider.send_message_streaming(
+        message="Tell me a story",
+        on_chunk=lambda text: print(text, end='', flush=True),
+        cancel_token=token
+    )
+else:
+    response = provider.send_message(message)
+```
+
+When cancelled, the response contains:
+- Partial text accumulated before cancellation
+- `finish_reason = FinishReason.CANCELLED`
+
+### Client API
+
+```python
+import threading
+import time
+
+# Start message in background
+client = JaatoClient()
+client.connect(project, location, model)
+client.configure_tools(registry)
+
+def run_message():
+    return client.send_message("Tell me a long story")
+
+thread = threading.Thread(target=run_message)
+thread.start()
+
+# User can cancel mid-response
+time.sleep(2)
+if client.is_processing:
+    client.stop()  # Signals cancellation
+
+thread.join()  # Response will contain partial text + "[Generation cancelled]"
+
+# Control streaming (enabled by default)
+client.set_streaming_enabled(True)   # Real-time output, better cancellation
+client.set_streaming_enabled(False)  # Batched output, simpler but no mid-stream cancel
+```
+
+### Interruptible Retry
+
+The retry logic respects cancellation during backoff sleeps:
+
+```python
+from shared.retry_utils import with_retry, interruptible_sleep
+
+# Retry with cancellation support
+token = CancelToken()
+response, stats = with_retry(
+    lambda: provider.send_message(message),
+    context="send_message",
+    cancel_token=token
+)
+
+# Manual interruptible sleep
+interruptible_sleep(30.0, cancel_token=token)  # Wakes if cancelled
+```
+
+### Cancellation Points
+
+The session checks for cancellation at these points:
+
+| Location | Behavior |
+|----------|----------|
+| Before send_message | Returns immediately |
+| During streaming | Breaks chunk loop |
+| Between retry attempts | Raises CancelledException |
+| During retry backoff | Wakes and raises |
+| Before each tool | Skips remaining tools |
+| After tool execution | Returns partial results |
+
 ## Background Task Flow
 
 When a tool supports background execution and exceeds its configured threshold, the ToolExecutor automatically converts it to a background task:

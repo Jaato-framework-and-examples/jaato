@@ -273,6 +273,58 @@ def tool_results_to_sdk_parts(results: List[ToolResult]) -> List[types.Part]:
     return [tool_result_to_sdk_part(r) for r in (results or [])]
 
 
+# ==================== Streaming Helpers ====================
+
+def function_call_from_sdk(fc) -> Optional[FunctionCall]:
+    """Convert SDK FunctionCall to internal FunctionCall.
+
+    Used during streaming to convert function calls from chunks.
+
+    Args:
+        fc: SDK FunctionCall object.
+
+    Returns:
+        Internal FunctionCall or None if invalid.
+    """
+    if not fc or not hasattr(fc, 'name'):
+        return None
+
+    call_id = str(uuid.uuid4())[:8]
+    return FunctionCall(
+        id=call_id,
+        name=fc.name,
+        args=dict(fc.args) if hasattr(fc, 'args') and fc.args else {}
+    )
+
+
+def finish_reason_from_sdk(reason) -> FinishReason:
+    """Convert SDK finish reason to internal FinishReason.
+
+    Used during streaming to convert finish reasons from chunks.
+
+    Args:
+        reason: SDK finish reason (enum or string).
+
+    Returns:
+        Internal FinishReason.
+    """
+    if not reason:
+        return FinishReason.UNKNOWN
+
+    reason_str = str(reason).upper()
+
+    if 'STOP' in reason_str:
+        return FinishReason.STOP
+    elif 'MAX' in reason_str or 'LENGTH' in reason_str:
+        return FinishReason.MAX_TOKENS
+    elif 'SAFETY' in reason_str:
+        return FinishReason.SAFETY
+    elif 'TOOL' in reason_str or 'FUNCTION' in reason_str:
+        return FinishReason.TOOL_USE
+
+    return FinishReason.UNKNOWN
+
+
 # ==================== Response Conversion ====================
 
 def extract_text_from_response(response) -> Optional[str]:

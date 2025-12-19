@@ -232,6 +232,56 @@ def tool_results_to_sdk(results: List[ToolResult]) -> List[ToolMessage]:
     return [tool_result_to_sdk(r) for r in (results or [])]
 
 
+# ==================== Streaming Helpers ====================
+
+def extract_function_calls_from_stream_delta(tool_calls) -> List[FunctionCall]:
+    """Extract function calls from streaming delta tool_calls.
+
+    In streaming mode, tool calls may be spread across multiple chunks.
+    Each chunk contains partial information that needs to be accumulated.
+
+    Args:
+        tool_calls: List of tool call deltas from a streaming chunk.
+
+    Returns:
+        List of FunctionCall objects (may be partial during streaming).
+    """
+    calls = []
+
+    if not tool_calls:
+        return calls
+
+    for tc in tool_calls:
+        # Get the tool call index and id
+        tc_id = getattr(tc, 'id', None) or str(uuid.uuid4())[:8]
+
+        # Get function info
+        func = getattr(tc, 'function', None)
+        if not func:
+            continue
+
+        name = getattr(func, 'name', None) or ''
+        arguments = getattr(func, 'arguments', None) or ''
+
+        # Parse arguments if present
+        args = {}
+        if arguments:
+            try:
+                args = json.loads(arguments)
+            except json.JSONDecodeError:
+                # Arguments may be partial during streaming
+                args = {"_partial": arguments}
+
+        if name:  # Only add if we have a function name
+            calls.append(FunctionCall(
+                id=tc_id,
+                name=name,
+                args=args,
+            ))
+
+    return calls
+
+
 # ==================== Response Conversion ====================
 
 def extract_text_from_response(response: ChatCompletions) -> Optional[str]:

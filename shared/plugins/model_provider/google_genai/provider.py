@@ -20,8 +20,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from google import genai
 from google.genai import types
 
-from ..base import GoogleAuthMethod, ModelProviderPlugin, ProviderConfig
+from ..base import GoogleAuthMethod, ModelProviderPlugin, ProviderConfig, StreamingCallback
 from ..types import (
+    CancelledException,
+    CancelToken,
+    FinishReason,
     Message,
     ProviderResponse,
     Role,
@@ -790,6 +793,235 @@ class GoogleGenAIProvider:
             True - Gemini supports structured output.
         """
         return True
+
+    def supports_streaming(self) -> bool:
+        """Check if streaming is supported.
+
+        Returns:
+            True - Google GenAI supports streaming.
+        """
+        return True
+
+    # ==================== Streaming ====================
+
+    def send_message_streaming(
+        self,
+        message: str,
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        response_schema: Optional[Dict[str, Any]] = None
+    ) -> ProviderResponse:
+        """Send a message with streaming response and optional cancellation.
+
+        Args:
+            message: The user's message text.
+            on_chunk: Callback invoked for each text chunk as it streams.
+            cancel_token: Optional token to request cancellation mid-stream.
+            response_schema: Optional JSON Schema to constrain the response.
+
+        Returns:
+            ProviderResponse with accumulated text and/or function calls.
+        """
+        if not self._chat:
+            raise RuntimeError("No chat session. Call create_session() first.")
+
+        # Build config override for structured output
+        config = None
+        if response_schema:
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=response_schema
+            )
+
+        # Accumulate response
+        accumulated_text = []
+        finish_reason = FinishReason.UNKNOWN
+        function_calls = []
+        usage = TokenUsage()
+        was_cancelled = False
+
+        try:
+            # Use send_message_stream for streaming
+            for chunk in self._chat.send_message_stream(message, config=config):
+                # Check for cancellation
+                if cancel_token and cancel_token.is_cancelled:
+                    was_cancelled = True
+                    finish_reason = FinishReason.CANCELLED
+                    break
+
+                # Extract text from chunk
+                if chunk.text:
+                    accumulated_text.append(chunk.text)
+                    on_chunk(chunk.text)
+
+                # Extract function calls if present
+                if hasattr(chunk, 'candidates') and chunk.candidates:
+                    candidate = chunk.candidates[0]
+                    if hasattr(candidate, 'content') and candidate.content:
+                        for part in candidate.content.parts:
+                            if hasattr(part, 'function_call') and part.function_call:
+                                from .converters import function_call_from_sdk
+                                fc = function_call_from_sdk(part.function_call)
+                                if fc and fc not in function_calls:
+                                    function_calls.append(fc)
+
+                    # Extract finish reason from last chunk
+                    if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
+                        from .converters import finish_reason_from_sdk
+                        finish_reason = finish_reason_from_sdk(candidate.finish_reason)
+
+                # Extract usage if available
+                if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
+                    usage = TokenUsage(
+                        prompt_tokens=getattr(chunk.usage_metadata, 'prompt_token_count', 0),
+                        output_tokens=getattr(chunk.usage_metadata, 'candidates_token_count', 0),
+                        total_tokens=getattr(chunk.usage_metadata, 'total_token_count', 0)
+                    )
+
+        except Exception as e:
+            # If cancelled during iteration, treat as cancellation
+            if cancel_token and cancel_token.is_cancelled:
+                was_cancelled = True
+                finish_reason = FinishReason.CANCELLED
+            else:
+                raise
+
+        # Build final response
+        final_text = ''.join(accumulated_text) if accumulated_text else None
+
+        # If we have function calls, update finish reason
+        if function_calls and not was_cancelled:
+            finish_reason = FinishReason.TOOL_USE
+
+        provider_response = ProviderResponse(
+            text=final_text,
+            function_calls=function_calls,
+            usage=usage,
+            finish_reason=finish_reason,
+            raw=None  # Streaming doesn't provide single raw response
+        )
+
+        self._last_usage = usage
+
+        # Parse structured output if schema was requested
+        if response_schema and final_text and not was_cancelled:
+            try:
+                provider_response.structured_output = json.loads(final_text)
+            except json.JSONDecodeError:
+                pass
+
+        return provider_response
+
+    def send_tool_results_streaming(
+        self,
+        results: List[ToolResult],
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        response_schema: Optional[Dict[str, Any]] = None
+    ) -> ProviderResponse:
+        """Send tool results with streaming response and optional cancellation.
+
+        Args:
+            results: List of tool execution results.
+            on_chunk: Callback invoked for each text chunk as it streams.
+            cancel_token: Optional token to request cancellation mid-stream.
+            response_schema: Optional JSON Schema to constrain the response.
+
+        Returns:
+            ProviderResponse with accumulated text and/or function calls.
+        """
+        if not self._chat:
+            raise RuntimeError("No chat session. Call create_session() first.")
+
+        # Convert results to SDK parts
+        sdk_parts = tool_results_to_sdk_parts(results)
+
+        # Build config override for structured output
+        config = None
+        if response_schema:
+            config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=response_schema
+            )
+
+        # Accumulate response
+        accumulated_text = []
+        finish_reason = FinishReason.UNKNOWN
+        function_calls = []
+        usage = TokenUsage()
+        was_cancelled = False
+
+        try:
+            # Use send_message_stream for streaming
+            for chunk in self._chat.send_message_stream(sdk_parts, config=config):
+                # Check for cancellation
+                if cancel_token and cancel_token.is_cancelled:
+                    was_cancelled = True
+                    finish_reason = FinishReason.CANCELLED
+                    break
+
+                # Extract text from chunk
+                if chunk.text:
+                    accumulated_text.append(chunk.text)
+                    on_chunk(chunk.text)
+
+                # Extract function calls if present
+                if hasattr(chunk, 'candidates') and chunk.candidates:
+                    candidate = chunk.candidates[0]
+                    if hasattr(candidate, 'content') and candidate.content:
+                        for part in candidate.content.parts:
+                            if hasattr(part, 'function_call') and part.function_call:
+                                from .converters import function_call_from_sdk
+                                fc = function_call_from_sdk(part.function_call)
+                                if fc and fc not in function_calls:
+                                    function_calls.append(fc)
+
+                    # Extract finish reason from last chunk
+                    if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
+                        from .converters import finish_reason_from_sdk
+                        finish_reason = finish_reason_from_sdk(candidate.finish_reason)
+
+                # Extract usage if available
+                if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
+                    usage = TokenUsage(
+                        prompt_tokens=getattr(chunk.usage_metadata, 'prompt_token_count', 0),
+                        output_tokens=getattr(chunk.usage_metadata, 'candidates_token_count', 0),
+                        total_tokens=getattr(chunk.usage_metadata, 'total_token_count', 0)
+                    )
+
+        except Exception as e:
+            # If cancelled during iteration, treat as cancellation
+            if cancel_token and cancel_token.is_cancelled:
+                was_cancelled = True
+                finish_reason = FinishReason.CANCELLED
+            else:
+                raise
+
+        # Build final response
+        final_text = ''.join(accumulated_text) if accumulated_text else None
+
+        # If we have function calls, update finish reason
+        if function_calls and not was_cancelled:
+            finish_reason = FinishReason.TOOL_USE
+
+        provider_response = ProviderResponse(
+            text=final_text,
+            function_calls=function_calls,
+            usage=usage,
+            finish_reason=finish_reason,
+            raw=None
+        )
+
+        self._last_usage = usage
+
+        # Parse structured output if schema was requested
+        if response_schema and final_text and not was_cancelled:
+            try:
+                provider_response.structured_output = json.loads(final_text)
+            except json.JSONDecodeError:
+                pass
+
+        return provider_response
 
     # ==================== Serialization ====================
 

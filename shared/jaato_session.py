@@ -16,6 +16,9 @@ from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .plugins.model_provider.types import (
     Attachment,
+    CancelledException,
+    CancelToken,
+    FinishReason,
     FunctionCall,
     Message,
     Part,
@@ -111,6 +114,11 @@ class JaatoSession:
         # Reads AI_REQUEST_INTERVAL from env (default: 0 = disabled)
         self._pacer = RequestPacer()
 
+        # Cancellation support
+        self._cancel_token: Optional[CancelToken] = None
+        self._is_running: bool = False
+        self._use_streaming: bool = True  # Enable streaming by default if provider supports it
+
     @property
     def model_name(self) -> Optional[str]:
         """Get the model name for this session."""
@@ -186,6 +194,47 @@ class JaatoSession:
             )
         """
         self._on_retry = callback
+
+    # ==================== Cancellation Support ====================
+
+    @property
+    def is_running(self) -> bool:
+        """Check if a message is currently being processed.
+
+        Returns:
+            True if send_message() is in progress, False otherwise.
+        """
+        return self._is_running
+
+    def request_stop(self) -> bool:
+        """Request cancellation of the current message processing.
+
+        If a message is being processed, signals the cancel token to stop.
+        The message loop will check this token and exit gracefully.
+
+        Returns:
+            True if a cancellation was requested (message was running),
+            False if no message was running.
+
+        Note:
+            Cancellation is cooperative - it may not be immediate.
+            The current streaming chunk will complete before stopping.
+        """
+        if self._cancel_token and self._is_running:
+            self._cancel_token.cancel()
+            return True
+        return False
+
+    def set_streaming_enabled(self, enabled: bool) -> None:
+        """Enable or disable streaming mode.
+
+        When enabled (default), the session uses streaming APIs for
+        real-time output and better cancellation support.
+
+        Args:
+            enabled: True to use streaming, False for batched responses.
+        """
+        self._use_streaming = enabled
 
     def configure(
         self,
@@ -527,7 +576,7 @@ class JaatoSession:
         message: str,
         on_output: Optional[OutputCallback]
     ) -> str:
-        """Internal function calling loop.
+        """Internal function calling loop with streaming and cancellation support.
 
         Args:
             message: The user's message text.
@@ -539,6 +588,10 @@ class JaatoSession:
         # Set output callback on executor
         if self._executor:
             self._executor.set_output_callback(on_output)
+
+        # Initialize cancellation support
+        self._cancel_token = CancelToken()
+        self._is_running = True
 
         # Track tokens and timing
         turn_start = datetime.now()
@@ -553,28 +606,76 @@ class JaatoSession:
         }
         response: Optional[ProviderResponse] = None
 
+        # Determine if we should use streaming
+        use_streaming = (
+            self._use_streaming and
+            self._provider and
+            hasattr(self._provider, 'supports_streaming') and
+            self._provider.supports_streaming()
+        )
+
         try:
+            # Check for cancellation before starting
+            if self._cancel_token.is_cancelled:
+                return "[Cancelled before start]"
+
             # Proactive rate limiting: wait if needed before request
             self._pacer.pace()
 
-            response, _retry_stats = with_retry(
-                lambda: self._provider.send_message(message),
-                context="send_message",
-                on_retry=self._on_retry
-            )
+            # Send message (streaming or batched)
+            if use_streaming:
+                # Streaming callback that routes to on_output
+                def streaming_callback(chunk: str) -> None:
+                    if on_output:
+                        on_output("model", chunk, "append")
+
+                response, _retry_stats = with_retry(
+                    lambda: self._provider.send_message_streaming(
+                        message,
+                        on_chunk=streaming_callback,
+                        cancel_token=self._cancel_token
+                    ),
+                    context="send_message_streaming",
+                    on_retry=self._on_retry,
+                    cancel_token=self._cancel_token
+                )
+            else:
+                response, _retry_stats = with_retry(
+                    lambda: self._provider.send_message(message),
+                    context="send_message",
+                    on_retry=self._on_retry,
+                    cancel_token=self._cancel_token
+                )
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
+
+            # Check for cancellation after initial message
+            if self._cancel_token.is_cancelled or response.finish_reason == FinishReason.CANCELLED:
+                partial_text = response.text or ''
+                if partial_text:
+                    return f"{partial_text}\n\n[Generation cancelled]"
+                return "[Generation cancelled]"
 
             # Handle function calling loop
             function_calls = list(response.function_calls) if response.function_calls else []
             while function_calls:
-                # Emit any text produced alongside function calls
-                if response.text and on_output:
+                # Check for cancellation before processing tools
+                if self._cancel_token.is_cancelled:
+                    if response.text:
+                        return f"{response.text}\n\n[Cancelled during tool execution]"
+                    return "[Cancelled during tool execution]"
+
+                # Emit any text produced alongside function calls (only in non-streaming mode)
+                if not use_streaming and response.text and on_output:
                     on_output("model", response.text, "write")
 
                 tool_results: List[ToolResult] = []
 
                 for fc in function_calls:
+                    # Check for cancellation before each tool
+                    if self._cancel_token.is_cancelled:
+                        break
+
                     name = fc.name
                     args = fc.args
 
@@ -627,19 +728,46 @@ class JaatoSession:
                     tool_result = self._build_tool_result(fc, executor_result)
                     tool_results.append(tool_result)
 
+                # Check for cancellation before sending tool results
+                if self._cancel_token.is_cancelled:
+                    return "[Cancelled after tool execution]"
+
                 # Send tool results back (with retry for rate limits)
                 self._pacer.pace()  # Proactive rate limiting
-                response, _retry_stats = with_retry(
-                    lambda: self._provider.send_tool_results(tool_results),
-                    context="send_tool_results",
-                    on_retry=self._on_retry
-                )
+
+                if use_streaming:
+                    def streaming_callback(chunk: str) -> None:
+                        if on_output:
+                            on_output("model", chunk, "append")
+
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.send_tool_results_streaming(
+                            tool_results,
+                            on_chunk=streaming_callback,
+                            cancel_token=self._cancel_token
+                        ),
+                        context="send_tool_results_streaming",
+                        on_retry=self._on_retry,
+                        cancel_token=self._cancel_token
+                    )
+                else:
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.send_tool_results(tool_results),
+                        context="send_tool_results",
+                        on_retry=self._on_retry,
+                        cancel_token=self._cancel_token
+                    )
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
 
-                # Check finish_reason for abnormal termination
-                from .plugins.model_provider.types import FinishReason
-                if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE):
+                # Check for cancellation or abnormal termination
+                if self._cancel_token.is_cancelled or response.finish_reason == FinishReason.CANCELLED:
+                    partial_text = response.text or ''
+                    if partial_text:
+                        return f"{partial_text}\n\n[Generation cancelled]"
+                    return "[Generation cancelled]"
+
+                if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE, FinishReason.CANCELLED):
                     import sys
                     print(f"[warning] Model stopped with finish_reason={response.finish_reason}", file=sys.stderr)
                     if response.text:
@@ -649,11 +777,15 @@ class JaatoSession:
 
                 function_calls = list(response.function_calls) if response.function_calls else []
 
-            # Emit final response text
-            if response.text and on_output:
+            # Emit final response text (only in non-streaming mode, streaming already emitted)
+            if not use_streaming and response.text and on_output:
                 on_output("model", response.text, "write")
 
             return response.text or ''
+
+        except CancelledException:
+            # Handle explicit cancellation exception
+            return "[Generation cancelled]"
 
         finally:
             # Record turn end time
@@ -663,6 +795,10 @@ class JaatoSession:
 
             if turn_data['total'] > 0:
                 self._turn_accounting.append(turn_data)
+
+            # Clean up cancellation state
+            self._is_running = False
+            self._cancel_token = None
 
     def _build_tool_result(
         self,

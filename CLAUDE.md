@@ -168,6 +168,45 @@ MCP servers are configured in `.mcp.json`:
 }
 ```
 
+### Streaming & Cancellation
+
+The framework supports streaming responses and mid-turn cancellation:
+
+```python
+import threading
+
+# Streaming is enabled by default
+client.set_streaming_enabled(True)  # or False for batched
+
+# Start message in background
+def run():
+    response = client.send_message("Tell me a long story")
+
+thread = threading.Thread(target=run)
+thread.start()
+
+# Cancel mid-response
+if client.is_processing:
+    client.stop()  # Returns partial text + "[Generation cancelled]"
+
+thread.join()
+```
+
+Key cancellation types in `shared/plugins/model_provider/types.py`:
+- `CancelToken`: Thread-safe cancellation signaling
+- `CancelledException`: Raised when operation is cancelled
+- `FinishReason.CANCELLED`: Indicates cancelled generation
+
+Provider streaming methods:
+- `supports_streaming()`: Check if provider supports streaming
+- `send_message_streaming(message, on_chunk, cancel_token)`: Stream with cancellation
+- `send_tool_results_streaming(results, on_chunk, cancel_token)`: Stream tool responses
+
+Session/client methods:
+- `client.stop()` / `session.request_stop()`: Request cancellation
+- `client.is_processing` / `session.is_running`: Check if message in progress
+- `client.set_streaming_enabled(bool)`: Toggle streaming mode
+
 ### Plugin Type System
 
 The project uses provider-agnostic types throughout the plugin system:
