@@ -7,6 +7,9 @@ overhead, fast execution.
 Similar to Java's simple heap compaction - just remove the oldest data.
 """
 
+import os
+import tempfile
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..model_provider.types import Message
@@ -50,6 +53,23 @@ class TruncateGCPlugin:
     def __init__(self):
         self._initialized = False
         self._config: Dict[str, Any] = {}
+        self._agent_name: Optional[str] = None
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [GC_TRUNCATE{agent_prefix}] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
 
     @property
     def name(self) -> str:
@@ -66,10 +86,14 @@ class TruncateGCPlugin:
                 - notification_template: str - Custom notification template
         """
         self._config = config or {}
+        self._agent_name = self._config.get("agent_name")
         self._initialized = True
+        preserve = self._config.get("preserve_recent_turns", "default")
+        self._trace(f"initialize: preserve_recent_turns={preserve}")
 
     def shutdown(self) -> None:
         """Clean up resources."""
+        self._trace("shutdown")
         self._config = {}
         self._initialized = False
 
@@ -97,12 +121,14 @@ class TruncateGCPlugin:
         # Check threshold percentage
         percent_used = context_usage.get('percent_used', 0)
         if percent_used >= config.threshold_percent:
+            self._trace(f"should_collect: triggered by threshold ({percent_used:.1f}% >= {config.threshold_percent}%)")
             return True, GCTriggerReason.THRESHOLD
 
         # Check turn limit
         if config.max_turns is not None:
             turns = context_usage.get('turns', 0)
             if turns >= config.max_turns:
+                self._trace(f"should_collect: triggered by turn_limit ({turns} >= {config.max_turns})")
                 return True, GCTriggerReason.TURN_LIMIT
 
         return False, None
@@ -125,6 +151,7 @@ class TruncateGCPlugin:
         Returns:
             Tuple of (new_history, result).
         """
+        self._trace(f"collect: reason={reason.value}, history_len={len(history)}")
         tokens_before = estimate_history_tokens(history)
 
         # Split into turns
@@ -185,6 +212,7 @@ class TruncateGCPlugin:
                 "preserved_indices": list(preserved_indices),
             }
         )
+        self._trace(f"collect: removed={removed_count} turns, tokens {tokens_before}->{tokens_after}")
 
         # Add notification if configured
         if self._config.get('notify_on_gc', False):

@@ -1,5 +1,8 @@
 """Web search plugin for performing internet searches."""
 
+import os
+import tempfile
+from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 
 from ..base import UserCommand
@@ -27,10 +30,28 @@ class WebSearchPlugin:
         self._safesearch: str = 'moderate'
         self._initialized = False
         self._ddgs = None
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
 
     @property
     def name(self) -> str:
         return "web_search"
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [WEB_SEARCH{agent_prefix}] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the web search plugin.
@@ -43,6 +64,8 @@ class WebSearchPlugin:
                 - safesearch: Safe search level (default: 'moderate')
         """
         if config:
+            # Extract agent name for trace logging
+            self._agent_name = config.get("agent_name")
             if 'max_results' in config:
                 self._max_results = config['max_results']
             if 'timeout' in config:
@@ -52,9 +75,11 @@ class WebSearchPlugin:
             if 'safesearch' in config:
                 self._safesearch = config['safesearch']
         self._initialized = True
+        self._trace(f"initialize: max_results={self._max_results}, region={self._region}")
 
     def shutdown(self) -> None:
         """Shutdown the web search plugin."""
+        self._trace("shutdown: cleaning up")
         self._ddgs = None
         self._initialized = False
 
@@ -126,12 +151,13 @@ Tips for effective searches:
         Returns:
             Dict containing search results or error.
         """
+        query = args.get('query')
+        max_results = args.get('max_results', self._max_results)
+        self._trace(f"web_search: query={query!r}, max_results={max_results}")
+
         try:
-            query = args.get('query')
             if not query:
                 return {'error': 'web_search: query must be provided'}
-
-            max_results = args.get('max_results', self._max_results)
 
             # Lazy import to avoid startup cost if plugin not used
             try:

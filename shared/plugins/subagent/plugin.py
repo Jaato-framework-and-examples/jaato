@@ -594,6 +594,15 @@ class SubagentPlugin:
                         mode=mode
                     )
 
+            # Emit the follow-up message to UI before execution
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_output(
+                    agent_id=agent_id,
+                    source="user",
+                    text=message,
+                    mode="write"
+                )
+
             # Send follow-up message
             response = session.send_message(message, on_output=subagent_output_callback)
 
@@ -945,11 +954,41 @@ class SubagentPlugin:
 
         try:
             # Create session from runtime with profile's configuration
+            # profile.plugins is always a list (possibly empty); pass it directly
+            # Empty list = no tools, non-empty list = only those tools
+
+            # Inject agent_name into each plugin's config for trace logging
+            effective_plugin_configs = profile.plugin_configs.copy() if profile.plugin_configs else {}
+            for plugin_name in (profile.plugins or []):
+                if plugin_name not in effective_plugin_configs:
+                    effective_plugin_configs[plugin_name] = {}
+                if "agent_name" not in effective_plugin_configs[plugin_name]:
+                    effective_plugin_configs[plugin_name]["agent_name"] = profile.name
+
             session = self._runtime.create_session(
                 model=model,
                 tools=profile.plugins if profile.plugins else None,
-                system_instructions=profile.system_instructions
+                system_instructions=profile.system_instructions,
+                plugin_configs=effective_plugin_configs if effective_plugin_configs else None
             )
+
+            # Debug: write to trace log file (visible even with rich client)
+            # Use JAATO_TRACE_LOG env var, or default to /tmp/rich_client_trace.log
+            import tempfile
+            trace_path = os.environ.get(
+                'JAATO_TRACE_LOG',
+                os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+            )
+            if trace_path:
+                try:
+                    with open(trace_path, "a") as f:
+                        from datetime import datetime as dt
+                        ts = dt.now().strftime("%H:%M:%S.%f")[:-3]
+                        f.write(f"[{ts}] [SUBAGENT] '{profile.name}' tools={profile.plugins}\n")
+                        f.write(f"[{ts}] [SUBAGENT] plugin_configs={profile.plugin_configs}\n")
+                        f.flush()
+                except (IOError, OSError):
+                    pass  # Silently skip if trace file cannot be written
 
             # Set agent context for permission checks
             session.set_agent_context(
@@ -970,6 +1009,15 @@ class SubagentPlugin:
                         text=text,
                         mode=mode
                     )
+
+            # Emit the initial prompt to UI before execution
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_output(
+                    agent_id=agent_id,
+                    source="user",
+                    text=prompt,
+                    mode="write"
+                )
 
             # Run the conversation with output capture
             response = session.send_message(prompt, on_output=subagent_output_callback)

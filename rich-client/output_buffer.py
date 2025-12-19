@@ -70,10 +70,12 @@ class OutputBuffer:
         self._measure_console: Optional[Console] = None
         self._console_width: int = 80
         self._last_source: Optional[str] = None  # Track source for turn detection
+        self._last_turn_source: Optional[str] = None  # Track user/model turns (ignores system/tool)
         self._scroll_offset: int = 0  # Lines scrolled up from bottom (0 = at bottom)
         self._spinner_active: bool = False
         self._spinner_index: int = 0
         self._active_tools: List[ActiveToolCall] = []  # Currently executing tools
+        self._tools_expanded: bool = False  # Toggle between collapsed/expanded tool view
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -102,7 +104,12 @@ class OutputBuffer:
         rendered = Text()
         if source == "model":
             if is_turn_start:
-                rendered.append("Model> ", style="bold cyan")
+                # Header line takes full width, actual text on next line
+                return 2  # Header + first content line (minimum)
+            rendered.append(text)
+        elif source == "user":
+            if is_turn_start:
+                return 2  # Header + first content line
             rendered.append(text)
         elif source == "system":
             rendered.append(text)
@@ -164,9 +171,15 @@ class OutputBuffer:
                 self.finalize_tool_tree()
 
         if mode == "write":
-            # Start a new block - this is a new turn
+            # Start a new block
             self._flush_current_block()
-            self._current_block = (source, [text], True)  # True = is new turn
+            # Only show header when switching between user and model turns
+            # (not for every model response within same agentic loop)
+            is_new_turn = False
+            if source in ("user", "model"):
+                is_new_turn = (self._last_turn_source != source)
+                self._last_turn_source = source
+            self._current_block = (source, [text], is_new_turn)
         elif mode == "append" and self._current_block:
             # Append to current block
             self._current_block[1].append(text)
@@ -205,6 +218,8 @@ class OutputBuffer:
         """Clear all output."""
         self._lines.clear()
         self._current_block = None
+        self._last_source = None
+        self._last_turn_source = None
         self._scroll_offset = 0
         self._spinner_active = False
         self._active_tools.clear()
@@ -298,10 +313,24 @@ class OutputBuffer:
         """Clear all active tools."""
         self._active_tools.clear()
 
-    def finalize_tool_tree(self) -> None:
-        """Convert tool tree to regular scrollable lines.
+    def toggle_tools_expanded(self) -> bool:
+        """Toggle between collapsed and expanded tool view.
 
-        Called when a turn is complete to make the tool tree scroll
+        Returns:
+            True if now expanded, False if now collapsed.
+        """
+        self._tools_expanded = not self._tools_expanded
+        return self._tools_expanded
+
+    @property
+    def tools_expanded(self) -> bool:
+        """Check if tool view is currently expanded."""
+        return self._tools_expanded
+
+    def finalize_tool_tree(self) -> None:
+        """Convert tool tree to stored lines (collapsed or expanded based on setting).
+
+        Called when a turn is complete to make the tool summary scroll
         with the rest of the content instead of staying fixed.
         """
         if not self._active_tools:
@@ -317,58 +346,49 @@ class OutputBuffer:
         if not all_completed or any_pending:
             return  # Don't finalize yet
 
-        # Build the tool tree as text lines
-        lines = []
-        lines.append(("Model> ✓ Processed", "bold green"))
+        tool_count = len(self._active_tools)
 
-        for i, tool in enumerate(self._active_tools):
-            is_last = (i == len(self._active_tools) - 1)
-            prefix = "└─" if is_last else "├─"
+        # Add separator line for visual distinction (no F3 hint for finalized trees)
+        self._add_line("system", "", "")
+        self._add_line("system", "  ─ ─ ─", "dim")
 
-            # Build tool line
-            status_icon = "✓" if tool.success else "✗"
-            status_style = "green" if tool.success else "red"
-            line_parts = [f"       {prefix} {status_icon} {tool.name}"]
+        if self._tools_expanded:
+            # Expanded view - each tool on its own line
+            header = f"  ▾ {tool_count} tool{'s' if tool_count != 1 else ''}:"
+            self._add_line("system", header, "dim")
 
-            # Add args summary (truncated) before duration
-            if tool.args_summary and tool.args_summary != "{}":
-                line_parts.append(f" {tool.args_summary}")
+            for i, tool in enumerate(self._active_tools):
+                is_last = (i == len(self._active_tools) - 1)
+                connector = "└─" if is_last else "├─"
+                status_icon = "✓" if tool.success else "✗"
 
-            if tool.duration_seconds is not None:
-                line_parts.append(f" ({tool.duration_seconds:.2f}s)")
+                # Build tool line with args and duration if available
+                tool_line = f"    {connector} {tool.name}"
+                if tool.args_summary:
+                    tool_line += f"({tool.args_summary})"
+                tool_line += f" {status_icon}"
+                if tool.duration_seconds is not None:
+                    tool_line += f" ({tool.duration_seconds:.1f}s)"
 
-            # Add permission result
-            if tool.permission_state in ("granted", "denied"):
-                if tool.permission_state == "granted":
-                    method_label = tool.permission_method or "allowed"
-                    if method_label == "whitelist":
-                        line_parts.append(" ✓ auto-approved (whitelist)")
-                    else:
-                        line_parts.append(f" ✓ allowed ({method_label})")
-                else:
-                    method_label = tool.permission_method or "denied"
-                    if method_label == "blacklist":
-                        line_parts.append(" ✗ blocked (blacklist)")
-                    else:
-                        line_parts.append(f" ✗ denied ({method_label})")
+                self._add_line("system", tool_line, "dim")
 
-            # Add clarification result
-            if tool.clarification_state == "resolved":
-                line_parts.append(" ✓ answered")
+                # Add error message if failed
+                if not tool.success and tool.error_message:
+                    continuation = "   " if is_last else "│  "
+                    error_line = f"    {continuation}   ⚠ {tool.error_message[:60]}"
+                    self._add_line("system", error_line, "dim red")
+        else:
+            # Collapsed view - all tools on one line
+            tool_summaries = []
+            for tool in self._active_tools:
+                status_icon = "✓" if tool.success else "✗"
+                tool_summaries.append(f"{tool.name} {status_icon}")
 
-            lines.append(("".join(line_parts), ""))
+            summary_line = f"  ▸ {tool_count} tool{'s' if tool_count != 1 else ''}: " + " ".join(tool_summaries)
+            self._add_line("system", summary_line, "dim")
 
-            # Add error message if failed
-            if not tool.success and tool.error_message:
-                continuation = "   " if is_last else "│  "
-                error_msg = tool.error_message
-                if len(error_msg) > 60:
-                    error_msg = error_msg[:57] + "..."
-                lines.append((f"       {continuation}     ⚠ {error_msg}", "dim red"))
-
-        # Add lines to buffer as system messages (they'll scroll normally)
-        for text, style in lines:
-            self._add_line("system", text, style or "")
+        # Add blank line for spacing before next model response
+        self._add_line("system", "", "")
 
         # Clear active tools so they don't render separately anymore
         self._active_tools.clear()
@@ -589,17 +609,22 @@ class OutputBuffer:
         height = 0
 
         if self._active_tools:
-            # Header line ("Model> ✓ Processed" or "Model> ⏳ Awaiting..." etc.)
-            height += 1
+            if self._tools_expanded:
+                # Expanded view: header + each tool on its own line
+                height += 1  # Header line
 
-            for tool in self._active_tools:
-                # Tool line (always 1 line)
+                for tool in self._active_tools:
+                    height += 1  # Tool line
+
+                    # Error message (if failed and has error)
+                    if tool.completed and not tool.success and tool.error_message:
+                        height += 1
+            else:
+                # Collapsed view: just one summary line
                 height += 1
 
-                # Error message (if failed and has error)
-                if tool.completed and not tool.success and tool.error_message:
-                    height += 1
-
+            # Check for pending prompts (same logic for both views)
+            for tool in self._active_tools:
                 # Permission prompt (if pending)
                 if tool.permission_state == "pending" and tool.permission_prompt_lines:
                     height += 1  # "Permission required" header
@@ -689,7 +714,7 @@ class OutputBuffer:
             if self._spinner_active:
                 output = Text()
                 frame = self.SPINNER_FRAMES[self._spinner_index]
-                output.append(f"Model> {frame} ", style="bold cyan")
+                output.append(f"  {frame} ", style="cyan")
                 output.append("thinking...", style="dim italic")
                 return output
             return Text("Waiting for output...", style="dim italic")
@@ -704,10 +729,10 @@ class OutputBuffer:
         lines_to_show: List[OutputLine] = []
 
         if height:
-            # Calculate how much space the tool tree will take (including newline separator)
+            # Calculate how much space the tool tree will take (including separator)
             tool_tree_height = self._calculate_tool_tree_height()
             if tool_tree_height > 0 and all_lines:
-                tool_tree_height += 1  # Account for newline before tool tree
+                tool_tree_height += 4  # Account for separator (\n\n + line + \n)
 
             # Adjust available height for stored lines
             available_for_lines = max(1, height - tool_tree_height)
@@ -763,33 +788,55 @@ class OutputBuffer:
                         output.append("\n")
                     output.append(wrapped_line, style=line.style)
             elif line.source == "user":
-                # User input - show with You> prefix on turn start
-                prefix_width = 5 if line.is_turn_start else 0  # "You> " = 5 chars
-                wrapped = wrap_text(line.text, prefix_width)
-                for j, wrapped_line in enumerate(wrapped):
-                    if j > 0:
+                # User input - use header line for turn start
+                if line.is_turn_start:
+                    # Add blank line before header for visual separation (if not first line)
+                    if i > 0:
                         output.append("\n")
-                    if j == 0 and line.is_turn_start:
-                        output.append("You> ", style="bold green")
-                    elif j > 0 and line.is_turn_start:
-                        output.append("     ")  # Indent continuation lines
-                    output.append(wrapped_line)
+                    # Render header line: ── You ───────────────────
+                    header_prefix = "── You "
+                    remaining = max(0, wrap_width - len(header_prefix))
+                    output.append(header_prefix, style="bold green")
+                    output.append("─" * remaining, style="dim green")
+                    output.append("\n")
+                    # Then render the text content
+                    wrapped = wrap_text(line.text, 0)
+                    for j, wrapped_line in enumerate(wrapped):
+                        if j > 0:
+                            output.append("\n")
+                        output.append(wrapped_line)
+                else:
+                    # Non-turn-start - just render text
+                    wrapped = wrap_text(line.text, 0)
+                    for j, wrapped_line in enumerate(wrapped):
+                        if j > 0:
+                            output.append("\n")
+                        output.append(wrapped_line)
             elif line.source == "model":
-                # Model output - always indent to align with "Model> " prefix
-                prefix_width = 7  # "Model> " = 7 chars
-                wrapped = wrap_text(line.text, prefix_width)
-                for j, wrapped_line in enumerate(wrapped):
-                    if j > 0:
+                # Model output - use header line for turn start
+                if line.is_turn_start:
+                    # Add blank line before header for visual separation (if not first line)
+                    if i > 0:
                         output.append("\n")
-                    if j == 0 and line.is_turn_start:
-                        output.append("Model> ", style="bold cyan")
-                    elif j == 0:
-                        # Non-turn-start first line - indent to align
-                        output.append("       ")
-                    else:
-                        # All continuation lines get indentation
-                        output.append("       ")
-                    output.append(wrapped_line)
+                    # Render header line: ── Model ─────────────────
+                    header_prefix = "── Model "
+                    remaining = max(0, wrap_width - len(header_prefix))
+                    output.append(header_prefix, style="bold cyan")
+                    output.append("─" * remaining, style="dim cyan")
+                    output.append("\n")
+                    # Then render the text content (no prefix needed)
+                    wrapped = wrap_text(line.text, 0)
+                    for j, wrapped_line in enumerate(wrapped):
+                        if j > 0:
+                            output.append("\n")
+                        output.append(wrapped_line)
+                else:
+                    # Non-turn-start - just render text, no prefix
+                    wrapped = wrap_text(line.text, 0)
+                    for j, wrapped_line in enumerate(wrapped):
+                        if j > 0:
+                            output.append("\n")
+                        output.append(wrapped_line)
             elif line.source == "tool":
                 # Tool output
                 prefix_width = len(f"[{line.source}] ") if line.is_turn_start else 0
@@ -869,96 +916,106 @@ class OutputBuffer:
                         output.append(" " * (len(f"[{line.source}] ")))  # Indent continuation
                     output.append_text(Text.from_ansi(wrapped_line))
 
-        # Add tool call tree (after regular lines, before deferred lines)
+        # Add tool call summary (after regular lines)
         if self._active_tools:
             if lines_to_show:
+                output.append("\n\n")  # Extra blank line for visual separation
+                # Add separator line with toggle hint
+                if self._tools_expanded:
+                    output.append("  ─ ─ ─  Ctrl+T to collapse", style="dim")
+                else:
+                    output.append("  ─ ─ ─  Ctrl+T to expand", style="dim")
                 output.append("\n")
 
             # Check if waiting for user input (permission or clarification)
-            awaiting_input = any(
-                tool.permission_state == "pending" or tool.clarification_state == "pending"
-                for tool in self._active_tools
-            )
+            pending_tool = None
+            for tool in self._active_tools:
+                if tool.permission_state == "pending" or tool.clarification_state == "pending":
+                    pending_tool = tool
+                    break
 
-            # Show header based on state
-            # Awaiting user input takes precedence over other states
-            if awaiting_input:
-                # Waiting for user response
-                output.append("Model> ⏳ ", style="bold yellow")
-                output.append("Awaiting...", style="dim italic")
-            elif self._spinner_active:
-                # Model is processing
-                frame = self.SPINNER_FRAMES[self._spinner_index]
-                output.append(f"Model> {frame} ", style="bold cyan")
-                output.append("thinking...", style="dim italic")
-            else:
-                # All tools completed - show "Processed" header
-                output.append("Model> ✓ ", style="bold green")
-                output.append("Processed", style="dim italic")
+            tool_count = len(self._active_tools)
+            # Check if any tools are still executing (not completed)
+            any_uncompleted = any(not tool.completed for tool in self._active_tools)
+            # Show spinner if: spinner is active OR any tool is still executing
+            # Also show spinner if all tools completed but not finalized yet (turn still in progress)
+            all_completed = all(tool.completed for tool in self._active_tools)
+            show_spinner = self._spinner_active or any_uncompleted or (all_completed and not pending_tool)
 
-            # Show tool calls below header
-            for i, tool in enumerate(self._active_tools):
-                output.append("\n")
-                is_last = (i == len(self._active_tools) - 1)
-                prefix = "└─" if is_last else "├─"
-                continuation = "   " if is_last else "│  "
-                output.append(f"       {prefix} ", style="dim")
-
-                if tool.completed:
-                    # Completed tool - show with checkmark and duration
-                    status_icon = "✓" if tool.success else "✗"
-                    status_style = "green" if tool.success else "red"
-                    output.append(f"{status_icon} ", style=status_style)
-                    output.append(tool.name, style="dim yellow")
-                    # Add args summary (truncated) before duration
-                    if tool.args_summary and tool.args_summary != "{}":
-                        output.append(f" {tool.args_summary}", style="dim")
-                    if tool.duration_seconds is not None:
-                        output.append(f" ({tool.duration_seconds:.2f}s)", style="dim")
-                    # Add collapsed permission result on same line
-                    if tool.permission_state in ("granted", "denied"):
-                        output.append(" ", style="dim")
-                        if tool.permission_state == "granted":
-                            output.append("✓ ", style="green")
-                            method_label = tool.permission_method or "allowed"
-                            if method_label == "whitelist":
-                                output.append("auto-approved (whitelist)", style="dim green")
-                            else:
-                                output.append(f"allowed ({method_label})", style="dim green")
-                        else:
-                            output.append("✗ ", style="red")
-                            method_label = tool.permission_method or "denied"
-                            if method_label == "blacklist":
-                                output.append("blocked (blacklist)", style="dim red")
-                            else:
-                                output.append(f"denied ({method_label})", style="dim red")
-                    # Add collapsed clarification result on same line
-                    if tool.clarification_state == "resolved":
-                        output.append(" ", style="dim")
-                        output.append("✓ ", style="cyan")
-                        output.append("answered", style="dim cyan")
-                    # Show error message on next line for failed tools
-                    if not tool.success and tool.error_message:
-                        output.append("\n")
-                        output.append(f"       {continuation}     ", style="dim")
-                        output.append("⚠ ", style="red")
-                        # Truncate error message if too long
-                        error_msg = tool.error_message
-                        if len(error_msg) > 60:
-                            error_msg = error_msg[:57] + "..."
-                        output.append(error_msg, style="dim red")
+            if self._tools_expanded:
+                # Expanded view - show each tool on its own line
+                if pending_tool:
+                    output.append("  ⏳ ", style="bold yellow")
+                elif show_spinner:
+                    frame = self.SPINNER_FRAMES[self._spinner_index]
+                    output.append(f"  {frame} ", style="cyan")
                 else:
-                    # Active tool - show with spinner indicator
-                    output.append("○ ", style="yellow")
-                    output.append(tool.name, style="yellow")
-                    if tool.args_summary and tool.args_summary != "{}":
-                        output.append(f" {tool.args_summary}", style="dim")
+                    output.append("  ▾ ", style="dim")
+                output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}:", style="dim")
 
-                # Show permission info under this tool (only when pending)
-                if tool.permission_state == "pending" and tool.permission_prompt_lines:
+                # Show each tool on its own line
+                for i, tool in enumerate(self._active_tools):
+                    is_last = (i == len(self._active_tools) - 1)
+                    connector = "└─" if is_last else "├─"
+
+                    if tool.completed:
+                        status_icon = "✓" if tool.success else "✗"
+                        status_style = "green" if tool.success else "red"
+                    else:
+                        status_icon = "○"
+                        status_style = "dim"
+
+                    output.append("\n")
+                    output.append(f"    {connector} ", style="dim")
+                    output.append(tool.name, style="dim")
+                    if tool.args_summary:
+                        output.append(f"({tool.args_summary})", style="dim")
+                    output.append(f" {status_icon}", style=status_style)
+
+                    # Show duration if available
+                    if tool.completed and tool.duration_seconds is not None:
+                        output.append(f" ({tool.duration_seconds:.1f}s)", style="dim")
+
+                    # Show error message if failed
+                    if tool.completed and not tool.success and tool.error_message:
+                        output.append("\n")
+                        continuation = "   " if is_last else "│  "
+                        output.append(f"    {continuation} ", style="dim")
+                        output.append(f"  ⚠ {tool.error_message[:60]}", style="red dim")
+            else:
+                # Collapsed view - all tools on one line
+                tool_summaries = []
+                for tool in self._active_tools:
+                    if tool.completed:
+                        status_icon = "✓" if tool.success else "✗"
+                    else:
+                        status_icon = "○"
+                    tool_summaries.append(f"{tool.name} {status_icon}")
+
+                if pending_tool:
+                    output.append("  ⏳ ", style="bold yellow")
+                    output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
+                    output.append(" ".join(tool_summaries), style="dim")
+                elif show_spinner:
+                    frame = self.SPINNER_FRAMES[self._spinner_index]
+                    output.append(f"  {frame} ", style="cyan")
+                    output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
+                    output.append(" ".join(tool_summaries), style="dim")
+                else:
+                    output.append("  ▸ ", style="dim")
+                    output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
+                    output.append(" ".join(tool_summaries), style="dim")
+
+            # Show permission/clarification prompt for pending tool (expanded)
+            if pending_tool:
+                continuation = "   "  # No tree structure needed
+
+                # Show permission info (only when pending)
+                if pending_tool.permission_state == "pending" and pending_tool.permission_prompt_lines:
+                    tool = pending_tool
                     # Expanded permission prompt
                     output.append("\n")
-                    output.append(f"       {continuation}     ", style="dim")
+                    output.append(f"  {continuation}     ", style="dim")
                     output.append("⚠ ", style="yellow")
                     output.append("Permission required", style="yellow")
 
@@ -986,7 +1043,7 @@ class OutputBuffer:
                     box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
                     content_width = box_width - 4  # Space for "│ " and " │"
                     output.append("\n")
-                    output.append(f"       {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
+                    output.append(f"  {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
 
                     for prompt_line in lines_to_render:
                         # Wrap long lines instead of truncating
@@ -1000,7 +1057,7 @@ class OutputBuffer:
                         for display_line in wrapped:
                             output.append("\n")
                             padding = box_width - len(display_line) - 4
-                            output.append(f"       {continuation}     │ ", style="dim")
+                            output.append(f"  {continuation}     │ ", style="dim")
                             # Color diff lines appropriately
                             if display_line.startswith('+') and not display_line.startswith('+++'):
                                 output.append(display_line, style="green")
@@ -1017,7 +1074,7 @@ class OutputBuffer:
                         output.append("\n")
                         truncation_msg = f"[...{hidden_count} more - 'v' to view...]"
                         padding = box_width - len(truncation_msg) - 4
-                        output.append(f"       {continuation}     │ ", style="dim")
+                        output.append(f"  {continuation}     │ ", style="dim")
                         output.append(truncation_msg, style="dim italic cyan")
                         output.append(" " * max(0, padding) + " │", style="dim")
                         # Show last line (usually options) - wrap if needed
@@ -1029,18 +1086,19 @@ class OutputBuffer:
                         for display_line in last_wrapped:
                             output.append("\n")
                             padding = box_width - len(display_line) - 4
-                            output.append(f"       {continuation}     │ ", style="dim")
+                            output.append(f"  {continuation}     │ ", style="dim")
                             output.append(display_line, style="cyan")  # Options styled cyan
                             output.append(" " * max(0, padding) + " │", style="dim")
 
                     output.append("\n")
-                    output.append(f"       {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
+                    output.append(f"  {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
 
-                # Show clarification info under this tool
-                if tool.clarification_state == "pending":
+                # Show clarification info for pending tool
+                if pending_tool.clarification_state == "pending":
+                    tool = pending_tool
                     # Show header with progress
                     output.append("\n")
-                    output.append(f"       {continuation}     ", style="dim")
+                    output.append(f"  {continuation}     ", style="dim")
                     output.append("❓ ", style="cyan")
                     if tool.clarification_total_questions > 0:
                         output.append(f"Clarification ({tool.clarification_current_question}/{tool.clarification_total_questions})", style="cyan")
@@ -1051,7 +1109,7 @@ class OutputBuffer:
                     if tool.clarification_answered:
                         for q_idx, answer_summary in tool.clarification_answered:
                             output.append("\n")
-                            output.append(f"       {continuation}     ", style="dim")
+                            output.append(f"  {continuation}     ", style="dim")
                             output.append("  ✓ ", style="green")
                             output.append(f"Q{q_idx}: ", style="dim")
                             output.append(answer_summary, style="dim green")
@@ -1079,7 +1137,7 @@ class OutputBuffer:
                         box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
                         content_width = box_width - 4
                         output.append("\n")
-                        output.append(f"       {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
+                        output.append(f"  {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
 
                         for prompt_line in lines_to_render:
                             # Wrap long lines
@@ -1092,7 +1150,7 @@ class OutputBuffer:
                             for display_line in wrapped:
                                 output.append("\n")
                                 padding = box_width - len(display_line) - 4
-                                output.append(f"       {continuation}     │ ", style="dim")
+                                output.append(f"  {continuation}     │ ", style="dim")
                                 output.append(display_line)
                                 output.append(" " * max(0, padding) + " │", style="dim")
 
@@ -1101,7 +1159,7 @@ class OutputBuffer:
                             output.append("\n")
                             truncation_msg = f"[...{hidden_count} more - 'v' to view...]"
                             padding = box_width - len(truncation_msg) - 4
-                            output.append(f"       {continuation}     │ ", style="dim")
+                            output.append(f"  {continuation}     │ ", style="dim")
                             output.append(truncation_msg, style="dim italic cyan")
                             output.append(" " * max(0, padding) + " │", style="dim")
                             last_line = prompt_lines[-1]
@@ -1112,18 +1170,25 @@ class OutputBuffer:
                             for display_line in last_wrapped:
                                 output.append("\n")
                                 padding = box_width - len(display_line) - 4
-                                output.append(f"       {continuation}     │ ", style="dim")
+                                output.append(f"  {continuation}     │ ", style="dim")
                                 output.append(display_line, style="cyan")
                                 output.append(" " * max(0, padding) + " │", style="dim")
 
                         output.append("\n")
-                        output.append(f"       {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
+                        output.append(f"  {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
         elif self._spinner_active:
-            # Spinner active but no tools yet
+            # Spinner active but no tools yet - show model header first
             if lines_to_show:
-                output.append("\n")
+                output.append("\n\n")  # Blank line before header
+                # Show model header if this is a new turn
+                if self._last_turn_source != "model":
+                    header_prefix = "── Model "
+                    remaining = max(0, wrap_width - len(header_prefix))
+                    output.append(header_prefix, style="bold cyan")
+                    output.append("─" * remaining, style="dim cyan")
+                    output.append("\n")
             frame = self.SPINNER_FRAMES[self._spinner_index]
-            output.append(f"Model> {frame} ", style="bold cyan")
+            output.append(f"  {frame} ", style="cyan")
             output.append("thinking...", style="dim italic")
 
         return output
