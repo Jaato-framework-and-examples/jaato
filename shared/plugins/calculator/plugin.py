@@ -1,10 +1,13 @@
 # shared/plugins/calculator/plugin.py
 
+import ast
+import json
+import operator
+import os
+import tempfile
+from datetime import datetime
 from typing import Dict, List, Optional, Any, Callable
 from jaato import ToolSchema
-import json
-import ast
-import operator
 
 
 class CalculatorPlugin:
@@ -17,6 +20,23 @@ class CalculatorPlugin:
 
     def __init__(self):
         self.precision = 2
+        self._agent_name: Optional[str] = None
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [CALCULATOR{agent_prefix}] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """
@@ -25,12 +45,14 @@ class CalculatorPlugin:
         Args:
             config: Dict with plugin settings
         """
-        if config:
-            self.precision = config.get("precision", 2)
+        config = config or {}
+        self._agent_name = config.get("agent_name")
+        self.precision = config.get("precision", 2)
+        self._trace(f"initialize: precision={self.precision}")
 
     def shutdown(self) -> None:
         """Cleanup when plugin is disabled."""
-        pass  # Nothing to clean up
+        self._trace("shutdown")
 
     def get_tool_schemas(self):
         """Declare the tools this plugin provides."""
@@ -142,9 +164,10 @@ class CalculatorPlugin:
 
         Returns formatted result or error message.
         """
+        a = args.get('a')
+        b = args.get('b')
+        self._trace(f"add: a={a}, b={b}")
         try:
-            a = args.get('a')
-            b = args.get('b')
             if a is None or b is None:
                 return "Error: Both 'a' and 'b' are required"
             result = float(a) + float(b)
@@ -165,9 +188,10 @@ class CalculatorPlugin:
 
         Returns formatted result or error message.
         """
+        a = args.get('a')
+        b = args.get('b')
+        self._trace(f"subtract: a={a}, b={b}")
         try:
-            a = args.get('a')
-            b = args.get('b')
             if a is None or b is None:
                 return "Error: Both 'a' and 'b' are required"
             result = float(a) - float(b)
@@ -188,9 +212,10 @@ class CalculatorPlugin:
 
         Returns formatted result or error message.
         """
+        a = args.get('a')
+        b = args.get('b')
+        self._trace(f"multiply: a={a}, b={b}")
         try:
-            a = args.get('a')
-            b = args.get('b')
             if a is None or b is None:
                 return "Error: Both 'a' and 'b' are required"
             result = float(a) * float(b)
@@ -211,9 +236,10 @@ class CalculatorPlugin:
 
         Returns formatted result or error message.
         """
+        a = args.get('a')
+        b = args.get('b')
+        self._trace(f"divide: a={a}, b={b}")
         try:
-            a = args.get('a')
-            b = args.get('b')
             if a is None or b is None:
                 return "Error: Both 'a' and 'b' are required"
 
@@ -244,9 +270,9 @@ class CalculatorPlugin:
 
         Returns formatted result or error message.
         """
+        expression = args.get('expression')
+        self._trace(f"calculate: expression={expression!r}")
         try:
-            expression = args.get('expression')
-
             # Validate input
             if not expression:
                 return "Error: expression required"

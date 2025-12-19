@@ -12,6 +12,8 @@ Template syntax in command files:
 
 import os
 import re
+import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Callable, Optional
 from ..model_provider.types import ToolSchema
@@ -42,6 +44,23 @@ class SlashCommandPlugin:
     def __init__(self):
         self._commands_dir: str = DEFAULT_COMMANDS_DIR
         self._initialized = False
+        self._agent_name: Optional[str] = None
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [SLASH_COMMAND{agent_prefix}] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
 
     @property
     def name(self) -> str:
@@ -54,13 +73,16 @@ class SlashCommandPlugin:
             config: Optional dict with:
                 - commands_dir: Path to commands directory (default: .jaato/commands)
         """
-        if config:
-            if 'commands_dir' in config:
-                self._commands_dir = config['commands_dir']
+        config = config or {}
+        self._agent_name = config.get("agent_name")
+        if 'commands_dir' in config:
+            self._commands_dir = config['commands_dir']
         self._initialized = True
+        self._trace(f"initialize: commands_dir={self._commands_dir}")
 
     def shutdown(self) -> None:
         """Shutdown the slash command plugin."""
+        self._trace("shutdown")
         self._initialized = False
 
     def get_commands_dir(self) -> Path:
@@ -215,6 +237,7 @@ If the command file is not found, inform the user and suggest listing available 
         """
         command_name = args.get('command_name', '').strip()
         command_args = args.get('args', []) or []
+        self._trace(f"processCommand: command={command_name}, args_count={len(command_args)}")
 
         if not command_name:
             return {
