@@ -248,11 +248,15 @@ print(f"Loaded: {provider.name}")</code></pre>
             </li>
           </ul>
 
-          <h3>Streaming Methods</h3>
+          <h3>Streaming & Cancellation Methods</h3>
           <ul class="param-list">
             <li>
               <span class="param-name">supports_streaming()</span>
               <div class="param-desc">Check if provider supports streaming</div>
+            </li>
+            <li>
+              <span class="param-name">supports_stop()</span>
+              <div class="param-desc">Check if provider supports mid-turn cancellation</div>
             </li>
             <li>
               <span class="param-name">send_message_streaming(...)</span>
@@ -313,9 +317,13 @@ class ModelProviderPlugin(Protocol):
         """Get conversation history."""
         ...
 
-    # Streaming methods (optional but recommended)
+    # Streaming & cancellation methods
     def supports_streaming(self) -> bool:
         """Check if streaming is supported."""
+        ...
+
+    def supports_stop(self) -> bool:
+        """Check if mid-turn cancellation is supported."""
         ...
 
     def send_message_streaming(
