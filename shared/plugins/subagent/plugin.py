@@ -947,11 +947,20 @@ class SubagentPlugin:
             # Create session from runtime with profile's configuration
             # profile.plugins is always a list (possibly empty); pass it directly
             # Empty list = no tools, non-empty list = only those tools
+
+            # Inject agent_name into each plugin's config for trace logging
+            effective_plugin_configs = profile.plugin_configs.copy() if profile.plugin_configs else {}
+            for plugin_name in (profile.plugins or []):
+                if plugin_name not in effective_plugin_configs:
+                    effective_plugin_configs[plugin_name] = {}
+                if "agent_name" not in effective_plugin_configs[plugin_name]:
+                    effective_plugin_configs[plugin_name]["agent_name"] = profile.name
+
             session = self._runtime.create_session(
                 model=model,
                 tools=profile.plugins if profile.plugins else None,
                 system_instructions=profile.system_instructions,
-                plugin_configs=profile.plugin_configs if profile.plugin_configs else None
+                plugin_configs=effective_plugin_configs if effective_plugin_configs else None
             )
 
             # Debug: write to trace log file (visible even with rich client)
