@@ -1,5 +1,7 @@
 """Memory plugin for model self-curated persistent memory across sessions."""
 
+import os
+import tempfile
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -28,6 +30,23 @@ class MemoryPlugin:
         self._name = "memory"
         self._storage: Optional[MemoryStorage] = None
         self._indexer: Optional[MemoryIndexer] = None
+        self._agent_name: Optional[str] = None
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [MEMORY{agent_prefix}] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
 
     @property
     def name(self) -> str:
@@ -43,6 +62,7 @@ class MemoryPlugin:
                 - enrichment_limit: Max hints to show in prompt (default: 5)
         """
         config = config or {}
+        self._agent_name = config.get("agent_name")
         storage_path = config.get("storage_path", ".jaato/memories.jsonl")
 
         self._storage = MemoryStorage(storage_path)
@@ -51,9 +71,11 @@ class MemoryPlugin:
         # Build index from existing memories
         existing_memories = self._storage.load_all()
         self._indexer.build_index(existing_memories)
+        self._trace(f"initialize: storage_path={storage_path}, memories={len(existing_memories)}")
 
     def shutdown(self) -> None:
         """Shutdown the plugin and clean up resources."""
+        self._trace("shutdown")
         if self._indexer:
             self._indexer.clear()
         self._storage = None
@@ -268,6 +290,9 @@ class MemoryPlugin:
         Returns:
             Result dict with status and memory_id
         """
+        description = args.get("description", "")
+        tags = args.get("tags", [])
+        self._trace(f"store_memory: description={description!r}, tags={tags}")
         if not self._storage or not self._indexer:
             return {
                 "status": "error",
@@ -306,6 +331,9 @@ class MemoryPlugin:
         Returns:
             Result dict with memories list
         """
+        tags = args.get("tags", [])
+        limit = args.get("limit", 3)
+        self._trace(f"retrieve_memories: tags={tags}, limit={limit}")
         if not self._storage:
             return {
                 "status": "error",
@@ -355,6 +383,7 @@ class MemoryPlugin:
         Returns:
             Result dict with all tags
         """
+        self._trace("list_memory_tags")
         if not self._indexer:
             return {
                 "status": "error",
