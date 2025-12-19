@@ -115,9 +115,16 @@ class ReferencesPlugin:
                     resolved_sources.append(s)
 
             # Resolve relative paths for inline sources against provided base or CWD
-            # Make paths relative to CWD so model doesn't see absolute paths
+            # Make paths relative to project root (not CWD which may differ)
             inline_base_path = config.get("base_path", os.getcwd())
-            resolve_source_paths(resolved_sources, inline_base_path, relative_to=os.getcwd())
+            # Detect project root: if base_path contains .jaato, use its parent
+            base_path_obj = Path(inline_base_path).resolve()
+            if '.jaato' in base_path_obj.parts:
+                jaato_idx = base_path_obj.parts.index('.jaato')
+                project_root = str(Path(*base_path_obj.parts[:jaato_idx]))
+            else:
+                project_root = str(base_path_obj)
+            resolve_source_paths(resolved_sources, inline_base_path, relative_to=project_root)
             self._sources = resolved_sources
         else:
             self._sources = self._config.sources
