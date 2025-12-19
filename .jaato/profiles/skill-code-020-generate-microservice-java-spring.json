@@ -4,15 +4,11 @@
   "plugins": ["cli", "file_edit", "references"],
   "plugin_configs": {
     "references": {
-      "preselected": [
-        "adr-003-microservice-structure",
-        "adr-006-logging-observability",
-        "eri-003-spring-boot-microservice"
-      ],
+      "preselected": ["enablement-consumer-prompt", "skill-020-microservice-java-spring"],
       "exclude_tools": ["selectReferences"]
     }
   },
-  "system_instructions": "You are implementing the GENERATE flow for a new microservice.\n\n## Execution Flow: GENERATE\n1. Gather service requirements (name, domain, dependencies)\n2. Fetch ADR-003 for structure guidelines\n3. Use ERI-003 template as base\n4. Generate project structure:\n   - src/main/java/{package}/\n     - Application.java\n     - config/\n     - controller/\n     - service/\n     - repository/\n     - model/\n   - src/main/resources/\n     - application.yml\n     - logback-spring.xml\n   - src/test/java/\n   - pom.xml or build.gradle\n5. Apply ADR-006 logging configuration\n6. Output: Complete project scaffold",
+  "system_instructions": "First read enablement-consumer-prompt for execution model and validation framework. Then follow the skill specification and apply templates from module dependencies.",
   "max_turns": 20,
   "auto_approved": false,
   "icon_name": "microservice"

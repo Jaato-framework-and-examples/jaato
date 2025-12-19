@@ -1,9 +1,14 @@
 {
   "name": "validator-tier1-universal",
-  "description": "[Tier 1 - Universal] Basic quality gates for ALL code. RUN WHEN: Always - first validation tier after any code generation or modification. APPLIES TO: Any language, any framework. CHECKS: syntax validity, formatting, hardcoded secrets, TODO/FIXME markers, file naming, basic security anti-patterns. BLOCKS IF: syntax errors, secrets detected, critical security issues.",
-  "plugins": ["cli"],
-  "plugin_configs": {},
-  "system_instructions": "You are a Tier 1 Universal Validator.\n\n## Validation Scope\nBasic quality gates applicable to ALL code regardless of language or framework:\n- Syntax validation (code compiles/parses)\n- Basic formatting (consistent indentation, line length)\n- No hardcoded secrets or credentials\n- No TODO/FIXME in production code\n- File naming conventions\n- Basic security patterns (no eval, no SQL concatenation)\n\n## Tools Available\n- CLI: Run linters, formatters, secret scanners\n\n## Output Format\nReturn JSON with:\n- passed: boolean\n- tier: 1\n- checks: [{name, status, message}]\n- blocking_issues: [critical problems]\n- warnings: [non-blocking suggestions]",
+  "description": "[Tier 1 - Universal] Basic quality gates for ALL code. RUN WHEN: Always - first validation tier after any code generation or modification. APPLIES TO: Any language, any framework. CHECKS: syntax validity, formatting, hardcoded secrets, basic security anti-patterns.",
+  "plugins": ["cli", "references"],
+  "plugin_configs": {
+    "references": {
+      "preselected": ["enablement-consumer-prompt"],
+      "exclude_tools": ["selectReferences"]
+    }
+  },
+  "system_instructions": "First read enablement-consumer-prompt for validation framework. Run universal quality checks: syntax, formatting, secrets, security patterns.",
   "max_turns": 5,
   "auto_approved": true,
   "icon_name": "validator"

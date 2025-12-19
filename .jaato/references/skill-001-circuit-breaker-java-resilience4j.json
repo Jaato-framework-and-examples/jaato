@@ -1,0 +1,10 @@
+{
+  "id": "skill-001-circuit-breaker-java-resilience4j",
+  "name": "SKILL-001: Add Circuit Breaker (Java/Resilience4j)",
+  "description": "Add circuit breaker pattern to existing Java methods. Includes prompts/SPEC.md for execution and references mod-code-001 for templates.",
+  "type": "local",
+  "path": "./.jaato/docs/skills/code/soi/skill-001-circuit-breaker-java-resilience4j/",
+  "mode": "auto",
+  "tags": ["skill", "circuit-breaker", "resilience4j", "java", "spring", "ADD"],
+  "fetchHint": "Read prompts/SPEC.md for execution steps, SKILL.md for full specification"
+}
