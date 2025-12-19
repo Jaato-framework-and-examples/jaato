@@ -4,7 +4,8 @@
   "plugins": ["cli", "file_edit", "references"],
   "plugin_configs": {
     "references": {
-      "sources": ["enablement-consumer-prompt", "skill-020-microservice-java-spring"]
+      "sources": ["enablement-consumer-prompt", "skill-020-microservice-java-spring"],
+      "exclude_tools": ["selectReferences"]
     }
   },
   "system_instructions": "First read enablement-consumer-prompt for execution model and validation framework. Then follow the skill specification and apply templates from module dependencies.",

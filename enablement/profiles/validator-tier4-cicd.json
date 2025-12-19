@@ -4,7 +4,8 @@
   "plugins": ["cli", "references"],
   "plugin_configs": {
     "references": {
-      "sources": ["enablement-consumer-prompt"]
+      "sources": ["enablement-consumer-prompt"],
+      "exclude_tools": ["selectReferences"]
     }
   },
   "system_instructions": "First read enablement-consumer-prompt for validation framework. Run full CI/CD validation: tests, coverage, security, container build.",
