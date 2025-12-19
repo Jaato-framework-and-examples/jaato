@@ -296,6 +296,10 @@ The tool returns responses keyed by question number (1-based):
         Returns:
             Dict with either 'responses' (answers) or 'error'
         """
+        context = args.get("context", "")
+        questions = args.get("questions", [])
+        self._trace(f"request_clarification: context={context!r}, questions={len(questions)}")
+
         if not self._initialized or not self._channel:
             return {"error": "Plugin not initialized"}
 

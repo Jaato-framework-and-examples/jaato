@@ -626,6 +626,7 @@ If a tool is denied, do not attempt to execute it."""
         tool_name = args.get("tool_name", "")
         tool_args = args.get("arguments", {})
         intent = args.get("intent", "")
+        self._trace(f"askPermission: tool={tool_name}, intent={intent!r}")
 
         if not tool_name:
             return {"error": "tool_name is required"}
