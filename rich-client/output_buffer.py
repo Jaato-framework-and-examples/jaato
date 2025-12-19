@@ -362,8 +362,11 @@ class OutputBuffer:
                 connector = "└─" if is_last else "├─"
                 status_icon = "✓" if tool.success else "✗"
 
-                # Build tool line with duration if available
-                tool_line = f"    {connector} {tool.name} {status_icon}"
+                # Build tool line with args and duration if available
+                tool_line = f"    {connector} {tool.name}"
+                if tool.args_summary:
+                    tool_line += f"({tool.args_summary})"
+                tool_line += f" {status_icon}"
                 if tool.duration_seconds is not None:
                     tool_line += f" ({tool.duration_seconds:.1f}s)"
 
@@ -959,6 +962,8 @@ class OutputBuffer:
                     output.append("\n")
                     output.append(f"    {connector} ", style="dim")
                     output.append(tool.name, style="dim")
+                    if tool.args_summary:
+                        output.append(f"({tool.args_summary})", style="dim")
                     output.append(f" {status_icon}", style=status_style)
 
                     # Show duration if available
