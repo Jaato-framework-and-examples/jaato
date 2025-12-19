@@ -180,11 +180,21 @@ class OutputBuffer:
                 is_new_turn = (self._last_turn_source != source)
                 self._last_turn_source = source
             self._current_block = (source, [text], is_new_turn)
-        elif mode == "append" and self._current_block:
-            # Append to current block
-            self._current_block[1].append(text)
+        elif mode == "append":
+            # Append mode (streaming)
+            if self._current_block and self._current_block[0] == source:
+                # Append to existing block from same source
+                self._current_block[1].append(text)
+            else:
+                # First streaming chunk or source changed - create new block
+                self._flush_current_block()
+                is_new_turn = False
+                if source in ("user", "model"):
+                    is_new_turn = (self._last_turn_source != source)
+                    self._last_turn_source = source
+                self._current_block = (source, [text], is_new_turn)
         else:
-            # Standalone line
+            # Standalone line (unknown mode)
             self._flush_current_block()
             is_new_turn = self._last_source != source
             for i, line in enumerate(text.split('\n')):
