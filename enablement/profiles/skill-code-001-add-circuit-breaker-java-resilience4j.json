@@ -4,10 +4,10 @@
   "plugins": ["cli", "file_edit", "references"],
   "plugin_configs": {
     "references": {
-      "sources": ["skill-001-circuit-breaker-java-resilience4j"]
+      "sources": ["enablement-consumer-prompt", "skill-001-circuit-breaker-java-resilience4j"]
     }
   },
-  "system_instructions": "Read and follow the skill specification. Load and apply templates from the module dependencies declared in the skill.",
+  "system_instructions": "First read enablement-consumer-prompt for execution model and validation framework. Then follow the skill specification and apply templates from module dependencies.",
   "max_turns": 15,
   "auto_approved": false,
   "icon_name": "circuit_breaker"
