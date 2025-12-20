@@ -19,7 +19,7 @@ from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
-from .plugins.model_provider.base import UsageUpdateCallback
+from .plugins.model_provider.base import UsageUpdateCallback, GCThresholdCallback
 from .plugins.model_provider.types import (
     Message,
     Part,
@@ -380,7 +380,8 @@ class JaatoClient:
         self,
         message: str,
         on_output: Optional[OutputCallback] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_gc_threshold: Optional[GCThresholdCallback] = None
     ) -> str:
         """Send a message to the model.
 
@@ -390,6 +391,10 @@ class JaatoClient:
                 Signature: (source: str, text: str, mode: str) -> None
             on_usage_update: Optional callback for real-time token usage.
                 Signature: (usage: TokenUsage) -> None
+            on_gc_threshold: Optional callback when GC threshold is crossed.
+                Signature: (percent_used: float, threshold: float) -> None
+                Called during streaming when context usage exceeds the configured
+                threshold, enabling proactive GC notifications.
 
         Returns:
             The final model response text.
@@ -414,7 +419,9 @@ class JaatoClient:
             if on_output:
                 on_output(source, text, mode)
 
-        response = self._session.send_message(message, wrapped_output_callback, on_usage_update)
+        response = self._session.send_message(
+            message, wrapped_output_callback, on_usage_update, on_gc_threshold
+        )
 
         # After turn completes, update UI hooks with accounting data
         if self._ui_hooks:

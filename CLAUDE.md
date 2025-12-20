@@ -209,6 +209,56 @@ Session/client methods:
 - `client.supports_stop` / `session.supports_stop`: Check if stop is supported
 - `client.set_streaming_enabled(bool)`: Toggle streaming mode
 
+### Proactive Garbage Collection
+
+The framework supports proactive context garbage collection that monitors token usage
+during streaming and automatically triggers GC when thresholds are exceeded:
+
+```python
+from shared.plugins.gc_truncate import create_plugin
+from shared.plugins.gc import GCConfig
+
+# Setup GC plugin with threshold
+gc_plugin = create_plugin()
+gc_plugin.initialize({"preserve_recent_turns": 5, "notify_on_gc": True})
+
+gc_config = GCConfig(
+    threshold_percent=80.0,    # Trigger when context is 80% full
+    preserve_recent_turns=5,   # Keep last 5 turns
+    auto_trigger=True,         # Enable automatic triggering
+    check_before_send=True     # Check before each send_message()
+)
+
+client.set_gc_plugin(gc_plugin, gc_config)
+
+# Optional: Get notified when threshold is crossed during streaming
+def on_gc_threshold(percent_used: float, threshold: float) -> None:
+    print(f"Warning: Context at {percent_used:.1f}%, GC will run after turn")
+
+response = client.send_message(
+    "Long prompt...",
+    on_gc_threshold=on_gc_threshold  # Optional callback
+)
+# GC automatically runs after turn if threshold was crossed
+```
+
+Key GC types in `shared/plugins/gc/`:
+- `GCConfig`: Configuration for GC behavior (thresholds, triggers)
+- `GCPlugin`: Protocol for GC strategy plugins
+- `GCResult`: Result of a GC operation (tokens freed, items collected)
+- `GCTriggerReason`: Why GC was triggered (THRESHOLD, MANUAL, TURN_LIMIT)
+
+GC strategies:
+- `gc_truncate`: Simple removal of oldest turns
+- `gc_summarize`: Compress old turns via summarization
+- `gc_hybrid`: Generational approach (recent preserved, middle summarized, ancient truncated)
+
+Proactive GC flow:
+1. Token usage is monitored during streaming via `on_usage_update` callback
+2. When usage crosses `threshold_percent`, a flag is set
+3. After the turn completes, GC is automatically triggered
+4. Optional `on_gc_threshold` callback notifies the application
+
 ### Plugin Type System
 
 The project uses provider-agnostic types throughout the plugin system:

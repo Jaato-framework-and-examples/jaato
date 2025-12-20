@@ -16,7 +16,7 @@ from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
-from .plugins.model_provider.base import UsageUpdateCallback
+from .plugins.model_provider.base import UsageUpdateCallback, GCThresholdCallback
 from .plugins.model_provider.types import (
     Attachment,
     CancelledException,
@@ -122,6 +122,10 @@ class JaatoSession:
         self._cancel_token: Optional[CancelToken] = None
         self._is_running: bool = False
         self._use_streaming: bool = True  # Enable streaming by default if provider supports it
+
+        # Proactive GC tracking
+        self._gc_threshold_crossed: bool = False  # Set when threshold crossed during streaming
+        self._gc_threshold_callback: Optional[GCThresholdCallback] = None
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
@@ -571,7 +575,8 @@ class JaatoSession:
         self,
         message: str,
         on_output: Optional[OutputCallback] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_gc_threshold: Optional[GCThresholdCallback] = None
     ) -> str:
         """Send a message to the model.
 
@@ -581,6 +586,8 @@ class JaatoSession:
                 Signature: (source: str, text: str, mode: str) -> None
             on_usage_update: Optional callback for real-time token usage.
                 Signature: (usage: TokenUsage) -> None
+            on_gc_threshold: Optional callback when GC threshold is crossed.
+                Signature: (percent_used: float, threshold: float) -> None
 
         Returns:
             The final model response text.
@@ -591,19 +598,81 @@ class JaatoSession:
         if not self._provider:
             raise RuntimeError("Session not configured. Call configure() first.")
 
-        # Check and perform GC if needed
+        # Check and perform GC if needed (pre-send)
         if self._gc_plugin and self._gc_config and self._gc_config.check_before_send:
             self._maybe_collect_before_send()
+
+        # Reset proactive GC tracking for this turn
+        self._gc_threshold_crossed = False
+        self._gc_threshold_callback = on_gc_threshold
+
+        # Wrap usage callback to check GC threshold
+        wrapped_usage_callback = self._wrap_usage_callback_with_gc_check(on_usage_update)
 
         # Run prompt enrichment if registry is available
         processed_message = self._enrich_and_clean_prompt(message)
 
-        response = self._run_chat_loop(processed_message, on_output, on_usage_update)
+        response = self._run_chat_loop(processed_message, on_output, wrapped_usage_callback)
+
+        # Proactive GC: if threshold was crossed during streaming, trigger GC now
+        if self._gc_threshold_crossed and self._gc_plugin and self._gc_config:
+            self._trace("PROACTIVE_GC: Threshold crossed during streaming, triggering post-turn GC")
+            self._maybe_collect_after_turn()
 
         # Notify session plugin
         self._notify_session_turn_complete()
 
         return response
+
+    def _wrap_usage_callback_with_gc_check(
+        self,
+        on_usage_update: Optional[UsageUpdateCallback]
+    ) -> Optional[UsageUpdateCallback]:
+        """Wrap usage callback to check GC threshold during streaming."""
+        if not self._gc_plugin or not self._gc_config:
+            return on_usage_update
+
+        def wrapped_callback(usage: TokenUsage) -> None:
+            # Check if threshold crossed
+            if not self._gc_threshold_crossed and usage.total_tokens > 0:
+                context_limit = self.get_context_limit()
+                if context_limit > 0:
+                    percent_used = (usage.total_tokens / context_limit) * 100
+                    threshold = self._gc_config.threshold_percent if self._gc_config else 80.0
+
+                    if percent_used >= threshold:
+                        self._gc_threshold_crossed = True
+                        self._trace(f"PROACTIVE_GC: Threshold crossed ({percent_used:.1f}% >= {threshold}%)")
+
+                        # Notify via callback if provided
+                        if self._gc_threshold_callback:
+                            self._gc_threshold_callback(percent_used, threshold)
+
+            # Call original callback if provided
+            if on_usage_update:
+                on_usage_update(usage)
+
+        return wrapped_callback
+
+    def _maybe_collect_after_turn(self) -> Optional[GCResult]:
+        """Perform GC after turn if threshold was crossed during streaming."""
+        if not self._gc_plugin or not self._gc_config:
+            return None
+
+        context_usage = self.get_context_usage()
+        history = self.get_history()
+
+        # Use THRESHOLD as the reason since it was triggered by threshold crossing
+        new_history, result = self._gc_plugin.collect(
+            history, context_usage, self._gc_config, GCTriggerReason.THRESHOLD
+        )
+
+        if result.success:
+            self._trace(f"PROACTIVE_GC: Collected {result.items_collected} items, freed {result.tokens_freed} tokens")
+            self.reset_session(new_history)
+            self._gc_history.append(result)
+
+        return result
 
     def _enrich_and_clean_prompt(self, prompt: str) -> str:
         """Run prompt through enrichment pipeline and strip @references."""

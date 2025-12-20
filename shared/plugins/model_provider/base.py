@@ -35,6 +35,11 @@ StreamingCallback = Callable[[str], None]
 # Parameters: (usage: TokenUsage) - current token usage from streaming
 UsageUpdateCallback = Callable[[TokenUsage], None]
 
+# GC threshold callback for proactive garbage collection notifications
+# Parameters: (percent_used: float, threshold: float) - current and threshold percentages
+# Called when context usage crosses configured threshold during streaming
+GCThresholdCallback = Callable[[float, float], None]
+
 
 # Authentication method type for Google GenAI provider
 GoogleAuthMethod = Literal["auto", "api_key", "service_account_file", "adc", "impersonation"]
