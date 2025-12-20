@@ -371,6 +371,24 @@ class RichClient:
                     # Channel finished - start spinner while model continues
                     self._display.start_spinner()
 
+        # Create a cancel token provider that checks the session's current token
+        def get_cancel_token():
+            """Get the current cancel token from the session, if any."""
+            if self._jaato:
+                session = self._jaato.get_session()
+                if session and hasattr(session, '_cancel_token'):
+                    return session._cancel_token
+            return None
+
+        # Wrapper that acts like a CancelToken but checks the current session token
+        class CancelTokenProxy:
+            @property
+            def is_cancelled(self):
+                token = get_cancel_token()
+                return token.is_cancelled if token else False
+
+        cancel_token_proxy = CancelTokenProxy()
+
         # Set callbacks on clarification plugin channel
         if self.registry:
             clarification_plugin = self.registry.get_plugin("clarification")
@@ -381,6 +399,7 @@ class RichClient:
                         output_callback=self._create_output_callback(),
                         input_queue=self._channel_input_queue,
                         prompt_callback=on_prompt_state_change,
+                        cancel_token=cancel_token_proxy,
                     )
                     self._trace("Clarification channel callbacks set (queue)")
 
@@ -406,6 +425,7 @@ class RichClient:
                     output_callback=self._create_output_callback(suppress_sources={"permission"}),
                     input_queue=self._channel_input_queue,
                     prompt_callback=on_prompt_state_change,
+                    cancel_token=cancel_token_proxy,
                 )
                 self._trace("Permission channel callbacks set (queue)")
 
