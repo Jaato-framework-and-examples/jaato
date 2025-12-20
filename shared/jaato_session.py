@@ -16,6 +16,7 @@ from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
+from .plugins.model_provider.base import UsageUpdateCallback
 from .plugins.model_provider.types import (
     Attachment,
     CancelledException,
@@ -26,6 +27,7 @@ from .plugins.model_provider.types import (
     Part,
     ProviderResponse,
     Role,
+    TokenUsage,
     ToolResult,
     ToolSchema,
 )
@@ -568,7 +570,8 @@ class JaatoSession:
     def send_message(
         self,
         message: str,
-        on_output: Optional[OutputCallback] = None
+        on_output: Optional[OutputCallback] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None
     ) -> str:
         """Send a message to the model.
 
@@ -576,6 +579,8 @@ class JaatoSession:
             message: The user's message text.
             on_output: Optional callback for real-time output.
                 Signature: (source: str, text: str, mode: str) -> None
+            on_usage_update: Optional callback for real-time token usage.
+                Signature: (usage: TokenUsage) -> None
 
         Returns:
             The final model response text.
@@ -593,7 +598,7 @@ class JaatoSession:
         # Run prompt enrichment if registry is available
         processed_message = self._enrich_and_clean_prompt(message)
 
-        response = self._run_chat_loop(processed_message, on_output)
+        response = self._run_chat_loop(processed_message, on_output, on_usage_update)
 
         # Notify session plugin
         self._notify_session_turn_complete()
@@ -615,13 +620,15 @@ class JaatoSession:
     def _run_chat_loop(
         self,
         message: str,
-        on_output: Optional[OutputCallback]
+        on_output: Optional[OutputCallback],
+        on_usage_update: Optional[UsageUpdateCallback] = None
     ) -> str:
         """Internal function calling loop with streaming and cancellation support.
 
         Args:
             message: The user's message text.
             on_output: Optional callback for real-time output.
+            on_usage_update: Optional callback for real-time token usage updates.
 
         Returns:
             The final response text.
@@ -678,7 +685,8 @@ class JaatoSession:
                     lambda: self._provider.send_message_streaming(
                         message,
                         on_chunk=streaming_callback,
-                        cancel_token=self._cancel_token
+                        cancel_token=self._cancel_token,
+                        on_usage_update=on_usage_update
                     ),
                     context="send_message_streaming",
                     on_retry=self._on_retry,
@@ -816,7 +824,8 @@ class JaatoSession:
                         lambda: self._provider.send_tool_results_streaming(
                             tool_results,
                             on_chunk=streaming_callback,
-                            cancel_token=self._cancel_token
+                            cancel_token=self._cancel_token,
+                            on_usage_update=on_usage_update
                         ),
                         context="send_tool_results_streaming",
                         on_retry=self._on_retry,

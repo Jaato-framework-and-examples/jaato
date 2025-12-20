@@ -31,6 +31,10 @@ OutputCallback = Callable[[str, str, str], None]
 # Parameters: (chunk: str) - the text chunk received from the model
 StreamingCallback = Callable[[str], None]
 
+# Usage update callback for real-time token accounting
+# Parameters: (usage: TokenUsage) - current token usage from streaming
+UsageUpdateCallback = Callable[[TokenUsage], None]
+
 
 # Authentication method type for Google GenAI provider
 GoogleAuthMethod = Literal["auto", "api_key", "service_account_file", "adc", "impersonation"]
@@ -353,7 +357,8 @@ class ModelProviderPlugin(Protocol):
         message: str,
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None
+        response_schema: Optional[Dict[str, Any]] = None,
+        on_usage_update: Optional['UsageUpdateCallback'] = None
     ) -> ProviderResponse:
         """Send a message with streaming response and optional cancellation.
 
@@ -366,6 +371,8 @@ class ModelProviderPlugin(Protocol):
             cancel_token: Optional token to request cancellation mid-stream.
                 If cancelled, streaming stops and partial response is returned.
             response_schema: Optional JSON Schema to constrain the response.
+            on_usage_update: Optional callback invoked when token usage is
+                updated during streaming (for real-time accounting).
 
         Returns:
             ProviderResponse with accumulated text and/or function calls.
@@ -398,7 +405,8 @@ class ModelProviderPlugin(Protocol):
         results: List[ToolResult],
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None
+        response_schema: Optional[Dict[str, Any]] = None,
+        on_usage_update: Optional['UsageUpdateCallback'] = None
     ) -> ProviderResponse:
         """Send tool results with streaming response and optional cancellation.
 
@@ -409,6 +417,8 @@ class ModelProviderPlugin(Protocol):
             on_chunk: Callback invoked for each text chunk as it streams.
             cancel_token: Optional token to request cancellation mid-stream.
             response_schema: Optional JSON Schema to constrain the response.
+            on_usage_update: Optional callback invoked when token usage is
+                updated during streaming (for real-time accounting).
 
         Returns:
             ProviderResponse with accumulated text and/or function calls.

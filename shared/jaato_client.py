@@ -19,6 +19,7 @@ from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
+from .plugins.model_provider.base import UsageUpdateCallback
 from .plugins.model_provider.types import (
     Message,
     Part,
@@ -378,7 +379,8 @@ class JaatoClient:
     def send_message(
         self,
         message: str,
-        on_output: Optional[OutputCallback] = None
+        on_output: Optional[OutputCallback] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None
     ) -> str:
         """Send a message to the model.
 
@@ -386,6 +388,8 @@ class JaatoClient:
             message: The user's message text.
             on_output: Optional callback for real-time output.
                 Signature: (source: str, text: str, mode: str) -> None
+            on_usage_update: Optional callback for real-time token usage.
+                Signature: (usage: TokenUsage) -> None
 
         Returns:
             The final model response text.
@@ -410,7 +414,7 @@ class JaatoClient:
             if on_output:
                 on_output(source, text, mode)
 
-        response = self._session.send_message(message, wrapped_output_callback)
+        response = self._session.send_message(message, wrapped_output_callback, on_usage_update)
 
         # After turn completes, update UI hooks with accounting data
         if self._ui_hooks:

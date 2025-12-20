@@ -36,7 +36,7 @@ try:
 except ImportError:
     ChatCompletionsResponseFormatJSON = None  # type: ignore
 
-from ..base import ModelProviderPlugin, ProviderConfig, StreamingCallback
+from ..base import ModelProviderPlugin, ProviderConfig, StreamingCallback, UsageUpdateCallback
 from ..types import (
     CancelledException,
     CancelToken,
@@ -754,7 +754,8 @@ class GitHubModelsProvider:
         message: str,
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None
+        response_schema: Optional[Dict[str, Any]] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None
     ) -> ProviderResponse:
         """Send a message with streaming response and optional cancellation.
 
@@ -763,6 +764,7 @@ class GitHubModelsProvider:
             on_chunk: Callback invoked for each text chunk as it streams.
             cancel_token: Optional token to request cancellation mid-stream.
             response_schema: Optional JSON Schema to constrain the response.
+            on_usage_update: Optional callback for real-time token usage updates.
 
         Returns:
             ProviderResponse with accumulated text and/or function calls.
@@ -836,6 +838,9 @@ class GitHubModelsProvider:
                         output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
                         total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0
                     )
+                    # Notify about usage update for real-time accounting
+                    if on_usage_update and usage.total_tokens > 0:
+                        on_usage_update(usage)
 
             self._trace(f"STREAM_END chunks={chunk_count} finish_reason={finish_reason}")
 
@@ -883,7 +888,8 @@ class GitHubModelsProvider:
         results: List[ToolResult],
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
-        response_schema: Optional[Dict[str, Any]] = None
+        response_schema: Optional[Dict[str, Any]] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None
     ) -> ProviderResponse:
         """Send tool results with streaming response and optional cancellation.
 
@@ -892,6 +898,7 @@ class GitHubModelsProvider:
             on_chunk: Callback invoked for each text chunk as it streams.
             cancel_token: Optional token to request cancellation mid-stream.
             response_schema: Optional JSON Schema to constrain the response.
+            on_usage_update: Optional callback for real-time token usage updates.
 
         Returns:
             ProviderResponse with accumulated text and/or function calls.
@@ -969,6 +976,9 @@ class GitHubModelsProvider:
                         output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
                         total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0
                     )
+                    # Notify about usage update for real-time accounting
+                    if on_usage_update and usage.total_tokens > 0:
+                        on_usage_update(usage)
 
             self._trace(f"STREAM_TOOL_RESULTS_END chunks={chunk_count} finish_reason={finish_reason}")
 
