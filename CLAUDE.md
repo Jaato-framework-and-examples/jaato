@@ -320,6 +320,7 @@ Key types in `shared/plugins/model_provider/types.py`:
 | `AI_USE_CHAT_FUNCTIONS` | Enable function calling mode (`1`/`true`) |
 | `AI_EXECUTE_TOOLS` | Allow generic tool execution (`1`/`true`) |
 | `LEDGER_PATH` | Output path for token accounting JSONL |
+| `JAATO_GC_THRESHOLD` | GC trigger threshold percentage (default: 80.0) |
 
 ### Rate Limiting
 | Variable | Purpose |

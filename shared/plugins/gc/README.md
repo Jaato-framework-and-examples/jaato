@@ -85,7 +85,7 @@ client.set_gc_plugin(plugin, GCConfig(threshold_percent=75.0))
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `threshold_percent` | float | 80.0 | Trigger GC when context usage exceeds this % |
+| `threshold_percent` | float | 80.0 | Trigger GC when context usage exceeds this %. Can be overridden via `JAATO_GC_THRESHOLD` env var. |
 | `max_turns` | int | None | Trigger GC when turn count exceeds this |
 | `auto_trigger` | bool | True | Enable automatic GC triggering |
 | `check_before_send` | bool | True | Check GC before each send_message() |

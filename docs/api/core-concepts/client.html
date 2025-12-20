@@ -488,8 +488,9 @@ gc = create_gc()
 gc.initialize({"preserve_recent_turns": 5})
 
 # Configure: trigger at 80% capacity
+# (or set JAATO_GC_THRESHOLD env var to override default)
 client.set_gc_plugin(gc, GCConfig(
-    threshold_percent=80.0,
+    threshold_percent=80.0,  # default, can omit
     check_before_send=True
 ))
 
