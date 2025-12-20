@@ -917,8 +917,15 @@ class GoogleGenAIProvider:
                     )
                     self._trace(f"STREAM_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
                     # Notify about usage update for real-time accounting
+                    will_call = on_usage_update is not None and usage.total_tokens > 0
+                    self._trace(f"STREAM_USAGE_CHECK callback_set={on_usage_update is not None} total={usage.total_tokens} will_call={will_call}")
                     if on_usage_update and usage.total_tokens > 0:
-                        on_usage_update(usage)
+                        try:
+                            self._trace("STREAM_USAGE_CALLING callback...")
+                            on_usage_update(usage)
+                            self._trace("STREAM_USAGE_CALLED callback completed")
+                        except Exception as cb_err:
+                            self._trace(f"STREAM_USAGE_CALLBACK_ERROR {type(cb_err).__name__}: {cb_err}")
 
             self._trace(f"STREAM_END chunks={chunk_count} finish_reason={finish_reason}")
 
@@ -1045,8 +1052,15 @@ class GoogleGenAIProvider:
                     )
                     self._trace(f"STREAM_TOOL_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
                     # Notify about usage update for real-time accounting
+                    will_call = on_usage_update is not None and usage.total_tokens > 0
+                    self._trace(f"STREAM_TOOL_USAGE_CHECK callback_set={on_usage_update is not None} total={usage.total_tokens} will_call={will_call}")
                     if on_usage_update and usage.total_tokens > 0:
-                        on_usage_update(usage)
+                        try:
+                            self._trace("STREAM_TOOL_USAGE_CALLING callback...")
+                            on_usage_update(usage)
+                            self._trace("STREAM_TOOL_USAGE_CALLED callback completed")
+                        except Exception as cb_err:
+                            self._trace(f"STREAM_TOOL_USAGE_CALLBACK_ERROR {type(cb_err).__name__}: {cb_err}")
 
             self._trace(f"STREAM_TOOL_RESULTS_END chunks={chunk_count} finish_reason={finish_reason}")
 
