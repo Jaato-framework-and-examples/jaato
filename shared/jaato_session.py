@@ -1045,7 +1045,7 @@ class JaatoSession:
         turn_data: Dict[str, Any]
     ) -> ProviderResponse:
         """Send tool results back to the model and get the continuation response."""
-        from .token_accounting import with_retry
+        # with_retry is already imported at module level from .retry_utils
 
         # Proactive rate limiting
         self._pacer.pace()
