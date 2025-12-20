@@ -139,24 +139,6 @@ class OutputBuffer:
         display_lines = self._measure_display_lines(source, text, is_turn_start)
         self._lines.append(OutputLine(source, text, style, display_lines, is_turn_start))
 
-    def _trace(self, msg: str) -> None:
-        """Write trace message to log file for debugging."""
-        import os
-        import tempfile
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
-        if trace_path:
-            try:
-                import datetime
-                with open(trace_path, "a") as f:
-                    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [OutputBuffer] {msg}\n")
-                    f.flush()
-            except Exception:
-                pass
-
     def append(self, source: str, text: str, mode: str) -> None:
         """Append output to the buffer.
 
@@ -165,8 +147,6 @@ class OutputBuffer:
             text: The output text.
             mode: "write" for new block, "append" to continue.
         """
-        self._trace(f"append source={source} mode={mode} text={repr(text[:50] if len(text) > 50 else text)} current_block={self._current_block is not None}")
-
         # Skip plan messages - they're shown in the sticky plan panel
         if source == "plan":
             return
@@ -223,22 +203,17 @@ class OutputBuffer:
 
     def _flush_current_block(self) -> None:
         """Flush the current block to lines."""
-        import traceback
-        caller = ''.join(traceback.format_stack()[-3:-1]).replace('\n', ' | ')
         if self._current_block:
             source, parts, is_new_turn = self._current_block
             # Concatenate streaming chunks directly (no separator)
             # Then split by newlines for display
             full_text = ''.join(parts)
-            self._trace(f"FLUSH source={source} parts_count={len(parts)} caller={caller[:200]}")
             lines = full_text.split('\n')
             for i, line in enumerate(lines):
                 # Only first line of a new turn gets the prefix
                 self._add_line(source, line, "line", is_turn_start=(i == 0 and is_new_turn))
             self._last_source = source
             self._current_block = None
-        else:
-            self._trace(f"FLUSH (no current_block) caller={caller[:200]}")
 
     def _get_current_block_lines(self) -> List[OutputLine]:
         """Get lines from current block without flushing it.
