@@ -2,7 +2,7 @@
 
 import sys
 from abc import ABC, abstractmethod
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 from .models import (
     Answer,
@@ -357,12 +357,14 @@ class QueueChannel(ClarificationChannel):
         self._input_queue: Optional['queue.Queue[str]'] = None
         self._waiting_for_input: bool = False
         self._prompt_callback: Optional[callable] = None
+        self._cancel_token: Optional[Any] = None  # CancelToken for interruption
 
     def set_callbacks(
         self,
         output_callback: Optional[callable] = None,
         input_queue: Optional['queue.Queue[str]'] = None,
         prompt_callback: Optional[callable] = None,
+        cancel_token: Optional[Any] = None,
         **kwargs,
     ) -> None:
         """Set the callbacks and queue for TUI integration.
@@ -371,10 +373,12 @@ class QueueChannel(ClarificationChannel):
             output_callback: Called with (source, text, mode) to display output.
             input_queue: Queue to receive user input from the main input handler.
             prompt_callback: Called with True when waiting for input, False when done.
+            cancel_token: Optional CancelToken to check for cancellation requests.
         """
         self._output_callback = output_callback
         self._input_queue = input_queue
         self._prompt_callback = prompt_callback
+        self._cancel_token = cancel_token
 
     @property
     def waiting_for_input(self) -> bool:
@@ -387,16 +391,33 @@ class QueueChannel(ClarificationChannel):
             self._output_callback("clarification", text, mode)
 
     def _read_input(self, timeout: float = 60.0) -> Optional[str]:
-        """Read input from the queue with timeout."""
+        """Read input from the queue with timeout, checking for cancellation.
+
+        Returns:
+            User input string, None on timeout, or "__CANCELLED__" if cancelled.
+        """
         import queue as queue_module
+        import time
 
         if not self._input_queue:
             return None
 
-        try:
-            return self._input_queue.get(timeout=timeout)
-        except queue_module.Empty:
-            return None
+        # Poll in short intervals to check for cancellation
+        poll_interval = 0.1  # Check every 100ms
+        elapsed = 0.0
+
+        while elapsed < timeout:
+            # Check for cancellation
+            if self._cancel_token and hasattr(self._cancel_token, 'is_cancelled'):
+                if self._cancel_token.is_cancelled:
+                    return "__CANCELLED__"
+
+            try:
+                return self._input_queue.get(timeout=poll_interval)
+            except queue_module.Empty:
+                elapsed += poll_interval
+
+        return None
 
     def request_clarification(
         self,
@@ -448,7 +469,8 @@ class QueueChannel(ClarificationChannel):
             try:
                 response = self._read_input(timeout=60.0)
 
-                if response is None or response.lower() == 'cancel':
+                # Handle cancellation (via cancel token or typing 'cancel')
+                if response is None or response == "__CANCELLED__" or response.lower() == 'cancel':
                     return ClarificationResponse(cancelled=True)
 
                 answer = self._parse_answer(i, question, response)
