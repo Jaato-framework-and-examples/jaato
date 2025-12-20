@@ -179,6 +179,22 @@ class GitHubModelsProvider:
         # Models cache: (timestamp, models_list)
         self._models_cache: Optional[Tuple[float, List[str]]] = None
 
+        # Trace file for debugging (set JAATO_PROVIDER_TRACE to enable)
+        self._trace_file: Optional[str] = os.environ.get("JAATO_PROVIDER_TRACE")
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to file for debugging streaming interactions."""
+        if not self._trace_file:
+            return
+        import datetime
+        try:
+            with open(self._trace_file, "a") as f:
+                ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                f.write(f"[{ts}] [github_models] {msg}\n")
+                f.flush()
+        except Exception:
+            pass  # Don't let tracing errors break the provider
+
     @property
     def name(self) -> str:
         """Provider identifier."""
@@ -771,6 +787,8 @@ class GitHubModelsProvider:
         was_cancelled = False
 
         try:
+            self._trace(f"STREAM_START message={repr(message[:100])}...")
+            chunk_count = 0
             response_stream = self._client.complete(
                 model=self._model_name,
                 messages=messages,
@@ -780,6 +798,7 @@ class GitHubModelsProvider:
             for chunk in response_stream:
                 # Check for cancellation
                 if cancel_token and cancel_token.is_cancelled:
+                    self._trace(f"STREAM_CANCELLED after {chunk_count} chunks")
                     was_cancelled = True
                     finish_reason = FinishReason.CANCELLED
                     break
@@ -791,6 +810,8 @@ class GitHubModelsProvider:
                         if hasattr(choice, 'delta') and choice.delta:
                             delta = choice.delta
                             if hasattr(delta, 'content') and delta.content:
+                                chunk_count += 1
+                                self._trace(f"STREAM_CHUNK[{chunk_count}] len={len(delta.content)} text={repr(delta.content[:50])}")
                                 accumulated_text.append(delta.content)
                                 on_chunk(delta.content)
 
@@ -798,6 +819,8 @@ class GitHubModelsProvider:
                             if hasattr(delta, 'tool_calls') and delta.tool_calls:
                                 from .converters import extract_function_calls_from_stream_delta
                                 new_calls = extract_function_calls_from_stream_delta(delta.tool_calls)
+                                for fc in new_calls:
+                                    self._trace(f"STREAM_FUNC_CALL name={fc.name}")
                                 function_calls.extend(new_calls)
 
                         # Extract finish reason
@@ -812,7 +835,10 @@ class GitHubModelsProvider:
                         total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0
                     )
 
+            self._trace(f"STREAM_END chunks={chunk_count} finish_reason={finish_reason}")
+
         except Exception as e:
+            self._trace(f"STREAM_ERROR {type(e).__name__}: {e}")
             # If cancelled during iteration, treat as cancellation
             if cancel_token and cancel_token.is_cancelled:
                 was_cancelled = True
@@ -893,6 +919,9 @@ class GitHubModelsProvider:
         was_cancelled = False
 
         try:
+            tool_names = [r.tool_name for r in results]
+            self._trace(f"STREAM_TOOL_RESULTS_START tools={tool_names}")
+            chunk_count = 0
             response_stream = self._client.complete(
                 model=self._model_name,
                 messages=messages,
@@ -902,6 +931,7 @@ class GitHubModelsProvider:
             for chunk in response_stream:
                 # Check for cancellation
                 if cancel_token and cancel_token.is_cancelled:
+                    self._trace(f"STREAM_TOOL_RESULTS_CANCELLED after {chunk_count} chunks")
                     was_cancelled = True
                     finish_reason = FinishReason.CANCELLED
                     break
@@ -913,6 +943,8 @@ class GitHubModelsProvider:
                         if hasattr(choice, 'delta') and choice.delta:
                             delta = choice.delta
                             if hasattr(delta, 'content') and delta.content:
+                                chunk_count += 1
+                                self._trace(f"STREAM_TOOL_CHUNK[{chunk_count}] len={len(delta.content)} text={repr(delta.content[:50])}")
                                 accumulated_text.append(delta.content)
                                 on_chunk(delta.content)
 
@@ -920,6 +952,8 @@ class GitHubModelsProvider:
                             if hasattr(delta, 'tool_calls') and delta.tool_calls:
                                 from .converters import extract_function_calls_from_stream_delta
                                 new_calls = extract_function_calls_from_stream_delta(delta.tool_calls)
+                                for fc in new_calls:
+                                    self._trace(f"STREAM_TOOL_FUNC_CALL name={fc.name}")
                                 function_calls.extend(new_calls)
 
                         # Extract finish reason
@@ -934,7 +968,10 @@ class GitHubModelsProvider:
                         total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0
                     )
 
+            self._trace(f"STREAM_TOOL_RESULTS_END chunks={chunk_count} finish_reason={finish_reason}")
+
         except Exception as e:
+            self._trace(f"STREAM_TOOL_RESULTS_ERROR {type(e).__name__}: {e}")
             # If cancelled during iteration, treat as cancellation
             if cancel_token and cancel_token.is_cancelled:
                 was_cancelled = True
