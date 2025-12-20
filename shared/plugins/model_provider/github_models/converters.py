@@ -322,6 +322,44 @@ def extract_function_calls_from_response(response: ChatCompletions) -> List[Func
     return calls
 
 
+def extract_parts_from_response(response: ChatCompletions) -> List[Part]:
+    """Extract parts from SDK response, preserving order of text and function calls.
+
+    In OpenAI/GitHub Models API, text content comes before tool_calls in the message,
+    so we preserve that ordering in the parts list.
+    """
+    parts = []
+
+    if not response or not response.choices:
+        return parts
+
+    for choice in response.choices:
+        if not choice.message:
+            continue
+
+        # Text content comes first
+        if choice.message.content:
+            parts.append(Part.from_text(choice.message.content))
+
+        # Tool calls follow text
+        if choice.message.tool_calls:
+            for tc in choice.message.tool_calls:
+                args = {}
+                if tc.function.arguments:
+                    try:
+                        args = json.loads(tc.function.arguments)
+                    except json.JSONDecodeError:
+                        args = {"raw": tc.function.arguments}
+                fc = FunctionCall(
+                    id=tc.id,
+                    name=tc.function.name,
+                    args=args,
+                )
+                parts.append(Part.from_function_call(fc))
+
+    return parts
+
+
 def extract_finish_reason_from_response(response: ChatCompletions) -> FinishReason:
     """Extract finish reason from SDK response."""
     if not response or not response.choices:
@@ -360,8 +398,7 @@ def extract_usage_from_response(response: ChatCompletions) -> TokenUsage:
 def response_from_sdk(response: ChatCompletions) -> ProviderResponse:
     """Convert SDK ChatCompletions to internal ProviderResponse."""
     return ProviderResponse(
-        text=extract_text_from_response(response),
-        function_calls=extract_function_calls_from_response(response),
+        parts=extract_parts_from_response(response),
         usage=extract_usage_from_response(response),
         finish_reason=extract_finish_reason_from_response(response),
         raw=response,

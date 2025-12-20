@@ -479,9 +479,10 @@ class GitHubModelsProvider:
             self._add_response_to_history(provider_response)
 
             # Parse structured output if schema was requested
-            if response_schema and provider_response.text:
+            text = provider_response.get_text()
+            if response_schema and text:
                 try:
-                    provider_response.structured_output = json.loads(provider_response.text)
+                    provider_response.structured_output = json.loads(text)
                 except json.JSONDecodeError:
                     pass
 
@@ -556,9 +557,10 @@ class GitHubModelsProvider:
             self._add_response_to_history(provider_response)
 
             # Parse structured output if schema was requested
-            if response_schema and provider_response.text:
+            text = provider_response.get_text()
+            if response_schema and text:
                 try:
-                    provider_response.structured_output = json.loads(provider_response.text)
+                    provider_response.structured_output = json.loads(text)
                 except json.JSONDecodeError:
                     pass
 
@@ -598,16 +600,8 @@ class GitHubModelsProvider:
 
     def _add_response_to_history(self, response: ProviderResponse) -> None:
         """Add the model's response to history."""
-        parts = []
-
-        if response.text:
-            parts.append(Part(text=response.text))
-
-        for fc in response.function_calls:
-            parts.append(Part(function_call=fc))
-
-        if parts:
-            self._history.append(Message(role=Role.MODEL, parts=parts))
+        if response.parts:
+            self._history.append(Message(role=Role.MODEL, parts=response.parts))
 
     def _handle_api_error(self, error: Exception) -> None:
         """Handle API errors and convert to appropriate exceptions."""
@@ -783,12 +777,21 @@ class GitHubModelsProvider:
         kwargs = self._build_completion_kwargs(response_schema)
         kwargs['stream'] = True
 
-        # Accumulate response
-        accumulated_text = []
+        # Accumulate response with parts preserving order
+        accumulated_text = []  # Text chunks for current text block
+        parts = []  # Ordered parts preserving text/function_call interleaving
         finish_reason = FinishReason.UNKNOWN
-        function_calls = []
+        function_calls = []  # Also keep flat list for backwards compatibility
         usage = TokenUsage()
         was_cancelled = False
+
+        def flush_text_block():
+            """Flush accumulated text as a single Part."""
+            nonlocal accumulated_text
+            if accumulated_text:
+                text = ''.join(accumulated_text)
+                parts.append(Part.from_text(text))
+                accumulated_text = []
 
         try:
             self._trace(f"STREAM_START message={repr(message[:100])}...")
@@ -825,6 +828,10 @@ class GitHubModelsProvider:
                                 new_calls = extract_function_calls_from_stream_delta(delta.tool_calls)
                                 for fc in new_calls:
                                     self._trace(f"STREAM_FUNC_CALL name={fc.name}")
+                                    # Flush any pending text before adding function call
+                                    flush_text_block()
+                                    # Add function call as a part
+                                    parts.append(Part.from_function_call(fc))
                                 function_calls.extend(new_calls)
 
                         # Extract finish reason
@@ -855,16 +862,15 @@ class GitHubModelsProvider:
                 self._handle_api_error(e)
                 raise
 
-        # Build final response
-        final_text = ''.join(accumulated_text) if accumulated_text else None
+        # Flush any remaining text as final part
+        flush_text_block()
 
         # If we have function calls, update finish reason
         if function_calls and not was_cancelled:
             finish_reason = FinishReason.TOOL_USE
 
         provider_response = ProviderResponse(
-            text=final_text,
-            function_calls=function_calls,
+            parts=parts,
             usage=usage,
             finish_reason=finish_reason,
             raw=None
@@ -876,6 +882,7 @@ class GitHubModelsProvider:
         self._add_response_to_history(provider_response)
 
         # Parse structured output if schema was requested
+        final_text = provider_response.get_text()
         if response_schema and final_text and not was_cancelled:
             try:
                 provider_response.structured_output = json.loads(final_text)
@@ -921,12 +928,21 @@ class GitHubModelsProvider:
         kwargs = self._build_completion_kwargs(response_schema)
         kwargs['stream'] = True
 
-        # Accumulate response
-        accumulated_text = []
+        # Accumulate response with parts preserving order
+        accumulated_text = []  # Text chunks for current text block
+        parts = []  # Ordered parts preserving text/function_call interleaving
         finish_reason = FinishReason.UNKNOWN
-        function_calls = []
+        function_calls = []  # Also keep flat list for backwards compatibility
         usage = TokenUsage()
         was_cancelled = False
+
+        def flush_text_block():
+            """Flush accumulated text as a single Part."""
+            nonlocal accumulated_text
+            if accumulated_text:
+                text = ''.join(accumulated_text)
+                parts.append(Part.from_text(text))
+                accumulated_text = []
 
         try:
             tool_names = [r.name for r in results]
@@ -964,6 +980,10 @@ class GitHubModelsProvider:
                                 new_calls = extract_function_calls_from_stream_delta(delta.tool_calls)
                                 for fc in new_calls:
                                     self._trace(f"STREAM_TOOL_FUNC_CALL name={fc.name}")
+                                    # Flush any pending text before adding function call
+                                    flush_text_block()
+                                    # Add function call as a part
+                                    parts.append(Part.from_function_call(fc))
                                 function_calls.extend(new_calls)
 
                         # Extract finish reason
@@ -994,16 +1014,15 @@ class GitHubModelsProvider:
                 self._handle_api_error(e)
                 raise
 
-        # Build final response
-        final_text = ''.join(accumulated_text) if accumulated_text else None
+        # Flush any remaining text as final part
+        flush_text_block()
 
         # If we have function calls, update finish reason
         if function_calls and not was_cancelled:
             finish_reason = FinishReason.TOOL_USE
 
         provider_response = ProviderResponse(
-            text=final_text,
-            function_calls=function_calls,
+            parts=parts,
             usage=usage,
             finish_reason=finish_reason,
             raw=None
@@ -1015,6 +1034,7 @@ class GitHubModelsProvider:
         self._add_response_to_history(provider_response)
 
         # Parse structured output if schema was requested
+        final_text = provider_response.get_text()
         if response_schema and final_text and not was_cancelled:
             try:
                 provider_response.structured_output = json.loads(final_text)

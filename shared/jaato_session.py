@@ -789,10 +789,17 @@ class JaatoSession:
 
             # Send message (streaming or batched)
             if use_streaming:
+                # Track whether we've sent the first chunk (to use "write" vs "append")
+                first_chunk_sent = False
+
                 # Streaming callback that routes to on_output
                 def streaming_callback(chunk: str) -> None:
+                    nonlocal first_chunk_sent
                     if on_output:
-                        on_output("model", chunk, "append")
+                        # First chunk uses "write" to start block, subsequent use "append"
+                        mode = "append" if first_chunk_sent else "write"
+                        on_output("model", chunk, mode)
+                        first_chunk_sent = True
 
                 self._trace(f"STREAMING on_usage_update={'set' if wrapped_usage_callback else 'None'}")
                 response, _retry_stats = with_retry(
@@ -818,7 +825,7 @@ class JaatoSession:
 
             # Check for cancellation after initial message (including parent)
             if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
-                partial_text = response.text or ''
+                partial_text = response.get_text()
                 cancel_msg = "[Generation cancelled]"
                 if on_output and not cancellation_notified:
                     self._trace(f"CANCEL_NOTIFY: {cancel_msg} (after initial message)")
@@ -832,9 +839,20 @@ class JaatoSession:
                     return f"{partial_text}\n\n{cancel_msg}"
                 return cancel_msg
 
-            # Handle function calling loop
-            function_calls = list(response.function_calls) if response.function_calls else []
-            while function_calls:
+            # Handle function calling loop - process parts in order to support interleaved text/tools
+            accumulated_text: List[str] = []
+
+            def get_pending_function_calls() -> List[FunctionCall]:
+                """Extract function calls from response.parts."""
+                return [p.function_call for p in response.parts if p.function_call]
+
+            def get_all_text() -> str:
+                """Concatenate all text from response.parts."""
+                texts = [p.text for p in response.parts if p.text]
+                return ''.join(texts) if texts else ''
+
+            pending_calls = get_pending_function_calls()
+            while pending_calls:
                 # Check for cancellation before processing tools (including parent)
                 if self._is_cancelled():
                     cancel_msg = "[Cancelled during tool execution]"
@@ -845,147 +863,92 @@ class JaatoSession:
                     elif cancellation_notified:
                         self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (before processing tools) - already notified!")
                     # Notify model of cancellation for context on next turn
-                    self._notify_model_of_cancellation(cancel_msg, response.text or '')
-                    if response.text:
-                        return f"{response.text}\n\n{cancel_msg}"
+                    all_text = get_all_text()
+                    self._notify_model_of_cancellation(cancel_msg, all_text)
+                    if all_text:
+                        return f"{all_text}\n\n{cancel_msg}"
                     return cancel_msg
 
-                # Emit any text produced alongside function calls (only in non-streaming mode)
-                if not use_streaming and response.text and on_output:
-                    on_output("model", response.text, "write")
+                # Process parts in order - emit text, collect function calls into groups
+                current_fc_group: List[FunctionCall] = []
+                for part in response.parts:
+                    if part.text:
+                        # Before emitting text, execute any pending function calls
+                        if current_fc_group:
+                            tool_results = self._execute_function_call_group(
+                                current_fc_group, turn_data, on_output, cancellation_notified
+                            )
+                            if self._is_cancelled():
+                                cancel_msg = "[Cancelled after tool execution]"
+                                if on_output and not cancellation_notified:
+                                    on_output("system", cancel_msg, "write")
+                                self._notify_model_of_cancellation(cancel_msg)
+                                return cancel_msg
+                            # Send tool results and get continuation
+                            response = self._send_tool_results_and_continue(
+                                tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
+                            )
+                            if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
+                                partial = get_all_text()
+                                cancel_msg = "[Generation cancelled]"
+                                if on_output and not cancellation_notified:
+                                    on_output("system", cancel_msg, "write")
+                                self._notify_model_of_cancellation(cancel_msg, partial)
+                                return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
+                            current_fc_group = []
 
-                tool_results: List[ToolResult] = []
+                        # Emit text (only in non-streaming mode)
+                        if not use_streaming and on_output:
+                            on_output("model", part.text, "write")
+                        accumulated_text.append(part.text)
 
-                for fc in function_calls:
-                    # Check for cancellation before each tool (including parent)
+                    elif part.function_call:
+                        current_fc_group.append(part.function_call)
+
+                # Execute remaining function calls at end of parts
+                if current_fc_group:
+                    tool_results = self._execute_function_call_group(
+                        current_fc_group, turn_data, on_output, cancellation_notified
+                    )
                     if self._is_cancelled():
-                        break
+                        cancel_msg = "[Cancelled after tool execution]"
+                        if on_output and not cancellation_notified:
+                            on_output("system", cancel_msg, "write")
+                        self._notify_model_of_cancellation(cancel_msg)
+                        return cancel_msg
 
-                    name = fc.name
-                    args = fc.args
-
-                    # Emit hook: tool starting
-                    if self._ui_hooks:
-                        self._ui_hooks.on_tool_call_start(
-                            agent_id=self._agent_id,
-                            tool_name=name,
-                            tool_args=args,
-                            call_id=fc.id
-                        )
-
-                    fc_start = datetime.now()
-                    if self._executor:
-                        executor_result = self._executor.execute(name, args)
-                    else:
-                        executor_result = (False, {"error": f"No executor registered for {name}"})
-                    fc_end = datetime.now()
-
-                    # Determine success and error message from executor result
-                    fc_success = True
-                    fc_error_message = None
-                    if isinstance(executor_result, tuple) and len(executor_result) == 2:
-                        fc_success = executor_result[0]
-                        # Extract error message if tool failed
-                        if not fc_success and isinstance(executor_result[1], dict):
-                            fc_error_message = executor_result[1].get('error')
-
-                    # Emit hook: tool ended
-                    fc_duration = (fc_end - fc_start).total_seconds()
-                    if self._ui_hooks:
-                        self._ui_hooks.on_tool_call_end(
-                            agent_id=self._agent_id,
-                            tool_name=name,
-                            success=fc_success,
-                            duration_seconds=fc_duration,
-                            error_message=fc_error_message,
-                            call_id=fc.id
-                        )
-
-                    # Record function call timing
-                    turn_data['function_calls'].append({
-                        'name': name,
-                        'start_time': fc_start.isoformat(),
-                        'end_time': fc_end.isoformat(),
-                        'duration_seconds': fc_duration,
-                    })
-
-                    # Build ToolResult
-                    tool_result = self._build_tool_result(fc, executor_result)
-                    tool_results.append(tool_result)
-
-                # Check for cancellation before sending tool results (including parent)
-                if self._is_cancelled():
-                    cancel_msg = "[Cancelled after tool execution]"
-                    if on_output and not cancellation_notified:
-                        self._trace(f"CANCEL_NOTIFY: {cancel_msg} (before sending tool results)")
-                        on_output("system", cancel_msg, "write")
-                        cancellation_notified = True
-                    elif cancellation_notified:
-                        self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (before sending tool results) - already notified!")
-                    # Notify model of cancellation for context on next turn
-                    self._notify_model_of_cancellation(cancel_msg)
-                    return cancel_msg
-
-                # Send tool results back (with retry for rate limits)
-                self._pacer.pace()  # Proactive rate limiting
-
-                if use_streaming:
-                    def streaming_callback(chunk: str) -> None:
-                        if on_output:
-                            on_output("model", chunk, "append")
-
-                    response, _retry_stats = with_retry(
-                        lambda: self._provider.send_tool_results_streaming(
-                            tool_results,
-                            on_chunk=streaming_callback,
-                            cancel_token=self._cancel_token,
-                            on_usage_update=wrapped_usage_callback
-                        ),
-                        context="send_tool_results_streaming",
-                        on_retry=self._on_retry,
-                        cancel_token=self._cancel_token
+                    # Send tool results and get next response
+                    response = self._send_tool_results_and_continue(
+                        tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
                     )
-                else:
-                    response, _retry_stats = with_retry(
-                        lambda: self._provider.send_tool_results(tool_results),
-                        context="send_tool_results",
-                        on_retry=self._on_retry,
-                        cancel_token=self._cancel_token
-                    )
-                self._record_token_usage(response)
-                self._accumulate_turn_tokens(response, turn_data)
+                    if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
+                        partial = get_all_text()
+                        cancel_msg = "[Generation cancelled]"
+                        if on_output and not cancellation_notified:
+                            on_output("system", cancel_msg, "write")
+                        self._notify_model_of_cancellation(cancel_msg, partial)
+                        return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
 
-                # Check for cancellation or abnormal termination (including parent)
-                if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
-                    partial_text = response.text or ''
-                    cancel_msg = "[Generation cancelled]"
-                    if on_output and not cancellation_notified:
-                        self._trace(f"CANCEL_NOTIFY: {cancel_msg} (after tool results)")
-                        on_output("system", cancel_msg, "write")
-                        cancellation_notified = True
-                    elif cancellation_notified:
-                        self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (after tool results) - already notified!")
-                    # Notify model of cancellation for context on next turn
-                    self._notify_model_of_cancellation(cancel_msg, partial_text)
-                    if partial_text:
-                        return f"{partial_text}\n\n{cancel_msg}"
-                    return cancel_msg
+                    if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE, FinishReason.CANCELLED):
+                        import sys
+                        print(f"[warning] Model stopped with finish_reason={response.finish_reason}", file=sys.stderr)
+                        final_text = get_all_text()
+                        if final_text:
+                            return f"{final_text}\n\n[Model stopped: {response.finish_reason}]"
+                        else:
+                            return f"[Model stopped unexpectedly: {response.finish_reason}]"
 
-                if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE, FinishReason.CANCELLED):
-                    import sys
-                    print(f"[warning] Model stopped with finish_reason={response.finish_reason}", file=sys.stderr)
-                    if response.text:
-                        return f"{response.text}\n\n[Model stopped: {response.finish_reason}]"
-                    else:
-                        return f"[Model stopped unexpectedly: {response.finish_reason}]"
+                # Check for more function calls in the new response
+                pending_calls = get_pending_function_calls()
 
-                function_calls = list(response.function_calls) if response.function_calls else []
+            # Collect any remaining text from the final response
+            for part in response.parts:
+                if part.text:
+                    if not use_streaming and on_output:
+                        on_output("model", part.text, "write")
+                    accumulated_text.append(part.text)
 
-            # Emit final response text (only in non-streaming mode, streaming already emitted)
-            if not use_streaming and response.text and on_output:
-                on_output("model", response.text, "write")
-
-            return response.text or ''
+            return ''.join(accumulated_text) if accumulated_text else ''
 
         except CancelledException:
             # Handle explicit cancellation exception
@@ -1004,6 +967,123 @@ class JaatoSession:
             # Clean up cancellation state
             self._is_running = False
             self._cancel_token = None
+
+    def _execute_function_call_group(
+        self,
+        function_calls: List[FunctionCall],
+        turn_data: Dict[str, Any],
+        on_output: Optional[OutputCallback],
+        cancellation_notified: bool
+    ) -> List[ToolResult]:
+        """Execute a group of function calls and return their results."""
+        tool_results: List[ToolResult] = []
+
+        for fc in function_calls:
+            # Check for cancellation before each tool (including parent)
+            if self._is_cancelled():
+                break
+
+            name = fc.name
+            args = fc.args
+
+            # Emit hook: tool starting
+            if self._ui_hooks:
+                self._ui_hooks.on_tool_call_start(
+                    agent_id=self._agent_id,
+                    tool_name=name,
+                    tool_args=args,
+                    call_id=fc.id
+                )
+
+            fc_start = datetime.now()
+            if self._executor:
+                executor_result = self._executor.execute(name, args)
+            else:
+                executor_result = (False, {"error": f"No executor registered for {name}"})
+            fc_end = datetime.now()
+
+            # Determine success and error message from executor result
+            fc_success = True
+            fc_error_message = None
+            if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                fc_success = executor_result[0]
+                if not fc_success and isinstance(executor_result[1], dict):
+                    fc_error_message = executor_result[1].get('error')
+
+            # Emit hook: tool ended
+            fc_duration = (fc_end - fc_start).total_seconds()
+            if self._ui_hooks:
+                self._ui_hooks.on_tool_call_end(
+                    agent_id=self._agent_id,
+                    tool_name=name,
+                    success=fc_success,
+                    duration_seconds=fc_duration,
+                    error_message=fc_error_message,
+                    call_id=fc.id
+                )
+
+            # Record function call timing
+            turn_data['function_calls'].append({
+                'name': name,
+                'start_time': fc_start.isoformat(),
+                'end_time': fc_end.isoformat(),
+                'duration_seconds': fc_duration,
+            })
+
+            # Build ToolResult
+            tool_result = self._build_tool_result(fc, executor_result)
+            tool_results.append(tool_result)
+
+        return tool_results
+
+    def _send_tool_results_and_continue(
+        self,
+        tool_results: List[ToolResult],
+        use_streaming: bool,
+        on_output: Optional[OutputCallback],
+        wrapped_usage_callback: Optional[UsageUpdateCallback],
+        turn_data: Dict[str, Any]
+    ) -> ProviderResponse:
+        """Send tool results back to the model and get the continuation response."""
+        # with_retry is already imported at module level from .retry_utils
+
+        # Proactive rate limiting
+        self._pacer.pace()
+
+        if use_streaming:
+            # Track first chunk to use "write" for new block, "append" for continuation
+            first_chunk_after_tools = [False]  # Use list to allow mutation in closure
+
+            def streaming_callback(chunk: str) -> None:
+                if on_output:
+                    # First chunk after tool results starts a new block
+                    mode = "append" if first_chunk_after_tools[0] else "write"
+                    on_output("model", chunk, mode)
+                    first_chunk_after_tools[0] = True
+
+            response, _retry_stats = with_retry(
+                lambda: self._provider.send_tool_results_streaming(
+                    tool_results,
+                    on_chunk=streaming_callback,
+                    cancel_token=self._cancel_token,
+                    on_usage_update=wrapped_usage_callback
+                ),
+                context="send_tool_results_streaming",
+                on_retry=self._on_retry,
+                cancel_token=self._cancel_token
+            )
+        else:
+            response, _retry_stats = with_retry(
+                lambda: self._provider.send_tool_results(tool_results),
+                context="send_tool_results",
+                on_retry=self._on_retry,
+                cancel_token=self._cancel_token
+            )
+
+        self._record_token_usage(response)
+        self._accumulate_turn_tokens(response, turn_data)
+
+        return response
 
     def _build_tool_result(
         self,
@@ -1296,7 +1376,7 @@ class JaatoSession:
             raise RuntimeError("Session not configured.")
 
         response = self._provider.generate(prompt)
-        return response.text or ''
+        return response.get_text() or ''
 
     def send_message_with_parts(
         self,
