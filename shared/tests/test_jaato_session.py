@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from ..jaato_session import JaatoSession
+from ..plugins.model_provider.types import Part, FunctionCall, FinishReason
 
 
 class TestJaatoSessionInitialization:
@@ -119,18 +120,20 @@ class TestJaatoSessionSendMessage:
 
     def test_send_message_returns_response(self):
         """Test that send_message returns response text."""
+        from ..plugins.model_provider.types import TokenUsage
+
         mock_runtime = MagicMock()
         mock_provider = MagicMock()
 
-        # Setup provider response
+        # Setup provider response with parts
         mock_response = MagicMock()
-        mock_response.text = "Hello back!"
-        mock_response.function_calls = []
-        mock_response.usage = MagicMock()
-        mock_response.usage.prompt_tokens = 10
-        mock_response.usage.output_tokens = 5
-        mock_response.usage.total_tokens = 15
-        mock_provider.send_message.return_value = mock_response
+        mock_response.parts = [Part.from_text("Hello back!")]
+        mock_response.finish_reason = FinishReason.STOP
+        mock_response.usage = TokenUsage(prompt_tokens=10, output_tokens=5, total_tokens=15)
+
+        # Mock streaming support (enabled by default)
+        mock_provider.supports_streaming.return_value = True
+        mock_provider.send_message_streaming.return_value = mock_response
 
         mock_runtime.create_provider.return_value = mock_provider
         mock_runtime.get_tool_schemas.return_value = []
@@ -317,7 +320,8 @@ class TestJaatoSessionGenerate:
         mock_provider = MagicMock()
 
         mock_response = MagicMock()
-        mock_response.text = "Generated text"
+        mock_response.parts = [Part.from_text("Generated text")]
+        mock_response.get_text = lambda: "Generated text"
         mock_provider.generate.return_value = mock_response
 
         mock_runtime.create_provider.return_value = mock_provider
