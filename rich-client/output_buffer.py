@@ -223,12 +223,14 @@ class OutputBuffer:
 
     def _flush_current_block(self) -> None:
         """Flush the current block to lines."""
+        import traceback
+        caller = ''.join(traceback.format_stack()[-3:-1]).replace('\n', ' | ')
         if self._current_block:
             source, parts, is_new_turn = self._current_block
             # Concatenate streaming chunks directly (no separator)
             # Then split by newlines for display
             full_text = ''.join(parts)
-            self._trace(f"FLUSH source={source} parts_count={len(parts)} full_text={repr(full_text[:80] if len(full_text) > 80 else full_text)}")
+            self._trace(f"FLUSH source={source} parts_count={len(parts)} caller={caller[:200]}")
             lines = full_text.split('\n')
             for i, line in enumerate(lines):
                 # Only first line of a new turn gets the prefix
@@ -236,7 +238,7 @@ class OutputBuffer:
             self._last_source = source
             self._current_block = None
         else:
-            self._trace("FLUSH (no current_block)")
+            self._trace(f"FLUSH (no current_block) caller={caller[:200]}")
 
     def _get_current_block_lines(self) -> List[OutputLine]:
         """Get lines from current block without flushing it.
