@@ -389,15 +389,202 @@ def extract_usage_from_response(response: Any) -> TokenUsage:
 
 
 def response_from_anthropic(response: Any) -> ProviderResponse:
-    """Convert Anthropic response to internal ProviderResponse."""
+    """Convert Anthropic response to internal ProviderResponse.
+
+    Uses parts-based API for proper text/function_call interleaving.
+    """
+    parts = []
+
+    # Extract parts in order from response content
+    if response and hasattr(response, "content"):
+        for block in response.content:
+            if hasattr(block, "type"):
+                if block.type == "text":
+                    parts.append(Part.from_text(block.text))
+                elif block.type == "tool_use":
+                    fc = FunctionCall(
+                        id=block.id,
+                        name=block.name,
+                        args=block.input if hasattr(block, "input") else {},
+                    )
+                    parts.append(Part.from_function_call(fc))
+                # Thinking blocks are extracted separately
+
     return ProviderResponse(
-        text=extract_text_from_response(response),
-        function_calls=extract_function_calls_from_response(response),
+        parts=parts,
         usage=extract_usage_from_response(response),
         finish_reason=extract_finish_reason_from_response(response),
         raw=response,
         thinking=extract_thinking_from_response(response),
     )
+
+
+# ==================== Streaming Helpers ====================
+
+
+def extract_text_from_stream_event(event: Any) -> Optional[str]:
+    """Extract text delta from a streaming event.
+
+    Anthropic streaming uses various event types:
+    - content_block_delta with text_delta contains text chunks
+    - Other event types don't contain text
+
+    Returns:
+        Text chunk if this is a text delta event, None otherwise.
+    """
+    if not event:
+        return None
+
+    # Check event type
+    event_type = getattr(event, "type", None)
+
+    if event_type == "content_block_delta":
+        delta = getattr(event, "delta", None)
+        if delta:
+            delta_type = getattr(delta, "type", None)
+            if delta_type == "text_delta":
+                return getattr(delta, "text", None)
+
+    return None
+
+
+def extract_input_json_from_stream_event(event: Any) -> Optional[str]:
+    """Extract input JSON delta from a streaming event (for tool calls).
+
+    Returns:
+        JSON string chunk if this is an input_json_delta event, None otherwise.
+    """
+    if not event:
+        return None
+
+    event_type = getattr(event, "type", None)
+
+    if event_type == "content_block_delta":
+        delta = getattr(event, "delta", None)
+        if delta:
+            delta_type = getattr(delta, "type", None)
+            if delta_type == "input_json_delta":
+                return getattr(delta, "partial_json", None)
+
+    return None
+
+
+def extract_content_block_start(event: Any) -> Optional[Dict[str, Any]]:
+    """Extract content block info from content_block_start event.
+
+    Returns:
+        Dict with block type and info, or None.
+    """
+    if not event:
+        return None
+
+    event_type = getattr(event, "type", None)
+
+    if event_type == "content_block_start":
+        index = getattr(event, "index", 0)
+        content_block = getattr(event, "content_block", None)
+        if content_block:
+            block_type = getattr(content_block, "type", None)
+            if block_type == "tool_use":
+                return {
+                    "type": "tool_use",
+                    "index": index,
+                    "id": getattr(content_block, "id", ""),
+                    "name": getattr(content_block, "name", ""),
+                }
+            elif block_type == "text":
+                return {
+                    "type": "text",
+                    "index": index,
+                }
+            elif block_type == "thinking":
+                return {
+                    "type": "thinking",
+                    "index": index,
+                }
+
+    return None
+
+
+def extract_message_delta(event: Any) -> Optional[Dict[str, Any]]:
+    """Extract message delta info (stop reason, usage) from message_delta event.
+
+    Returns:
+        Dict with stop_reason and usage info, or None.
+    """
+    if not event:
+        return None
+
+    event_type = getattr(event, "type", None)
+
+    if event_type == "message_delta":
+        result: Dict[str, Any] = {}
+
+        delta = getattr(event, "delta", None)
+        if delta:
+            stop_reason = getattr(delta, "stop_reason", None)
+            if stop_reason:
+                result["stop_reason"] = stop_reason
+
+        usage = getattr(event, "usage", None)
+        if usage:
+            result["usage"] = TokenUsage(
+                prompt_tokens=0,  # Not available in delta
+                output_tokens=getattr(usage, "output_tokens", 0),
+                total_tokens=getattr(usage, "output_tokens", 0),
+            )
+
+        return result if result else None
+
+    return None
+
+
+def extract_message_start(event: Any) -> Optional[TokenUsage]:
+    """Extract initial usage from message_start event.
+
+    Returns:
+        TokenUsage with input tokens, or None.
+    """
+    if not event:
+        return None
+
+    event_type = getattr(event, "type", None)
+
+    if event_type == "message_start":
+        message = getattr(event, "message", None)
+        if message:
+            usage = getattr(message, "usage", None)
+            if usage:
+                input_tokens = getattr(usage, "input_tokens", 0)
+                output_tokens = getattr(usage, "output_tokens", 0)
+                return TokenUsage(
+                    prompt_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=input_tokens + output_tokens,
+                )
+
+    return None
+
+
+def extract_thinking_from_stream_event(event: Any) -> Optional[str]:
+    """Extract thinking delta from a streaming event.
+
+    Returns:
+        Thinking text chunk if this is a thinking_delta event, None otherwise.
+    """
+    if not event:
+        return None
+
+    event_type = getattr(event, "type", None)
+
+    if event_type == "content_block_delta":
+        delta = getattr(event, "delta", None)
+        if delta:
+            delta_type = getattr(delta, "type", None)
+            if delta_type == "thinking_delta":
+                return getattr(delta, "thinking", None)
+
+    return None
 
 
 # ==================== Serialization ====================

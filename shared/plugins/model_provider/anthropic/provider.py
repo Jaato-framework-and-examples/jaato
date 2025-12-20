@@ -18,8 +18,12 @@ Features:
 import json
 from typing import Any, Dict, List, Optional
 
-from ..base import ModelProviderPlugin, ProviderConfig
+from ..base import ModelProviderPlugin, ProviderConfig, StreamingCallback, UsageUpdateCallback
 from ..types import (
+    CancelledException,
+    CancelToken,
+    FinishReason,
+    FunctionCall,
     Message,
     Part,
     ProviderResponse,
@@ -30,6 +34,12 @@ from ..types import (
 )
 from .converters import (
     deserialize_history,
+    extract_content_block_start,
+    extract_input_json_from_stream_event,
+    extract_message_delta,
+    extract_message_start,
+    extract_text_from_stream_event,
+    extract_thinking_from_stream_event,
     messages_to_anthropic,
     response_from_anthropic,
     serialize_history,
@@ -343,9 +353,10 @@ class AnthropicProvider:
             self._add_response_to_history(provider_response)
 
             # Handle structured output via response parsing
-            if response_schema and provider_response.text:
+            text = provider_response.get_text()
+            if response_schema and text:
                 try:
-                    provider_response.structured_output = json.loads(provider_response.text)
+                    provider_response.structured_output = json.loads(text)
                 except json.JSONDecodeError:
                     pass
 
@@ -498,17 +509,20 @@ class AnthropicProvider:
         return False
 
     def _add_response_to_history(self, response: ProviderResponse) -> None:
-        """Add the model's response to history."""
-        parts = []
+        """Add the model's response to history.
 
-        if response.text:
-            parts.append(Part(text=response.text))
+        Uses the parts-based response format which preserves
+        text/function_call interleaving.
+        """
+        # Filter to only text and function_call parts for history
+        # (excludes function_response parts which belong to user messages)
+        history_parts = [
+            p for p in response.parts
+            if p.text is not None or p.function_call is not None
+        ]
 
-        for fc in response.function_calls:
-            parts.append(Part(function_call=fc))
-
-        if parts:
-            self._history.append(Message(role=Role.MODEL, parts=parts))
+        if history_parts:
+            self._history.append(Message(role=Role.MODEL, parts=history_parts))
 
     def _handle_api_error(self, error: Exception) -> None:
         """Handle API errors and convert to appropriate exceptions."""
@@ -619,6 +633,309 @@ class AnthropicProvider:
             True if thinking is supported.
         """
         return self._is_thinking_capable()
+
+    def supports_streaming(self) -> bool:
+        """Check if streaming is supported.
+
+        Returns:
+            True - Anthropic supports streaming.
+        """
+        return True
+
+    def supports_stop(self) -> bool:
+        """Check if mid-turn cancellation (stop) is supported.
+
+        Returns:
+            True - Anthropic supports stop via streaming cancellation.
+        """
+        return True
+
+    # ==================== Streaming ====================
+
+    def send_message_streaming(
+        self,
+        message: str,
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None
+    ) -> ProviderResponse:
+        """Send a message with streaming response and optional cancellation.
+
+        Args:
+            message: The user's message text.
+            on_chunk: Callback invoked for each text chunk as it streams.
+            cancel_token: Optional token to request cancellation mid-stream.
+            response_schema: Optional JSON Schema to constrain the response.
+            on_usage_update: Optional callback for real-time token usage updates.
+
+        Returns:
+            ProviderResponse with accumulated text and/or function calls.
+        """
+        if not self._client or not self._model_name:
+            raise RuntimeError("No chat session. Call create_session() first.")
+
+        # Add user message to history
+        self._history.append(Message.from_text(Role.USER, message))
+
+        # Build messages for API
+        messages = messages_to_anthropic(self._history)
+
+        # Build API kwargs
+        kwargs = self._build_api_kwargs(response_schema)
+
+        try:
+            response = self._stream_response(
+                messages=messages,
+                kwargs=kwargs,
+                on_chunk=on_chunk,
+                cancel_token=cancel_token,
+                on_usage_update=on_usage_update,
+            )
+
+            self._last_usage = response.usage
+
+            # Add assistant response to history
+            self._add_response_to_history(response)
+
+            # Handle structured output via response parsing
+            text = response.get_text()
+            if response_schema and text:
+                try:
+                    response.structured_output = json.loads(text)
+                except json.JSONDecodeError:
+                    pass
+
+            return response
+        except Exception as e:
+            # Remove the user message we added if the call failed
+            if self._history and self._history[-1].role == Role.USER:
+                self._history.pop()
+            self._handle_api_error(e)
+            raise
+
+    def send_tool_results_streaming(
+        self,
+        results: List[ToolResult],
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None
+    ) -> ProviderResponse:
+        """Send tool results with streaming response and optional cancellation.
+
+        Args:
+            results: List of tool execution results.
+            on_chunk: Callback invoked for each text chunk as it streams.
+            cancel_token: Optional token to request cancellation mid-stream.
+            response_schema: Optional JSON Schema to constrain the response.
+            on_usage_update: Optional callback for real-time token usage updates.
+
+        Returns:
+            ProviderResponse with accumulated text and/or function calls.
+        """
+        if not self._client or not self._model_name:
+            raise RuntimeError("No chat session. Call create_session() first.")
+
+        # Add tool results to history as a user message with tool_result blocks
+        tool_result_parts = [Part(function_response=r) for r in results]
+        self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
+
+        # Build messages for API
+        messages = messages_to_anthropic(self._history)
+
+        # Build API kwargs
+        kwargs = self._build_api_kwargs(response_schema)
+
+        try:
+            response = self._stream_response(
+                messages=messages,
+                kwargs=kwargs,
+                on_chunk=on_chunk,
+                cancel_token=cancel_token,
+                on_usage_update=on_usage_update,
+            )
+
+            self._last_usage = response.usage
+
+            # Add assistant response to history
+            self._add_response_to_history(response)
+
+            return response
+        except Exception as e:
+            self._handle_api_error(e)
+            raise
+
+    def _stream_response(
+        self,
+        messages: List[Dict[str, Any]],
+        kwargs: Dict[str, Any],
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+    ) -> ProviderResponse:
+        """Stream a response from the Anthropic API.
+
+        Internal method used by both send_message_streaming and
+        send_tool_results_streaming.
+        """
+        # State for accumulating response
+        accumulated_text: List[str] = []  # Text chunks for current text block
+        accumulated_thinking: List[str] = []  # Thinking chunks
+        parts: List[Part] = []  # Ordered parts preserving interleaving
+        current_tool_calls: Dict[int, Dict[str, Any]] = {}  # index -> {id, name, json_chunks}
+        finish_reason = FinishReason.UNKNOWN
+        usage = TokenUsage()
+        was_cancelled = False
+
+        def flush_text_block():
+            """Flush accumulated text as a single Part."""
+            nonlocal accumulated_text
+            if accumulated_text:
+                text = ''.join(accumulated_text)
+                parts.append(Part.from_text(text))
+                accumulated_text = []
+
+        try:
+            # Use the streaming API
+            with self._client.messages.stream(
+                model=self._model_name,
+                messages=messages,
+                **kwargs,
+            ) as stream:
+                for event in stream:
+                    # Check for cancellation
+                    if cancel_token and cancel_token.is_cancelled:
+                        was_cancelled = True
+                        finish_reason = FinishReason.CANCELLED
+                        break
+
+                    # Handle message_start (initial usage)
+                    initial_usage = extract_message_start(event)
+                    if initial_usage:
+                        usage = initial_usage
+                        if on_usage_update and usage.total_tokens > 0:
+                            on_usage_update(usage)
+
+                    # Handle content_block_start (new text/tool_use block)
+                    block_info = extract_content_block_start(event)
+                    if block_info:
+                        if block_info["type"] == "tool_use":
+                            # Start tracking a new tool call
+                            idx = block_info["index"]
+                            current_tool_calls[idx] = {
+                                "id": block_info["id"],
+                                "name": block_info["name"],
+                                "json_chunks": [],
+                            }
+                        elif block_info["type"] == "text":
+                            # Flush any existing text before starting new block
+                            # (though typically there's only one text block)
+                            pass
+
+                    # Handle text deltas
+                    text_chunk = extract_text_from_stream_event(event)
+                    if text_chunk:
+                        accumulated_text.append(text_chunk)
+                        on_chunk(text_chunk)
+
+                    # Handle thinking deltas
+                    thinking_chunk = extract_thinking_from_stream_event(event)
+                    if thinking_chunk:
+                        accumulated_thinking.append(thinking_chunk)
+
+                    # Handle tool input JSON deltas
+                    json_chunk = extract_input_json_from_stream_event(event)
+                    if json_chunk:
+                        # Find which tool call this belongs to (current active one)
+                        # Anthropic sends in order, so it's the last one
+                        if current_tool_calls:
+                            last_idx = max(current_tool_calls.keys())
+                            current_tool_calls[last_idx]["json_chunks"].append(json_chunk)
+
+                    # Handle content_block_stop (finalize tool call)
+                    event_type = getattr(event, "type", None)
+                    if event_type == "content_block_stop":
+                        idx = getattr(event, "index", None)
+                        if idx is not None and idx in current_tool_calls:
+                            # Finalize this tool call
+                            tc = current_tool_calls[idx]
+                            json_str = ''.join(tc["json_chunks"])
+                            try:
+                                args = json.loads(json_str) if json_str else {}
+                            except json.JSONDecodeError:
+                                args = {}
+
+                            # Flush text before adding function call
+                            flush_text_block()
+
+                            fc = FunctionCall(
+                                id=tc["id"],
+                                name=tc["name"],
+                                args=args,
+                            )
+                            parts.append(Part.from_function_call(fc))
+                            del current_tool_calls[idx]
+
+                    # Handle message_delta (stop reason, final usage)
+                    delta_info = extract_message_delta(event)
+                    if delta_info:
+                        if "stop_reason" in delta_info:
+                            reason = delta_info["stop_reason"]
+                            if reason == "end_turn":
+                                finish_reason = FinishReason.STOP
+                            elif reason == "tool_use":
+                                finish_reason = FinishReason.TOOL_USE
+                            elif reason == "max_tokens":
+                                finish_reason = FinishReason.MAX_TOKENS
+                            elif reason == "stop_sequence":
+                                finish_reason = FinishReason.STOP
+                        if "usage" in delta_info:
+                            delta_usage = delta_info["usage"]
+                            # Combine with existing input tokens
+                            usage = TokenUsage(
+                                prompt_tokens=usage.prompt_tokens,
+                                output_tokens=delta_usage.output_tokens,
+                                total_tokens=usage.prompt_tokens + delta_usage.output_tokens,
+                            )
+                            if on_usage_update and usage.total_tokens > 0:
+                                on_usage_update(usage)
+
+        except Exception as e:
+            # If cancelled during iteration, treat as cancellation
+            if cancel_token and cancel_token.is_cancelled:
+                was_cancelled = True
+                finish_reason = FinishReason.CANCELLED
+            else:
+                raise
+
+        # Flush any remaining text
+        flush_text_block()
+
+        # Handle any incomplete tool calls (shouldn't happen normally)
+        for idx, tc in current_tool_calls.items():
+            json_str = ''.join(tc["json_chunks"])
+            try:
+                args = json.loads(json_str) if json_str else {}
+            except json.JSONDecodeError:
+                args = {}
+            fc = FunctionCall(id=tc["id"], name=tc["name"], args=args)
+            parts.append(Part.from_function_call(fc))
+
+        # Build thinking string
+        thinking = ''.join(accumulated_thinking) if accumulated_thinking else None
+
+        # Update finish reason if we have function calls
+        if any(p.function_call for p in parts) and not was_cancelled:
+            finish_reason = FinishReason.TOOL_USE
+
+        return ProviderResponse(
+            parts=parts,
+            usage=usage,
+            finish_reason=finish_reason,
+            raw=None,  # Streaming doesn't provide single raw response
+            thinking=thinking,
+        )
 
     # ==================== Serialization ====================
 
