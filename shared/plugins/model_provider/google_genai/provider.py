@@ -151,20 +151,18 @@ class GoogleGenAIProvider:
         # Models cache: (timestamp, models_list)
         self._models_cache: Optional[Tuple[float, List[str]]] = None
 
-        # Trace file for debugging (defaults to /tmp/provider_trace.log, set to empty to disable)
+    def _trace(self, msg: str) -> None:
+        """Write trace message to file for debugging streaming interactions."""
         import tempfile
-        self._trace_file: Optional[str] = os.environ.get(
+        trace_path = os.environ.get(
             "JAATO_PROVIDER_TRACE",
             os.path.join(tempfile.gettempdir(), "provider_trace.log")
         )
-
-    def _trace(self, msg: str) -> None:
-        """Write trace message to file for debugging streaming interactions."""
-        if not self._trace_file:
+        if not trace_path:
             return
         import datetime
         try:
-            with open(self._trace_file, "a") as f:
+            with open(trace_path, "a") as f:
                 ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
                 f.write(f"[{ts}] [google_genai] {msg}\n")
                 f.flush()
