@@ -1023,10 +1023,15 @@ class JaatoSession:
         response: ProviderResponse,
         turn_tokens: Dict[str, int]
     ) -> None:
-        """Accumulate token counts from provider response."""
-        turn_tokens['prompt'] += response.usage.prompt_tokens
-        turn_tokens['output'] += response.usage.output_tokens
-        turn_tokens['total'] += response.usage.total_tokens
+        """Update token counts from provider response.
+
+        Note: We REPLACE (not sum) because each API response's prompt_tokens
+        already includes ALL previous history. The final API call in a turn
+        has the complete context usage.
+        """
+        turn_tokens['prompt'] = response.usage.prompt_tokens
+        turn_tokens['output'] = response.usage.output_tokens
+        turn_tokens['total'] = response.usage.total_tokens
 
     def _record_token_usage(self, response: ProviderResponse) -> None:
         """Record token usage to ledger if available."""
