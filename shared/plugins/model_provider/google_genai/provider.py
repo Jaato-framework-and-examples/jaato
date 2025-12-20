@@ -151,8 +151,12 @@ class GoogleGenAIProvider:
         # Models cache: (timestamp, models_list)
         self._models_cache: Optional[Tuple[float, List[str]]] = None
 
-        # Trace file for debugging (set JAATO_PROVIDER_TRACE to enable)
-        self._trace_file: Optional[str] = os.environ.get("JAATO_PROVIDER_TRACE")
+        # Trace file for debugging (defaults to /tmp/provider_trace.log, set to empty to disable)
+        import tempfile
+        self._trace_file: Optional[str] = os.environ.get(
+            "JAATO_PROVIDER_TRACE",
+            os.path.join(tempfile.gettempdir(), "provider_trace.log")
+        )
 
     def _trace(self, msg: str) -> None:
         """Write trace message to file for debugging streaming interactions."""
