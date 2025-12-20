@@ -93,6 +93,8 @@ class SubagentPlugin:
         self._parent_agent_id: str = "main"  # Parent agent ID for nested subagents
         # Session registry for multi-turn conversations
         self._active_sessions: Dict[str, Dict[str, Any]] = {}  # agent_id -> session info
+        # Parent session reference for cancellation propagation
+        self._parent_session: Optional[Any] = None  # JaatoSession reference
 
     @property
     def name(self) -> str:
@@ -462,6 +464,18 @@ class SubagentPlugin:
         if self._config and runtime.project and runtime.location:
             self._config.project = runtime.project
             self._config.location = runtime.location
+
+    def set_parent_session(self, session: Any) -> None:
+        """Set the parent session reference for cancellation propagation.
+
+        When set, child subagent sessions will inherit the parent's cancel
+        token, allowing automatic cancellation propagation from parent to
+        children.
+
+        Args:
+            session: JaatoSession instance of the parent agent.
+        """
+        self._parent_session = session
 
     def set_connection(self, project: str, location: str, model: str) -> None:
         """Set the connection parameters for subagents.
@@ -1108,6 +1122,12 @@ class SubagentPlugin:
                 agent_type="subagent",
                 agent_name=profile.name
             )
+
+            # Set parent cancel token for automatic cancellation propagation
+            if self._parent_session and hasattr(self._parent_session, '_cancel_token'):
+                parent_token = self._parent_session._cancel_token
+                if parent_token and hasattr(session, 'set_parent_cancel_token'):
+                    session.set_parent_cancel_token(parent_token)
 
             # Pass UI hooks to session for tool call tracking
             if self._ui_hooks:

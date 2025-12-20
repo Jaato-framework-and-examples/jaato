@@ -120,6 +120,7 @@ class JaatoSession:
 
         # Cancellation support
         self._cancel_token: Optional[CancelToken] = None
+        self._parent_cancel_token: Optional[CancelToken] = None  # For parent→child propagation
         self._is_running: bool = False
         self._use_streaming: bool = True  # Enable streaming by default if provider supports it
 
@@ -263,6 +264,30 @@ class JaatoSession:
         """
         self._use_streaming = enabled
 
+    def set_parent_cancel_token(self, token: CancelToken) -> None:
+        """Set a parent cancel token for cancellation propagation.
+
+        When set, this session will check both its own cancel token
+        and the parent token. If the parent is cancelled, this session
+        will also stop - enabling automatic parent→child propagation.
+
+        Args:
+            token: The parent session's cancel token.
+        """
+        self._parent_cancel_token = token
+
+    def _is_cancelled(self) -> bool:
+        """Check if this session or its parent has been cancelled.
+
+        Returns:
+            True if either this session's token or parent token is cancelled.
+        """
+        if self._cancel_token and self._cancel_token.is_cancelled:
+            return True
+        if self._parent_cancel_token and self._parent_cancel_token.is_cancelled:
+            return True
+        return False
+
     @property
     def supports_stop(self) -> bool:
         """Check if the current provider supports mid-turn cancellation.
@@ -341,6 +366,12 @@ class JaatoSession:
                 self._runtime.permission_plugin,
                 context=context
             )
+
+        # Set this session as parent for subagent plugin (for cancellation propagation)
+        if self._runtime.registry:
+            subagent_plugin = self._runtime.registry.get_plugin("subagent")
+            if subagent_plugin and hasattr(subagent_plugin, 'set_parent_session'):
+                subagent_plugin.set_parent_session(self)
 
         # Build system instructions
         self._system_instruction = self._runtime.get_system_instructions(
@@ -746,8 +777,8 @@ class JaatoSession:
         )
 
         try:
-            # Check for cancellation before starting
-            if self._cancel_token.is_cancelled:
+            # Check for cancellation before starting (including parent)
+            if self._is_cancelled():
                 msg = "[Cancelled before start]"
                 if on_output:
                     on_output("system", msg, "write")
@@ -785,8 +816,8 @@ class JaatoSession:
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
 
-            # Check for cancellation after initial message
-            if self._cancel_token.is_cancelled or response.finish_reason == FinishReason.CANCELLED:
+            # Check for cancellation after initial message (including parent)
+            if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
                 partial_text = response.text or ''
                 cancel_msg = "[Generation cancelled]"
                 if on_output and not cancellation_notified:
@@ -804,8 +835,8 @@ class JaatoSession:
             # Handle function calling loop
             function_calls = list(response.function_calls) if response.function_calls else []
             while function_calls:
-                # Check for cancellation before processing tools
-                if self._cancel_token.is_cancelled:
+                # Check for cancellation before processing tools (including parent)
+                if self._is_cancelled():
                     cancel_msg = "[Cancelled during tool execution]"
                     if on_output and not cancellation_notified:
                         self._trace(f"CANCEL_NOTIFY: {cancel_msg} (before processing tools)")
@@ -826,8 +857,8 @@ class JaatoSession:
                 tool_results: List[ToolResult] = []
 
                 for fc in function_calls:
-                    # Check for cancellation before each tool
-                    if self._cancel_token.is_cancelled:
+                    # Check for cancellation before each tool (including parent)
+                    if self._is_cancelled():
                         break
 
                     name = fc.name
@@ -882,8 +913,8 @@ class JaatoSession:
                     tool_result = self._build_tool_result(fc, executor_result)
                     tool_results.append(tool_result)
 
-                # Check for cancellation before sending tool results
-                if self._cancel_token.is_cancelled:
+                # Check for cancellation before sending tool results (including parent)
+                if self._is_cancelled():
                     cancel_msg = "[Cancelled after tool execution]"
                     if on_output and not cancellation_notified:
                         self._trace(f"CANCEL_NOTIFY: {cancel_msg} (before sending tool results)")
@@ -924,8 +955,8 @@ class JaatoSession:
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
 
-                # Check for cancellation or abnormal termination
-                if self._cancel_token.is_cancelled or response.finish_reason == FinishReason.CANCELLED:
+                # Check for cancellation or abnormal termination (including parent)
+                if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
                     partial_text = response.text or ''
                     cancel_msg = "[Generation cancelled]"
                     if on_output and not cancellation_notified:
