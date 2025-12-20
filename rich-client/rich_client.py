@@ -888,7 +888,23 @@ class RichClient:
                     'tokens_remaining': tokens_remaining,
                 }
                 self._trace(f"[usage_callback] updating display: {percent_used:.1f}% used, {total_tokens} tokens")
+
+                # Update agent registry if available (status bar reads from here)
+                if self._agent_registry:
+                    agent_id = self._agent_registry.get_selected_agent_id()
+                    if agent_id:
+                        self._agent_registry.update_context_usage(
+                            agent_id=agent_id,
+                            total_tokens=total_tokens,
+                            prompt_tokens=usage.prompt_tokens,
+                            output_tokens=usage.output_tokens,
+                            turns=0,  # Don't know turn count during streaming
+                            percent_used=percent_used
+                        )
+
+                # Also update display directly (fallback if no registry)
                 self._display.update_context_usage(usage_dict)
+
                 # Trace after update
                 try:
                     with open(trace_path, "a") as f:
