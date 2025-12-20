@@ -919,7 +919,7 @@ class GitHubModelsProvider:
         was_cancelled = False
 
         try:
-            tool_names = [r.tool_name for r in results]
+            tool_names = [r.name for r in results]
             self._trace(f"STREAM_TOOL_RESULTS_START tools={tool_names}")
             chunk_count = 0
             response_stream = self._client.complete(
