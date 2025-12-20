@@ -9,6 +9,7 @@ for subagents, avoiding redundant provider connections.
 
 import logging
 import os
+import threading
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from datetime import datetime
 
@@ -95,6 +96,10 @@ class SubagentPlugin:
         self._active_sessions: Dict[str, Dict[str, Any]] = {}  # agent_id -> session info
         # Parent session reference for cancellation propagation
         self._parent_session: Optional[Any] = None  # JaatoSession reference
+        # Background task tracking for parallel execution
+        self._background_threads: Dict[str, threading.Thread] = {}  # agent_id -> thread
+        self._background_results: Dict[str, SubagentResult] = {}  # agent_id -> result
+        self._result_lock = threading.Lock()  # Protect result access
 
     @property
     def name(self) -> str:
@@ -249,6 +254,14 @@ class SubagentPlugin:
                                     "description": "Maximum conversation turns (default: 10)"
                                 }
                             }
+                        },
+                        "background": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, run subagent in background and return immediately with "
+                                "agent_id. Use get_subagent_result to retrieve results later. "
+                                "Enables parallel execution of multiple subagents. Default: false."
+                            )
                         }
                     },
                     "required": ["task"]
@@ -323,10 +336,35 @@ class SubagentPlugin:
                 }
             ),
             ToolSchema(
+                name='get_subagent_result',
+                description=(
+                    'Get the result of a background subagent. Use this after spawning a '
+                    'subagent with background=true to retrieve its result once complete. '
+                    'Returns the result if complete, or status if still running.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "subagent_id": {
+                            "type": "string",
+                            "description": "ID of the subagent to get results from"
+                        },
+                        "wait": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, block until the subagent completes. "
+                                "If false (default), return immediately with current status."
+                            )
+                        }
+                    },
+                    "required": ["subagent_id"]
+                }
+            ),
+            ToolSchema(
                 name='list_active_subagents',
                 description=(
                     'List currently active subagent sessions that can receive follow-up '
-                    'messages. Shows subagent ID, profile, creation time, and turn count.'
+                    'messages. Shows subagent ID, profile, status (running/waiting), and turn count.'
                 ),
                 parameters={
                     "type": "object",
@@ -356,6 +394,7 @@ class SubagentPlugin:
             'continue_subagent': self._execute_continue_subagent,
             'close_subagent': self._execute_close_subagent,
             'cancel_subagent': self._execute_cancel_subagent,
+            'get_subagent_result': self._execute_get_subagent_result,
             'list_active_subagents': self._execute_list_active_subagents,
             'list_subagent_profiles': self._execute_list_profiles,
             # User command aliases
@@ -803,22 +842,83 @@ class SubagentPlugin:
                 'message': f'Failed to cancel session {subagent_id} - may have already completed'
             }
 
+    def _execute_get_subagent_result(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get the result of a background subagent.
+
+        Args:
+            args: Tool arguments containing:
+                - subagent_id: ID of the subagent
+                - wait: If true, block until complete
+
+        Returns:
+            Dict with result or status.
+        """
+        subagent_id = args.get('subagent_id', '')
+        wait = args.get('wait', False)
+
+        if not subagent_id:
+            return {
+                'success': False,
+                'error': 'No subagent_id provided'
+            }
+
+        # Check if result already available
+        with self._result_lock:
+            if subagent_id in self._background_results:
+                result = self._background_results.pop(subagent_id)
+                return {
+                    'success': True,
+                    'complete': True,
+                    **result.to_dict()
+                }
+
+        # Check if thread is still running
+        thread = self._background_threads.get(subagent_id)
+        if thread and thread.is_alive():
+            if wait:
+                # Block until thread completes
+                thread.join()
+                # Now result should be available
+                with self._result_lock:
+                    if subagent_id in self._background_results:
+                        result = self._background_results.pop(subagent_id)
+                        return {
+                            'success': True,
+                            'complete': True,
+                            **result.to_dict()
+                        }
+                return {
+                    'success': False,
+                    'error': f'Subagent {subagent_id} completed but no result available'
+                }
+            else:
+                # Return status without waiting
+                return {
+                    'success': True,
+                    'complete': False,
+                    'status': 'running',
+                    'agent_id': subagent_id,
+                    'message': f'Subagent {subagent_id} is still running. Call again with wait=true to block until complete.'
+                }
+
+        # No thread and no result - unknown agent_id
+        return {
+            'success': False,
+            'error': f'No background subagent found with ID: {subagent_id}'
+        }
+
     def _execute_list_active_subagents(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """List active subagent sessions.
+        """List active subagent sessions and background tasks.
 
         Args:
             args: Tool arguments (unused).
 
         Returns:
-            Dict containing list of active sessions.
+            Dict containing list of active sessions and background tasks.
         """
-        if not self._active_sessions:
-            return {
-                'active_sessions': [],
-                'message': 'No active subagent sessions'
-            }
-
         sessions = []
+
+        # List interactive sessions
         for agent_id, info in self._active_sessions.items():
             session = info.get('session')
             is_running = session.is_running if session else False
@@ -826,6 +926,7 @@ class SubagentPlugin:
             sessions.append({
                 'agent_id': agent_id,
                 'profile': info['profile'].name,
+                'type': 'interactive',
                 'status': 'running' if is_running else 'waiting',
                 'can_cancel': is_running and supports_stop,
                 'created_at': info['created_at'].isoformat(),
@@ -833,6 +934,32 @@ class SubagentPlugin:
                 'turn_count': info['turn_count'],
                 'max_turns': info['max_turns'],
             })
+
+        # List background tasks
+        for agent_id, thread in self._background_threads.items():
+            sessions.append({
+                'agent_id': agent_id,
+                'type': 'background',
+                'status': 'running' if thread.is_alive() else 'complete',
+                'can_cancel': thread.is_alive(),  # Can cancel via cancel_subagent
+            })
+
+        # Check for completed background results not yet retrieved
+        with self._result_lock:
+            for agent_id in self._background_results.keys():
+                if agent_id not in self._background_threads:
+                    sessions.append({
+                        'agent_id': agent_id,
+                        'type': 'background',
+                        'status': 'complete (result pending)',
+                        'can_cancel': False,
+                    })
+
+        if not sessions:
+            return {
+                'active_sessions': [],
+                'message': 'No active subagent sessions'
+            }
 
         return {
             'active_sessions': sessions,
@@ -989,7 +1116,49 @@ class SubagentPlugin:
         if profile.system_instructions:
             full_prompt = f"{profile.system_instructions}\n\n{full_prompt}"
 
-        # Run the subagent
+        # Check for background execution
+        background = args.get('background', False)
+
+        if background:
+            # Generate agent_id for background task
+            self._subagent_counter += 1
+            if self._parent_agent_id == "main":
+                agent_id = f"subagent_{self._subagent_counter}"
+            else:
+                agent_id = f"{self._parent_agent_id}.{profile.name}"
+
+            # Spawn background thread
+            def background_task():
+                try:
+                    result = self._run_subagent(profile, full_prompt)
+                    with self._result_lock:
+                        self._background_results[agent_id] = result
+                except Exception as e:
+                    logger.exception("Error in background subagent")
+                    with self._result_lock:
+                        self._background_results[agent_id] = SubagentResult(
+                            success=False,
+                            response='',
+                            error=f"Subagent execution failed: {str(e)}",
+                            agent_id=agent_id
+                        )
+                finally:
+                    # Clean up thread reference
+                    self._background_threads.pop(agent_id, None)
+
+            thread = threading.Thread(target=background_task, daemon=True)
+            self._background_threads[agent_id] = thread
+            thread.start()
+
+            # Return immediately with agent_id
+            return {
+                'success': True,
+                'background': True,
+                'agent_id': agent_id,
+                'message': f'Subagent {agent_id} started in background. Use get_subagent_result to retrieve results.'
+            }
+
+        # Synchronous execution (default)
         try:
             result = self._run_subagent(profile, full_prompt)
             return result.to_dict()
