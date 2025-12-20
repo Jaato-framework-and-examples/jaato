@@ -681,6 +681,7 @@ class JaatoSession:
                     if on_output:
                         on_output("model", chunk, "append")
 
+                self._trace(f"STREAMING on_usage_update={'set' if on_usage_update else 'None'}")
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_message_streaming(
                         message,
