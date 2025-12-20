@@ -4,8 +4,11 @@ Manages a ring buffer of output lines for display in the scrolling
 region of the TUI.
 """
 
+import os
+import tempfile
 import textwrap
 from collections import deque
+from datetime import datetime
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -78,6 +81,24 @@ class OutputBuffer:
         self._tools_expanded: bool = False  # Toggle between collapsed/expanded tool view
         self._rendering: bool = False  # Guard against flushes during render
 
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get("JAATO_TRACE_LOG")
+        if not trace_path:
+            trace_path = os.environ.get(
+                "JAATO_PROVIDER_TRACE",
+                os.path.join(tempfile.gettempdir(), "provider_trace.log")
+            )
+        if trace_path == "":
+            return
+        try:
+            with open(trace_path, "a") as f:
+                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                f.write(f"[{ts}] [output_buffer] {msg}\n")
+                f.flush()
+        except (IOError, OSError):
+            pass
+
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
 
@@ -148,6 +169,10 @@ class OutputBuffer:
             text: The output text.
             mode: "write" for new block, "append" to continue.
         """
+        # Trace cancellation messages
+        if "cancelled" in text.lower():
+            self._trace(f"APPEND: source={source} mode={mode} text={text!r}")
+
         # Skip plan messages - they're shown in the sticky plan panel
         if source == "plan":
             return
@@ -212,6 +237,9 @@ class OutputBuffer:
             # Concatenate streaming chunks directly (no separator)
             # Then split by newlines for display
             full_text = ''.join(parts)
+            # Trace cancellation messages being flushed
+            if "cancelled" in full_text.lower():
+                self._trace(f"FLUSH: source={source} full_text={full_text!r}")
             lines = full_text.split('\n')
             for i, line in enumerate(lines):
                 # Only first line of a new turn gets the prefix
@@ -760,6 +788,13 @@ class OutputBuffer:
         """Internal render implementation (called within rendering guard)."""
         # Get current block lines without flushing (preserves streaming state)
         current_block_lines = self._get_current_block_lines()
+
+        # Trace if any cancellation messages in either source
+        has_cancel_in_lines = any("cancelled" in line.text.lower() for line in self._lines)
+        has_cancel_in_block = any("cancelled" in line.text.lower() for line in current_block_lines)
+        if has_cancel_in_lines or has_cancel_in_block:
+            self._trace(f"RENDER: lines_count={len(self._lines)} block_count={len(current_block_lines)} "
+                       f"cancel_in_lines={has_cancel_in_lines} cancel_in_block={has_cancel_in_block}")
 
         # If buffer is empty but spinner is active, show only spinner
         if not self._lines and not current_block_lines:
