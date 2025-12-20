@@ -4,7 +4,9 @@ Provides isolated conversation state for an agent (main or subagent),
 while sharing resources from the parent JaatoRuntime.
 """
 
+import os
 import re
+import tempfile
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
@@ -118,6 +120,25 @@ class JaatoSession:
         self._cancel_token: Optional[CancelToken] = None
         self._is_running: bool = False
         self._use_streaming: bool = True  # Enable streaming by default if provider supports it
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get("JAATO_TRACE_LOG")
+        if not trace_path:
+            trace_path = os.environ.get(
+                "JAATO_PROVIDER_TRACE",
+                os.path.join(tempfile.gettempdir(), "provider_trace.log")
+            )
+        # Empty string means disabled
+        if trace_path == "":
+            return
+        try:
+            with open(trace_path, "a") as f:
+                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                f.write(f"[{ts}] [session] {msg}\n")
+                f.flush()
+        except (IOError, OSError):
+            pass
 
     @property
     def model_name(self) -> Optional[str]:
@@ -678,8 +699,11 @@ class JaatoSession:
                 partial_text = response.text or ''
                 cancel_msg = "[Generation cancelled]"
                 if on_output and not cancellation_notified:
+                    self._trace(f"CANCEL_NOTIFY: {cancel_msg} (after initial message)")
                     on_output("system", cancel_msg, "write")
                     cancellation_notified = True
+                elif cancellation_notified:
+                    self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (after initial message) - already notified!")
                 if partial_text:
                     return f"{partial_text}\n\n{cancel_msg}"
                 return cancel_msg
@@ -691,8 +715,11 @@ class JaatoSession:
                 if self._cancel_token.is_cancelled:
                     cancel_msg = "[Cancelled during tool execution]"
                     if on_output and not cancellation_notified:
+                        self._trace(f"CANCEL_NOTIFY: {cancel_msg} (before processing tools)")
                         on_output("system", cancel_msg, "write")
                         cancellation_notified = True
+                    elif cancellation_notified:
+                        self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (before processing tools) - already notified!")
                     if response.text:
                         return f"{response.text}\n\n{cancel_msg}"
                     return cancel_msg
@@ -764,8 +791,11 @@ class JaatoSession:
                 if self._cancel_token.is_cancelled:
                     cancel_msg = "[Cancelled after tool execution]"
                     if on_output and not cancellation_notified:
+                        self._trace(f"CANCEL_NOTIFY: {cancel_msg} (before sending tool results)")
                         on_output("system", cancel_msg, "write")
                         cancellation_notified = True
+                    elif cancellation_notified:
+                        self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (before sending tool results) - already notified!")
                     return cancel_msg
 
                 # Send tool results back (with retry for rate limits)
@@ -801,8 +831,11 @@ class JaatoSession:
                     partial_text = response.text or ''
                     cancel_msg = "[Generation cancelled]"
                     if on_output and not cancellation_notified:
+                        self._trace(f"CANCEL_NOTIFY: {cancel_msg} (after tool results)")
                         on_output("system", cancel_msg, "write")
                         cancellation_notified = True
+                    elif cancellation_notified:
+                        self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (after tool results) - already notified!")
                     if partial_text:
                         return f"{partial_text}\n\n{cancel_msg}"
                     return cancel_msg
