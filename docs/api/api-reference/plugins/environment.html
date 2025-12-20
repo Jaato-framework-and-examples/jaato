@@ -86,8 +86,8 @@
         <div class="panel-explanation">
           <h1>Environment Plugin</h1>
           <p class="lead">
-            Query execution environment details (OS, shell, architecture, working directory)
-            to generate platform-appropriate commands and paths.
+            Query execution environment (OS, shell, architecture) and internal context
+            (token usage, GC thresholds) to generate platform-appropriate commands and manage resources.
           </p>
 
           <table>
@@ -117,6 +117,7 @@
             <li><strong>Path construction</strong> - Use correct separators (<code>/</code> vs <code>\</code>)</li>
             <li><strong>Tool availability</strong> - Know which utilities exist on the platform</li>
             <li><strong>Binary selection</strong> - Choose correct architecture (x86_64 vs arm64)</li>
+            <li><strong>Context management</strong> - Monitor token usage and proactively manage context</li>
           </ul>
 
           <h2 id="tool-get-environment">get_environment</h2>
@@ -139,7 +140,7 @@
                 <td><code>aspect</code></td>
                 <td><code>string</code></td>
                 <td>No</td>
-                <td>Filter to specific aspect: <code>os</code>, <code>shell</code>, <code>arch</code>, <code>cwd</code>, or <code>all</code> (default)</td>
+                <td>Filter to specific aspect: <code>os</code>, <code>shell</code>, <code>arch</code>, <code>cwd</code>, <code>context</code>, or <code>all</code> (default)</td>
               </tr>
             </tbody>
           </table>
@@ -190,9 +191,31 @@
             Returns the absolute path to the current working directory as a string.
           </p>
 
+          <h3>Context (<code>aspect="context"</code>)</h3>
+          <p>
+            Returns token usage and GC settings. Requires session injection via <code>set_session_plugin()</code>.
+          </p>
+          <table>
+            <thead>
+              <tr><th>Field</th><th>Description</th><th>Examples</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>model</code></td><td>Model name</td><td><code>gemini-2.5-flash</code></td></tr>
+              <tr><td><code>context_limit</code></td><td>Max context size</td><td><code>1048576</code></td></tr>
+              <tr><td><code>total_tokens</code></td><td>Total tokens used</td><td><code>15234</code></td></tr>
+              <tr><td><code>prompt_tokens</code></td><td>Input tokens</td><td><code>12000</code></td></tr>
+              <tr><td><code>output_tokens</code></td><td>Output tokens</td><td><code>3234</code></td></tr>
+              <tr><td><code>tokens_remaining</code></td><td>Available tokens</td><td><code>1033342</code></td></tr>
+              <tr><td><code>percent_used</code></td><td>Usage percentage</td><td><code>1.45</code></td></tr>
+              <tr><td><code>turns</code></td><td>Conversation turns</td><td><code>5</code></td></tr>
+              <tr><td><code>gc</code></td><td>GC settings</td><td>Object with thresholds</td></tr>
+            </tbody>
+          </table>
+
           <h2 id="configuration">Configuration</h2>
           <p>
-            This plugin requires no configuration. Simply expose it via the registry.
+            This plugin requires no configuration for basic aspects. For <code>context</code> aspect,
+            inject the session via <code>set_session_plugin()</code>.
           </p>
         </div>
 
@@ -216,28 +239,22 @@ os_info = executors["get_environment"]({"aspect": "os"})
 shell_info = executors["get_environment"]({"aspect": "shell"})</code></pre>
           </div>
 
-          <div class="code-label" style="margin-top: 24px;">Response: all aspects</div>
+          <div class="code-label" style="margin-top: 24px;">Response: context aspect</div>
           <div class="code-block">
             <pre><code class="language-json">{
-  "os": {
-    "type": "linux",
-    "name": "Linux",
-    "release": "5.15.0-generic",
-    "friendly_name": "Linux"
-  },
-  "shell": {
-    "default": "bash",
-    "current": "bash",
-    "path": "/bin/bash",
-    "path_separator": ":",
-    "dir_separator": "/"
-  },
-  "arch": {
-    "machine": "x86_64",
-    "processor": "x86_64",
-    "normalized": "x86_64"
-  },
-  "cwd": "/home/user/project"
+  "model": "gemini-2.5-flash",
+  "context_limit": 1048576,
+  "total_tokens": 15234,
+  "prompt_tokens": 12000,
+  "output_tokens": 3234,
+  "tokens_remaining": 1033342,
+  "percent_used": 1.45,
+  "turns": 5,
+  "gc": {
+    "threshold_percent": 80.0,
+    "auto_trigger": true,
+    "preserve_recent_turns": 5
+  }
 }</code></pre>
           </div>
 
