@@ -200,7 +200,7 @@ class TestMessaging:
 
         response = provider.send_message("Hi")
 
-        assert response.text == "Hello!"
+        assert response.get_text() == "Hello!"
         assert response.usage.prompt_tokens == 10
         assert response.usage.output_tokens == 20
 
@@ -255,7 +255,7 @@ class TestMessaging:
 
         response = provider.generate("One-shot prompt")
 
-        assert response.text == "Generated"
+        assert response.get_text() == "Generated"
 
 
 class TestExtendedThinking:
@@ -281,7 +281,7 @@ class TestExtendedThinking:
 
         response = provider.send_message("Complex question")
 
-        assert response.text == "Final answer"
+        assert response.get_text() == "Final answer"
         assert response.thinking == "Let me think about this step by step..."
         assert response.has_thinking is True
 
@@ -366,10 +366,11 @@ class TestFunctionCalling:
 
         response = provider.send_message("Get weather")
 
-        assert len(response.function_calls) == 1
-        assert response.function_calls[0].name == "get_weather"
-        assert response.function_calls[0].args == {"location": "NYC"}
-        assert response.function_calls[0].id == "toolu_abc123"
+        function_calls = response.get_function_calls()
+        assert len(function_calls) == 1
+        assert function_calls[0].name == "get_weather"
+        assert function_calls[0].args == {"location": "NYC"}
+        assert function_calls[0].id == "toolu_abc123"
         assert response.finish_reason == FinishReason.TOOL_USE
 
     @patch('anthropic.Anthropic')
@@ -394,7 +395,7 @@ class TestFunctionCalling:
 
         response = provider.send_tool_results(results)
 
-        assert response.text == "The weather is sunny."
+        assert response.get_text() == "The weather is sunny."
 
 
 class TestErrorHandling:
@@ -621,3 +622,78 @@ class TestPromptCaching:
         # Last tool should have cache_control
         assert 'cache_control' in tools_sent[-1]
         assert tools_sent[-1]['cache_control'] == {"type": "ephemeral"}
+
+
+class TestStreamingCapabilities:
+    """Tests for streaming support."""
+
+    def test_supports_streaming_true(self):
+        """Anthropic should support streaming."""
+        provider = AnthropicProvider()
+        assert provider.supports_streaming() is True
+
+    def test_supports_stop_true(self):
+        """Anthropic should support stop (cancellation)."""
+        provider = AnthropicProvider()
+        assert provider.supports_stop() is True
+
+
+class TestStreamingConverters:
+    """Tests for streaming helper functions in converters."""
+
+    def test_extract_text_from_stream_event(self):
+        """Should extract text from text_delta event."""
+        from ..converters import extract_text_from_stream_event
+
+        # Create mock event
+        event = MagicMock()
+        event.type = "content_block_delta"
+        event.delta = MagicMock()
+        event.delta.type = "text_delta"
+        event.delta.text = "Hello"
+
+        result = extract_text_from_stream_event(event)
+        assert result == "Hello"
+
+    def test_extract_text_from_non_text_event(self):
+        """Should return None for non-text events."""
+        from ..converters import extract_text_from_stream_event
+
+        event = MagicMock()
+        event.type = "message_start"
+
+        result = extract_text_from_stream_event(event)
+        assert result is None
+
+    def test_extract_content_block_start_tool_use(self):
+        """Should extract tool_use block info."""
+        from ..converters import extract_content_block_start
+
+        event = MagicMock()
+        event.type = "content_block_start"
+        event.index = 0
+        event.content_block = MagicMock()
+        event.content_block.type = "tool_use"
+        event.content_block.id = "toolu_123"
+        event.content_block.name = "get_weather"
+
+        result = extract_content_block_start(event)
+        assert result["type"] == "tool_use"
+        assert result["id"] == "toolu_123"
+        assert result["name"] == "get_weather"
+
+    def test_extract_message_start_usage(self):
+        """Should extract usage from message_start event."""
+        from ..converters import extract_message_start
+
+        event = MagicMock()
+        event.type = "message_start"
+        event.message = MagicMock()
+        event.message.usage = MagicMock()
+        event.message.usage.input_tokens = 100
+        event.message.usage.output_tokens = 10
+
+        result = extract_message_start(event)
+        assert result.prompt_tokens == 100
+        assert result.output_tokens == 10
+        assert result.total_tokens == 110
