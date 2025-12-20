@@ -1,0 +1,337 @@
+[15:39:32.724] [google_genai] STREAM_INIT on_usage_update=set
+[15:39:32.740] [google_genai] STREAM_START message="Let's have an extended conversation to explore this codebase thoroughly. For each step, provide deta"...
+[15:39:36.032] [google_genai] STREAM_CHUNK[1] len=219 text="Hello! I'm ready to embark on this deep dive into the codebase with you. I will provide detailed analysis and code examples for each step of our exploration. Let's begin with your first request.\n\nI will start by finding"
+[15:39:36.040] [google_genai] STREAM_USAGE prompt=0 output=0 total=0
+[15:39:36.056] [google_genai] STREAM_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:39:36.237] [google_genai] STREAM_CHUNK[2] len=79 text=' all the Python files in the `shared/plugins/` directory to begin our analysis.'
+[15:39:36.253] [google_genai] STREAM_USAGE prompt=0 output=0 total=0
+[15:39:36.279] [google_genai] STREAM_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:39:36.458] [google_genai] STREAM_FUNC_CALL name=cli_based_tool
+[15:39:36.458] [google_genai] STREAM_USAGE prompt=9279 output=82 total=9454
+[15:39:36.458] [google_genai] STREAM_USAGE_CHECK callback_set=True total=9454 will_call=True
+[15:39:36.458] [google_genai] STREAM_USAGE_CALLING callback __main__.usage_update_callback...
+[15:39:36.458] [rich_client_callback] received: prompt=9279 output=82 total=9454
+[15:39:36.458] [rich_client_callback] display=True jaato=True
+[15:39:36.458] [rich_client_callback] update_context_usage called, percent=0.9%
+[15:39:36.464] [google_genai] STREAM_USAGE_CALLED callback completed
+[15:39:36.529] [google_genai] STREAM_END chunks=2 finish_reason=FinishReason.STOP
+[15:39:42.600] [google_genai] STREAM_TOOL_RESULTS_START tools=['cli_based_tool']
+[15:39:45.360] [google_genai] STREAM_TOOL_CHUNK[1] len=224 text='It seems that the directory `shared/plugins/` does not exist in the current file system. I was unable to locate it to search for Python files.\n\nTo proceed, I will list the contents of the current directory. This will help us'
+[15:39:45.377] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:39:45.398] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:39:45.560] [google_genai] STREAM_TOOL_CHUNK[2] len=73 text=" identify the correct path to the plugins directory you're interested in."
+[15:39:45.565] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:39:45.565] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:39:45.733] [google_genai] STREAM_TOOL_FUNC_CALL name=cli_based_tool
+[15:39:45.733] [google_genai] STREAM_TOOL_USAGE prompt=9405 output=73 total=9600
+[15:39:45.733] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=9600 will_call=True
+[15:39:45.733] [google_genai] STREAM_TOOL_USAGE_CALLING callback __main__.usage_update_callback...
+[15:39:45.733] [rich_client_callback] received: prompt=9405 output=73 total=9600
+[15:39:45.733] [rich_client_callback] display=True jaato=True
+[15:39:45.733] [rich_client_callback] update_context_usage called, percent=0.9%
+[15:39:45.744] [google_genai] STREAM_TOOL_USAGE_CALLED callback completed
+[15:39:45.760] [google_genai] STREAM_TOOL_RESULTS_END chunks=2 finish_reason=FinishReason.STOP
+[15:39:45.873] [google_genai] STREAM_TOOL_RESULTS_START tools=['cli_based_tool']
+[15:39:48.195] [google_genai] STREAM_TOOL_CHUNK[1] len=202 text="Okay, from the root directory, I see `docs` and `inputs`. It's possible the plugins are located within one of these. I'll start by exploring the `docs` directory to see if I can find the `shared/plugins"
+[15:39:48.200] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:39:48.205] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:39:48.269] [google_genai] STREAM_TOOL_CHUNK[2] len=21 text='` path you mentioned.'
+[15:39:48.284] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:39:48.295] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:39:48.406] [google_genai] STREAM_TOOL_FUNC_CALL name=cli_based_tool
+[15:39:48.407] [google_genai] STREAM_TOOL_USAGE prompt=9627 output=66 total=9773
+[15:39:48.407] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=9773 will_call=True
+[15:39:48.407] [google_genai] STREAM_TOOL_USAGE_CALLING callback __main__.usage_update_callback...
+[15:39:48.407] [rich_client_callback] received: prompt=9627 output=66 total=9773
+[15:39:48.407] [rich_client_callback] display=True jaato=True
+[15:39:48.407] [rich_client_callback] update_context_usage called, percent=0.9%
+[15:39:48.412] [google_genai] STREAM_TOOL_USAGE_CALLED callback completed
+[15:39:48.418] [google_genai] STREAM_TOOL_RESULTS_END chunks=2 finish_reason=FinishReason.STOP
+[15:39:48.515] [google_genai] STREAM_TOOL_RESULTS_START tools=['cli_based_tool']
+[15:39:50.182] [google_genai] STREAM_TOOL_CHUNK[1] len=100 text="The `docs` directory doesn't seem to contain the plugins. Next, I'll examine the `inputs` directory."
+[15:39:50.198] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:39:50.203] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:39:50.334] [google_genai] STREAM_TOOL_FUNC_CALL name=cli_based_tool
+[15:39:50.334] [google_genai] STREAM_TOOL_USAGE prompt=9753 output=36 total=9823
+[15:39:50.334] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=9823 will_call=True
+[15:39:50.334] [google_genai] STREAM_TOOL_USAGE_CALLING callback __main__.usage_update_callback...
+[15:39:50.334] [rich_client_callback] received: prompt=9753 output=36 total=9823
+[15:39:50.334] [rich_client_callback] display=True jaato=True
+[15:39:50.334] [rich_client_callback] update_context_usage called, percent=0.9%
+[15:39:50.345] [google_genai] STREAM_TOOL_USAGE_CALLED callback completed
+[15:39:50.361] [google_genai] STREAM_TOOL_RESULTS_END chunks=1 finish_reason=FinishReason.STOP
+[15:39:50.458] [google_genai] STREAM_TOOL_RESULTS_START tools=['cli_based_tool']
+[15:39:53.223] [google_genai] STREAM_TOOL_CHUNK[1] len=215 text="I've searched the `docs` and `inputs` directories, but I haven't been able to locate the `shared/plugins` directory you mentioned. The `inputs` directory contains some configuration files, but not the Python plugins"
+[15:39:53.224] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:39:53.229] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:39:53.673] [google_genai] STREAM_TOOL_CHUNK[2] len=177 text=" we're looking for.\n\nIt's possible the path is different from what we expected. So far, I've determined the directory structure to be:\n\n```\n.\n├── docs\n│   └── new_feature.md\n├──"
+[15:39:53.679] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:39:53.684] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:39:54.072] [google_genai] STREAM_TOOL_CHUNK[3] len=209 text=' inputs\n│   ├── domain-api-spec.yaml\n│   ├── mapping.json\n│   ├── prompt.md\n│   └── system-api-parties.yaml\n├── provider_trace.log\n└── rich_client_trace.log\n```\n\nCould you please verify the path to the plugins'
+[15:39:54.083] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:39:54.104] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:39:54.448] [google_genai] STREAM_TOOL_CHUNK[4] len=102 text=' directory? Or perhaps I could search for `*.py` files in the entire current directory to locate them.'
+[15:39:54.459] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:39:54.464] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:39:54.612] [google_genai] STREAM_TOOL_FUNC_CALL name=cli_based_tool
+[15:39:54.613] [google_genai] STREAM_TOOL_USAGE prompt=9954 output=199 total=10252
+[15:39:54.613] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=10252 will_call=True
+[15:39:54.613] [google_genai] STREAM_TOOL_USAGE_CALLING callback __main__.usage_update_callback...
+[15:39:54.613] [rich_client_callback] received: prompt=9954 output=199 total=10252
+[15:39:54.613] [rich_client_callback] display=True jaato=True
+[15:39:54.613] [rich_client_callback] update_context_usage called, percent=1.0%
+[15:39:54.624] [google_genai] STREAM_TOOL_USAGE_CALLED callback completed
+[15:39:54.624] [google_genai] STREAM_TOOL_RESULTS_END chunks=4 finish_reason=FinishReason.STOP
+[15:39:54.751] [google_genai] STREAM_TOOL_RESULTS_START tools=['cli_based_tool']
+[15:39:58.476] [google_genai] STREAM_TOOL_CHUNK[1] len=283 text="I've conducted a thorough search for Python files, including a recursive search from the current directory, and I haven't found any `.py` files. I've explored the `docs` and `inputs` directories, and they do not contain any Python code.\n\nIt appears there are no Python plugins in the"
+[15:39:58.482] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:39:58.492] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:39:59.195] [google_genai] STREAM_TOOL_CHUNK[2] len=307 text=" file system accessible to me. Could you please double-check that we are in the correct directory and that the Python files you're referring to are indeed present?\n\nIf you can provide an alternative path or more information about the project structure, I'll be happy to continue the analysis. Otherwise, I'm"
+[15:39:59.211] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:39:59.222] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:39:59.425] [google_genai] STREAM_TOOL_CHUNK[3] len=67 text=" afraid I can't proceed with the requested code review and summary."
+[15:39:59.430] [google_genai] STREAM_TOOL_USAGE prompt=10177 output=143 total=10497
+[15:39:59.435] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=10497 will_call=True
+[15:39:59.456] [google_genai] STREAM_TOOL_USAGE_CALLING callback __main__.usage_update_callback...
+[15:39:59.477] [rich_client_callback] received: prompt=10177 output=143 total=10497
+[15:39:59.496] [rich_client_callback] display=True jaato=True
+[15:39:59.502] [rich_client_callback] update_context_usage called, percent=1.0%
+[15:39:59.517] [google_genai] STREAM_TOOL_USAGE_CALLED callback completed
+[15:39:59.543] [google_genai] STREAM_TOOL_RESULTS_END chunks=3 finish_reason=FinishReason.STOP
+[15:40:10.784] [google_genai] STREAM_INIT on_usage_update=set
+[15:40:10.790] [google_genai] STREAM_START message='look into ../../shared/plugins'...
+[15:40:13.349] [google_genai] STREAM_CHUNK[1] len=156 text="Of course. Let's investigate the directory `../../shared/plugins`. I will start by listing its contents to see if I can find the Python files you mentioned."
+[15:40:13.354] [google_genai] STREAM_USAGE prompt=0 output=0 total=0
+[15:40:13.365] [google_genai] STREAM_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:13.466] [google_genai] STREAM_FUNC_CALL name=cli_based_tool
+[15:40:13.466] [google_genai] STREAM_USAGE prompt=10327 output=48 total=10450
+[15:40:13.466] [google_genai] STREAM_USAGE_CHECK callback_set=True total=10450 will_call=True
+[15:40:13.466] [google_genai] STREAM_USAGE_CALLING callback __main__.usage_update_callback...
+[15:40:13.467] [rich_client_callback] received: prompt=10327 output=48 total=10450
+[15:40:13.467] [google_genai] STREAM_USAGE_CALLED callback completed
+[15:40:13.471] [google_genai] STREAM_END chunks=1 finish_reason=FinishReason.STOP
+[15:40:13.546] [google_genai] STREAM_TOOL_RESULTS_START tools=['cli_based_tool']
+[15:40:19.089] [google_genai] STREAM_TOOL_CHUNK[1] len=308 text="Excellent! That's the directory I was looking for. It's rich with plugins and modules.\n\nI'll now begin the comprehensive analysis you requested. As per your instructions, I'll start by reading and summarizing every Python file in this directory, beginning with the files in the root of `../../shared/plugins/"
+[15:40:19.099] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:19.099] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:19.307] [google_genai] STREAM_TOOL_CHUNK[2] len=106 text="` and then moving through each subdirectory.\n\nFirst, I'll read and analyze `../../shared/plugins/base.py`."
+[15:40:19.318] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:19.328] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:19.454] [google_genai] STREAM_TOOL_FUNC_CALL name=readFile
+[15:40:19.454] [google_genai] STREAM_TOOL_USAGE prompt=11164 output=104 total=11663
+[15:40:19.454] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=11663 will_call=True
+[15:40:19.454] [google_genai] STREAM_TOOL_USAGE_CALLING callback __main__.usage_update_callback...
+[15:40:19.454] [rich_client_callback] received: prompt=11164 output=104 total=11663
+[15:40:19.454] [google_genai] STREAM_TOOL_USAGE_CALLED callback completed
+[15:40:19.459] [google_genai] STREAM_TOOL_RESULTS_END chunks=2 finish_reason=FinishReason.STOP
+[15:40:19.509] [google_genai] STREAM_TOOL_RESULTS_START tools=['readFile']
+[15:40:39.046] [google_genai] STREAM_TOOL_CHUNK[1] len=300 text="This `base.py` file is a cornerstone of the plugin system, defining a clear and extensible contract for all plugins. Here's a detailed analysis:\n\n### Summary of `../../shared/plugins/base.py`\n\nThis file establishes the fundamental architecture for the entire plugin system. It defines the `ToolPlugin"
+[15:40:39.051] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:39.161] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:40.112] [google_genai] STREAM_TOOL_CHUNK[2] len=340 text='` protocol, which acts as an abstract base class (or an interface) that all plugins must adhere to. This approach promotes a decoupled and modular system, where the core application can interact with any plugin that conforms to this protocol, regardless of its specific implementation.\n\n**Key Architectural Concepts:**\n\n*   **Protocol-Based'
+[15:40:40.128] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:40.158] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:41.328] [google_genai] STREAM_TOOL_CHUNK[3] len=347 text=' Interface:** Instead of traditional class inheritance, the system uses a `runtime_checkable` `Protocol`. This means any class that has the required methods and properties will be considered a valid `ToolPlugin`, promoting flexibility and avoiding rigid class hierarchies.\n*   - **Model Tools vs. User Commands:** The architecture makes a critical'
+[15:40:41.338] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:41.359] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:42.075] [google_genai] STREAM_TOOL_CHUNK[4] len=317 text=' distinction between two types of plugin functionality:\n    -   **Model Tools:** These are functions designed to be called by the large language model through its function-calling capabilities. They are exposed via `get_tool_schemas()` and `get_executors()`.\n    -   **User Commands:** These are commands that a human'
+[15:40:42.086] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:42.096] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:42.943] [google_genai] STREAM_TOOL_CHUNK[5] len=334 text=' user (or another automated agent) can invoke directly from the client interface, bypassing the model. This is useful for administrative tasks, direct interaction, and scenarios where model mediation is unnecessary. They are defined via `get_user_commands()`.\n*   **Provider-Agnostic Design:** Plugins declare their tool schemas using'
+[15:40:42.949] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:42.964] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:43.766] [google_genai] STREAM_TOOL_CHUNK[6] len=330 text=' a generic `ToolSchema` class. A dedicated `model_provider` plugin is then responsible for translating these generic schemas into the specific format required by the underlying language model (e.g., Gemini, GPT-4). This isolates plugins from the specifics of any single AI provider.\n*   **Plugin Lifecycle:** The protocol defines '
+[15:40:43.771] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:43.777] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:44.859] [google_genai] STREAM_TOOL_CHUNK[7] len=356 text='`initialize()` and `shutdown()` methods, giving plugins clear entry and exit points to manage resources, load configurations, and perform cleanup.\n*   **Extensibility through Optional Methods:** The base protocol is lean, but it includes a comprehensive set of optional methods for advanced features. Plugins can choose to implement these to provide richer'
+[15:40:44.874] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:44.880] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:45.697] [google_genai] STREAM_TOOL_CHUNK[8] len=293 text=' functionality, such as:\n    *   **Prompt Enrichment:** Intercepting and modifying user prompts before they are sent to the model.\n    *   **Custom Permission UI:** Providing detailed, formatted information (like code diffs) when asking for user permission to run a tool.\n    *   **Command Aut'
+[15:40:45.712] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:45.733] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:46.465] [google_genai] STREAM_TOOL_CHUNK[9] len=322 text='ocompletion:** Offering interactive help for user commands.\n    *   **Interactive Sessions:** Supporting two-way communication with the user for prompts, questions, and progress updates.\n\n**Public Methods and Data Structures:**\n\nThe `ToolPlugin` protocol mandates the implementation of the following methods:\n\n*   **`name('
+[15:40:46.471] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:46.471] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:47.004] [google_genai] STREAM_TOOL_CHUNK[10] len=238 text="self) -> str`**: A property that returns the plugin's unique identifier.\n*   **`get_tool_schemas(self) -> List[ToolSchema]`**: Returns a list of schemas for the tools the model can invoke.\n*   **`get_executors(self) -> Dict[str, Callable]"
+[15:40:47.014] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:47.025] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:47.553] [google_genai] STREAM_TOOL_CHUNK[11] len=291 text='`**: Returns a dictionary mapping tool names to the Python functions that execute them.\n*   **`initialize(self, config: Optional[Dict]) -> None`**: A one-time setup method called when the plugin is loaded.\n*   **`shutdown(self) -> None`**: A cleanup method called when the plugin is unloaded'
+[15:40:47.563] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:47.568] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:48.086] [google_genai] STREAM_TOOL_CHUNK[12] len=240 text=".\n*   **`get_system_instructions(self) -> Optional[str]`**: Provides instructional text to be included in the system prompt, helping the model understand how to use the plugin's tools.\n*   **`get_auto_approved_tools(self) -> List[str]`**: A"
+[15:40:48.096] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:48.112] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:48.924] [google_genai] STREAM_TOOL_CHUNK[13] len=291 text=' security feature allowing plugins to whitelist safe, read-only tools that can run without a user permission prompt.\n*   **`get_user_commands(self) -> List[UserCommand]`**: Declares commands for direct user invocation.\n\n**Integration with the Plugin Registry:**\n\nThe `ToolPlugin` protocol is'
+[15:40:48.935] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:48.935] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:49.758] [google_genai] STREAM_TOOL_CHUNK[14] len=322 text=" the central point of integration. The plugin registry is responsible for discovering classes that implement this protocol. Once a valid plugin is found, the registry uses the protocol's methods to:\n1.  Retrieve tool schemas and register them with the `model_provider`.\n2.  Obtain the executors to dispatch tool calls from"
+[15:40:49.763] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:49.769] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:50.476] [google_genai] STREAM_TOOL_CHUNK[15] len=310 text=" the model.\n3.  Aggregate system instructions to build the final system prompt.\n4.  Manage the plugin's lifecycle via `initialize` and `shutdown`.\n\n**Example Usage Code:**\n\nA minimal plugin implementation conforming to this protocol would look like this:\n\n```python\nfrom typing import List, Dict, Any, Callable"
+[15:40:50.481] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:50.486] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:51.026] [google_genai] STREAM_TOOL_CHUNK[16] len=267 text=', Optional\nfrom .base import ToolPlugin, ToolSchema, UserCommand\n\nclass MyExamplePlugin:\n    """A simple plugin demonstrating the ToolPlugin protocol."""\n\n    @property\n    def name(self) -> str:\n        return "example_plugin"\n\n    def get_tool_schemas(self) -> List'
+[15:40:51.031] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:51.036] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:51.651] [google_genai] STREAM_TOOL_CHUNK[17] len=245 text='[ToolSchema]:\n        # In a real implementation, you would construct a full ToolSchema\n        return [ToolSchema(name="say_hello", description="Says hello to a given name.")]\n\n    def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]],'
+[15:40:51.666] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:51.671] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:52.057] [google_genai] STREAM_TOOL_CHUNK[18] len=225 text=' Any]]:\n        return {"say_hello": self.say_hello_executor}\n\n    def say_hello_executor(self, args: Dict[str, Any]) -> str:\n        name = args.get("name", "World")\n        return f"Hello, {name}!"\n\n    def initialize(self,'
+[15:40:52.063] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:52.068] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:52.629] [google_genai] STREAM_TOOL_CHUNK[19] len=238 text=' config: Optional[Dict[str, Any]] = None) -> None:\n        print(f"Plugin \'{self.name}\' is initializing.")\n\n    def shutdown(self) -> None:\n        print(f"Plugin \'{self.name}\' is shutting down.")\n\n    def get_system_instructions(self) ->'
+[15:40:52.629] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:52.630] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:53.225] [google_genai] STREAM_TOOL_CHUNK[20] len=240 text=' Optional[str]:\n        return "The \'say_hello\' tool is available to greet users."\n\n    def get_auto_approved_tools(self) -> List[str]:\n        # This tool is safe and doesn\'t need permission.\n        return ["say_hello"]\n\n    def get_user_'
+[15:40:53.236] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:53.241] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:53.982] [google_genai] STREAM_TOOL_CHUNK[21] len=288 text='commands(self) -> List[UserCommand]:\n        # This plugin does not provide any direct user commands.\n        return []\n\n```\n\nThis `base.py` file is exceptionally well-designed. It provides a robust, flexible, and scalable foundation for the entire plugin ecosystem.\n\nNext, I will proceed'
+[15:40:53.982] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:53.983] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:54.121] [google_genai] STREAM_TOOL_CHUNK[22] len=56 text=' to read and analyze `../../shared/plugins/__init__.py`.'
+[15:40:54.131] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:40:54.136] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:40:54.267] [google_genai] STREAM_TOOL_FUNC_CALL name=readFile
+[15:40:54.267] [google_genai] STREAM_TOOL_USAGE prompt=15567 output=1426 total=18565
+[15:40:54.267] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=18565 will_call=True
+[15:40:54.267] [google_genai] STREAM_TOOL_USAGE_CALLING callback __main__.usage_update_callback...
+[15:40:54.267] [rich_client_callback] received: prompt=15567 output=1426 total=18565
+[15:40:54.267] [google_genai] STREAM_TOOL_USAGE_CALLED callback completed
+[15:40:54.405] [google_genai] STREAM_TOOL_RESULTS_END chunks=22 finish_reason=FinishReason.STOP
+[15:41:18.763] [google_genai] STREAM_INIT on_usage_update=set
+[15:41:18.773] [google_genai] STREAM_START message="Let's have an extended conversation to explore this codebase thoroughly. For each step, provide deta"...
+[15:41:25.387] [google_genai] STREAM_CHUNK[1] len=231 text="Of course. My apologies for the interruption. Let's resume our deep dive into the codebase. I will proceed with the analysis of the `__init__.py` file as planned.\n\nI will now read the contents of `../../shared/plugins/__init__.py`."
+[15:41:25.395] [google_genai] STREAM_USAGE prompt=0 output=0 total=0
+[15:41:25.410] [google_genai] STREAM_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:25.521] [google_genai] STREAM_FUNC_CALL name=readFile
+[15:41:25.521] [google_genai] STREAM_USAGE prompt=17252 output=66 total=17684
+[15:41:25.521] [google_genai] STREAM_USAGE_CHECK callback_set=True total=17684 will_call=True
+[15:41:25.521] [google_genai] STREAM_USAGE_CALLING callback __main__.usage_update_callback...
+[15:41:25.521] [rich_client_callback] received: prompt=17252 output=66 total=17684
+[15:41:25.522] [google_genai] STREAM_USAGE_CALLED callback completed
+[15:41:25.525] [google_genai] STREAM_END chunks=1 finish_reason=FinishReason.STOP
+[15:41:25.583] [google_genai] STREAM_TOOL_RESULTS_START tools=['readFile']
+[15:41:26.776] [google_genai] STREAM_TOOL_CHUNK[1] len=3 text='###'
+[15:41:26.787] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:26.787] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:26.896] [google_genai] STREAM_TOOL_CHUNK[2] len=56 text=' Summary of `../../shared/plugins/__init__.py`\n\nThis `__'
+[15:41:26.907] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:26.907] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:27.031] [google_genai] STREAM_TOOL_CHUNK[3] len=70 text='init__.py` file serves as the public-facing entry point for the entire'
+[15:41:27.037] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:27.037] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:27.317] [google_genai] STREAM_TOOL_CHUNK[4] len=152 text=" `plugins` package. Its primary role is to define the package's public API, making it easy for other parts of the application to import and use the core"
+[15:41:27.328] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:27.328] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:27.692] [google_genai] STREAM_TOOL_CHUNK[5] len=178 text=' components of the plugin system without needing to know its internal directory structure.\n\n**Key Architectural Role:**\n\n*   **Facade and Public API:** This file acts as a facade'
+[15:41:27.698] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:27.703] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:28.185] [google_genai] STREAM_TOOL_CHUNK[6] len=243 text=', simplifying the interface to the plugin system. Instead of developers needing to remember whether `PluginRegistry` is in `plugins.registry` or `ToolPlugin` is in `plugins.base`, they can import everything directly from the top-level `plugins'
+[15:41:28.201] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:28.216] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:28.709] [google_genai] STREAM_TOOL_CHUNK[7] len=222 text='` package (e.g., `from shared.plugins import PluginRegistry`). This is a standard and effective Python practice for creating clean, maintainable packages.\n*   **Selective Exposure:** The `__all__` list is a crucial element'
+[15:41:28.720] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:28.730] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:29.310] [google_genai] STREAM_TOOL_CHUNK[8] len=345 text='. It explicitly defines which names are part of the public API of the `plugins` package. When a developer writes `from shared.plugins import *`, only the names in `__all__` will be imported. This prevents namespace pollution and clearly communicates which components are intended for external use versus which are internal implementation details'
+[15:41:29.321] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:29.331] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:29.904] [google_genai] STREAM_TOOL_CHUNK[9] len=317 text='.\n*   **Documentation and Usage Example:** The docstring at the top of the file is excellent. It not only describes the purpose of the package but also provides a concise, ready-to-use code snippet. This is invaluable for developer onboarding, as it immediately shows a new user how to instantiate the `PluginRegistry'
+[15:41:29.919] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:29.935] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:30.554] [google_genai] STREAM_TOOL_CHUNK[10] len=274 text='`, discover plugins, and use their tools.\n\n**Exposed Public Components:**\n\nThe `__all__` variable exposes the following key components, which are imported from the `base.py` and `registry.py` modules:\n\n*   **`ToolPlugin`**: The core protocol that all plugins must implement.'
+[15:41:30.565] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:30.570] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:31.261] [google_genai] STREAM_TOOL_CHUNK[11] len=315 text=" By exporting this, the package allows developers to easily create new plugins.\n*   **`PluginRegistry`**: The main engine of the plugin system. This is the class responsible for discovering, loading, and managing plugins. It's the primary object that consumers of this package will interact with.\n*   **`UserCommand"
+[15:41:31.282] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:31.292] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:32.010] [google_genai] STREAM_TOOL_CHUNK[12] len=314 text='`**, **`CommandParameter`**: Data classes used to define the structure of user-facing commands and their arguments. Exposing them allows plugins to build and return command definitions.\n*   **`PermissionDisplayInfo`**: The data class used to provide custom formatting for permission requests.\n*   **`parse_command_'
+[15:41:32.015] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:32.031] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:32.628] [google_genai] STREAM_TOOL_CHUNK[13] len=304 text="args`**: The utility function for parsing raw string arguments into a structured format based on a command's definition.\n\n**Integration and Usage:**\n\nAs the docstring clearly illustrates, a typical integration pattern would be:\n\n1.  **Import:**\n    ```python\n    from shared.plugins import PluginRegistry"
+[15:41:32.638] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:32.659] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:33.310] [google_genai] STREAM_TOOL_CHUNK[14] len=282 text='\n    ```\n2.  **Instantiate and Discover:** Create an instance of the registry and run the discovery process to find all available plugin implementations.\n    ```python\n    registry = PluginRegistry()\n    registry.discover()\n    ```\n3.  **Expose and Configure:** Selectively enable ('
+[15:41:33.315] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:33.321] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:33.859] [google_genai] STREAM_TOOL_CHUNK[15] len=256 text="expose) the tools from the desired plugins, passing any necessary configuration.\n    ```python\n    registry.expose_tool('cli', config={'extra_paths': ['/usr/local/bin']})\n    ```\n4.  **Retrieve and Use:** Get the tool schemas and executor functions for all"
+[15:41:33.879] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:33.895] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:34.403] [google_genai] STREAM_TOOL_CHUNK[16] len=247 text=' exposed plugins, which can then be passed to the model and the tool-running engine.\n    ```python\n    tool_schemas = registry.get_exposed_tool_schemas()\n    executors = registry.get_exposed_executors()\n    ```\n\nIn summary, this `__init__.py` file'
+[15:41:34.414] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:34.429] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:35.083] [google_genai] STREAM_TOOL_CHUNK[17] len=303 text=' is a perfect example of how to design a clean and user-friendly Python package. It abstracts away the internal module structure and provides a single, well-documented entry point for all interactions with the plugin system.\n\nNext, I will analyze the `registry.py` file, which, based on the `__init__.py'
+[15:41:35.098] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:35.114] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:35.294] [google_genai] STREAM_TOOL_CHUNK[18] len=64 text='` file, appears to be the heart of the plugin management system.'
+[15:41:35.300] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:35.315] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:35.467] [google_genai] STREAM_TOOL_FUNC_CALL name=readFile
+[15:41:35.467] [google_genai] STREAM_TOOL_USAGE prompt=17989 output=882 total=18871
+[15:41:35.467] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=18871 will_call=True
+[15:41:35.467] [google_genai] STREAM_TOOL_USAGE_CALLING callback __main__.usage_update_callback...
+[15:41:35.467] [rich_client_callback] received: prompt=17989 output=882 total=18871
+[15:41:35.468] [google_genai] STREAM_TOOL_USAGE_CALLED callback completed
+[15:41:35.473] [google_genai] STREAM_TOOL_RESULTS_END chunks=18 finish_reason=FinishReason.STOP
+[15:41:35.541] [google_genai] STREAM_TOOL_RESULTS_START tools=['readFile']
+[15:41:38.764] [google_genai] STREAM_TOOL_CHUNK[1] len=15 text='### Summary of '
+[15:41:38.780] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:38.790] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:38.817] [google_genai] STREAM_TOOL_CHUNK[2] len=66 text='`../../shared/plugins/registry.py`\n\nThis file is the absolute core'
+[15:41:38.839] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:38.854] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:38.876] [google_genai] STREAM_TOOL_CHUNK[3] len=81 text=' of the plugin system. The `PluginRegistry` class acts as the central coordinator'
+[15:41:38.895] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:38.905] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:38.932] [google_genai] STREAM_TOOL_CHUNK[4] len=193 text=', responsible for the entire lifecycle of all plugins. It handles everything from finding the plugins to managing their state and aggregating their capabilities for the rest of the application.'
+[15:41:38.952] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:38.968] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:39.000] [google_genai] STREAM_TOOL_CHUNK[5] len=195 text='\n\n**Purpose and Architecture:**\n\nThe `PluginRegistry` is designed to be a comprehensive management layer that decouples the main application logic from the individual plugins. Its architecture is'
+[15:41:39.010] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:39.030] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:39.052] [google_genai] STREAM_TOOL_CHUNK[6] len=221 text=" built around several key responsibilities:\n\n1.  **Discovery:** The registry is responsible for finding available plugins. It employs a two-pronged strategy:\n    *   **Entry Points:** It uses Python's standard `importlib."
+[15:41:39.073] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:39.094] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:39.121] [google_genai] STREAM_TOOL_CHUNK[7] len=219 text='metadata` to find plugins registered as "entry points" (e.g., `jaato.plugins`). This is the standard, production-friendly way to allow third-party packages to extend the application\'s functionality. Any installed Python'
+[15:41:39.136] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:39.157] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:39.536] [google_genai] STREAM_TOOL_CHUNK[8] len=323 text=' package can declare itself as a plugin.\n    *   **Directory Scanning:** It can also scan the local `plugins` directory. This is extremely useful for development, as it allows developers to add or modify plugins without having to package and install them first.\n\n2.  **Lifecycle Management:** The registry manages the state'
+[15:41:39.556] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:39.577] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:40.010] [google_genai] STREAM_TOOL_CHUNK[9] len=260 text=' of each plugin. A plugin can be:\n    *   **Discovered:** The registry is aware of it.\n    *   **Exposed:** The plugin is active. Its `initialize()` method has been called, and its tools are available to the model.\n    *   **Unexposed:** The plugin is inactive'
+[15:41:40.026] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:40.052] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:40.554] [google_genai] STREAM_TOOL_CHUNK[10] len=319 text=". Its `shutdown()` method has been called, and its tools are no longer available.\n\n3.  **State Aggregation:** The registry's primary value is that it collects and aggregates the properties of all *exposed* plugins. Instead of the main application having to query each plugin individually, it can simply ask the registry"
+[15:41:40.564] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:40.585] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:41.015] [google_genai] STREAM_TOOL_CHUNK[11] len=257 text=' for:\n    *   A combined list of all tool schemas (`get_exposed_tool_schemas`).\n    *   A single dictionary of all tool executors (`get_exposed_executors`).\n    *   A consolidated block of system instructions (`get_system_instructions`).\n\n4.  **Fine-Grained'
+[15:41:41.031] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:41.046] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:41.528] [google_genai] STREAM_TOOL_CHUNK[12] len=329 text=' Control:** Beyond managing plugins as a whole, the registry also provides methods to enable or disable *individual tools* within a plugin (`disable_tool`, `enable_tool`). This allows for very granular control over the capabilities exposed to the model at any given time.\n\n**Public Methods with Signatures:**\n\nThe `PluginRegistry'
+[15:41:41.534] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:41.539] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:42.131] [google_genai] STREAM_TOOL_CHUNK[13] len=258 text='` class has a rich and well-defined public API for managing the plugin ecosystem:\n\n*   **Discovery & Listing:**\n    *   `discover(self, plugin_kind: str = "tool", ...) -> List[str]`: Finds all plugins via entry points and/or directory scanning.\n    *   `list'
+[15:41:42.142] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:42.157] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:42.546] [google_genai] STREAM_TOOL_CHUNK[14] len=225 text='_available(self) -> List[str]`: Returns the names of all discovered plugins.\n    *   `list_exposed(self) -> List[str]`: Returns the names of only the currently active plugins.\n    *   `get_plugin(self, name: str) -> Optional['
+[15:41:42.551] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:42.556] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:42.995] [google_genai] STREAM_TOOL_CHUNK[15] len=256 text='ToolPlugin]`: Retrieves a specific plugin instance by its name.\n\n*   **Lifecycle and State:**\n    *   `expose_tool(self, name: str, config: Optional[Dict] = None) -> bool`: Activates a plugin, calls its `initialize()` method, and makes its tools available.'
+[15:41:43.000] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:43.021] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:43.484] [google_genai] STREAM_TOOL_CHUNK[16] len=224 text='\n    *   `unexpose_tool(self, name: str) -> None`: Deactivates a plugin and calls its `shutdown()` method.\n    *   `expose_all(self, ...)` and `unexpose_all(self)`: Bulk operations to activate or deactivate all plugins.\n    '
+[15:41:43.494] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:43.520] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:43.886] [google_genai] STREAM_TOOL_CHUNK[17] len=239 text='*   `register_plugin(self, plugin: ToolPlugin, ...)`: Manually adds a plugin instance to the registry.\n\n*   **Tool & Capability Aggregation:**\n    *   `get_enabled_tool_schemas(self) -> List[ToolSchema]`: Returns a list of tool schemas for'
+[15:41:43.891] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:43.902] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:44.428] [google_genai] STREAM_TOOL_CHUNK[18] len=256 text=' all *enabled* tools from all *exposed* plugins. This is what you would send to the model.\n    *   `get_enabled_executors(self) -> Dict[str, Callable]`: Returns a dictionary of executor functions for all enabled tools.\n    *   `get_system_instructions(self'
+[15:41:44.433] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:44.459] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:44.883] [google_genai] STREAM_TOOL_CHUNK[19] len=291 text=') -> Optional[str]`: Returns a single string containing the system instructions from all exposed plugins, concatenated together.\n    *   `get_exposed_user_commands(self) -> List[UserCommand]`: Returns a list of all direct user commands from exposed plugins.\n\n*   **Prompt Enrichment:**\n    *'
+[15:41:44.888] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:44.899] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:45.340] [google_genai] STREAM_TOOL_CHUNK[20] len=287 text="   `enrich_prompt(self, prompt: str) -> PromptEnrichmentResult`: A powerful feature that passes the user's prompt through a pipeline of subscribed plugins, allowing each one to modify it or extract metadata before it goes to the model.\n\n**How it Integrates with the `ToolPlugin` Protocol"
+[15:41:45.351] [google_genai] STREAM_TOOL_USAGE prompt=0 output=0 total=0
+[15:41:45.361] [google_genai] STREAM_TOOL_USAGE_CHECK callback_set=True total=0 will_call=False
+[15:41:45.881] [google_genai] STREAM_TOOL_RESULTS_CANCELLED after 20 chunks
+[15:41:45.881] [google_genai] STREAM_TOOL_RESULTS_END chunks=20 finish_reason=FinishReason.CANCELLED
