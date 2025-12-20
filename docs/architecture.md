@@ -314,6 +314,100 @@ The session checks for cancellation at these points:
 | Before each tool | Skips remaining tools |
 | After tool execution | Returns partial results |
 
+## Subagent Coordination
+
+The SubagentPlugin supports advanced coordination patterns including parallel execution, cancellation propagation, and shared state.
+
+### Parallel Execution
+
+Subagents can be spawned in background threads for concurrent task execution:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           Parent Agent                                       │
+│                                                                             │
+│  spawn_subagent(task="A", background=True)  ─────────────┐                  │
+│  spawn_subagent(task="B", background=True)  ──────┐      │                  │
+│  spawn_subagent(task="C", background=True)  ─┐    │      │                  │
+│                                              │    │      │                  │
+│  Parent continues working...                 │    │      │                  │
+│                                              ▼    ▼      ▼                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                    Background Threads                                │   │
+│  │  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐                │   │
+│  │  │ Subagent C  │   │ Subagent B  │   │ Subagent A  │                │   │
+│  │  │ (running)   │   │ (running)   │   │ (running)   │                │   │
+│  │  └─────────────┘   └─────────────┘   └─────────────┘                │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  get_subagent_result(agent_id) ◄────── Collect results when ready          │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Cancellation Propagation
+
+Parent cancellation automatically propagates to all child subagents through shared `CancelToken` references:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         User Signal (Ctrl+C)                                 │
+└─────────────────────────────────────────┬───────────────────────────────────┘
+                                          │
+                                          ▼
+                              ┌───────────────────────┐
+                              │ Parent Session        │
+                              │   CancelToken.cancel()│
+                              └───────────┬───────────┘
+                                          │
+                     ┌────────────────────┼────────────────────┐
+                     ▼                    ▼                    ▼
+          ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+          │ Subagent A      │  │ Subagent B      │  │ Subagent C      │
+          │ parent_token ───┼──┼─► is_cancelled  │  │ parent_token    │
+          │ _is_cancelled() │  │ = True          │  │ sees parent     │
+          │ → True          │  └─────────────────┘  │ cancellation    │
+          └─────────────────┘                       └─────────────────┘
+```
+
+Each subagent checks both its own and parent's cancel token:
+
+```python
+def _is_cancelled(self) -> bool:
+    if self._cancel_token and self._cancel_token.is_cancelled:
+        return True
+    if self._parent_cancel_token and self._parent_cancel_token.is_cancelled:
+        return True
+    return False
+```
+
+### Shared State
+
+Thread-safe shared state enables inter-agent communication:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         SubagentPlugin                                       │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                  Shared State (Thread-Safe Dict)                     │   │
+│  │   _state_lock: threading.Lock()                                      │   │
+│  │   _shared_state: {"analysis": {...}, "progress": 42, ...}            │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│           ▲                    ▲                    ▲                       │
+│           │                    │                    │                       │
+│  ┌────────┴───────┐   ┌───────┴────────┐   ┌──────┴─────────┐             │
+│  │  Subagent A    │   │  Subagent B    │   │  Subagent C    │             │
+│  │  set_shared    │   │  get_shared    │   │  list_shared   │             │
+│  │  _state(k,v)   │   │  _state(k)     │   │  _state()      │             │
+│  └────────────────┘   └────────────────┘   └────────────────┘             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Use cases:
+- **Coordination flags**: One agent sets "ready", others wait
+- **Result aggregation**: Multiple agents contribute to shared collection
+- **Progress tracking**: Shared counters for monitoring
+
 ## Background Task Flow
 
 When a tool supports background execution and exceeds its configured threshold, the ToolExecutor automatically converts it to a background task:
@@ -745,7 +839,15 @@ classDiagram
         +auto_discover_profiles: bool
         +profiles_dir: str
         +spawn_subagent()
+        +continue_subagent()
+        +close_subagent()
+        +cancel_subagent()
+        +get_subagent_result()
+        +list_active_subagents()
         +list_subagent_profiles()
+        +set_shared_state()
+        +get_shared_state()
+        +list_shared_state()
         +discover_profiles()
         +profiles user command
     }
