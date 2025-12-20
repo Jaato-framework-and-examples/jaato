@@ -838,6 +838,7 @@ class GitHubModelsProvider:
                         output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
                         total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0
                     )
+                    self._trace(f"STREAM_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
                     # Notify about usage update for real-time accounting
                     if on_usage_update and usage.total_tokens > 0:
                         on_usage_update(usage)
@@ -976,6 +977,7 @@ class GitHubModelsProvider:
                         output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
                         total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0
                     )
+                    self._trace(f"STREAM_TOOL_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
                     # Notify about usage update for real-time accounting
                     if on_usage_update and usage.total_tokens > 0:
                         on_usage_update(usage)
