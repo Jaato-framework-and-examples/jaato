@@ -183,8 +183,9 @@ class ProviderResponse:
     Wraps the provider-specific response with a common interface.
 
     Attributes:
-        text: The text content of the response (if any).
-        function_calls: List of function calls requested by the model.
+        parts: Ordered list of response parts preserving the interleaving
+            of text and function calls as they were produced by the model.
+            Use this to process text and tool calls in their original order.
         usage: Token usage statistics.
         finish_reason: Why the model stopped generating.
         raw: The original provider-specific response object.
@@ -192,19 +193,25 @@ class ProviderResponse:
             This is populated when the model returns structured JSON output
             conforming to a requested schema.
     """
-    text: Optional[str] = None
-    function_calls: List[FunctionCall] = field(default_factory=list)
+    parts: List[Part] = field(default_factory=list)
     usage: TokenUsage = field(default_factory=TokenUsage)
     finish_reason: FinishReason = FinishReason.UNKNOWN
     raw: Any = None
     structured_output: Optional[Dict[str, Any]] = None
 
-    @property
+    def get_text(self) -> str:
+        """Extract concatenated text from all text parts."""
+        texts = [p.text for p in self.parts if p.text]
+        return ''.join(texts) if texts else ''
+
+    def get_function_calls(self) -> List[FunctionCall]:
+        """Extract all function calls from parts."""
+        return [p.function_call for p in self.parts if p.function_call]
+
     def has_function_calls(self) -> bool:
         """Check if the response contains function calls."""
-        return len(self.function_calls) > 0
+        return any(p.function_call for p in self.parts)
 
-    @property
     def has_structured_output(self) -> bool:
         """Check if the response contains structured output."""
         return self.structured_output is not None
