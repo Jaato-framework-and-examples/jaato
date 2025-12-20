@@ -724,6 +724,19 @@ class JaatoSession:
         }
         response: Optional[ProviderResponse] = None
 
+        # Wrap usage callback to also update turn_data during streaming
+        # This ensures we capture token values even if streaming is cancelled
+        # Always enabled for internal turn tracking, regardless of external callback
+        def usage_callback_with_turn_tracking(usage: TokenUsage) -> None:
+            if usage.total_tokens > 0:
+                turn_data['prompt'] = usage.prompt_tokens
+                turn_data['output'] = usage.output_tokens
+                turn_data['total'] = usage.total_tokens
+            if on_usage_update:
+                on_usage_update(usage)
+
+        wrapped_usage_callback = usage_callback_with_turn_tracking
+
         # Determine if we should use streaming
         use_streaming = (
             self._use_streaming and
@@ -750,13 +763,13 @@ class JaatoSession:
                     if on_output:
                         on_output("model", chunk, "append")
 
-                self._trace(f"STREAMING on_usage_update={'set' if on_usage_update else 'None'}")
+                self._trace(f"STREAMING on_usage_update={'set' if wrapped_usage_callback else 'None'}")
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_message_streaming(
                         message,
                         on_chunk=streaming_callback,
                         cancel_token=self._cancel_token,
-                        on_usage_update=on_usage_update
+                        on_usage_update=wrapped_usage_callback
                     ),
                     context="send_message_streaming",
                     on_retry=self._on_retry,
@@ -895,7 +908,7 @@ class JaatoSession:
                             tool_results,
                             on_chunk=streaming_callback,
                             cancel_token=self._cancel_token,
-                            on_usage_update=on_usage_update
+                            on_usage_update=wrapped_usage_callback
                         ),
                         context="send_tool_results_streaming",
                         on_retry=self._on_retry,
@@ -1028,10 +1041,14 @@ class JaatoSession:
         Note: We REPLACE (not sum) because each API response's prompt_tokens
         already includes ALL previous history. The final API call in a turn
         has the complete context usage.
+
+        However, we only replace if values are non-zero, to preserve good values
+        when streaming is cancelled mid-turn (which may return zero tokens).
         """
-        turn_tokens['prompt'] = response.usage.prompt_tokens
-        turn_tokens['output'] = response.usage.output_tokens
-        turn_tokens['total'] = response.usage.total_tokens
+        if response.usage.total_tokens > 0:
+            turn_tokens['prompt'] = response.usage.prompt_tokens
+            turn_tokens['output'] = response.usage.output_tokens
+            turn_tokens['total'] = response.usage.total_tokens
 
     def _record_token_usage(self, response: ProviderResponse) -> None:
         """Record token usage to ledger if available."""
