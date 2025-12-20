@@ -4,11 +4,8 @@ Manages a ring buffer of output lines for display in the scrolling
 region of the TUI.
 """
 
-import os
-import tempfile
 import textwrap
 from collections import deque
-from datetime import datetime
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -80,24 +77,6 @@ class OutputBuffer:
         self._active_tools: List[ActiveToolCall] = []  # Currently executing tools
         self._tools_expanded: bool = False  # Toggle between collapsed/expanded tool view
         self._rendering: bool = False  # Guard against flushes during render
-
-    def _trace(self, msg: str) -> None:
-        """Write trace message to log file for debugging."""
-        trace_path = os.environ.get("JAATO_TRACE_LOG")
-        if not trace_path:
-            trace_path = os.environ.get(
-                "JAATO_PROVIDER_TRACE",
-                os.path.join(tempfile.gettempdir(), "provider_trace.log")
-            )
-        if trace_path == "":
-            return
-        try:
-            with open(trace_path, "a") as f:
-                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] [output_buffer] {msg}\n")
-                f.flush()
-        except (IOError, OSError):
-            pass
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
