@@ -612,6 +612,7 @@ class JaatoSession:
         # Initialize cancellation support
         self._cancel_token = CancelToken()
         self._is_running = True
+        cancellation_notified = False  # Track if we've already shown cancellation message
 
         # Track tokens and timing
         turn_start = datetime.now()
@@ -676,8 +677,9 @@ class JaatoSession:
             if self._cancel_token.is_cancelled or response.finish_reason == FinishReason.CANCELLED:
                 partial_text = response.text or ''
                 cancel_msg = "[Generation cancelled]"
-                if on_output:
+                if on_output and not cancellation_notified:
                     on_output("system", cancel_msg, "write")
+                    cancellation_notified = True
                 if partial_text:
                     return f"{partial_text}\n\n{cancel_msg}"
                 return cancel_msg
@@ -688,8 +690,9 @@ class JaatoSession:
                 # Check for cancellation before processing tools
                 if self._cancel_token.is_cancelled:
                     cancel_msg = "[Cancelled during tool execution]"
-                    if on_output:
+                    if on_output and not cancellation_notified:
                         on_output("system", cancel_msg, "write")
+                        cancellation_notified = True
                     if response.text:
                         return f"{response.text}\n\n{cancel_msg}"
                     return cancel_msg
@@ -760,8 +763,9 @@ class JaatoSession:
                 # Check for cancellation before sending tool results
                 if self._cancel_token.is_cancelled:
                     cancel_msg = "[Cancelled after tool execution]"
-                    if on_output:
+                    if on_output and not cancellation_notified:
                         on_output("system", cancel_msg, "write")
+                        cancellation_notified = True
                     return cancel_msg
 
                 # Send tool results back (with retry for rate limits)
@@ -796,8 +800,9 @@ class JaatoSession:
                 if self._cancel_token.is_cancelled or response.finish_reason == FinishReason.CANCELLED:
                     partial_text = response.text or ''
                     cancel_msg = "[Generation cancelled]"
-                    if on_output:
+                    if on_output and not cancellation_notified:
                         on_output("system", cancel_msg, "write")
+                        cancellation_notified = True
                     if partial_text:
                         return f"{partial_text}\n\n{cancel_msg}"
                     return cancel_msg
