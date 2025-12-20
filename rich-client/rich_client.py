@@ -846,12 +846,37 @@ class RichClient:
         # Create callback that stops spinner on first output
         output_callback = self._create_output_callback(stop_spinner_on_first=True)
 
+        # Create usage update callback for real-time token accounting
+        def usage_update_callback(usage) -> None:
+            """Update status bar with real-time token usage during streaming."""
+            if self._display and self._jaato:
+                # Get context limit for percentage calculation
+                context_limit = self._jaato.get_context_limit()
+                total_tokens = usage.total_tokens
+                percent_used = (total_tokens / context_limit * 100) if context_limit > 0 else 0
+                tokens_remaining = max(0, context_limit - total_tokens)
+
+                # Build usage dict for display update
+                usage_dict = {
+                    'total_tokens': total_tokens,
+                    'prompt_tokens': usage.prompt_tokens,
+                    'output_tokens': usage.output_tokens,
+                    'context_limit': context_limit,
+                    'percent_used': percent_used,
+                    'tokens_remaining': tokens_remaining,
+                }
+                self._display.update_context_usage(usage_dict)
+
         def model_thread():
             self._trace("[model_thread] started")
             self._model_running = True
             try:
                 self._trace("[model_thread] calling send_message...")
-                self._jaato.send_message(prompt, on_output=output_callback)
+                self._jaato.send_message(
+                    prompt,
+                    on_output=output_callback,
+                    on_usage_update=usage_update_callback
+                )
                 self._trace(f"[model_thread] send_message returned")
 
                 # Update context usage in status bar
