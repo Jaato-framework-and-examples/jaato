@@ -820,10 +820,8 @@ class JaatoSession:
 
         except CancelledException:
             # Handle explicit cancellation exception
-            cancel_msg = "[Generation cancelled]"
-            if on_output:
-                on_output("system", cancel_msg, "write")
-            return cancel_msg
+            # Note: Don't send on_output here - the explicit checks above already do
+            return "[Generation cancelled]"
 
         finally:
             # Record turn end time
