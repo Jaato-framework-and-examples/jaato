@@ -854,6 +854,8 @@ class GoogleGenAIProvider:
         if not self._chat:
             raise RuntimeError("No chat session. Call create_session() first.")
 
+        self._trace(f"STREAM_INIT on_usage_update={'set' if on_usage_update else 'None'}")
+
         # Build config override for structured output
         config = None
         if response_schema:
