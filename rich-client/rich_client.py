@@ -849,6 +849,7 @@ class RichClient:
         # Create usage update callback for real-time token accounting
         def usage_update_callback(usage) -> None:
             """Update status bar with real-time token usage during streaming."""
+            self._trace(f"[usage_callback] received: prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
             if self._display and self._jaato:
                 # Get context limit for percentage calculation
                 context_limit = self._jaato.get_context_limit()
@@ -865,6 +866,7 @@ class RichClient:
                     'percent_used': percent_used,
                     'tokens_remaining': tokens_remaining,
                 }
+                self._trace(f"[usage_callback] updating display: {percent_used:.1f}% used, {total_tokens} tokens")
                 self._display.update_context_usage(usage_dict)
 
         def model_thread():
