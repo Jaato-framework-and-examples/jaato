@@ -389,6 +389,28 @@ def extract_function_calls_from_response(response) -> List[FunctionCall]:
     return calls
 
 
+def extract_parts_from_response(response) -> List[Part]:
+    """Extract parts from SDK response, preserving order of text and function calls."""
+    parts = []
+
+    if not response or not hasattr(response, 'candidates') or not response.candidates:
+        return parts
+
+    for candidate in response.candidates:
+        if not hasattr(candidate, 'content') or not candidate.content:
+            continue
+
+        for sdk_part in (candidate.content.parts or []):
+            if hasattr(sdk_part, 'text') and sdk_part.text:
+                parts.append(Part.from_text(sdk_part.text))
+            elif hasattr(sdk_part, 'function_call') and sdk_part.function_call:
+                fc = function_call_from_sdk(sdk_part.function_call)
+                if fc:
+                    parts.append(Part.from_function_call(fc))
+
+    return parts
+
+
 def extract_finish_reason_from_response(response) -> FinishReason:
     """Extract finish reason from SDK response."""
     if not response or not hasattr(response, 'candidates') or not response.candidates:
@@ -428,8 +450,7 @@ def extract_usage_from_response(response) -> TokenUsage:
 def response_from_sdk(response) -> ProviderResponse:
     """Convert SDK response to internal ProviderResponse."""
     return ProviderResponse(
-        text=extract_text_from_response(response),
-        function_calls=extract_function_calls_from_response(response),
+        parts=extract_parts_from_response(response),
         usage=extract_usage_from_response(response),
         finish_reason=extract_finish_reason_from_response(response),
         raw=response
