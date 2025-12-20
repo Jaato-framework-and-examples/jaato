@@ -151,6 +151,22 @@ class GoogleGenAIProvider:
         # Models cache: (timestamp, models_list)
         self._models_cache: Optional[Tuple[float, List[str]]] = None
 
+        # Trace file for debugging (set JAATO_PROVIDER_TRACE to enable)
+        self._trace_file: Optional[str] = os.environ.get("JAATO_PROVIDER_TRACE")
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to file for debugging streaming interactions."""
+        if not self._trace_file:
+            return
+        import datetime
+        try:
+            with open(self._trace_file, "a") as f:
+                ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                f.write(f"[{ts}] [google_genai] {msg}\n")
+                f.flush()
+        except Exception:
+            pass  # Don't let tracing errors break the provider
+
     @property
     def name(self) -> str:
         """Provider identifier."""
@@ -851,9 +867,12 @@ class GoogleGenAIProvider:
 
         try:
             # Use send_message_stream for streaming
+            self._trace(f"STREAM_START message={repr(message[:100])}...")
+            chunk_count = 0
             for chunk in self._chat.send_message_stream(message, config=config):
                 # Check for cancellation
                 if cancel_token and cancel_token.is_cancelled:
+                    self._trace(f"STREAM_CANCELLED after {chunk_count} chunks")
                     was_cancelled = True
                     finish_reason = FinishReason.CANCELLED
                     break
@@ -861,6 +880,8 @@ class GoogleGenAIProvider:
                 # Extract text from chunk safely (avoids SDK warning about non-text parts)
                 chunk_text = extract_text_from_chunk(chunk)
                 if chunk_text:
+                    chunk_count += 1
+                    self._trace(f"STREAM_CHUNK[{chunk_count}] len={len(chunk_text)} text={repr(chunk_text[:50])}")
                     accumulated_text.append(chunk_text)
                     on_chunk(chunk_text)
 
@@ -873,6 +894,7 @@ class GoogleGenAIProvider:
                                 from .converters import function_call_from_sdk
                                 fc = function_call_from_sdk(part.function_call)
                                 if fc and fc not in function_calls:
+                                    self._trace(f"STREAM_FUNC_CALL name={fc.name}")
                                     function_calls.append(fc)
 
                     # Extract finish reason from last chunk
@@ -888,7 +910,10 @@ class GoogleGenAIProvider:
                         total_tokens=getattr(chunk.usage_metadata, 'total_token_count', 0) or 0
                     )
 
+            self._trace(f"STREAM_END chunks={chunk_count} finish_reason={finish_reason}")
+
         except Exception as e:
+            self._trace(f"STREAM_ERROR {type(e).__name__}: {e}")
             # If cancelled during iteration, treat as cancellation
             if cancel_token and cancel_token.is_cancelled:
                 was_cancelled = True
@@ -963,9 +988,13 @@ class GoogleGenAIProvider:
 
         try:
             # Use send_message_stream for streaming
+            tool_names = [r.tool_name for r in results]
+            self._trace(f"STREAM_TOOL_RESULTS_START tools={tool_names}")
+            chunk_count = 0
             for chunk in self._chat.send_message_stream(sdk_parts, config=config):
                 # Check for cancellation
                 if cancel_token and cancel_token.is_cancelled:
+                    self._trace(f"STREAM_TOOL_RESULTS_CANCELLED after {chunk_count} chunks")
                     was_cancelled = True
                     finish_reason = FinishReason.CANCELLED
                     break
@@ -973,6 +1002,8 @@ class GoogleGenAIProvider:
                 # Extract text from chunk safely (avoids SDK warning about non-text parts)
                 chunk_text = extract_text_from_chunk(chunk)
                 if chunk_text:
+                    chunk_count += 1
+                    self._trace(f"STREAM_TOOL_CHUNK[{chunk_count}] len={len(chunk_text)} text={repr(chunk_text[:50])}")
                     accumulated_text.append(chunk_text)
                     on_chunk(chunk_text)
 
@@ -985,6 +1016,7 @@ class GoogleGenAIProvider:
                                 from .converters import function_call_from_sdk
                                 fc = function_call_from_sdk(part.function_call)
                                 if fc and fc not in function_calls:
+                                    self._trace(f"STREAM_TOOL_FUNC_CALL name={fc.name}")
                                     function_calls.append(fc)
 
                     # Extract finish reason from last chunk
@@ -1000,7 +1032,10 @@ class GoogleGenAIProvider:
                         total_tokens=getattr(chunk.usage_metadata, 'total_token_count', 0) or 0
                     )
 
+            self._trace(f"STREAM_TOOL_RESULTS_END chunks={chunk_count} finish_reason={finish_reason}")
+
         except Exception as e:
+            self._trace(f"STREAM_TOOL_RESULTS_ERROR {type(e).__name__}: {e}")
             # If cancelled during iteration, treat as cancellation
             if cancel_token and cancel_token.is_cancelled:
                 was_cancelled = True
