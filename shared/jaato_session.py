@@ -789,10 +789,17 @@ class JaatoSession:
 
             # Send message (streaming or batched)
             if use_streaming:
+                # Track whether we've sent the first chunk (to use "write" vs "append")
+                first_chunk_sent = False
+
                 # Streaming callback that routes to on_output
                 def streaming_callback(chunk: str) -> None:
+                    nonlocal first_chunk_sent
                     if on_output:
-                        on_output("model", chunk, "append")
+                        # First chunk uses "write" to start block, subsequent use "append"
+                        mode = "append" if first_chunk_sent else "write"
+                        on_output("model", chunk, mode)
+                        first_chunk_sent = True
 
                 self._trace(f"STREAMING on_usage_update={'set' if wrapped_usage_callback else 'None'}")
                 response, _retry_stats = with_retry(
@@ -818,7 +825,7 @@ class JaatoSession:
 
             # Check for cancellation after initial message (including parent)
             if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
-                partial_text = response.text or ''
+                partial_text = response.get_text()
                 cancel_msg = "[Generation cancelled]"
                 if on_output and not cancellation_notified:
                     self._trace(f"CANCEL_NOTIFY: {cancel_msg} (after initial message)")
@@ -1363,7 +1370,7 @@ class JaatoSession:
             raise RuntimeError("Session not configured.")
 
         response = self._provider.generate(prompt)
-        return response.text or ''
+        return response.get_text() or ''
 
     def send_message_with_parts(
         self,
