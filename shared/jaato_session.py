@@ -678,8 +678,6 @@ class JaatoSession:
                 cancel_msg = "[Generation cancelled]"
                 if on_output:
                     on_output("system", cancel_msg, "write")
-                # Inject into history so model knows about cancellation
-                self._inject_cancellation_into_history(cancel_msg)
                 if partial_text:
                     return f"{partial_text}\n\n{cancel_msg}"
                 return cancel_msg
@@ -692,7 +690,6 @@ class JaatoSession:
                     cancel_msg = "[Cancelled during tool execution]"
                     if on_output:
                         on_output("system", cancel_msg, "write")
-                    self._inject_cancellation_into_history(cancel_msg)
                     if response.text:
                         return f"{response.text}\n\n{cancel_msg}"
                     return cancel_msg
@@ -765,7 +762,6 @@ class JaatoSession:
                     cancel_msg = "[Cancelled after tool execution]"
                     if on_output:
                         on_output("system", cancel_msg, "write")
-                    self._inject_cancellation_into_history(cancel_msg)
                     return cancel_msg
 
                 # Send tool results back (with retry for rate limits)
@@ -802,7 +798,6 @@ class JaatoSession:
                     cancel_msg = "[Generation cancelled]"
                     if on_output:
                         on_output("system", cancel_msg, "write")
-                    self._inject_cancellation_into_history(cancel_msg)
                     if partial_text:
                         return f"{partial_text}\n\n{cancel_msg}"
                     return cancel_msg
@@ -826,8 +821,6 @@ class JaatoSession:
         except CancelledException:
             # Handle explicit cancellation exception
             # Note: Don't send on_output here - the explicit checks above already do
-            # But still inject into history in case explicit checks didn't catch it
-            self._inject_cancellation_into_history("[Generation cancelled]")
             return "[Generation cancelled]"
 
         finally:
@@ -1075,25 +1068,6 @@ class JaatoSession:
         )
 
         new_history = list(current_history) + [user_message, model_message]
-        self._create_provider_session(new_history)
-
-    def _inject_cancellation_into_history(self, cancel_msg: str) -> None:
-        """Inject a cancellation notification into conversation history.
-
-        This allows the model to know the user cancelled in future turns.
-        """
-        if not self._provider:
-            return
-
-        current_history = self.get_history()
-
-        # Add as a model message indicating what happened
-        model_message = Message(
-            role=Role.MODEL,
-            parts=[Part.from_text(cancel_msg)]
-        )
-
-        new_history = list(current_history) + [model_message]
         self._create_provider_session(new_history)
 
     def generate(self, prompt: str) -> str:
