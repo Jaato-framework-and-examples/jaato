@@ -65,8 +65,8 @@ class TestJaatoRuntimeConfigurePlugins:
         runtime.connect("my-project", "us-central1")
 
         mock_registry = MagicMock()
-        mock_registry.get_exposed_tool_schemas.return_value = []
-        mock_registry.get_exposed_executors.return_value = {}
+        mock_registry.get_enabled_tool_schemas.return_value = []
+        mock_registry.get_enabled_executors.return_value = {}
         mock_registry.get_system_instructions.return_value = None
         mock_registry.get_auto_approved_tools.return_value = []
         mock_registry.get_plugin.return_value = None
@@ -81,8 +81,8 @@ class TestJaatoRuntimeConfigurePlugins:
         runtime.connect("my-project", "us-central1")
 
         mock_registry = MagicMock()
-        mock_registry.get_exposed_tool_schemas.return_value = []
-        mock_registry.get_exposed_executors.return_value = {}
+        mock_registry.get_enabled_tool_schemas.return_value = []
+        mock_registry.get_enabled_executors.return_value = {}
         mock_registry.get_system_instructions.return_value = None
         mock_registry.get_auto_approved_tools.return_value = []
         mock_registry.get_plugin.return_value = None
@@ -105,8 +105,8 @@ class TestJaatoRuntimeConfigurePlugins:
         mock_schema.name = "test_tool"
 
         mock_registry = MagicMock()
-        mock_registry.get_exposed_tool_schemas.return_value = [mock_schema]
-        mock_registry.get_exposed_executors.return_value = {}
+        mock_registry.get_enabled_tool_schemas.return_value = [mock_schema]
+        mock_registry.get_enabled_executors.return_value = {}
         mock_registry.get_system_instructions.return_value = None
         mock_registry.get_auto_approved_tools.return_value = []
         mock_registry.get_plugin.return_value = None
@@ -144,8 +144,8 @@ class TestJaatoRuntimeCreateSession:
 
         # Setup mock registry
         mock_registry = MagicMock()
-        mock_registry.get_exposed_tool_schemas.return_value = []
-        mock_registry.get_exposed_executors.return_value = {}
+        mock_registry.get_enabled_tool_schemas.return_value = []
+        mock_registry.get_enabled_executors.return_value = {}
         mock_registry.get_system_instructions.return_value = None
         mock_registry.get_auto_approved_tools.return_value = []
         mock_registry.get_plugin.return_value = None
@@ -204,8 +204,8 @@ class TestJaatoRuntimeGetToolSchemas:
         mock_schema.name = "cached_tool"
 
         mock_registry = MagicMock()
-        mock_registry.get_exposed_tool_schemas.return_value = [mock_schema]
-        mock_registry.get_exposed_executors.return_value = {}
+        mock_registry.get_enabled_tool_schemas.return_value = [mock_schema]
+        mock_registry.get_enabled_executors.return_value = {}
         mock_registry.get_system_instructions.return_value = None
         mock_registry.get_auto_approved_tools.return_value = []
         mock_registry.get_plugin.return_value = None
@@ -232,8 +232,8 @@ class TestJaatoRuntimeGetToolSchemas:
         mock_mcp_plugin.get_tool_schemas.return_value = [mock_schema_mcp]
 
         mock_registry = MagicMock()
-        mock_registry.get_exposed_tool_schemas.return_value = [mock_schema_cli, mock_schema_mcp]
-        mock_registry.get_exposed_executors.return_value = {}
+        mock_registry.get_enabled_tool_schemas.return_value = [mock_schema_cli, mock_schema_mcp]
+        mock_registry.get_enabled_executors.return_value = {}
         mock_registry.get_system_instructions.return_value = None
         mock_registry.get_auto_approved_tools.return_value = []
         mock_registry.get_plugin.side_effect = lambda name: {
@@ -268,8 +268,8 @@ class TestJaatoRuntimeGetExecutors:
             return "result"
 
         mock_registry = MagicMock()
-        mock_registry.get_exposed_tool_schemas.return_value = []
-        mock_registry.get_exposed_executors.return_value = {"test_tool": mock_executor}
+        mock_registry.get_enabled_tool_schemas.return_value = []
+        mock_registry.get_enabled_executors.return_value = {"test_tool": mock_executor}
         mock_registry.get_system_instructions.return_value = None
         mock_registry.get_auto_approved_tools.return_value = []
         mock_registry.get_plugin.return_value = None
@@ -295,8 +295,8 @@ class TestJaatoRuntimeGetSystemInstructions:
         runtime.connect("my-project", "us-central1")
 
         mock_registry = MagicMock()
-        mock_registry.get_exposed_tool_schemas.return_value = []
-        mock_registry.get_exposed_executors.return_value = {}
+        mock_registry.get_enabled_tool_schemas.return_value = []
+        mock_registry.get_enabled_executors.return_value = {}
         mock_registry.get_system_instructions.return_value = "Be helpful."
         mock_registry.get_auto_approved_tools.return_value = []
         mock_registry.get_plugin.return_value = None
@@ -312,8 +312,8 @@ class TestJaatoRuntimeGetSystemInstructions:
         runtime.connect("my-project", "us-central1")
 
         mock_registry = MagicMock()
-        mock_registry.get_exposed_tool_schemas.return_value = []
-        mock_registry.get_exposed_executors.return_value = {}
+        mock_registry.get_enabled_tool_schemas.return_value = []
+        mock_registry.get_enabled_executors.return_value = {}
         mock_registry.get_system_instructions.return_value = "Be helpful."
         mock_registry.get_auto_approved_tools.return_value = []
         mock_registry.get_plugin.return_value = None
