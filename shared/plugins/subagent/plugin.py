@@ -96,10 +96,13 @@ class SubagentPlugin:
         self._active_sessions: Dict[str, Dict[str, Any]] = {}  # agent_id -> session info
         # Parent session reference for cancellation propagation
         self._parent_session: Optional[Any] = None  # JaatoSession reference
-        # Background task tracking for parallel execution
+        # Background agent tracking for parallel execution
         self._background_threads: Dict[str, threading.Thread] = {}  # agent_id -> thread
         self._background_results: Dict[str, SubagentResult] = {}  # agent_id -> result
         self._result_lock = threading.Lock()  # Protect result access
+        # Shared state for inter-agent communication
+        self._shared_state: Dict[str, Any] = {}  # key -> value (thread-safe via lock)
+        self._state_lock = threading.Lock()  # Protect shared state access
 
     @property
     def name(self) -> str:
@@ -383,6 +386,56 @@ class SubagentPlugin:
                     "properties": {},
                     "required": []
                 }
+            ),
+            ToolSchema(
+                name='set_shared_state',
+                description=(
+                    'Store a value in shared state that can be accessed by all agents '
+                    '(main and subagents). Use this for inter-agent communication '
+                    'and sharing analysis results between parallel subagents.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Unique key for the state entry"
+                        },
+                        "value": {
+                            "description": "Value to store (any JSON-serializable type)"
+                        }
+                    },
+                    "required": ["key", "value"]
+                }
+            ),
+            ToolSchema(
+                name='get_shared_state',
+                description=(
+                    'Retrieve a value from shared state. Use this to access '
+                    'data stored by other agents or previous operations.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Key of the state entry to retrieve"
+                        }
+                    },
+                    "required": ["key"]
+                }
+            ),
+            ToolSchema(
+                name='list_shared_state',
+                description=(
+                    'List all keys in shared state. Use this to see what '
+                    'data is available for inter-agent communication.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
             )
         ]
         return declarations
@@ -397,6 +450,9 @@ class SubagentPlugin:
             'get_subagent_result': self._execute_get_subagent_result,
             'list_active_subagents': self._execute_list_active_subagents,
             'list_subagent_profiles': self._execute_list_profiles,
+            'set_shared_state': self._execute_set_shared_state,
+            'get_shared_state': self._execute_get_shared_state,
+            'list_shared_state': self._execute_list_shared_state,
             # User command aliases
             'profiles': self._execute_list_profiles,
             'active': self._execute_list_active_subagents,
@@ -908,13 +964,13 @@ class SubagentPlugin:
         }
 
     def _execute_list_active_subagents(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """List active subagent sessions and background tasks.
+        """List active subagent sessions and background agents.
 
         Args:
             args: Tool arguments (unused).
 
         Returns:
-            Dict containing list of active sessions and background tasks.
+            Dict containing list of active sessions and background agents.
         """
         sessions = []
 
@@ -935,22 +991,22 @@ class SubagentPlugin:
                 'max_turns': info['max_turns'],
             })
 
-        # List background tasks
+        # List background agents
         for agent_id, thread in self._background_threads.items():
             sessions.append({
                 'agent_id': agent_id,
-                'type': 'background',
+                'type': 'background_agent',
                 'status': 'running' if thread.is_alive() else 'complete',
                 'can_cancel': thread.is_alive(),  # Can cancel via cancel_subagent
             })
 
-        # Check for completed background results not yet retrieved
+        # Check for completed background agents with results not yet retrieved
         with self._result_lock:
             for agent_id in self._background_results.keys():
                 if agent_id not in self._background_threads:
                     sessions.append({
                         'agent_id': agent_id,
-                        'type': 'background',
+                        'type': 'background_agent',
                         'status': 'complete (result pending)',
                         'can_cancel': False,
                     })
@@ -987,6 +1043,80 @@ class SubagentPlugin:
                             status="cancelled"
                         )
         return cancelled_count
+
+    def _execute_set_shared_state(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Store a value in shared state.
+
+        Args:
+            args: Tool arguments containing:
+                - key: State key
+                - value: Value to store
+
+        Returns:
+            Dict with success status.
+        """
+        key = args.get('key', '')
+        if not key:
+            return {'success': False, 'error': 'No key provided'}
+
+        value = args.get('value')
+        with self._state_lock:
+            self._shared_state[key] = value
+
+        return {
+            'success': True,
+            'message': f'State "{key}" set successfully'
+        }
+
+    def _execute_get_shared_state(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Retrieve a value from shared state.
+
+        Args:
+            args: Tool arguments containing:
+                - key: State key to retrieve
+
+        Returns:
+            Dict with value or error.
+        """
+        key = args.get('key', '')
+        if not key:
+            return {'success': False, 'error': 'No key provided'}
+
+        with self._state_lock:
+            if key in self._shared_state:
+                return {
+                    'success': True,
+                    'key': key,
+                    'value': self._shared_state[key]
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': f'Key "{key}" not found in shared state'
+                }
+
+    def _execute_list_shared_state(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List all keys in shared state.
+
+        Args:
+            args: Tool arguments (unused).
+
+        Returns:
+            Dict with list of keys.
+        """
+        with self._state_lock:
+            keys = list(self._shared_state.keys())
+
+        if not keys:
+            return {
+                'keys': [],
+                'message': 'Shared state is empty'
+            }
+
+        return {
+            'keys': keys,
+            'count': len(keys)
+        }
 
     def _close_session(self, agent_id: str) -> None:
         """Close and cleanup a subagent session.
