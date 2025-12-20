@@ -1051,9 +1051,15 @@ class JaatoSession:
         self._pacer.pace()
 
         if use_streaming:
+            # Track first chunk to use "write" for new block, "append" for continuation
+            first_chunk_after_tools = [False]  # Use list to allow mutation in closure
+
             def streaming_callback(chunk: str) -> None:
                 if on_output:
-                    on_output("model", chunk, "append")
+                    # First chunk after tool results starts a new block
+                    mode = "append" if first_chunk_after_tools[0] else "write"
+                    on_output("model", chunk, mode)
+                    first_chunk_after_tools[0] = True
 
             response, _retry_stats = with_retry(
                 lambda: self._provider.send_tool_results_streaming(
