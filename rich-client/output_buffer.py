@@ -2,10 +2,17 @@
 
 Manages a ring buffer of output lines for display in the scrolling
 region of the TUI.
+
+Tracing:
+    Set RICH_BUFFER_TRACE environment variable to control buffer tracing:
+    - Not set: writes to {tempdir}/rich_render_trace.log
+    - Empty string: disabled
+    - Path: writes to specified file
 """
 
 import os
 import re
+import tempfile
 import textwrap
 from collections import deque
 from dataclasses import dataclass
@@ -26,7 +33,46 @@ def _trace(msg: str) -> None:
     except (IOError, OSError):
         pass
 
-import re
+
+def _get_buffer_trace_path() -> Optional[str]:
+    """Get the buffer trace file path from environment variable.
+
+    Returns:
+        Path to trace file, or None if tracing is disabled.
+        - RICH_BUFFER_TRACE not set: default to {tempdir}/rich_render_trace.log
+        - RICH_BUFFER_TRACE="": disabled (returns None)
+        - RICH_BUFFER_TRACE="/path/to/file": use that path
+    """
+    env_val = os.environ.get("RICH_BUFFER_TRACE")
+    if env_val is None:
+        # Not set - use default location
+        return os.path.join(tempfile.gettempdir(), "rich_render_trace.log")
+    elif env_val == "":
+        # Explicitly disabled
+        return None
+    else:
+        # Custom path
+        return env_val
+
+
+def _buffer_trace(msg: str) -> None:
+    """Write trace message to buffer trace log.
+
+    Args:
+        msg: Message to trace.
+    """
+    trace_path = _get_buffer_trace_path()
+    if trace_path is None:
+        return
+
+    try:
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        with open(trace_path, "a") as f:
+            f.write(f"[{ts}] {msg}\n")
+            f.flush()
+    except (IOError, OSError):
+        pass  # Silently ignore trace errors
+
 
 from rich.console import Console, RenderableType
 from rich.text import Text
@@ -112,6 +158,46 @@ def _slice_ansi_string(text: str, start: int, width: int) -> tuple[str, bool, bo
         sliced += '\x1b[0m'
 
     return sliced, has_more_left, has_more_right
+
+
+def _get_trace_path() -> Optional[str]:
+    """Get the trace file path from environment variable.
+
+    Returns:
+        Path to trace file, or None if tracing is disabled.
+        - RICH_BUFFER_TRACE not set: default to {tempdir}/rich_render_trace.log
+        - RICH_BUFFER_TRACE="": disabled (returns None)
+        - RICH_BUFFER_TRACE="/path/to/file": use that path
+    """
+    env_val = os.environ.get("RICH_BUFFER_TRACE")
+    if env_val is None:
+        # Not set - use default location
+        return os.path.join(tempfile.gettempdir(), "rich_render_trace.log")
+    elif env_val == "":
+        # Explicitly disabled
+        return None
+    else:
+        # Custom path
+        return env_val
+
+
+def _buffer_trace(msg: str) -> None:
+    """Write trace message to buffer trace log.
+
+    Args:
+        msg: Message to trace.
+    """
+    trace_path = _get_trace_path()
+    if trace_path is None:
+        return
+
+    try:
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        with open(trace_path, "a") as f:
+            f.write(f"[{ts}] {msg}\n")
+            f.flush()
+    except (IOError, OSError):
+        pass  # Silently ignore trace errors
 
 
 @dataclass
@@ -485,6 +571,10 @@ class OutputBuffer:
             text: The output text.
             mode: "write" for new block, "append" to continue.
         """
+        # Trace buffer append
+        text_preview = text[:80] + "..." if len(text) > 80 else text
+        text_preview = text_preview.replace("\n", "\\n")
+        _buffer_trace(f"append: source={source} mode={mode} text={text_preview!r}")
 
         # Skip plan messages - they're shown in the sticky plan panel
         if source == "plan":
@@ -652,6 +742,10 @@ class OutputBuffer:
             message: The system message.
             style: Rich style for the message.
         """
+        msg_preview = message[:80] + "..." if len(message) > 80 else message
+        msg_preview = msg_preview.replace("\n", "\\n")
+        _buffer_trace(f"add_system_message: style={style} msg={msg_preview!r}")
+
         self._flush_current_block()
         # Handle None or empty messages gracefully
         if not message:
@@ -689,6 +783,8 @@ class OutputBuffer:
 
     def clear(self) -> None:
         """Clear all output."""
+        _buffer_trace(f"clear: lines={len(self._lines)} active_tools={len(self._active_tools)}")
+
         self._lines.clear()
         self._current_block = None
         self._last_source = None
@@ -733,6 +829,8 @@ class OutputBuffer:
             tool_args: Arguments passed to the tool.
             call_id: Unique identifier for this tool call (for correlation).
         """
+        _buffer_trace(f"add_active_tool: name={tool_name} call_id={call_id}")
+
         # If all existing tools are completed, finalize them as a ToolBlock
         # This ensures proper ordering of text and tool output
         if self._active_tools and all(t.completed for t in self._active_tools):
@@ -746,9 +844,11 @@ class OutputBuffer:
         # Don't add duplicates - check by call_id if provided, otherwise by name
         for tool in self._active_tools:
             if call_id and tool.call_id == call_id:
+                _buffer_trace(f"add_active_tool: skipped duplicate call_id={call_id}")
                 return
             # Fall back to name-based check only if no call_id provided
             if not call_id and tool.name == tool_name and not tool.call_id:
+                _buffer_trace(f"add_active_tool: skipped duplicate name={tool_name}")
                 return
 
         # When first tool is added, establish the placeholder position
@@ -782,6 +882,11 @@ class OutputBuffer:
             error_message: Error message if the tool failed.
             call_id: Unique identifier for this tool call (for correlation).
         """
+        _buffer_trace(
+            f"mark_tool_completed: name={tool_name} success={success} "
+            f"duration={duration_seconds} call_id={call_id}"
+        )
+
         for tool in self._active_tools:
             # Match by call_id if provided, otherwise by name (for backwards compatibility)
             if call_id:
@@ -3229,6 +3334,12 @@ class OutputBuffer:
         Returns:
             Rich renderable for the output panel.
         """
+        _buffer_trace(
+            f"render: lines={len(self._lines)} height={height} width={width} "
+            f"scroll_offset={self._scroll_offset} spinner={self._spinner_active} "
+            f"active_tools={len(self._active_tools)}"
+        )
+
         # Set rendering guard to prevent flush during render cycle
         self._rendering = True
         try:
