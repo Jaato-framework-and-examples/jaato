@@ -846,6 +846,9 @@ class RichClient:
         # Create callback that stops spinner on first output
         output_callback = self._create_output_callback(stop_spinner_on_first=True)
 
+        # Track maximum token usage seen during this turn (to avoid jumping backwards)
+        max_tokens_seen = {'prompt': 0, 'output': 0, 'total': 0}
+
         # Create usage update callback for real-time token accounting
         def usage_update_callback(usage) -> None:
             """Update status bar with real-time token usage during streaming."""
@@ -863,6 +866,19 @@ class RichClient:
             except Exception as e:
                 pass  # Ignore trace errors
             self._trace(f"[usage_callback] received: prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
+
+            # Only update if we see HIGHER values (prevents backwards jumping)
+            # The prompt_tokens is the most reliable indicator of context size
+            # since it includes the full conversation history
+            if usage.prompt_tokens >= max_tokens_seen['prompt']:
+                max_tokens_seen['prompt'] = usage.prompt_tokens
+                max_tokens_seen['output'] = max(max_tokens_seen['output'], usage.output_tokens)
+                max_tokens_seen['total'] = max_tokens_seen['prompt'] + max_tokens_seen['output']
+            else:
+                # Skip update if prompt_tokens dropped (new API call with different context)
+                self._trace(f"[usage_callback] skipping update: prompt {usage.prompt_tokens} < max {max_tokens_seen['prompt']}")
+                return
+
             # Trace the condition check
             try:
                 with open(trace_path, "a") as f:
@@ -874,15 +890,15 @@ class RichClient:
             if self._display and self._jaato:
                 # Get context limit for percentage calculation
                 context_limit = self._jaato.get_context_limit()
-                total_tokens = usage.total_tokens
+                total_tokens = max_tokens_seen['total']
                 percent_used = (total_tokens / context_limit * 100) if context_limit > 0 else 0
                 tokens_remaining = max(0, context_limit - total_tokens)
 
                 # Build usage dict for display update
                 usage_dict = {
                     'total_tokens': total_tokens,
-                    'prompt_tokens': usage.prompt_tokens,
-                    'output_tokens': usage.output_tokens,
+                    'prompt_tokens': max_tokens_seen['prompt'],
+                    'output_tokens': max_tokens_seen['output'],
                     'context_limit': context_limit,
                     'percent_used': percent_used,
                     'tokens_remaining': tokens_remaining,
@@ -896,8 +912,8 @@ class RichClient:
                         self._agent_registry.update_context_usage(
                             agent_id=agent_id,
                             total_tokens=total_tokens,
-                            prompt_tokens=usage.prompt_tokens,
-                            output_tokens=usage.output_tokens,
+                            prompt_tokens=max_tokens_seen['prompt'],
+                            output_tokens=max_tokens_seen['output'],
                             turns=0,  # Don't know turn count during streaming
                             percent_used=percent_used
                         )
