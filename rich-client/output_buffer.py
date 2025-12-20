@@ -66,7 +66,7 @@ class OutputBuffer:
             max_lines: Maximum number of lines to retain.
         """
         self._lines: deque[OutputLine] = deque(maxlen=max_lines)
-        self._current_block: Optional[Tuple[str, List[str]]] = None
+        self._current_block: Optional[Tuple[str, List[str], bool]] = None
         self._measure_console: Optional[Console] = None
         self._console_width: int = 80
         self._last_source: Optional[str] = None  # Track source for turn detection
@@ -76,6 +76,7 @@ class OutputBuffer:
         self._spinner_index: int = 0
         self._active_tools: List[ActiveToolCall] = []  # Currently executing tools
         self._tools_expanded: bool = False  # Toggle between collapsed/expanded tool view
+        self._rendering: bool = False  # Guard against flushes during render
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -203,6 +204,9 @@ class OutputBuffer:
 
     def _flush_current_block(self) -> None:
         """Flush the current block to lines."""
+        # Guard: don't flush during render cycles (prompt_toolkit calls render frequently)
+        if self._rendering:
+            return
         if self._current_block:
             source, parts, is_new_turn = self._current_block
             # Concatenate streaming chunks directly (no separator)
@@ -745,6 +749,15 @@ class OutputBuffer:
         Returns:
             Rich renderable for the output panel.
         """
+        # Set rendering guard to prevent flush during render cycle
+        self._rendering = True
+        try:
+            return self._render_impl(height, width)
+        finally:
+            self._rendering = False
+
+    def _render_impl(self, height: Optional[int] = None, width: Optional[int] = None) -> RenderableType:
+        """Internal render implementation (called within rendering guard)."""
         # Get current block lines without flushing (preserves streaming state)
         current_block_lines = self._get_current_block_lines()
 
