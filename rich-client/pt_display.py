@@ -429,9 +429,8 @@ class PTDisplay:
             if self._is_running_callback and self._is_running_callback():
                 if self._stop_callback:
                     self._stop_callback()
-                    # Flush pending streaming content and show cancellation message
+                    # Flush pending streaming content (cancellation message comes from session)
                     self._output_buffer._flush_current_block()
-                    self._output_buffer.add_system_message("[Cancelled by user]", style="yellow")
                     self._app.invalidate()
                 return
             # Otherwise exit the application
