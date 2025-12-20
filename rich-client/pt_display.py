@@ -313,7 +313,8 @@ class PTDisplay:
         else:
             output_buffer = self._output_buffer
 
-        output_buffer._flush_current_block()
+        # NOTE: Do NOT flush here - render() uses _get_current_block_lines()
+        # which reads streaming content without flushing, preserving chunk accumulation
 
         # Calculate available height for output (account for dynamic input height)
         input_height = self._get_input_height()
