@@ -1,7 +1,7 @@
 {
   "name": "validator-tier1-universal",
   "description": "[Tier 1 - Universal] Basic quality gates for ALL code. RUN WHEN: Always - first validation tier after any code generation or modification. APPLIES TO: Any language, any framework. CHECKS: syntax validity, formatting, hardcoded secrets, basic security anti-patterns.",
-  "plugins": ["cli", "references"],
+  "plugins": ["cli", "references", "artifact_tracker"],
   "plugin_configs": {
     "references": {
       "preselected": ["enablement-consumer-prompt"],

@@ -4,6 +4,7 @@ This module defines the interface that all GC strategy plugins must implement,
 along with supporting types for configuration, results, and trigger reasons.
 """
 
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
@@ -68,8 +69,13 @@ class GCConfig:
     """
 
     # Trigger settings
-    threshold_percent: float = 80.0
-    """Trigger GC when context usage exceeds this percentage."""
+    threshold_percent: float = field(
+        default_factory=lambda: float(os.getenv('JAATO_GC_THRESHOLD', '80.0'))
+    )
+    """Trigger GC when context usage exceeds this percentage.
+
+    Can be overridden via JAATO_GC_THRESHOLD environment variable.
+    """
 
     max_turns: Optional[int] = None
     """Trigger GC when turn count exceeds this limit (None = no limit)."""

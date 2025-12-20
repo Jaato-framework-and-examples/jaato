@@ -509,16 +509,38 @@ loadImage(path="./diagram.png")
         <div class="panel-explanation">
           <h2>Subagent Plugin</h2>
           <p>
-            Spawn child agents with configurable profiles for delegating
-            specialized tasks.
+            Spawn child agents with configurable profiles for delegating specialized tasks.
+            Supports parallel execution, cancellation propagation, and shared state for
+            inter-agent communication.
           </p>
 
           <table>
             <tbody>
               <tr><td><strong>Name</strong></td><td><code>subagent</code></td></tr>
-              <tr><td><strong>Tools</strong></td><td><code>spawn_subagent</code>, <code>list_subagent_profiles</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>spawn_subagent</code>, <code>continue_subagent</code>, <code>close_subagent</code>, <code>cancel_subagent</code>, <code>get_subagent_result</code>, <code>list_active_subagents</code>, <code>list_subagent_profiles</code>, <code>set_shared_state</code>, <code>get_shared_state</code>, <code>list_shared_state</code></td></tr>
             </tbody>
           </table>
+
+          <h3>Parallel Execution</h3>
+          <p>
+            Spawn subagents in background threads for concurrent task execution using
+            <code>background=True</code>. Use <code>get_subagent_result</code> to collect
+            results when ready.
+          </p>
+
+          <h3>Cancellation Propagation</h3>
+          <p>
+            When the parent agent is cancelled (e.g., user presses Ctrl+C), all running
+            subagents are automatically cancelled through shared <code>CancelToken</code>
+            references. Use <code>cancel_subagent</code> to manually cancel a specific agent.
+          </p>
+
+          <h3>Shared State</h3>
+          <p>
+            Thread-safe shared state for inter-agent communication. All agents can read
+            and write to a shared dictionary using <code>set_shared_state</code> and
+            <code>get_shared_state</code> tools.
+          </p>
 
           <h3>Profile Auto-Discovery</h3>
           <p>
@@ -528,16 +550,6 @@ loadImage(path="./diagram.png")
           <ul>
             <li><code>auto_discover_profiles</code>: Enable/disable (default: <code>true</code>)</li>
             <li><code>profiles_dir</code>: Directory to scan (default: <code>.jaato/profiles</code>)</li>
-          </ul>
-
-          <h3>Agent Profiles</h3>
-          <p>
-            Predefined configurations for common agent types:
-          </p>
-          <ul>
-            <li><strong>research</strong>: Web search and analysis</li>
-            <li><strong>code-review</strong>: Code analysis and suggestions</li>
-            <li><strong>documentation</strong>: Technical writing</li>
           </ul>
 
           <h3>Plugin Configuration</h3>
@@ -561,14 +573,29 @@ loadImage(path="./diagram.png")
           </table>
         </div>
         <div class="panel-code">
-          <div class="code-label">Profile file (.jaato/profiles/code_assistant.json)</div>
+          <div class="code-label">Parallel execution</div>
           <div class="code-block">
-            <pre><code class="language-json">{
-  "name": "code_assistant",
-  "description": "Code analysis agent",
-  "plugins": ["cli", "file_edit"],
-  "max_turns": 10
-}</code></pre>
+            <pre><code class="language-python"># Spawn agents in background
+spawn_subagent(task="Analyze API module", background=True)
+spawn_subagent(task="Review auth code", background=True)
+
+# Check status
+list_active_subagents()
+
+# Collect result when ready
+get_subagent_result(agent_id="subagent_abc123")</code></pre>
+          </div>
+          <div class="code-label" style="margin-top: 24px;">Shared state</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Store a value (accessible by all agents)
+set_shared_state(key="results", value={"count": 42})
+
+# Retrieve a value
+get_shared_state(key="results")
+# Returns: {'success': True, 'value': {"count": 42}}
+
+# List all keys
+list_shared_state()</code></pre>
           </div>
           <div class="code-label" style="margin-top: 24px;">Profile with plugin_configs</div>
           <div class="code-block">

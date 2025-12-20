@@ -793,12 +793,14 @@ class QueueChannel(ConsoleChannel):
         self._input_queue: Optional['queue.Queue[str]'] = None
         self._waiting_for_input: bool = False
         self._prompt_callback: Optional[Callable[[bool], None]] = None
+        self._cancel_token: Optional[Any] = None  # CancelToken for interruption
 
     def set_callbacks(
         self,
         output_callback: Optional[Callable[[str, str, str], None]] = None,
         input_queue: Optional['queue.Queue[str]'] = None,
         prompt_callback: Optional[Callable[[bool], None]] = None,
+        cancel_token: Optional[Any] = None,
         **kwargs,
     ) -> None:
         """Set the callbacks and queue for TUI integration.
@@ -807,10 +809,12 @@ class QueueChannel(ConsoleChannel):
             output_callback: Called with (source, text, mode) to display output.
             input_queue: Queue to receive user input from the main input handler.
             prompt_callback: Called with True when waiting for input, False when done.
+            cancel_token: Optional CancelToken to check for cancellation requests.
         """
         self._output_callback = output_callback
         self._input_queue = input_queue
         self._prompt_callback = prompt_callback
+        self._cancel_token = cancel_token
 
     @property
     def waiting_for_input(self) -> bool:
@@ -823,23 +827,36 @@ class QueueChannel(ConsoleChannel):
             self._output_callback("permission", text, mode)
 
     def _read_input(self, timeout: float = 30.0) -> Optional[str]:
-        """Read input from the queue with timeout.
+        """Read input from the queue with timeout, checking for cancellation.
 
         Args:
             timeout: Seconds to wait for input.
 
         Returns:
-            User input string, or None on timeout.
+            User input string, None on timeout, or "__CANCELLED__" if cancelled.
         """
         import queue
+        import time
 
         if not self._input_queue:
             return None
 
-        try:
-            return self._input_queue.get(timeout=timeout)
-        except queue.Empty:
-            return None
+        # Poll in short intervals to check for cancellation
+        poll_interval = 0.1  # Check every 100ms
+        elapsed = 0.0
+
+        while elapsed < timeout:
+            # Check for cancellation
+            if self._cancel_token and hasattr(self._cancel_token, 'is_cancelled'):
+                if self._cancel_token.is_cancelled:
+                    return "__CANCELLED__"
+
+            try:
+                return self._input_queue.get(timeout=poll_interval)
+            except queue.Empty:
+                elapsed += poll_interval
+
+        return None
 
     def request_permission(self, request: PermissionRequest) -> ChannelResponse:
         """Request permission by displaying in output panel and waiting for queue input."""
@@ -916,6 +933,14 @@ class QueueChannel(ConsoleChannel):
         try:
             # Wait for input from queue
             response_text = self._read_input(timeout=request.timeout_seconds)
+
+            if response_text == "__CANCELLED__":
+                # User cancelled via Ctrl+C
+                return ChannelResponse(
+                    request_id=request.request_id,
+                    decision=ChannelDecision.DENY,
+                    reason="User cancelled",
+                )
 
             if response_text is None:
                 # Timeout

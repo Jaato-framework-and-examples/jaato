@@ -129,10 +129,10 @@ class RichClient:
                 if stop_spinner_on_first and not first_output_received[0]:
                     first_output_received[0] = True
                     self._display.stop_spinner()
-                # Skip append_output for "model" source when UI hooks are active
-                # (hooks handle routing model output with agent context)
-                # But allow plugin output (references, clarification, etc.) through
-                if self._agent_registry and source == "model":
+                # Skip ALL sources when UI hooks are active - the hooks handle
+                # routing all output (model, system, plugin) to the correct buffer
+                # via on_agent_output. Without this, output gets duplicated.
+                if self._agent_registry:
                     return
                 self._display.append_output(source, text, mode)
         return callback
@@ -232,12 +232,8 @@ class RichClient:
 
     def initialize(self) -> bool:
         """Initialize the client."""
-        # Load environment
-        env_path = ROOT / self.env_file
-        if env_path.exists():
-            load_dotenv(env_path)
-        else:
-            load_dotenv(self.env_file)
+        # Load environment from CWD or explicit --env-file path
+        load_dotenv(self.env_file)
 
         # Check CA bundle
         active_bundle = active_cert_bundle(verbose=False)
@@ -375,6 +371,24 @@ class RichClient:
                     # Channel finished - start spinner while model continues
                     self._display.start_spinner()
 
+        # Create a cancel token provider that checks the session's current token
+        def get_cancel_token():
+            """Get the current cancel token from the session, if any."""
+            if self._jaato:
+                session = self._jaato.get_session()
+                if session and hasattr(session, '_cancel_token'):
+                    return session._cancel_token
+            return None
+
+        # Wrapper that acts like a CancelToken but checks the current session token
+        class CancelTokenProxy:
+            @property
+            def is_cancelled(self):
+                token = get_cancel_token()
+                return token.is_cancelled if token else False
+
+        cancel_token_proxy = CancelTokenProxy()
+
         # Set callbacks on clarification plugin channel
         if self.registry:
             clarification_plugin = self.registry.get_plugin("clarification")
@@ -385,6 +399,7 @@ class RichClient:
                         output_callback=self._create_output_callback(),
                         input_queue=self._channel_input_queue,
                         prompt_callback=on_prompt_state_change,
+                        cancel_token=cancel_token_proxy,
                     )
                     self._trace("Clarification channel callbacks set (queue)")
 
@@ -410,6 +425,7 @@ class RichClient:
                     output_callback=self._create_output_callback(suppress_sources={"permission"}),
                     input_queue=self._channel_input_queue,
                     prompt_callback=on_prompt_state_change,
+                    cancel_token=cancel_token_proxy,
                 )
                 self._trace("Permission channel callbacks set (queue)")
 
@@ -830,12 +846,119 @@ class RichClient:
         # Create callback that stops spinner on first output
         output_callback = self._create_output_callback(stop_spinner_on_first=True)
 
+        # Track maximum token usage seen during this turn (to avoid jumping backwards)
+        # Start at 0 - streaming prompt_tokens already includes full history,
+        # so each turn's streaming values naturally represent the current context.
+        # Don't initialize from get_context_usage() as turn_accounting values may differ
+        # from streaming values, causing updates to be incorrectly skipped.
+        max_tokens_seen = {'prompt': 0, 'output': 0, 'total': 0}
+
+        # Create usage update callback for real-time token accounting
+        def usage_update_callback(usage) -> None:
+            """Update status bar with real-time token usage during streaming."""
+            # Skip zero values (initialization chunks, not real data)
+            if usage.total_tokens == 0:
+                return
+
+            # Write to provider trace for debugging (same file as provider uses)
+            import datetime
+            trace_path = os.environ.get(
+                "JAATO_PROVIDER_TRACE",
+                os.path.join(tempfile.gettempdir(), "provider_trace.log")
+            )
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [rich_client_callback] received: prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}\n")
+                    f.flush()
+            except Exception as e:
+                pass  # Ignore trace errors
+            self._trace(f"[usage_callback] received: prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
+
+            # Only update if we see HIGHER values (prevents backwards jumping)
+            # The prompt_tokens is the most reliable indicator of context size
+            # since it includes the full conversation history
+            if usage.prompt_tokens >= max_tokens_seen['prompt']:
+                max_tokens_seen['prompt'] = usage.prompt_tokens
+                max_tokens_seen['output'] = max(max_tokens_seen['output'], usage.output_tokens)
+                max_tokens_seen['total'] = max_tokens_seen['prompt'] + max_tokens_seen['output']
+            else:
+                # Skip update if prompt_tokens dropped (new API call with different context)
+                self._trace(f"[usage_callback] skipping update: prompt {usage.prompt_tokens} < max {max_tokens_seen['prompt']}")
+                return
+
+            # Trace the condition check
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [rich_client_callback] display={self._display is not None} jaato={self._jaato is not None}\n")
+                    f.flush()
+            except Exception:
+                pass
+            if self._display and self._jaato:
+                # Get context limit for percentage calculation
+                context_limit = self._jaato.get_context_limit()
+                total_tokens = max_tokens_seen['total']
+                percent_used = (total_tokens / context_limit * 100) if context_limit > 0 else 0
+                tokens_remaining = max(0, context_limit - total_tokens)
+
+                # Build usage dict for display update
+                usage_dict = {
+                    'total_tokens': total_tokens,
+                    'prompt_tokens': max_tokens_seen['prompt'],
+                    'output_tokens': max_tokens_seen['output'],
+                    'context_limit': context_limit,
+                    'percent_used': percent_used,
+                    'tokens_remaining': tokens_remaining,
+                }
+                self._trace(f"[usage_callback] updating display: {percent_used:.1f}% used, {total_tokens} tokens")
+
+                # Update agent registry if available (status bar reads from here)
+                if self._agent_registry:
+                    agent_id = self._agent_registry.get_selected_agent_id()
+                    if agent_id:
+                        self._agent_registry.update_context_usage(
+                            agent_id=agent_id,
+                            total_tokens=total_tokens,
+                            prompt_tokens=max_tokens_seen['prompt'],
+                            output_tokens=max_tokens_seen['output'],
+                            turns=0,  # Don't know turn count during streaming
+                            percent_used=percent_used
+                        )
+
+                # Also update display directly (fallback if no registry)
+                self._display.update_context_usage(usage_dict)
+
+                # Trace after update
+                try:
+                    with open(trace_path, "a") as f:
+                        ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                        f.write(f"[{ts}] [rich_client_callback] update_context_usage called, percent={percent_used:.1f}%\n")
+                        f.flush()
+                except Exception:
+                    pass
+
+        def gc_threshold_callback(percent_used: float, threshold: float) -> None:
+            """Handle GC threshold crossing notification."""
+            self._trace(f"[gc_threshold] Context threshold crossed: {percent_used:.1f}% >= {threshold}%")
+            # Show warning in output (optional - GC will happen automatically after turn)
+            if self._display:
+                self._display.add_system_message(
+                    f"⚠ Context usage ({percent_used:.1f}%) exceeds threshold ({threshold}%). GC will run after this turn.",
+                    style="yellow"
+                )
+
         def model_thread():
             self._trace("[model_thread] started")
             self._model_running = True
             try:
                 self._trace("[model_thread] calling send_message...")
-                self._jaato.send_message(prompt, on_output=output_callback)
+                self._jaato.send_message(
+                    prompt,
+                    on_output=output_callback,
+                    on_usage_update=usage_update_callback,
+                    on_gc_threshold=gc_threshold_callback
+                )
                 self._trace(f"[model_thread] send_message returned")
 
                 # Update context usage in status bar
@@ -1015,6 +1138,12 @@ class RichClient:
 
         # Set model info in status bar
         self._display.set_model_info(self._model_provider, self._model_name)
+
+        # Set up stop callbacks for Ctrl-C handling
+        self._display.set_stop_callbacks(
+            stop_callback=lambda: self._jaato.stop() if self._jaato else False,
+            is_running_callback=lambda: self._jaato.is_processing if self._jaato else False
+        )
 
         # Set up the live reporter and queue channels
         self._setup_live_reporter()
