@@ -849,6 +849,19 @@ class RichClient:
         # Create usage update callback for real-time token accounting
         def usage_update_callback(usage) -> None:
             """Update status bar with real-time token usage during streaming."""
+            # Write to provider trace for debugging (same file as provider uses)
+            import datetime
+            trace_path = os.environ.get(
+                "JAATO_PROVIDER_TRACE",
+                os.path.join(tempfile.gettempdir(), "provider_trace.log")
+            )
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [rich_client_callback] received: prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}\n")
+                    f.flush()
+            except Exception as e:
+                pass  # Ignore trace errors
             self._trace(f"[usage_callback] received: prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
             if self._display and self._jaato:
                 # Get context limit for percentage calculation
