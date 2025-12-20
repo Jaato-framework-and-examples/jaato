@@ -64,6 +64,7 @@ class TestEnvironmentPluginToolSchemas:
         assert "shell" in aspect_enum
         assert "arch" in aspect_enum
         assert "cwd" in aspect_enum
+        assert "context" in aspect_enum
         assert "all" in aspect_enum
 
 
@@ -146,6 +147,23 @@ class TestEnvironmentPluginExecution:
         assert "error" in result
         assert "Invalid aspect" in result["error"]
 
+    def test_get_environment_context_aspect_without_session(self):
+        """Test getting context info without session returns error."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "context"}))
+
+        # Without session, should return error
+        assert "error" in result
+        assert "Session not available" in result["error"]
+
+    def test_get_environment_all_includes_context(self):
+        """Test that 'all' includes context key."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "all"}))
+
+        # Context should be in result (even if it's an error without session)
+        assert "context" in result
+
 
 class TestEnvironmentPluginOSInfo:
     """Tests for OS information accuracy."""
@@ -214,6 +232,129 @@ class TestEnvironmentPluginArchInfo:
 
         # Normalized should be one of the common names
         assert result["normalized"] in ["x86_64", "arm64", "x86", platform.machine().lower()]
+
+
+class TestEnvironmentPluginContextInfo:
+    """Tests for context/token usage information."""
+
+    def test_set_session(self):
+        """Test that set_session stores the session reference."""
+        plugin = EnvironmentPlugin()
+
+        class MockSession:
+            pass
+
+        mock_session = MockSession()
+        plugin.set_session(mock_session)
+
+        assert plugin._session is mock_session
+
+    def test_shutdown_clears_session(self):
+        """Test that shutdown clears the session reference."""
+        plugin = EnvironmentPlugin()
+
+        class MockSession:
+            pass
+
+        plugin.set_session(MockSession())
+        assert plugin._session is not None
+
+        plugin.shutdown()
+        assert plugin._session is None
+
+    def test_context_aspect_with_session(self):
+        """Test getting context info with a mocked session."""
+        plugin = EnvironmentPlugin()
+
+        class MockSession:
+            def get_context_usage(self):
+                return {
+                    "model": "test-model",
+                    "context_limit": 100000,
+                    "total_tokens": 5000,
+                    "prompt_tokens": 4000,
+                    "output_tokens": 1000,
+                    "tokens_remaining": 95000,
+                    "percent_used": 5.0,
+                    "turns": 3,
+                }
+
+        plugin.set_session(MockSession())
+        result = json.loads(plugin._get_environment({"aspect": "context"}))
+
+        assert result["model"] == "test-model"
+        assert result["context_limit"] == 100000
+        assert result["total_tokens"] == 5000
+        assert result["prompt_tokens"] == 4000
+        assert result["output_tokens"] == 1000
+        assert result["tokens_remaining"] == 95000
+        assert result["percent_used"] == 5.0
+        assert result["turns"] == 3
+        assert result["gc"] is None  # No GC config on mock
+
+    def test_context_aspect_with_gc_config(self):
+        """Test that GC config is included when available."""
+        plugin = EnvironmentPlugin()
+
+        class MockGCConfig:
+            threshold_percent = 80.0
+            auto_trigger = True
+            preserve_recent_turns = 5
+            max_turns = None
+
+        class MockSession:
+            _gc_config = MockGCConfig()
+
+            def get_context_usage(self):
+                return {
+                    "model": "test-model",
+                    "context_limit": 100000,
+                    "total_tokens": 5000,
+                    "prompt_tokens": 4000,
+                    "output_tokens": 1000,
+                    "tokens_remaining": 95000,
+                    "percent_used": 5.0,
+                    "turns": 3,
+                }
+
+        plugin.set_session(MockSession())
+        result = json.loads(plugin._get_environment({"aspect": "context"}))
+
+        assert result["gc"] is not None
+        assert result["gc"]["threshold_percent"] == 80.0
+        assert result["gc"]["auto_trigger"] is True
+        assert result["gc"]["preserve_recent_turns"] == 5
+        assert "max_turns" not in result["gc"]  # None is not included
+
+    def test_context_aspect_with_max_turns(self):
+        """Test that max_turns is included when set."""
+        plugin = EnvironmentPlugin()
+
+        class MockGCConfig:
+            threshold_percent = 80.0
+            auto_trigger = True
+            preserve_recent_turns = 5
+            max_turns = 100
+
+        class MockSession:
+            _gc_config = MockGCConfig()
+
+            def get_context_usage(self):
+                return {
+                    "model": "test-model",
+                    "context_limit": 100000,
+                    "total_tokens": 0,
+                    "prompt_tokens": 0,
+                    "output_tokens": 0,
+                    "tokens_remaining": 100000,
+                    "percent_used": 0,
+                    "turns": 0,
+                }
+
+        plugin.set_session(MockSession())
+        result = json.loads(plugin._get_environment({"aspect": "context"}))
+
+        assert result["gc"]["max_turns"] == 100
 
 
 class TestEnvironmentPluginProtocol:

@@ -1,17 +1,24 @@
 # shared/plugins/environment/plugin.py
 
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, TYPE_CHECKING
 from jaato import ToolSchema
 import json
 import os
 import platform
 import shutil
 
+if TYPE_CHECKING:
+    from shared.jaato_session import JaatoSession
+
 
 class EnvironmentPlugin:
-    """Plugin that provides environment awareness tools."""
+    """Plugin that provides environment awareness tools.
 
-    VALID_ASPECTS = ["os", "shell", "arch", "cwd", "all"]
+    Supports querying both external environment (OS, shell, architecture)
+    and internal context (token usage, GC thresholds) when a session is set.
+    """
+
+    VALID_ASPECTS = ["os", "shell", "arch", "cwd", "context", "all"]
 
     @property
     def name(self) -> str:
@@ -19,7 +26,7 @@ class EnvironmentPlugin:
         return "environment"
 
     def __init__(self):
-        pass
+        self._session: Optional['JaatoSession'] = None
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Called by registry with configuration."""
@@ -27,7 +34,17 @@ class EnvironmentPlugin:
 
     def shutdown(self) -> None:
         """Cleanup when plugin is disabled."""
-        pass
+        self._session = None
+
+    def set_session(self, session: 'JaatoSession') -> None:
+        """Receive session reference for context usage queries.
+
+        Called by JaatoSession when this plugin is registered.
+
+        Args:
+            session: The JaatoSession instance.
+        """
+        self._session = session
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Declare the tools this plugin provides."""
@@ -35,9 +52,9 @@ class EnvironmentPlugin:
             ToolSchema(
                 name="get_environment",
                 description=(
-                    "Get information about the local execution environment. "
+                    "Get information about the execution environment. "
                     "Use this to determine correct shell syntax, path formats, "
-                    "and available commands for the current platform."
+                    "available commands, and current token/context usage."
                 ),
                 parameters={
                     "type": "object",
@@ -51,6 +68,7 @@ class EnvironmentPlugin:
                                 "'shell' = shell type, "
                                 "'arch' = CPU architecture, "
                                 "'cwd' = current working directory, "
+                                "'context' = token usage and GC thresholds, "
                                 "'all' = everything (default)"
                             )
                         }
@@ -96,6 +114,9 @@ class EnvironmentPlugin:
 
         if aspect in ("cwd", "all"):
             result["cwd"] = os.getcwd()
+
+        if aspect in ("context", "all"):
+            result["context"] = self._get_context_info()
 
         # For single aspect (not "all"), flatten the response
         if aspect != "all" and len(result) == 1:
@@ -180,6 +201,50 @@ class EnvironmentPlugin:
             info["normalized"] = machine_lower
 
         return info
+
+    def _get_context_info(self) -> Dict[str, Any]:
+        """Get context window usage and GC threshold information.
+
+        Returns token usage, context limits, and garbage collection settings.
+        Requires a session to be set via set_session().
+        """
+        if self._session is None:
+            return {
+                "error": "Session not available. Context info requires session injection.",
+                "hint": "Use set_session_plugin() or ensure plugin is properly registered."
+            }
+
+        # Get context usage from session
+        usage = self._session.get_context_usage()
+
+        # Get GC config if available
+        gc_config = getattr(self._session, '_gc_config', None)
+
+        result = {
+            # Token usage
+            "model": usage.get("model", "unknown"),
+            "context_limit": usage.get("context_limit", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "tokens_remaining": usage.get("tokens_remaining", 0),
+            "percent_used": round(usage.get("percent_used", 0), 2),
+            "turns": usage.get("turns", 0),
+        }
+
+        # Add GC thresholds if available
+        if gc_config is not None:
+            result["gc"] = {
+                "threshold_percent": gc_config.threshold_percent,
+                "auto_trigger": gc_config.auto_trigger,
+                "preserve_recent_turns": gc_config.preserve_recent_turns,
+            }
+            if gc_config.max_turns is not None:
+                result["gc"]["max_turns"] = gc_config.max_turns
+        else:
+            result["gc"] = None
+
+        return result
 
     # ==================== Required Protocol Methods ====================
 
