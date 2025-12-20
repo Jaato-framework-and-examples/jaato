@@ -813,7 +813,7 @@ class GitHubModelsProvider:
                             delta = choice.delta
                             if hasattr(delta, 'content') and delta.content:
                                 chunk_count += 1
-                                self._trace(f"STREAM_CHUNK[{chunk_count}] len={len(delta.content)} text={repr(delta.content[:50])}")
+                                self._trace(f"STREAM_CHUNK[{chunk_count}] len={len(delta.content)} text={repr(delta.content)}")
                                 accumulated_text.append(delta.content)
                                 on_chunk(delta.content)
 
@@ -946,7 +946,7 @@ class GitHubModelsProvider:
                             delta = choice.delta
                             if hasattr(delta, 'content') and delta.content:
                                 chunk_count += 1
-                                self._trace(f"STREAM_TOOL_CHUNK[{chunk_count}] len={len(delta.content)} text={repr(delta.content[:50])}")
+                                self._trace(f"STREAM_TOOL_CHUNK[{chunk_count}] len={len(delta.content)} text={repr(delta.content)}")
                                 accumulated_text.append(delta.content)
                                 on_chunk(delta.content)
 
