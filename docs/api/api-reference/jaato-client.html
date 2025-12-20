@@ -662,9 +662,9 @@ gc_plugin.initialize({
     "preserve_recent_turns": 10
 })
 
-# Configure with threshold
+# Configure with threshold (or use JAATO_GC_THRESHOLD env var)
 config = GCConfig(
-    threshold_percent=75.0,
+    threshold_percent=75.0,  # overrides env var default
     check_before_send=True
 )
 

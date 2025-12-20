@@ -408,6 +408,7 @@ from shared.plugins.gc import discover_gc_plugins, load_gc_plugin
 
 plugins = discover_gc_plugins()  # Uses jaato.gc_plugins entry point
 gc_plugin = load_gc_plugin('gc_truncate')
+# threshold_percent defaults to JAATO_GC_THRESHOLD env var (or 80.0)
 client.set_gc_plugin(gc_plugin, GCConfig(threshold_percent=75.0))
 ```
 
