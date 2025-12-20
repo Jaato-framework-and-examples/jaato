@@ -8,7 +8,7 @@ import os
 import re
 import tempfile
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
 
 from .ai_tool_runner import ToolExecutor
 from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig
@@ -787,6 +787,10 @@ class JaatoSession:
             # Proactive rate limiting: wait if needed before request
             self._pacer.pace()
 
+            # Track function calls notified during streaming (for deduplication)
+            # Defined here so it's accessible in the parts processing loop below
+            notified_fc_ids: Set[str] = set()
+
             # Send message (streaming or batched)
             if use_streaming:
                 # Track whether we've sent the first chunk (to use "write" vs "append")
@@ -801,13 +805,30 @@ class JaatoSession:
                         on_output("model", chunk, mode)
                         first_chunk_sent = True
 
+                # Function call callback - triggers UI hooks at correct position
+                def function_call_callback(fc: FunctionCall) -> None:
+                    nonlocal first_chunk_sent
+                    # Record that we've notified about this FC (to avoid duplicate on_tool_call_start)
+                    notified_fc_ids.add(fc.id)
+                    # Trigger UI hook to display tool tree at this position in streaming output
+                    if self._ui_hooks:
+                        self._ui_hooks.on_tool_call_start(
+                            agent_id=self._agent_id,
+                            tool_name=fc.name,
+                            tool_args=fc.args,
+                            call_id=fc.id
+                        )
+                    # After tool tree header, next text chunk should start a new block
+                    first_chunk_sent = False
+
                 self._trace(f"STREAMING on_usage_update={'set' if wrapped_usage_callback else 'None'}")
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_message_streaming(
                         message,
                         on_chunk=streaming_callback,
                         cancel_token=self._cancel_token,
-                        on_usage_update=wrapped_usage_callback
+                        on_usage_update=wrapped_usage_callback,
+                        on_function_call=function_call_callback
                     ),
                     context="send_message_streaming",
                     on_retry=self._on_retry,
@@ -876,7 +897,8 @@ class JaatoSession:
                         # Before emitting text, execute any pending function calls
                         if current_fc_group:
                             tool_results = self._execute_function_call_group(
-                                current_fc_group, turn_data, on_output, cancellation_notified
+                                current_fc_group, turn_data, on_output, cancellation_notified,
+                                notified_fc_ids=notified_fc_ids
                             )
                             if self._is_cancelled():
                                 cancel_msg = "[Cancelled after tool execution]"
@@ -886,7 +908,8 @@ class JaatoSession:
                                 return cancel_msg
                             # Send tool results and get continuation
                             response = self._send_tool_results_and_continue(
-                                tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
+                                tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data,
+                                notified_fc_ids=notified_fc_ids
                             )
                             if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
                                 partial = get_all_text()
@@ -908,7 +931,8 @@ class JaatoSession:
                 # Execute remaining function calls at end of parts
                 if current_fc_group:
                     tool_results = self._execute_function_call_group(
-                        current_fc_group, turn_data, on_output, cancellation_notified
+                        current_fc_group, turn_data, on_output, cancellation_notified,
+                        notified_fc_ids=notified_fc_ids
                     )
                     if self._is_cancelled():
                         cancel_msg = "[Cancelled after tool execution]"
@@ -919,7 +943,8 @@ class JaatoSession:
 
                     # Send tool results and get next response
                     response = self._send_tool_results_and_continue(
-                        tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
+                        tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data,
+                        notified_fc_ids=notified_fc_ids
                     )
                     if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
                         partial = get_all_text()
@@ -973,10 +998,21 @@ class JaatoSession:
         function_calls: List[FunctionCall],
         turn_data: Dict[str, Any],
         on_output: Optional[OutputCallback],
-        cancellation_notified: bool
+        cancellation_notified: bool,
+        notified_fc_ids: Optional[Set[str]] = None
     ) -> List[ToolResult]:
-        """Execute a group of function calls and return their results."""
+        """Execute a group of function calls and return their results.
+
+        Args:
+            function_calls: List of function calls to execute.
+            turn_data: Turn accounting data.
+            on_output: Output callback for plugin output.
+            cancellation_notified: Whether cancellation was already notified.
+            notified_fc_ids: Set of FC IDs that were already notified via streaming.
+                             These will skip on_tool_call_start (but still call on_tool_call_end).
+        """
         tool_results: List[ToolResult] = []
+        notified_fc_ids = notified_fc_ids or set()
 
         for fc in function_calls:
             # Check for cancellation before each tool (including parent)
@@ -986,8 +1022,8 @@ class JaatoSession:
             name = fc.name
             args = fc.args
 
-            # Emit hook: tool starting
-            if self._ui_hooks:
+            # Emit hook: tool starting (skip if already notified during streaming)
+            if self._ui_hooks and fc.id not in notified_fc_ids:
                 self._ui_hooks.on_tool_call_start(
                     agent_id=self._agent_id,
                     tool_name=name,
@@ -1042,10 +1078,22 @@ class JaatoSession:
         use_streaming: bool,
         on_output: Optional[OutputCallback],
         wrapped_usage_callback: Optional[UsageUpdateCallback],
-        turn_data: Dict[str, Any]
+        turn_data: Dict[str, Any],
+        notified_fc_ids: Optional[Set[str]] = None
     ) -> ProviderResponse:
-        """Send tool results back to the model and get the continuation response."""
+        """Send tool results back to the model and get the continuation response.
+
+        Args:
+            tool_results: Results from tool execution.
+            use_streaming: Whether to use streaming mode.
+            on_output: Output callback for model responses.
+            wrapped_usage_callback: Callback for token usage updates.
+            turn_data: Turn accounting data.
+            notified_fc_ids: Set to track function calls already notified via streaming.
+                             New function calls detected during continuation will be added.
+        """
         # with_retry is already imported at module level from .retry_utils
+        notified_fc_ids = notified_fc_ids if notified_fc_ids is not None else set()
 
         # Proactive rate limiting
         self._pacer.pace()
@@ -1061,12 +1109,28 @@ class JaatoSession:
                     on_output("model", chunk, mode)
                     first_chunk_after_tools[0] = True
 
+            # Function call callback - triggers UI hooks at correct position
+            def function_call_callback(fc: FunctionCall) -> None:
+                # Record that we've notified about this FC (to avoid duplicate on_tool_call_start)
+                notified_fc_ids.add(fc.id)
+                # Trigger UI hook to display tool tree at this position in streaming output
+                if self._ui_hooks:
+                    self._ui_hooks.on_tool_call_start(
+                        agent_id=self._agent_id,
+                        tool_name=fc.name,
+                        tool_args=fc.args,
+                        call_id=fc.id
+                    )
+                # After tool tree header, next text chunk should start a new block
+                first_chunk_after_tools[0] = False
+
             response, _retry_stats = with_retry(
                 lambda: self._provider.send_tool_results_streaming(
                     tool_results,
                     on_chunk=streaming_callback,
                     cancel_token=self._cancel_token,
-                    on_usage_update=wrapped_usage_callback
+                    on_usage_update=wrapped_usage_callback,
+                    on_function_call=function_call_callback
                 ),
                 context="send_tool_results_streaming",
                 on_retry=self._on_retry,
