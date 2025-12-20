@@ -1056,12 +1056,25 @@ class JaatoSession:
         return self._provider.get_context_limit()
 
     def get_context_usage(self) -> Dict[str, Any]:
-        """Get context window usage statistics."""
+        """Get context window usage statistics.
+
+        Note: Each turn's prompt_tokens includes ALL previous history,
+        so we use the LAST turn's values (not sum) for context usage.
+        """
         turn_accounting = self.get_turn_accounting()
 
-        total_prompt = sum(t['prompt'] for t in turn_accounting)
-        total_output = sum(t['output'] for t in turn_accounting)
-        total_tokens = sum(t['total'] for t in turn_accounting)
+        if turn_accounting:
+            # Use the last turn's values - prompt includes full history
+            last_turn = turn_accounting[-1]
+            # The current context is the last turn's prompt + its output
+            # (which will become part of the next turn's prompt)
+            total_prompt = last_turn.get('prompt', 0)
+            total_output = last_turn.get('output', 0)
+            total_tokens = last_turn.get('total', 0)
+        else:
+            total_prompt = 0
+            total_output = 0
+            total_tokens = 0
 
         context_limit = self.get_context_limit()
         percent_used = (total_tokens / context_limit * 100) if context_limit > 0 else 0
