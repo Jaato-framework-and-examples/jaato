@@ -301,6 +301,26 @@ class SubagentPlugin:
                 }
             ),
             ToolSchema(
+                name='cancel_subagent',
+                description=(
+                    'Cancel a running subagent, stopping its current operation immediately. '
+                    'Use this when you need to interrupt a subagent that is taking too long '
+                    'or when you no longer need its result. The subagent will stop at the '
+                    'next cancellation checkpoint and return partial results if available. '
+                    'After cancellation, the session remains active for follow-up messages.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "subagent_id": {
+                            "type": "string",
+                            "description": "ID of the subagent to cancel (use list_active_subagents to see IDs)"
+                        }
+                    },
+                    "required": ["subagent_id"]
+                }
+            ),
+            ToolSchema(
                 name='list_active_subagents',
                 description=(
                     'List currently active subagent sessions that can receive follow-up '
@@ -333,6 +353,7 @@ class SubagentPlugin:
             'spawn_subagent': self._execute_spawn_subagent,
             'continue_subagent': self._execute_continue_subagent,
             'close_subagent': self._execute_close_subagent,
+            'cancel_subagent': self._execute_cancel_subagent,
             'list_active_subagents': self._execute_list_active_subagents,
             'list_subagent_profiles': self._execute_list_profiles,
             # User command aliases
@@ -703,6 +724,71 @@ class SubagentPlugin:
             'message': f'Session {subagent_id} closed successfully'
         }
 
+    def _execute_cancel_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Cancel a running subagent operation.
+
+        Args:
+            args: Tool arguments containing:
+                - subagent_id: ID of the subagent to cancel
+
+        Returns:
+            Dict with success status and message.
+        """
+        subagent_id = args.get('subagent_id', '')
+
+        if not subagent_id:
+            return {
+                'success': False,
+                'message': 'No subagent_id provided'
+            }
+
+        session_info = self._active_sessions.get(subagent_id)
+        if not session_info:
+            return {
+                'success': False,
+                'message': f'No active session found with ID: {subagent_id}'
+            }
+
+        session = session_info.get('session')
+        if not session:
+            return {
+                'success': False,
+                'message': f'Session {subagent_id} has no valid session object'
+            }
+
+        # Check if session is currently running
+        if not session.is_running:
+            return {
+                'success': False,
+                'message': f'Session {subagent_id} is not currently running (status: waiting)'
+            }
+
+        # Check if cancellation is supported
+        if not session.supports_stop:
+            return {
+                'success': False,
+                'message': f'Session {subagent_id} does not support cancellation (provider limitation)'
+            }
+
+        # Request cancellation
+        cancelled = session.request_stop()
+        if cancelled:
+            # Notify UI hooks
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_status_changed(
+                    agent_id=subagent_id,
+                    status="cancelled"
+                )
+            return {
+                'success': True,
+                'message': f'Cancellation requested for session {subagent_id}. The subagent will stop at the next checkpoint.'
+            }
+        else:
+            return {
+                'success': False,
+                'message': f'Failed to cancel session {subagent_id} - may have already completed'
+            }
+
     def _execute_list_active_subagents(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List active subagent sessions.
 
@@ -720,9 +806,14 @@ class SubagentPlugin:
 
         sessions = []
         for agent_id, info in self._active_sessions.items():
+            session = info.get('session')
+            is_running = session.is_running if session else False
+            supports_stop = session.supports_stop if session else False
             sessions.append({
                 'agent_id': agent_id,
                 'profile': info['profile'].name,
+                'status': 'running' if is_running else 'waiting',
+                'can_cancel': is_running and supports_stop,
                 'created_at': info['created_at'].isoformat(),
                 'last_activity': info['last_activity'].isoformat(),
                 'turn_count': info['turn_count'],
@@ -733,6 +824,28 @@ class SubagentPlugin:
             'active_sessions': sessions,
             'count': len(sessions)
         }
+
+    def cancel_all_running(self) -> int:
+        """Cancel all currently running subagent operations.
+
+        This is useful for propagating parent cancellation to all children,
+        or for cleanup when the parent session is interrupted.
+
+        Returns:
+            Number of subagents that were cancelled.
+        """
+        cancelled_count = 0
+        for agent_id, info in self._active_sessions.items():
+            session = info.get('session')
+            if session and session.is_running and session.supports_stop:
+                if session.request_stop():
+                    cancelled_count += 1
+                    if self._ui_hooks:
+                        self._ui_hooks.on_agent_status_changed(
+                            agent_id=agent_id,
+                            status="cancelled"
+                        )
+        return cancelled_count
 
     def _close_session(self, agent_id: str) -> None:
         """Close and cleanup a subagent session.
