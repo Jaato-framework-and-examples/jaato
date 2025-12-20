@@ -704,6 +704,8 @@ class JaatoSession:
                     cancellation_notified = True
                 elif cancellation_notified:
                     self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (after initial message) - already notified!")
+                # Notify model of cancellation for context on next turn
+                self._notify_model_of_cancellation(cancel_msg, partial_text)
                 if partial_text:
                     return f"{partial_text}\n\n{cancel_msg}"
                 return cancel_msg
@@ -720,6 +722,8 @@ class JaatoSession:
                         cancellation_notified = True
                     elif cancellation_notified:
                         self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (before processing tools) - already notified!")
+                    # Notify model of cancellation for context on next turn
+                    self._notify_model_of_cancellation(cancel_msg, response.text or '')
                     if response.text:
                         return f"{response.text}\n\n{cancel_msg}"
                     return cancel_msg
@@ -796,6 +800,8 @@ class JaatoSession:
                         cancellation_notified = True
                     elif cancellation_notified:
                         self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (before sending tool results) - already notified!")
+                    # Notify model of cancellation for context on next turn
+                    self._notify_model_of_cancellation(cancel_msg)
                     return cancel_msg
 
                 # Send tool results back (with retry for rate limits)
@@ -836,6 +842,8 @@ class JaatoSession:
                         cancellation_notified = True
                     elif cancellation_notified:
                         self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (after tool results) - already notified!")
+                    # Notify model of cancellation for context on next turn
+                    self._notify_model_of_cancellation(cancel_msg, partial_text)
                     if partial_text:
                         return f"{partial_text}\n\n{cancel_msg}"
                     return cancel_msg
@@ -1106,6 +1114,35 @@ class JaatoSession:
         )
 
         new_history = list(current_history) + [user_message, model_message]
+        self._create_provider_session(new_history)
+
+    def _notify_model_of_cancellation(self, cancel_msg: str, partial_text: str = '') -> None:
+        """Inject cancellation notice into history so model has context.
+
+        This adds a user message noting the cancellation, so on the next turn
+        the model understands why the previous response was cut short.
+
+        Args:
+            cancel_msg: The cancellation message shown to user.
+            partial_text: Any partial response text before cancellation.
+        """
+        if not self._provider:
+            return
+
+        current_history = self.get_history()
+
+        # Create a note for the model about what happened
+        if partial_text:
+            note = f"[System: Your previous response was cancelled by the user after: \"{partial_text[:100]}{'...' if len(partial_text) > 100 else ''}\"]"
+        else:
+            note = "[System: Your previous response was cancelled by the user before any output was generated.]"
+
+        user_message = Message(
+            role=Role.USER,
+            parts=[Part.from_text(note)]
+        )
+
+        new_history = list(current_history) + [user_message]
         self._create_provider_session(new_history)
 
     def generate(self, prompt: str) -> str:
