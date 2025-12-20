@@ -846,12 +846,22 @@ class RichClient:
         # Create callback that stops spinner on first output
         output_callback = self._create_output_callback(stop_spinner_on_first=True)
 
-        # Track maximum token usage seen during this turn (to avoid jumping backwards)
-        max_tokens_seen = {'prompt': 0, 'output': 0, 'total': 0}
+        # Initialize max_tokens_seen with CURRENT context usage (so we don't reset to 0)
+        # This preserves the previous turn's context when a new turn starts
+        current_usage = self._jaato.get_context_usage() if self._jaato else {}
+        max_tokens_seen = {
+            'prompt': current_usage.get('prompt_tokens', 0),
+            'output': current_usage.get('output_tokens', 0),
+            'total': current_usage.get('total_tokens', 0)
+        }
 
         # Create usage update callback for real-time token accounting
         def usage_update_callback(usage) -> None:
             """Update status bar with real-time token usage during streaming."""
+            # Skip zero values (initialization chunks, not real data)
+            if usage.total_tokens == 0:
+                return
+
             # Write to provider trace for debugging (same file as provider uses)
             import datetime
             trace_path = os.environ.get(
