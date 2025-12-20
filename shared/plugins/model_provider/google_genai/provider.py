@@ -883,7 +883,7 @@ class GoogleGenAIProvider:
                 chunk_text = extract_text_from_chunk(chunk)
                 if chunk_text:
                     chunk_count += 1
-                    self._trace(f"STREAM_CHUNK[{chunk_count}] len={len(chunk_text)} text={repr(chunk_text[:50])}")
+                    self._trace(f"STREAM_CHUNK[{chunk_count}] len={len(chunk_text)} text={repr(chunk_text)}")
                     accumulated_text.append(chunk_text)
                     on_chunk(chunk_text)
 
@@ -1005,7 +1005,7 @@ class GoogleGenAIProvider:
                 chunk_text = extract_text_from_chunk(chunk)
                 if chunk_text:
                     chunk_count += 1
-                    self._trace(f"STREAM_TOOL_CHUNK[{chunk_count}] len={len(chunk_text)} text={repr(chunk_text[:50])}")
+                    self._trace(f"STREAM_TOOL_CHUNK[{chunk_count}] len={len(chunk_text)} text={repr(chunk_text)}")
                     accumulated_text.append(chunk_text)
                     on_chunk(chunk_text)
 
