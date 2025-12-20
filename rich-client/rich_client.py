@@ -914,6 +914,16 @@ class RichClient:
                 except Exception:
                     pass
 
+        def gc_threshold_callback(percent_used: float, threshold: float) -> None:
+            """Handle GC threshold crossing notification."""
+            self._trace(f"[gc_threshold] Context threshold crossed: {percent_used:.1f}% >= {threshold}%")
+            # Show warning in output (optional - GC will happen automatically after turn)
+            if self._display:
+                self._display.add_system_message(
+                    f"⚠ Context usage ({percent_used:.1f}%) exceeds threshold ({threshold}%). GC will run after this turn.",
+                    style="yellow"
+                )
+
         def model_thread():
             self._trace("[model_thread] started")
             self._model_running = True
@@ -922,7 +932,8 @@ class RichClient:
                 self._jaato.send_message(
                     prompt,
                     on_output=output_callback,
-                    on_usage_update=usage_update_callback
+                    on_usage_update=usage_update_callback,
+                    on_gc_threshold=gc_threshold_callback
                 )
                 self._trace(f"[model_thread] send_message returned")
 
