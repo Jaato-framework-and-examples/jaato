@@ -1,10 +1,10 @@
 # Environment Plugin
 
-The environment plugin provides the `get_environment` tool for querying local execution environment details in the jaato framework.
+The environment plugin provides the `get_environment` tool for querying execution environment details in the jaato framework.
 
 ## Overview
 
-This plugin enables models to understand the execution environment before generating platform-specific commands, paths, or configurations. It exposes OS type, shell, architecture, and working directory information through a single tool with optional aspect filtering.
+This plugin enables models to understand both the external execution environment (OS, shell, architecture) and internal context (token usage, GC thresholds). It exposes all information through a single tool with optional aspect filtering.
 
 ## Tool Declaration
 
@@ -24,7 +24,7 @@ The plugin exposes a single tool:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `aspect` | string | No | `"all"` | Which aspect to query: `os`, `shell`, `arch`, `cwd`, or `all` |
+| `aspect` | string | No | `"all"` | Which aspect to query: `os`, `shell`, `arch`, `cwd`, `context`, or `all` |
 
 ### Response
 
@@ -49,7 +49,22 @@ When `aspect="all"` (default):
     "processor": "x86_64",
     "normalized": "x86_64"
   },
-  "cwd": "/home/user/project"
+  "cwd": "/home/user/project",
+  "context": {
+    "model": "gemini-2.5-flash",
+    "context_limit": 1048576,
+    "total_tokens": 15234,
+    "prompt_tokens": 12000,
+    "output_tokens": 3234,
+    "tokens_remaining": 1033342,
+    "percent_used": 1.45,
+    "turns": 5,
+    "gc": {
+      "threshold_percent": 80.0,
+      "auto_trigger": true,
+      "preserve_recent_turns": 5
+    }
+  }
 }
 ```
 
@@ -91,6 +106,20 @@ client.configure_tools(registry)
 response = client.send_message("What OS am I running on?")
 ```
 
+### Enabling Context Aspect
+
+The `context` aspect requires session injection to access token usage. Use `set_session_plugin()`:
+
+```python
+from shared.plugins.environment import EnvironmentPlugin
+
+plugin = EnvironmentPlugin()
+client.set_session_plugin(plugin)  # Injects session reference
+
+# Now the model can query context usage
+response = client.send_message("How many tokens have I used?")
+```
+
 ### Querying Specific Aspects
 
 The tool supports filtering by aspect to reduce response size:
@@ -107,6 +136,9 @@ get_environment(aspect="arch")
 
 # Get only working directory
 get_environment(aspect="cwd")
+
+# Get token usage and GC thresholds
+get_environment(aspect="context")
 
 # Get everything (default)
 get_environment()
@@ -148,6 +180,31 @@ get_environment(aspect="all")
 
 Returns a string (not an object) with the absolute path to the current working directory.
 
+### Context (`aspect="context"`)
+
+Returns token usage and garbage collection settings. Requires session injection via `set_session()`.
+
+| Field | Description | Example Values |
+|-------|-------------|----------------|
+| `model` | Model name | `"gemini-2.5-flash"` |
+| `context_limit` | Maximum context window size | `1048576` |
+| `total_tokens` | Total tokens used so far | `15234` |
+| `prompt_tokens` | Input tokens used | `12000` |
+| `output_tokens` | Output tokens generated | `3234` |
+| `tokens_remaining` | Tokens available before limit | `1033342` |
+| `percent_used` | Percentage of context used | `1.45` |
+| `turns` | Number of conversation turns | `5` |
+| `gc` | Garbage collection settings (if configured) | See below |
+
+#### GC Settings
+
+| Field | Description | Example Values |
+|-------|-------------|----------------|
+| `threshold_percent` | Trigger GC at this usage % | `80.0` |
+| `auto_trigger` | Whether GC triggers automatically | `true` |
+| `preserve_recent_turns` | Turns to always keep | `5` |
+| `max_turns` | Maximum turns before GC (if set) | `100` |
+
 ## Use Cases
 
 1. **Generating shell commands**: Query shell aspect to determine correct syntax
@@ -165,10 +222,14 @@ Returns a string (not an object) with the absolute path to the current working d
 4. **Architecture-specific decisions**: Query arch for binary selection
    - Download correct binaries for x86_64 vs arm64
 
+5. **Context management**: Query context aspect to monitor token usage
+   - Proactively summarize or trim context before hitting GC threshold
+   - Track cost/usage during long conversations
+
 ## Auto-Approval
 
 This plugin's tool is auto-approved (no permission prompt required) because it only reads environment information and has no side effects.
 
 ## Configuration
 
-This plugin requires no configuration.
+This plugin requires no configuration. For context aspect functionality, inject the session via `set_session_plugin()`.
