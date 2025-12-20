@@ -863,6 +863,14 @@ class RichClient:
             except Exception as e:
                 pass  # Ignore trace errors
             self._trace(f"[usage_callback] received: prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
+            # Trace the condition check
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [rich_client_callback] display={self._display is not None} jaato={self._jaato is not None}\n")
+                    f.flush()
+            except Exception:
+                pass
             if self._display and self._jaato:
                 # Get context limit for percentage calculation
                 context_limit = self._jaato.get_context_limit()
@@ -881,6 +889,14 @@ class RichClient:
                 }
                 self._trace(f"[usage_callback] updating display: {percent_used:.1f}% used, {total_tokens} tokens")
                 self._display.update_context_usage(usage_dict)
+                # Trace after update
+                try:
+                    with open(trace_path, "a") as f:
+                        ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                        f.write(f"[{ts}] [rich_client_callback] update_context_usage called, percent={percent_used:.1f}%\n")
+                        f.flush()
+                except Exception:
+                    pass
 
         def model_thread():
             self._trace("[model_thread] started")
