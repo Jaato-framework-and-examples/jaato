@@ -488,8 +488,9 @@ gc = create_gc()
 gc.initialize({"preserve_recent_turns": 5})
 
 # Configure: trigger at 80% capacity
+# (or set JAATO_GC_THRESHOLD env var to override default)
 client.set_gc_plugin(gc, GCConfig(
-    threshold_percent=80.0,
+    threshold_percent=80.0,  # default, can omit
     check_before_send=True
 ))
 
@@ -497,6 +498,23 @@ client.set_gc_plugin(gc, GCConfig(
 # Or trigger manually:
 result = client.manual_gc()
 print(f"Freed {result.tokens_freed} tokens")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Proactive GC with threshold callback</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Get notified when threshold is crossed
+def on_gc_threshold(percent: float, threshold: float):
+    print(f"⚠️ Context at {percent:.1f}%!")
+    print(f"GC will run after this turn")
+
+# Pass callback to send_message
+response = client.send_message(
+    "Long conversation...",
+    on_output=handler,
+    on_gc_threshold=on_gc_threshold
+)
+# GC runs automatically after turn completes
+# if threshold was exceeded during streaming</code></pre>
           </div>
         </div>
       </section>

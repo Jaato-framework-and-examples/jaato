@@ -9,6 +9,7 @@ for subagents, avoiding redundant provider connections.
 
 import logging
 import os
+import threading
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from datetime import datetime
 
@@ -93,6 +94,15 @@ class SubagentPlugin:
         self._parent_agent_id: str = "main"  # Parent agent ID for nested subagents
         # Session registry for multi-turn conversations
         self._active_sessions: Dict[str, Dict[str, Any]] = {}  # agent_id -> session info
+        # Parent session reference for cancellation propagation
+        self._parent_session: Optional[Any] = None  # JaatoSession reference
+        # Background agent tracking for parallel execution
+        self._background_threads: Dict[str, threading.Thread] = {}  # agent_id -> thread
+        self._background_results: Dict[str, SubagentResult] = {}  # agent_id -> result
+        self._result_lock = threading.Lock()  # Protect result access
+        # Shared state for inter-agent communication
+        self._shared_state: Dict[str, Any] = {}  # key -> value (thread-safe via lock)
+        self._state_lock = threading.Lock()  # Protect shared state access
 
     @property
     def name(self) -> str:
@@ -247,6 +257,14 @@ class SubagentPlugin:
                                     "description": "Maximum conversation turns (default: 10)"
                                 }
                             }
+                        },
+                        "background": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, run subagent in background and return immediately with "
+                                "agent_id. Use get_subagent_result to retrieve results later. "
+                                "Enables parallel execution of multiple subagents. Default: false."
+                            )
                         }
                     },
                     "required": ["task"]
@@ -301,10 +319,55 @@ class SubagentPlugin:
                 }
             ),
             ToolSchema(
+                name='cancel_subagent',
+                description=(
+                    'Cancel a running subagent, stopping its current operation immediately. '
+                    'Use this when you need to interrupt a subagent that is taking too long '
+                    'or when you no longer need its result. The subagent will stop at the '
+                    'next cancellation checkpoint and return partial results if available. '
+                    'After cancellation, the session remains active for follow-up messages.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "subagent_id": {
+                            "type": "string",
+                            "description": "ID of the subagent to cancel (use list_active_subagents to see IDs)"
+                        }
+                    },
+                    "required": ["subagent_id"]
+                }
+            ),
+            ToolSchema(
+                name='get_subagent_result',
+                description=(
+                    'Get the result of a background subagent. Use this after spawning a '
+                    'subagent with background=true to retrieve its result once complete. '
+                    'Returns the result if complete, or status if still running.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "subagent_id": {
+                            "type": "string",
+                            "description": "ID of the subagent to get results from"
+                        },
+                        "wait": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, block until the subagent completes. "
+                                "If false (default), return immediately with current status."
+                            )
+                        }
+                    },
+                    "required": ["subagent_id"]
+                }
+            ),
+            ToolSchema(
                 name='list_active_subagents',
                 description=(
                     'List currently active subagent sessions that can receive follow-up '
-                    'messages. Shows subagent ID, profile, creation time, and turn count.'
+                    'messages. Shows subagent ID, profile, status (running/waiting), and turn count.'
                 ),
                 parameters={
                     "type": "object",
@@ -323,6 +386,56 @@ class SubagentPlugin:
                     "properties": {},
                     "required": []
                 }
+            ),
+            ToolSchema(
+                name='set_shared_state',
+                description=(
+                    'Store a value in shared state that can be accessed by all agents '
+                    '(main and subagents). Use this for inter-agent communication '
+                    'and sharing analysis results between parallel subagents.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Unique key for the state entry"
+                        },
+                        "value": {
+                            "description": "Value to store (any JSON-serializable type)"
+                        }
+                    },
+                    "required": ["key", "value"]
+                }
+            ),
+            ToolSchema(
+                name='get_shared_state',
+                description=(
+                    'Retrieve a value from shared state. Use this to access '
+                    'data stored by other agents or previous operations.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Key of the state entry to retrieve"
+                        }
+                    },
+                    "required": ["key"]
+                }
+            ),
+            ToolSchema(
+                name='list_shared_state',
+                description=(
+                    'List all keys in shared state. Use this to see what '
+                    'data is available for inter-agent communication.'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
             )
         ]
         return declarations
@@ -333,8 +446,13 @@ class SubagentPlugin:
             'spawn_subagent': self._execute_spawn_subagent,
             'continue_subagent': self._execute_continue_subagent,
             'close_subagent': self._execute_close_subagent,
+            'cancel_subagent': self._execute_cancel_subagent,
+            'get_subagent_result': self._execute_get_subagent_result,
             'list_active_subagents': self._execute_list_active_subagents,
             'list_subagent_profiles': self._execute_list_profiles,
+            'set_shared_state': self._execute_set_shared_state,
+            'get_shared_state': self._execute_get_shared_state,
+            'list_shared_state': self._execute_list_shared_state,
             # User command aliases
             'profiles': self._execute_list_profiles,
             'active': self._execute_list_active_subagents,
@@ -441,6 +559,18 @@ class SubagentPlugin:
         if self._config and runtime.project and runtime.location:
             self._config.project = runtime.project
             self._config.location = runtime.location
+
+    def set_parent_session(self, session: Any) -> None:
+        """Set the parent session reference for cancellation propagation.
+
+        When set, child subagent sessions will inherit the parent's cancel
+        token, allowing automatic cancellation propagation from parent to
+        children.
+
+        Args:
+            session: JaatoSession instance of the parent agent.
+        """
+        self._parent_session = session
 
     def set_connection(self, project: str, location: str, model: str) -> None:
         """Set the connection parameters for subagents.
@@ -703,35 +833,289 @@ class SubagentPlugin:
             'message': f'Session {subagent_id} closed successfully'
         }
 
+    def _execute_cancel_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Cancel a running subagent operation.
+
+        Args:
+            args: Tool arguments containing:
+                - subagent_id: ID of the subagent to cancel
+
+        Returns:
+            Dict with success status and message.
+        """
+        subagent_id = args.get('subagent_id', '')
+
+        if not subagent_id:
+            return {
+                'success': False,
+                'message': 'No subagent_id provided'
+            }
+
+        session_info = self._active_sessions.get(subagent_id)
+        if not session_info:
+            return {
+                'success': False,
+                'message': f'No active session found with ID: {subagent_id}'
+            }
+
+        session = session_info.get('session')
+        if not session:
+            return {
+                'success': False,
+                'message': f'Session {subagent_id} has no valid session object'
+            }
+
+        # Check if session is currently running
+        if not session.is_running:
+            return {
+                'success': False,
+                'message': f'Session {subagent_id} is not currently running (status: waiting)'
+            }
+
+        # Check if cancellation is supported
+        if not session.supports_stop:
+            return {
+                'success': False,
+                'message': f'Session {subagent_id} does not support cancellation (provider limitation)'
+            }
+
+        # Request cancellation
+        cancelled = session.request_stop()
+        if cancelled:
+            # Notify UI hooks
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_status_changed(
+                    agent_id=subagent_id,
+                    status="cancelled"
+                )
+            return {
+                'success': True,
+                'message': f'Cancellation requested for session {subagent_id}. The subagent will stop at the next checkpoint.'
+            }
+        else:
+            return {
+                'success': False,
+                'message': f'Failed to cancel session {subagent_id} - may have already completed'
+            }
+
+    def _execute_get_subagent_result(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get the result of a background subagent.
+
+        Args:
+            args: Tool arguments containing:
+                - subagent_id: ID of the subagent
+                - wait: If true, block until complete
+
+        Returns:
+            Dict with result or status.
+        """
+        subagent_id = args.get('subagent_id', '')
+        wait = args.get('wait', False)
+
+        if not subagent_id:
+            return {
+                'success': False,
+                'error': 'No subagent_id provided'
+            }
+
+        # Check if result already available
+        with self._result_lock:
+            if subagent_id in self._background_results:
+                result = self._background_results.pop(subagent_id)
+                return {
+                    'success': True,
+                    'complete': True,
+                    **result.to_dict()
+                }
+
+        # Check if thread is still running
+        thread = self._background_threads.get(subagent_id)
+        if thread and thread.is_alive():
+            if wait:
+                # Block until thread completes
+                thread.join()
+                # Now result should be available
+                with self._result_lock:
+                    if subagent_id in self._background_results:
+                        result = self._background_results.pop(subagent_id)
+                        return {
+                            'success': True,
+                            'complete': True,
+                            **result.to_dict()
+                        }
+                return {
+                    'success': False,
+                    'error': f'Subagent {subagent_id} completed but no result available'
+                }
+            else:
+                # Return status without waiting
+                return {
+                    'success': True,
+                    'complete': False,
+                    'status': 'running',
+                    'agent_id': subagent_id,
+                    'message': f'Subagent {subagent_id} is still running. Call again with wait=true to block until complete.'
+                }
+
+        # No thread and no result - unknown agent_id
+        return {
+            'success': False,
+            'error': f'No background subagent found with ID: {subagent_id}'
+        }
+
     def _execute_list_active_subagents(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """List active subagent sessions.
+        """List active subagent sessions and background agents.
 
         Args:
             args: Tool arguments (unused).
 
         Returns:
-            Dict containing list of active sessions.
+            Dict containing list of active sessions and background agents.
         """
-        if not self._active_sessions:
-            return {
-                'active_sessions': [],
-                'message': 'No active subagent sessions'
-            }
-
         sessions = []
+
+        # List interactive sessions
         for agent_id, info in self._active_sessions.items():
+            session = info.get('session')
+            is_running = session.is_running if session else False
+            supports_stop = session.supports_stop if session else False
             sessions.append({
                 'agent_id': agent_id,
                 'profile': info['profile'].name,
+                'type': 'interactive',
+                'status': 'running' if is_running else 'waiting',
+                'can_cancel': is_running and supports_stop,
                 'created_at': info['created_at'].isoformat(),
                 'last_activity': info['last_activity'].isoformat(),
                 'turn_count': info['turn_count'],
                 'max_turns': info['max_turns'],
             })
 
+        # List background agents
+        for agent_id, thread in self._background_threads.items():
+            sessions.append({
+                'agent_id': agent_id,
+                'type': 'background_agent',
+                'status': 'running' if thread.is_alive() else 'complete',
+                'can_cancel': thread.is_alive(),  # Can cancel via cancel_subagent
+            })
+
+        # Check for completed background agents with results not yet retrieved
+        with self._result_lock:
+            for agent_id in self._background_results.keys():
+                if agent_id not in self._background_threads:
+                    sessions.append({
+                        'agent_id': agent_id,
+                        'type': 'background_agent',
+                        'status': 'complete (result pending)',
+                        'can_cancel': False,
+                    })
+
+        if not sessions:
+            return {
+                'active_sessions': [],
+                'message': 'No active subagent sessions'
+            }
+
         return {
             'active_sessions': sessions,
             'count': len(sessions)
+        }
+
+    def cancel_all_running(self) -> int:
+        """Cancel all currently running subagent operations.
+
+        This is useful for propagating parent cancellation to all children,
+        or for cleanup when the parent session is interrupted.
+
+        Returns:
+            Number of subagents that were cancelled.
+        """
+        cancelled_count = 0
+        for agent_id, info in self._active_sessions.items():
+            session = info.get('session')
+            if session and session.is_running and session.supports_stop:
+                if session.request_stop():
+                    cancelled_count += 1
+                    if self._ui_hooks:
+                        self._ui_hooks.on_agent_status_changed(
+                            agent_id=agent_id,
+                            status="cancelled"
+                        )
+        return cancelled_count
+
+    def _execute_set_shared_state(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Store a value in shared state.
+
+        Args:
+            args: Tool arguments containing:
+                - key: State key
+                - value: Value to store
+
+        Returns:
+            Dict with success status.
+        """
+        key = args.get('key', '')
+        if not key:
+            return {'success': False, 'error': 'No key provided'}
+
+        value = args.get('value')
+        with self._state_lock:
+            self._shared_state[key] = value
+
+        return {
+            'success': True,
+            'message': f'State "{key}" set successfully'
+        }
+
+    def _execute_get_shared_state(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Retrieve a value from shared state.
+
+        Args:
+            args: Tool arguments containing:
+                - key: State key to retrieve
+
+        Returns:
+            Dict with value or error.
+        """
+        key = args.get('key', '')
+        if not key:
+            return {'success': False, 'error': 'No key provided'}
+
+        with self._state_lock:
+            if key in self._shared_state:
+                return {
+                    'success': True,
+                    'key': key,
+                    'value': self._shared_state[key]
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': f'Key "{key}" not found in shared state'
+                }
+
+    def _execute_list_shared_state(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List all keys in shared state.
+
+        Args:
+            args: Tool arguments (unused).
+
+        Returns:
+            Dict with list of keys.
+        """
+        with self._state_lock:
+            keys = list(self._shared_state.keys())
+
+        if not keys:
+            return {
+                'keys': [],
+                'message': 'Shared state is empty'
+            }
+
+        return {
+            'keys': keys,
+            'count': len(keys)
         }
 
     def _close_session(self, agent_id: str) -> None:
@@ -862,7 +1246,49 @@ class SubagentPlugin:
         if profile.system_instructions:
             full_prompt = f"{profile.system_instructions}\n\n{full_prompt}"
 
-        # Run the subagent
+        # Check for background execution
+        background = args.get('background', False)
+
+        if background:
+            # Generate agent_id for background task
+            self._subagent_counter += 1
+            if self._parent_agent_id == "main":
+                agent_id = f"subagent_{self._subagent_counter}"
+            else:
+                agent_id = f"{self._parent_agent_id}.{profile.name}"
+
+            # Spawn background thread
+            def background_task():
+                try:
+                    result = self._run_subagent(profile, full_prompt)
+                    with self._result_lock:
+                        self._background_results[agent_id] = result
+                except Exception as e:
+                    logger.exception("Error in background subagent")
+                    with self._result_lock:
+                        self._background_results[agent_id] = SubagentResult(
+                            success=False,
+                            response='',
+                            error=f"Subagent execution failed: {str(e)}",
+                            agent_id=agent_id
+                        )
+                finally:
+                    # Clean up thread reference
+                    self._background_threads.pop(agent_id, None)
+
+            thread = threading.Thread(target=background_task, daemon=True)
+            self._background_threads[agent_id] = thread
+            thread.start()
+
+            # Return immediately with agent_id
+            return {
+                'success': True,
+                'background': True,
+                'agent_id': agent_id,
+                'message': f'Subagent {agent_id} started in background. Use get_subagent_result to retrieve results.'
+            }
+
+        # Synchronous execution (default)
         try:
             result = self._run_subagent(profile, full_prompt)
             return result.to_dict()
@@ -995,6 +1421,12 @@ class SubagentPlugin:
                 agent_type="subagent",
                 agent_name=profile.name
             )
+
+            # Set parent cancel token for automatic cancellation propagation
+            if self._parent_session and hasattr(self._parent_session, '_cancel_token'):
+                parent_token = self._parent_session._cancel_token
+                if parent_token and hasattr(session, 'set_parent_cancel_token'):
+                    session.set_parent_cancel_token(parent_token)
 
             # Pass UI hooks to session for tool call tracking
             if self._ui_hooks:

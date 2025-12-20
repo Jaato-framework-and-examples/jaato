@@ -36,8 +36,11 @@ try:
 except ImportError:
     ChatCompletionsResponseFormatJSON = None  # type: ignore
 
-from ..base import ModelProviderPlugin, ProviderConfig
+from ..base import ModelProviderPlugin, ProviderConfig, StreamingCallback, UsageUpdateCallback
 from ..types import (
+    CancelledException,
+    CancelToken,
+    FinishReason,
     Message,
     Part,
     ProviderResponse,
@@ -175,6 +178,24 @@ class GitHubModelsProvider:
 
         # Models cache: (timestamp, models_list)
         self._models_cache: Optional[Tuple[float, List[str]]] = None
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to file for debugging streaming interactions."""
+        import tempfile
+        trace_path = os.environ.get(
+            "JAATO_PROVIDER_TRACE",
+            os.path.join(tempfile.gettempdir(), "provider_trace.log")
+        )
+        if not trace_path:
+            return
+        import datetime
+        try:
+            with open(trace_path, "a") as f:
+                ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                f.write(f"[{ts}] [github_models] {msg}\n")
+                f.flush()
+        except Exception:
+            pass  # Don't let tracing errors break the provider
 
     @property
     def name(self) -> str:
@@ -709,6 +730,315 @@ class GitHubModelsProvider:
         if not self._model_name:
             return False
         return self._model_name.startswith("openai/")
+
+    def supports_streaming(self) -> bool:
+        """Check if streaming is supported.
+
+        Returns:
+            True - GitHub Models supports streaming via Azure AI Inference SDK.
+        """
+        return True
+
+    def supports_stop(self) -> bool:
+        """Check if mid-turn cancellation (stop) is supported.
+
+        Returns:
+            True - GitHub Models supports stop via streaming cancellation.
+        """
+        return True
+
+    # ==================== Streaming ====================
+
+    def send_message_streaming(
+        self,
+        message: str,
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None
+    ) -> ProviderResponse:
+        """Send a message with streaming response and optional cancellation.
+
+        Args:
+            message: The user's message text.
+            on_chunk: Callback invoked for each text chunk as it streams.
+            cancel_token: Optional token to request cancellation mid-stream.
+            response_schema: Optional JSON Schema to constrain the response.
+            on_usage_update: Optional callback for real-time token usage updates.
+
+        Returns:
+            ProviderResponse with accumulated text and/or function calls.
+        """
+        if not self._client or not self._model_name:
+            raise RuntimeError("No chat session. Call create_session() first.")
+
+        # Build messages list
+        messages = self._build_messages()
+        messages.append(UserMessage(content=message))
+
+        # Add user message to history
+        self._history.append(Message.from_text(Role.USER, message))
+
+        # Build completion kwargs
+        kwargs = self._build_completion_kwargs(response_schema)
+        kwargs['stream'] = True
+
+        # Accumulate response
+        accumulated_text = []
+        finish_reason = FinishReason.UNKNOWN
+        function_calls = []
+        usage = TokenUsage()
+        was_cancelled = False
+
+        try:
+            self._trace(f"STREAM_START message={repr(message[:100])}...")
+            chunk_count = 0
+            response_stream = self._client.complete(
+                model=self._model_name,
+                messages=messages,
+                **kwargs,
+            )
+
+            for chunk in response_stream:
+                # Check for cancellation
+                if cancel_token and cancel_token.is_cancelled:
+                    self._trace(f"STREAM_CANCELLED after {chunk_count} chunks")
+                    was_cancelled = True
+                    finish_reason = FinishReason.CANCELLED
+                    break
+
+                # Extract content from choices
+                if hasattr(chunk, 'choices') and chunk.choices:
+                    for choice in chunk.choices:
+                        # Extract text delta
+                        if hasattr(choice, 'delta') and choice.delta:
+                            delta = choice.delta
+                            if hasattr(delta, 'content') and delta.content:
+                                chunk_count += 1
+                                self._trace(f"STREAM_CHUNK[{chunk_count}] len={len(delta.content)} text={repr(delta.content)}")
+                                accumulated_text.append(delta.content)
+                                on_chunk(delta.content)
+
+                            # Extract tool calls
+                            if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                                from .converters import extract_function_calls_from_stream_delta
+                                new_calls = extract_function_calls_from_stream_delta(delta.tool_calls)
+                                for fc in new_calls:
+                                    self._trace(f"STREAM_FUNC_CALL name={fc.name}")
+                                function_calls.extend(new_calls)
+
+                        # Extract finish reason
+                        if hasattr(choice, 'finish_reason') and choice.finish_reason:
+                            finish_reason = self._map_finish_reason(choice.finish_reason)
+
+                # Extract usage from final chunk
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    usage = TokenUsage(
+                        prompt_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
+                        output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
+                        total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0
+                    )
+                    self._trace(f"STREAM_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
+                    # Notify about usage update for real-time accounting
+                    if on_usage_update and usage.total_tokens > 0:
+                        on_usage_update(usage)
+
+            self._trace(f"STREAM_END chunks={chunk_count} finish_reason={finish_reason}")
+
+        except Exception as e:
+            self._trace(f"STREAM_ERROR {type(e).__name__}: {e}")
+            # If cancelled during iteration, treat as cancellation
+            if cancel_token and cancel_token.is_cancelled:
+                was_cancelled = True
+                finish_reason = FinishReason.CANCELLED
+            else:
+                self._handle_api_error(e)
+                raise
+
+        # Build final response
+        final_text = ''.join(accumulated_text) if accumulated_text else None
+
+        # If we have function calls, update finish reason
+        if function_calls and not was_cancelled:
+            finish_reason = FinishReason.TOOL_USE
+
+        provider_response = ProviderResponse(
+            text=final_text,
+            function_calls=function_calls,
+            usage=usage,
+            finish_reason=finish_reason,
+            raw=None
+        )
+
+        self._last_usage = usage
+
+        # Add assistant response to history
+        self._add_response_to_history(provider_response)
+
+        # Parse structured output if schema was requested
+        if response_schema and final_text and not was_cancelled:
+            try:
+                provider_response.structured_output = json.loads(final_text)
+            except json.JSONDecodeError:
+                pass
+
+        return provider_response
+
+    def send_tool_results_streaming(
+        self,
+        results: List[ToolResult],
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None
+    ) -> ProviderResponse:
+        """Send tool results with streaming response and optional cancellation.
+
+        Args:
+            results: List of tool execution results.
+            on_chunk: Callback invoked for each text chunk as it streams.
+            cancel_token: Optional token to request cancellation mid-stream.
+            response_schema: Optional JSON Schema to constrain the response.
+            on_usage_update: Optional callback for real-time token usage updates.
+
+        Returns:
+            ProviderResponse with accumulated text and/or function calls.
+        """
+        if not self._client or not self._model_name:
+            raise RuntimeError("No chat session. Call create_session() first.")
+
+        # Add tool results to history
+        for result in results:
+            self._history.append(Message(
+                role=Role.TOOL,
+                parts=[Part(function_response=result)],
+            ))
+
+        # Build messages including tool results
+        messages = self._build_messages()
+
+        # Build completion kwargs
+        kwargs = self._build_completion_kwargs(response_schema)
+        kwargs['stream'] = True
+
+        # Accumulate response
+        accumulated_text = []
+        finish_reason = FinishReason.UNKNOWN
+        function_calls = []
+        usage = TokenUsage()
+        was_cancelled = False
+
+        try:
+            tool_names = [r.name for r in results]
+            self._trace(f"STREAM_TOOL_RESULTS_START tools={tool_names}")
+            chunk_count = 0
+            response_stream = self._client.complete(
+                model=self._model_name,
+                messages=messages,
+                **kwargs,
+            )
+
+            for chunk in response_stream:
+                # Check for cancellation
+                if cancel_token and cancel_token.is_cancelled:
+                    self._trace(f"STREAM_TOOL_RESULTS_CANCELLED after {chunk_count} chunks")
+                    was_cancelled = True
+                    finish_reason = FinishReason.CANCELLED
+                    break
+
+                # Extract content from choices
+                if hasattr(chunk, 'choices') and chunk.choices:
+                    for choice in chunk.choices:
+                        # Extract text delta
+                        if hasattr(choice, 'delta') and choice.delta:
+                            delta = choice.delta
+                            if hasattr(delta, 'content') and delta.content:
+                                chunk_count += 1
+                                self._trace(f"STREAM_TOOL_CHUNK[{chunk_count}] len={len(delta.content)} text={repr(delta.content)}")
+                                accumulated_text.append(delta.content)
+                                on_chunk(delta.content)
+
+                            # Extract tool calls
+                            if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                                from .converters import extract_function_calls_from_stream_delta
+                                new_calls = extract_function_calls_from_stream_delta(delta.tool_calls)
+                                for fc in new_calls:
+                                    self._trace(f"STREAM_TOOL_FUNC_CALL name={fc.name}")
+                                function_calls.extend(new_calls)
+
+                        # Extract finish reason
+                        if hasattr(choice, 'finish_reason') and choice.finish_reason:
+                            finish_reason = self._map_finish_reason(choice.finish_reason)
+
+                # Extract usage from final chunk
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    usage = TokenUsage(
+                        prompt_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
+                        output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
+                        total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0
+                    )
+                    self._trace(f"STREAM_TOOL_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
+                    # Notify about usage update for real-time accounting
+                    if on_usage_update and usage.total_tokens > 0:
+                        on_usage_update(usage)
+
+            self._trace(f"STREAM_TOOL_RESULTS_END chunks={chunk_count} finish_reason={finish_reason}")
+
+        except Exception as e:
+            self._trace(f"STREAM_TOOL_RESULTS_ERROR {type(e).__name__}: {e}")
+            # If cancelled during iteration, treat as cancellation
+            if cancel_token and cancel_token.is_cancelled:
+                was_cancelled = True
+                finish_reason = FinishReason.CANCELLED
+            else:
+                self._handle_api_error(e)
+                raise
+
+        # Build final response
+        final_text = ''.join(accumulated_text) if accumulated_text else None
+
+        # If we have function calls, update finish reason
+        if function_calls and not was_cancelled:
+            finish_reason = FinishReason.TOOL_USE
+
+        provider_response = ProviderResponse(
+            text=final_text,
+            function_calls=function_calls,
+            usage=usage,
+            finish_reason=finish_reason,
+            raw=None
+        )
+
+        self._last_usage = usage
+
+        # Add assistant response to history
+        self._add_response_to_history(provider_response)
+
+        # Parse structured output if schema was requested
+        if response_schema and final_text and not was_cancelled:
+            try:
+                provider_response.structured_output = json.loads(final_text)
+            except json.JSONDecodeError:
+                pass
+
+        return provider_response
+
+    def _map_finish_reason(self, reason: str) -> FinishReason:
+        """Map SDK finish reason string to internal FinishReason."""
+        if not reason:
+            return FinishReason.UNKNOWN
+
+        reason_lower = reason.lower()
+        if reason_lower == 'stop':
+            return FinishReason.STOP
+        elif reason_lower in ('length', 'max_tokens'):
+            return FinishReason.MAX_TOKENS
+        elif reason_lower in ('tool_calls', 'function_call'):
+            return FinishReason.TOOL_USE
+        elif reason_lower == 'content_filter':
+            return FinishReason.SAFETY
+
+        return FinishReason.UNKNOWN
 
     # ==================== Serialization ====================
 

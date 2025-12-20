@@ -177,6 +177,237 @@ sequenceDiagram
     JC-->>App: "Here are the files: ..."
 ```
 
+## Streaming & Cancellation
+
+The framework supports streaming responses and mid-turn cancellation for responsive user experiences.
+
+### Cancellation Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         User Signal (Ctrl+C, UI button)                      │
+└─────────────────────────────────────────┬───────────────────────────────────┘
+                                          │
+                                          ▼
+                              ┌───────────────────────┐
+                              │   JaatoClient.stop()  │
+                              └───────────┬───────────┘
+                                          │
+                                          ▼
+                              ┌───────────────────────┐
+                              │ JaatoSession          │
+                              │   .request_stop()     │
+                              │   ↓                   │
+                              │ CancelToken.cancel()  │
+                              └───────────┬───────────┘
+                                          │
+                     ┌────────────────────┼────────────────────┐
+                     ▼                    ▼                    ▼
+          ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+          │ Streaming Loop  │  │   Retry Logic   │  │  Tool Execution │
+          │ checks token    │  │ checks between  │  │ checks between  │
+          │ between chunks  │  │    attempts     │  │     tools       │
+          └─────────────────┘  └─────────────────┘  └─────────────────┘
+```
+
+### CancelToken
+
+The `CancelToken` class provides thread-safe cancellation signaling:
+
+```python
+from shared.plugins.model_provider.types import CancelToken, CancelledException
+
+token = CancelToken()
+
+# In worker thread: poll for cancellation
+while not token.is_cancelled:
+    do_work_chunk()
+
+# In main thread: request stop
+token.cancel()  # Signals all waiters
+
+# Or use blocking wait with timeout
+cancelled = token.wait(timeout=5.0)
+
+# Or register callbacks
+token.on_cancel(lambda: cleanup())
+```
+
+### Streaming Provider Support
+
+Model providers can implement streaming for real-time output:
+
+```python
+# Check if provider supports streaming
+if provider.supports_streaming():
+    response = provider.send_message_streaming(
+        message="Tell me a story",
+        on_chunk=lambda text: print(text, end='', flush=True),
+        cancel_token=token
+    )
+else:
+    response = provider.send_message(message)
+```
+
+When cancelled, the response contains:
+- Partial text accumulated before cancellation
+- `finish_reason = FinishReason.CANCELLED`
+
+### Client API
+
+```python
+import threading
+import time
+
+# Start message in background
+client = JaatoClient()
+client.connect(project, location, model)
+client.configure_tools(registry)
+
+def run_message():
+    return client.send_message("Tell me a long story")
+
+thread = threading.Thread(target=run_message)
+thread.start()
+
+# User can cancel mid-response
+time.sleep(2)
+if client.is_processing:
+    client.stop()  # Signals cancellation
+
+thread.join()  # Response will contain partial text + "[Generation cancelled]"
+
+# Control streaming (enabled by default)
+client.set_streaming_enabled(True)   # Real-time output, better cancellation
+client.set_streaming_enabled(False)  # Batched output, simpler but no mid-stream cancel
+```
+
+### Interruptible Retry
+
+The retry logic respects cancellation during backoff sleeps:
+
+```python
+from shared.retry_utils import with_retry, interruptible_sleep
+
+# Retry with cancellation support
+token = CancelToken()
+response, stats = with_retry(
+    lambda: provider.send_message(message),
+    context="send_message",
+    cancel_token=token
+)
+
+# Manual interruptible sleep
+interruptible_sleep(30.0, cancel_token=token)  # Wakes if cancelled
+```
+
+### Cancellation Points
+
+The session checks for cancellation at these points:
+
+| Location | Behavior |
+|----------|----------|
+| Before send_message | Returns immediately |
+| During streaming | Breaks chunk loop |
+| Between retry attempts | Raises CancelledException |
+| During retry backoff | Wakes and raises |
+| Before each tool | Skips remaining tools |
+| After tool execution | Returns partial results |
+
+## Subagent Coordination
+
+The SubagentPlugin supports advanced coordination patterns including parallel execution, cancellation propagation, and shared state.
+
+### Parallel Execution
+
+Subagents can be spawned in background threads for concurrent task execution:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           Parent Agent                                       │
+│                                                                             │
+│  spawn_subagent(task="A", background=True)  ─────────────┐                  │
+│  spawn_subagent(task="B", background=True)  ──────┐      │                  │
+│  spawn_subagent(task="C", background=True)  ─┐    │      │                  │
+│                                              │    │      │                  │
+│  Parent continues working...                 │    │      │                  │
+│                                              ▼    ▼      ▼                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                    Background Threads                                │   │
+│  │  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐                │   │
+│  │  │ Subagent C  │   │ Subagent B  │   │ Subagent A  │                │   │
+│  │  │ (running)   │   │ (running)   │   │ (running)   │                │   │
+│  │  └─────────────┘   └─────────────┘   └─────────────┘                │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  get_subagent_result(agent_id) ◄────── Collect results when ready          │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Cancellation Propagation
+
+Parent cancellation automatically propagates to all child subagents through shared `CancelToken` references:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         User Signal (Ctrl+C)                                 │
+└─────────────────────────────────────────┬───────────────────────────────────┘
+                                          │
+                                          ▼
+                              ┌───────────────────────┐
+                              │ Parent Session        │
+                              │   CancelToken.cancel()│
+                              └───────────┬───────────┘
+                                          │
+                     ┌────────────────────┼────────────────────┐
+                     ▼                    ▼                    ▼
+          ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+          │ Subagent A      │  │ Subagent B      │  │ Subagent C      │
+          │ parent_token ───┼──┼─► is_cancelled  │  │ parent_token    │
+          │ _is_cancelled() │  │ = True          │  │ sees parent     │
+          │ → True          │  └─────────────────┘  │ cancellation    │
+          └─────────────────┘                       └─────────────────┘
+```
+
+Each subagent checks both its own and parent's cancel token:
+
+```python
+def _is_cancelled(self) -> bool:
+    if self._cancel_token and self._cancel_token.is_cancelled:
+        return True
+    if self._parent_cancel_token and self._parent_cancel_token.is_cancelled:
+        return True
+    return False
+```
+
+### Shared State
+
+Thread-safe shared state enables inter-agent communication:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         SubagentPlugin                                       │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                  Shared State (Thread-Safe Dict)                     │   │
+│  │   _state_lock: threading.Lock()                                      │   │
+│  │   _shared_state: {"analysis": {...}, "progress": 42, ...}            │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│           ▲                    ▲                    ▲                       │
+│           │                    │                    │                       │
+│  ┌────────┴───────┐   ┌───────┴────────┐   ┌──────┴─────────┐             │
+│  │  Subagent A    │   │  Subagent B    │   │  Subagent C    │             │
+│  │  set_shared    │   │  get_shared    │   │  list_shared   │             │
+│  │  _state(k,v)   │   │  _state(k)     │   │  _state()      │             │
+│  └────────────────┘   └────────────────┘   └────────────────┘             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Use cases:
+- **Coordination flags**: One agent sets "ready", others wait
+- **Result aggregation**: Multiple agents contribute to shared collection
+- **Progress tracking**: Shared counters for monitoring
+
 ## Background Task Flow
 
 When a tool supports background execution and exceeds its configured threshold, the ToolExecutor automatically converts it to a background task:
@@ -271,6 +502,7 @@ from shared.plugins.gc import discover_gc_plugins, load_gc_plugin
 
 plugins = discover_gc_plugins()  # Uses jaato.gc_plugins entry point
 gc_plugin = load_gc_plugin('gc_truncate')
+# threshold_percent defaults to JAATO_GC_THRESHOLD env var (or 80.0)
 client.set_gc_plugin(gc_plugin, GCConfig(threshold_percent=75.0))
 ```
 
@@ -607,7 +839,15 @@ classDiagram
         +auto_discover_profiles: bool
         +profiles_dir: str
         +spawn_subagent()
+        +continue_subagent()
+        +close_subagent()
+        +cancel_subagent()
+        +get_subagent_result()
+        +list_active_subagents()
         +list_subagent_profiles()
+        +set_shared_state()
+        +get_shared_state()
+        +list_shared_state()
         +discover_profiles()
         +profiles user command
     }
