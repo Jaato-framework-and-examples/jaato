@@ -988,7 +988,7 @@ class GoogleGenAIProvider:
 
         try:
             # Use send_message_stream for streaming
-            tool_names = [r.tool_name for r in results]
+            tool_names = [r.name for r in results]
             self._trace(f"STREAM_TOOL_RESULTS_START tools={tool_names}")
             chunk_count = 0
             for chunk in self._chat.send_message_stream(sdk_parts, config=config):
