@@ -921,7 +921,9 @@ class GoogleGenAIProvider:
                     self._trace(f"STREAM_USAGE_CHECK callback_set={on_usage_update is not None} total={usage.total_tokens} will_call={will_call}")
                     if on_usage_update and usage.total_tokens > 0:
                         try:
-                            self._trace("STREAM_USAGE_CALLING callback...")
+                            cb_name = getattr(on_usage_update, '__name__', 'unknown')
+                            cb_module = getattr(on_usage_update, '__module__', 'unknown')
+                            self._trace(f"STREAM_USAGE_CALLING callback {cb_module}.{cb_name}...")
                             on_usage_update(usage)
                             self._trace("STREAM_USAGE_CALLED callback completed")
                         except Exception as cb_err:
@@ -1056,7 +1058,9 @@ class GoogleGenAIProvider:
                     self._trace(f"STREAM_TOOL_USAGE_CHECK callback_set={on_usage_update is not None} total={usage.total_tokens} will_call={will_call}")
                     if on_usage_update and usage.total_tokens > 0:
                         try:
-                            self._trace("STREAM_TOOL_USAGE_CALLING callback...")
+                            cb_name = getattr(on_usage_update, '__name__', 'unknown')
+                            cb_module = getattr(on_usage_update, '__module__', 'unknown')
+                            self._trace(f"STREAM_TOOL_USAGE_CALLING callback {cb_module}.{cb_name}...")
                             on_usage_update(usage)
                             self._trace("STREAM_TOOL_USAGE_CALLED callback completed")
                         except Exception as cb_err:
