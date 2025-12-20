@@ -158,6 +158,11 @@ class OutputBuffer:
             style: Style for the line.
             is_turn_start: Whether this is the first line of a new turn.
         """
+        # Trace cancellation messages being added to permanent lines
+        if "cancelled" in text.lower():
+            # Check if already in lines
+            existing_count = sum(1 for line in self._lines if "cancelled" in line.text.lower())
+            self._trace(f"ADD_LINE: source={source} text={text!r} existing_cancel_count={existing_count}")
         display_lines = self._measure_display_lines(source, text, is_turn_start)
         self._lines.append(OutputLine(source, text, style, display_lines, is_turn_start))
 
