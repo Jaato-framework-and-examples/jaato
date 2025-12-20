@@ -637,7 +637,10 @@ class JaatoSession:
         try:
             # Check for cancellation before starting
             if self._cancel_token.is_cancelled:
-                return "[Cancelled before start]"
+                msg = "[Cancelled before start]"
+                if on_output:
+                    on_output("system", msg, "write")
+                return msg
 
             # Proactive rate limiting: wait if needed before request
             self._pacer.pace()
@@ -672,18 +675,24 @@ class JaatoSession:
             # Check for cancellation after initial message
             if self._cancel_token.is_cancelled or response.finish_reason == FinishReason.CANCELLED:
                 partial_text = response.text or ''
+                cancel_msg = "[Generation cancelled]"
+                if on_output:
+                    on_output("system", cancel_msg, "write")
                 if partial_text:
-                    return f"{partial_text}\n\n[Generation cancelled]"
-                return "[Generation cancelled]"
+                    return f"{partial_text}\n\n{cancel_msg}"
+                return cancel_msg
 
             # Handle function calling loop
             function_calls = list(response.function_calls) if response.function_calls else []
             while function_calls:
                 # Check for cancellation before processing tools
                 if self._cancel_token.is_cancelled:
+                    cancel_msg = "[Cancelled during tool execution]"
+                    if on_output:
+                        on_output("system", cancel_msg, "write")
                     if response.text:
-                        return f"{response.text}\n\n[Cancelled during tool execution]"
-                    return "[Cancelled during tool execution]"
+                        return f"{response.text}\n\n{cancel_msg}"
+                    return cancel_msg
 
                 # Emit any text produced alongside function calls (only in non-streaming mode)
                 if not use_streaming and response.text and on_output:
@@ -750,7 +759,10 @@ class JaatoSession:
 
                 # Check for cancellation before sending tool results
                 if self._cancel_token.is_cancelled:
-                    return "[Cancelled after tool execution]"
+                    cancel_msg = "[Cancelled after tool execution]"
+                    if on_output:
+                        on_output("system", cancel_msg, "write")
+                    return cancel_msg
 
                 # Send tool results back (with retry for rate limits)
                 self._pacer.pace()  # Proactive rate limiting
@@ -783,9 +795,12 @@ class JaatoSession:
                 # Check for cancellation or abnormal termination
                 if self._cancel_token.is_cancelled or response.finish_reason == FinishReason.CANCELLED:
                     partial_text = response.text or ''
+                    cancel_msg = "[Generation cancelled]"
+                    if on_output:
+                        on_output("system", cancel_msg, "write")
                     if partial_text:
-                        return f"{partial_text}\n\n[Generation cancelled]"
-                    return "[Generation cancelled]"
+                        return f"{partial_text}\n\n{cancel_msg}"
+                    return cancel_msg
 
                 if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE, FinishReason.CANCELLED):
                     import sys
@@ -805,7 +820,10 @@ class JaatoSession:
 
         except CancelledException:
             # Handle explicit cancellation exception
-            return "[Generation cancelled]"
+            cancel_msg = "[Generation cancelled]"
+            if on_output:
+                on_output("system", cancel_msg, "write")
+            return cancel_msg
 
         finally:
             # Record turn end time
