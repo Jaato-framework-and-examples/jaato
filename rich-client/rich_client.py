@@ -232,12 +232,8 @@ class RichClient:
 
     def initialize(self) -> bool:
         """Initialize the client."""
-        # Load environment
-        env_path = ROOT / self.env_file
-        if env_path.exists():
-            load_dotenv(env_path)
-        else:
-            load_dotenv(self.env_file)
+        # Load environment from CWD or explicit --env-file path
+        load_dotenv(self.env_file)
 
         # Check CA bundle
         active_bundle = active_cert_bundle(verbose=False)
