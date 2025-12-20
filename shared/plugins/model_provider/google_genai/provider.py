@@ -20,7 +20,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from google import genai
 from google.genai import types
 
-from ..base import GoogleAuthMethod, ModelProviderPlugin, ProviderConfig, StreamingCallback, UsageUpdateCallback
+from ..base import (
+    FunctionCallDetectedCallback,
+    GoogleAuthMethod,
+    ModelProviderPlugin,
+    ProviderConfig,
+    StreamingCallback,
+    UsageUpdateCallback,
+)
 from ..types import (
     CancelledException,
     CancelToken,
@@ -840,7 +847,8 @@ class GoogleGenAIProvider:
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
         response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None
     ) -> ProviderResponse:
         """Send a message with streaming response and optional cancellation.
 
@@ -850,6 +858,7 @@ class GoogleGenAIProvider:
             cancel_token: Optional token to request cancellation mid-stream.
             response_schema: Optional JSON Schema to constrain the response.
             on_usage_update: Optional callback for real-time token usage updates.
+            on_function_call: Optional callback for function call detection during streaming.
 
         Returns:
             ProviderResponse with accumulated text and/or function calls.
@@ -915,6 +924,9 @@ class GoogleGenAIProvider:
                                     self._trace(f"STREAM_FUNC_CALL name={fc.name}")
                                     # Flush any pending text before adding function call
                                     flush_text_block()
+                                    # Notify caller about function call detection (for UI positioning)
+                                    if on_function_call:
+                                        on_function_call(fc)
                                     # Add function call as a part
                                     parts.append(Part.from_function_call(fc))
                                     function_calls.append(fc)
@@ -988,7 +1000,8 @@ class GoogleGenAIProvider:
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
         response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None
     ) -> ProviderResponse:
         """Send tool results with streaming response and optional cancellation.
 
@@ -998,6 +1011,7 @@ class GoogleGenAIProvider:
             cancel_token: Optional token to request cancellation mid-stream.
             response_schema: Optional JSON Schema to constrain the response.
             on_usage_update: Optional callback for real-time token usage updates.
+            on_function_call: Optional callback for function call detection during streaming.
 
         Returns:
             ProviderResponse with accumulated text and/or function calls.
@@ -1065,6 +1079,9 @@ class GoogleGenAIProvider:
                                     self._trace(f"STREAM_TOOL_FUNC_CALL name={fc.name}")
                                     # Flush any pending text before adding function call
                                     flush_text_block()
+                                    # Notify caller about function call detection (for UI positioning)
+                                    if on_function_call:
+                                        on_function_call(fc)
                                     # Add function call as a part
                                     parts.append(Part.from_function_call(fc))
                                     function_calls.append(fc)
