@@ -14,6 +14,7 @@ from typing import Dict, List, Any, Callable, Optional, Tuple
 
 from ..base import UserCommand, CommandParameter, CommandCompletion
 from ..model_provider.types import ToolSchema
+from ..subagent.config import expand_variables
 
 
 # Message types for background thread communication
@@ -253,10 +254,11 @@ class MCPToolPlugin:
         """
         if self._initialized:
             return
+        # Expand variables in config values (e.g., ${projectPath}, ${workspaceRoot})
+        config = expand_variables(config) if config else {}
         # Extract config from plugin_configs
-        if config:
-            self._agent_name = config.get("agent_name")
-            self._custom_config_path = config.get("config_path")
+        self._agent_name = config.get("agent_name")
+        self._custom_config_path = config.get("config_path")
         self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True

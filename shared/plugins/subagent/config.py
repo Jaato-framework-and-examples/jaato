@@ -3,11 +3,124 @@
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
+
+
+def expand_variables(
+    value: Any,
+    context: Optional[Dict[str, str]] = None
+) -> Any:
+    """Expand ${variable} references in a value.
+
+    Supports:
+    - Environment variables: ${HOME}, ${USER}, ${PATH}
+    - Context variables: ${projectPath}, ${workspaceRoot}, ${cwd}
+    - Nested expansion in dicts and lists
+
+    Args:
+        value: Value to expand (string, dict, list, or other)
+        context: Optional dict of context variables to expand
+
+    Returns:
+        Value with variables expanded
+
+    Examples:
+        >>> expand_variables("${HOME}/projects", {})
+        '/home/user/projects'
+
+        >>> expand_variables({"path": "${projectPath}/.lsp.json"}, {"projectPath": "/app"})
+        {'path': '/app/.lsp.json'}
+    """
+    if context is None:
+        context = {}
+
+    # Add default context variables
+    default_context = {
+        'cwd': os.getcwd(),
+        'workspaceRoot': _find_workspace_root(),
+        'HOME': os.environ.get('HOME', ''),
+        'USER': os.environ.get('USER', ''),
+    }
+    # Merge with provided context (provided takes precedence)
+    effective_context = {**default_context, **context}
+
+    if isinstance(value, str):
+        return _expand_string(value, effective_context)
+    elif isinstance(value, dict):
+        return {k: expand_variables(v, context) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [expand_variables(item, context) for item in value]
+    else:
+        return value
+
+
+def _expand_string(s: str, context: Dict[str, str]) -> str:
+    """Expand ${variable} references in a string.
+
+    Args:
+        s: String containing ${variable} references
+        context: Dict of variable names to values
+
+    Returns:
+        String with variables expanded
+    """
+    if '${' not in s:
+        return s
+
+    def replace_var(match: re.Match) -> str:
+        var_name = match.group(1)
+        # First check context, then environment
+        if var_name in context:
+            return context[var_name]
+        return os.environ.get(var_name, match.group(0))  # Keep original if not found
+
+    # Match ${VAR_NAME} pattern
+    pattern = r'\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}'
+    return re.sub(pattern, replace_var, s)
+
+
+def _find_workspace_root() -> str:
+    """Find the workspace root by looking for .git directory.
+
+    Returns:
+        Path to workspace root, or cwd if not found
+    """
+    current = Path.cwd()
+    for parent in [current] + list(current.parents):
+        if (parent / '.git').exists():
+            return str(parent)
+        if (parent / '.jaato').exists():
+            return str(parent)
+    return str(current)
+
+
+def expand_plugin_configs(
+    plugin_configs: Dict[str, Dict[str, Any]],
+    context: Optional[Dict[str, str]] = None
+) -> Dict[str, Dict[str, Any]]:
+    """Expand variables in all plugin configurations.
+
+    Args:
+        plugin_configs: Dict of plugin name -> config dict
+        context: Optional context variables (e.g., projectPath)
+
+    Returns:
+        Plugin configs with all variables expanded
+
+    Example:
+        >>> configs = {
+        ...     "lsp": {"config_path": "${projectPath}/.lsp.json"},
+        ...     "mcp": {"config_path": "${projectPath}/.mcp.json"}
+        ... }
+        >>> expand_plugin_configs(configs, {"projectPath": "/app"})
+        {'lsp': {'config_path': '/app/.lsp.json'}, 'mcp': {'config_path': '/app/.mcp.json'}}
+    """
+    return expand_variables(plugin_configs, context)
 
 
 @dataclass
