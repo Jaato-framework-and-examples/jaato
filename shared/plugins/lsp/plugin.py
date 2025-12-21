@@ -736,10 +736,13 @@ Example:
                 """Connect to a language server."""
                 self._log_event(LOG_INFO, "Connecting to server", server=name)
                 try:
+                    # Expand variables in args (e.g., ${workspaceRoot})
+                    raw_args = spec.get('args', [])
+                    expanded_args = expand_variables(raw_args)
                     config = ServerConfig(
                         name=name,
                         command=spec.get('command', ''),
-                        args=spec.get('args', []),
+                        args=expanded_args,
                         env=spec.get('env'),
                         root_uri=spec.get('rootUri'),
                         language_id=spec.get('languageId'),
