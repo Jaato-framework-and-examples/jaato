@@ -665,21 +665,24 @@ class PTDisplay:
 
         # Plan popup (floating overlay, shown with Ctrl+P)
         def get_popup_height():
-            """Calculate popup height based on current agent's plan steps."""
+            """Calculate popup height by rendering content and counting lines."""
             plan_data = self._get_current_plan_data()
             if not plan_data:
-                return 8
-            steps = plan_data.get("steps", [])
-            # Height components:
-            #   - Top border + title: 1
-            #   - Steps: ~3 lines each (description may wrap + result/error)
-            #   - Separator: 1
-            #   - Progress line: 1
-            #   - Bottom border: 1
-            # Total base: 4, plus 3 per step (generous for wrapping)
-            base_height = 4
-            step_lines = len(steps) * 3  # 3 lines per step to account for wrapping
-            return min(base_height + step_lines, self._height - 4)
+                return 6
+
+            # Render the popup to get actual line count
+            popup_width = max(40, min(80, int(self._width * 0.6)))
+            original_data = self._plan_panel._plan_data
+            self._plan_panel._plan_data = plan_data
+            rendered = self._plan_panel.render_popup(width=popup_width)
+            self._plan_panel._plan_data = original_data
+
+            # Render to string and count lines
+            rendered_str = self._renderer.render(rendered)
+            line_count = rendered_str.count('\n') + 1
+
+            # Cap at available screen height
+            return min(line_count, self._height - 4)
 
         plan_popup_window = ConditionalContainer(
             Window(
