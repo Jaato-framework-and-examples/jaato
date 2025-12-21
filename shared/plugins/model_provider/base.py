@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Protocol, runti
 from .types import (
     CancelledException,
     CancelToken,
+    FunctionCall,
     Message,
     Part,
     ProviderResponse,
@@ -39,6 +40,13 @@ UsageUpdateCallback = Callable[[TokenUsage], None]
 # Parameters: (percent_used: float, threshold: float) - current and threshold percentages
 # Called when context usage crosses configured threshold during streaming
 GCThresholdCallback = Callable[[float, float], None]
+
+# Function call detected callback for streaming
+# Parameters: (function_call: FunctionCall) - the function call detected mid-stream
+# Called when a function call is detected during streaming, BEFORE any subsequent
+# text chunks are emitted. This allows the caller to insert tool tree markers
+# at the correct position between text blocks.
+FunctionCallDetectedCallback = Callable[[FunctionCall], None]
 
 
 # Authentication method type for Google GenAI provider
@@ -363,7 +371,8 @@ class ModelProviderPlugin(Protocol):
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
         response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional['UsageUpdateCallback'] = None
+        on_usage_update: Optional['UsageUpdateCallback'] = None,
+        on_function_call: Optional['FunctionCallDetectedCallback'] = None
     ) -> ProviderResponse:
         """Send a message with streaming response and optional cancellation.
 
@@ -378,6 +387,10 @@ class ModelProviderPlugin(Protocol):
             response_schema: Optional JSON Schema to constrain the response.
             on_usage_update: Optional callback invoked when token usage is
                 updated during streaming (for real-time accounting).
+            on_function_call: Optional callback invoked when a function call
+                is detected mid-stream. Called BEFORE any subsequent text
+                chunks are emitted, allowing the caller to insert tool tree
+                markers at the correct position between text blocks.
 
         Returns:
             ProviderResponse with accumulated text and/or function calls.
@@ -411,7 +424,8 @@ class ModelProviderPlugin(Protocol):
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
         response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional['UsageUpdateCallback'] = None
+        on_usage_update: Optional['UsageUpdateCallback'] = None,
+        on_function_call: Optional['FunctionCallDetectedCallback'] = None
     ) -> ProviderResponse:
         """Send tool results with streaming response and optional cancellation.
 
@@ -424,6 +438,8 @@ class ModelProviderPlugin(Protocol):
             response_schema: Optional JSON Schema to constrain the response.
             on_usage_update: Optional callback invoked when token usage is
                 updated during streaming (for real-time accounting).
+            on_function_call: Optional callback invoked when a function call
+                is detected mid-stream. See send_message_streaming() for details.
 
         Returns:
             ProviderResponse with accumulated text and/or function calls.
