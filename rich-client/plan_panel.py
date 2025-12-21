@@ -109,16 +109,20 @@ class PlanPanel:
 
         return result
 
-    def render_popup(self, width: int = 50) -> Panel:
+    def render_popup(self, width: int = 50, plan_data: Optional[Dict[str, Any]] = None) -> Panel:
         """Render the plan popup overlay.
 
         Args:
             width: Width of the popup panel.
+            plan_data: Optional plan data to render. If None, uses self._plan_data.
 
         Returns:
             Rich Panel containing the full plan details.
         """
-        if not self._plan_data:
+        # Use provided plan_data or fall back to instance data
+        data = plan_data if plan_data is not None else self._plan_data
+
+        if not data:
             return Panel(
                 Text("No active plan", style="dim italic"),
                 title="[bold]Plan[/bold]",
@@ -126,7 +130,7 @@ class PlanPanel:
                 width=width,
             )
 
-        plan = self._plan_data
+        plan = data
         title = plan.get("title", "Untitled Plan")
         steps = plan.get("steps", [])
         progress = plan.get("progress", {})

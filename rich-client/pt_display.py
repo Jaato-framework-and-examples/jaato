@@ -359,12 +359,8 @@ class PTDisplay:
         # Use current agent's plan data (from registry if available)
         plan_data = self._get_current_plan_data()
 
-        # Temporarily set plan data on panel for rendering
-        # (render_popup uses self._plan_data internally)
-        original_data = self._plan_panel._plan_data
-        self._plan_panel._plan_data = plan_data
-        rendered = self._plan_panel.render_popup(width=popup_width)
-        self._plan_panel._plan_data = original_data
+        # Pass plan_data directly to avoid thread-unsafe state modification
+        rendered = self._plan_panel.render_popup(width=popup_width, plan_data=plan_data)
 
         return to_formatted_text(ANSI(self._renderer.render(rendered)))
 
@@ -671,11 +667,9 @@ class PTDisplay:
                 return 6
 
             # Render the popup to get actual line count
+            # Pass plan_data directly to avoid thread-unsafe state modification
             popup_width = max(40, min(80, int(self._width * 0.6)))
-            original_data = self._plan_panel._plan_data
-            self._plan_panel._plan_data = plan_data
-            rendered = self._plan_panel.render_popup(width=popup_width)
-            self._plan_panel._plan_data = original_data
+            rendered = self._plan_panel.render_popup(width=popup_width, plan_data=plan_data)
 
             # Render to string and count lines
             rendered_str = self._renderer.render(rendered)
