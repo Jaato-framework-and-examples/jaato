@@ -483,6 +483,13 @@ class RichClient:
         session.set_retry_callback(on_retry)
         self._trace("Retry callback configured for output panel")
 
+        # Also set callback on subagent plugin so subagent sessions use it
+        if self.registry:
+            subagent_plugin = self.registry.get_plugin("subagent")
+            if subagent_plugin and hasattr(subagent_plugin, 'set_retry_callback'):
+                subagent_plugin.set_retry_callback(on_retry)
+                self._trace("Retry callback configured for subagent plugin")
+
     def _setup_agent_hooks(self) -> None:
         """Set up agent lifecycle hooks for UI integration."""
         if not self._jaato or not self._agent_registry:
