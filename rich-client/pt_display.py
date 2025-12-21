@@ -668,12 +668,19 @@ class PTDisplay:
             """Calculate popup height based on current agent's plan steps."""
             plan_data = self._get_current_plan_data()
             if not plan_data:
-                return 5
+                return 6
             steps = plan_data.get("steps", [])
-            # Each step is 1-2 lines, plus title (1) + separator (1) + progress (1) + borders (2)
-            base_height = 5
-            step_lines = len(steps) * 2  # Assume 2 lines per step (step + result)
-            return min(base_height + step_lines, self._height - 4)
+            # Height components:
+            #   - Top border + title: 1
+            #   - Steps: ~2 lines each (description + optional result/error)
+            #   - Separator: 1
+            #   - Progress line: 1
+            #   - Bottom border: 1
+            # Total base: 4, plus 2 per step
+            base_height = 4
+            step_lines = len(steps) * 2  # Assume 2 lines per step
+            # Add 1 extra line for safety (text wrapping, etc.)
+            return min(base_height + step_lines + 1, self._height - 4)
 
         plan_popup_window = ConditionalContainer(
             Window(
