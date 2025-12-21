@@ -10,7 +10,7 @@ prompt_toolkit's ANSI() for display in FormattedTextControl windows.
 import shutil
 import sys
 from io import StringIO
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
@@ -226,6 +226,61 @@ class PTDisplay:
         # Clamp to configured limits
         return max(self.INPUT_MIN_HEIGHT, min(height, self.INPUT_MAX_HEIGHT))
 
+    def _get_current_plan_data(self) -> Optional[Dict[str, Any]]:
+        """Get plan data for the currently selected agent.
+
+        Uses agent registry if available (per-agent plans), otherwise
+        falls back to the global PlanPanel.
+        """
+        if self._agent_registry:
+            return self._agent_registry.get_selected_plan_data()
+        return self._plan_panel._plan_data
+
+    def _get_current_plan_symbols(self) -> List[tuple]:
+        """Get plan symbols for the currently selected agent.
+
+        Returns formatted text tuples for prompt_toolkit status bar.
+        """
+        plan_data = self._get_current_plan_data()
+        if not plan_data:
+            return []
+
+        steps = plan_data.get("steps", [])
+        if not steps:
+            return []
+
+        # Map status to prompt_toolkit style classes
+        style_map = {
+            "pending": "class:plan.pending",
+            "in_progress": "class:plan.in-progress",
+            "completed": "class:plan.completed",
+            "failed": "class:plan.failed",
+            "skipped": "class:plan.skipped",
+        }
+
+        symbol_map = {
+            "pending": "○",
+            "in_progress": "◐",
+            "completed": "●",
+            "failed": "✗",
+            "skipped": "⊘",
+        }
+
+        # Sort by sequence and build formatted tuples
+        sorted_steps = sorted(steps, key=lambda s: s.get("sequence", 0))
+        result = []
+        for step in sorted_steps:
+            status = step.get("status", "pending")
+            symbol = symbol_map.get(status, "○")
+            style = style_map.get(status, "class:plan.pending")
+            result.append((style, symbol))
+
+        return result
+
+    def _current_plan_has_data(self) -> bool:
+        """Check if there's plan data for the current agent."""
+        return self._get_current_plan_data() is not None
+
     def _get_status_bar_content(self):
         """Get status bar content as formatted text."""
         # Agent name (FIRST field, from selected agent if registry present)
@@ -263,8 +318,8 @@ class PTDisplay:
             ("class:status-bar.value", agent_name),
         ]
 
-        # Add plan symbols if there's an active plan
-        plan_symbols = self._plan_panel.get_status_symbols_formatted()
+        # Add plan symbols if there's an active plan (use selected agent's plan if registry present)
+        plan_symbols = self._get_current_plan_symbols()
         if plan_symbols:
             result.append(("class:status-bar.separator", "  │  "))
             result.extend(plan_symbols)
@@ -297,7 +352,17 @@ class PTDisplay:
         """Get rendered plan popup content as ANSI for prompt_toolkit."""
         # Calculate popup width (about 60% of terminal, min 40, max 80)
         popup_width = max(40, min(80, int(self._width * 0.6)))
+
+        # Use current agent's plan data (from registry if available)
+        plan_data = self._get_current_plan_data()
+
+        # Temporarily set plan data on panel for rendering
+        # (render_popup uses self._plan_data internally)
+        original_data = self._plan_panel._plan_data
+        self._plan_panel._plan_data = plan_data
         rendered = self._plan_panel.render_popup(width=popup_width)
+        self._plan_panel._plan_data = original_data
+
         return to_formatted_text(ANSI(self._renderer.render(rendered)))
 
     def _get_output_content(self):
@@ -511,7 +576,8 @@ class PTDisplay:
         @kb.add("c-p")
         def handle_ctrl_p(event):
             """Handle Ctrl+P - toggle plan popup visibility."""
-            if self._plan_panel.has_plan:
+            # Check if current agent has a plan (registry or fallback)
+            if self._current_plan_has_data():
                 self._plan_panel.toggle_popup()
                 self._app.invalidate()
 
@@ -596,11 +662,11 @@ class PTDisplay:
 
         # Plan popup (floating overlay, shown with Ctrl+P)
         def get_popup_height():
-            """Calculate popup height based on plan steps."""
-            if not self._plan_panel.has_plan:
+            """Calculate popup height based on current agent's plan steps."""
+            plan_data = self._get_current_plan_data()
+            if not plan_data:
                 return 5
-            plan_data = self._plan_panel._plan_data
-            steps = plan_data.get("steps", []) if plan_data else []
+            steps = plan_data.get("steps", [])
             # Each step is 1-2 lines, plus title (1) + separator (1) + progress (1) + borders (2)
             base_height = 5
             step_lines = len(steps) * 2  # Assume 2 lines per step (step + result)
@@ -611,7 +677,7 @@ class PTDisplay:
                 FormattedTextControl(self._get_plan_popup_content),
                 height=get_popup_height,
             ),
-            filter=Condition(lambda: self._plan_panel.is_popup_visible),
+            filter=Condition(lambda: self._plan_panel.is_popup_visible and self._current_plan_has_data()),
         )
 
         # Root layout with completions menu and plan popup
@@ -747,20 +813,41 @@ class PTDisplay:
 
     # Plan panel methods
 
-    def update_plan(self, plan_data: Dict[str, Any]) -> None:
-        """Update the plan panel."""
-        self._plan_panel.update_plan(plan_data)
+    def update_plan(self, plan_data: Dict[str, Any], agent_id: Optional[str] = None) -> None:
+        """Update the plan for an agent.
+
+        Args:
+            plan_data: Plan status dict with title, status, steps, progress.
+            agent_id: Which agent's plan to update. If None, updates the global
+                     plan panel (backwards compatibility) or "main" in registry.
+        """
+        if self._agent_registry:
+            # Route through registry for per-agent plan tracking
+            target_id = agent_id or "main"
+            self._agent_registry.update_plan(target_id, plan_data)
+        else:
+            # Fallback to global plan panel
+            self._plan_panel.update_plan(plan_data)
         self.refresh()
 
-    def clear_plan(self) -> None:
-        """Clear the plan panel."""
-        self._plan_panel.clear()
+    def clear_plan(self, agent_id: Optional[str] = None) -> None:
+        """Clear the plan for an agent.
+
+        Args:
+            agent_id: Which agent's plan to clear. If None, clears the global
+                     plan panel (backwards compatibility) or "main" in registry.
+        """
+        if self._agent_registry:
+            target_id = agent_id or "main"
+            self._agent_registry.clear_plan(target_id)
+        else:
+            self._plan_panel.clear()
         self.refresh()
 
     @property
     def has_plan(self) -> bool:
-        """Check if there's an active plan."""
-        return self._plan_panel.has_plan
+        """Check if there's an active plan for the current agent."""
+        return self._current_plan_has_data()
 
     # Output buffer methods
 
