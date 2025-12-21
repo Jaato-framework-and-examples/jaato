@@ -460,13 +460,19 @@ sequenceDiagram
           <code>JaatoSession._run_chat_loop()</code>. No plugin-specific changes are required.
         </p>
 
-        <h3>Hook Propagation</h3>
-        <p>Hooks are set at multiple levels:</p>
+        <h3>Hook and Callback Propagation</h3>
+        <p>Hooks and callbacks are set at multiple levels to ensure all agents behave consistently:</p>
         <ul>
           <li><code>JaatoClient.set_ui_hooks(hooks)</code> - Main agent, passes to session</li>
           <li><code>JaatoSession.set_ui_hooks(hooks, agent_id)</code> - Tool lifecycle emission</li>
+          <li><code>JaatoSession.set_retry_callback(callback)</code> - Routes retry notifications through custom handler</li>
           <li><code>SubagentPlugin.set_ui_hooks(hooks)</code> - Passes to spawned sessions</li>
+          <li><code>SubagentPlugin.set_retry_callback(callback)</code> - Passes to spawned sessions</li>
         </ul>
+        <p>
+          The retry callback ensures rate limit retry messages from subagents are routed through the same
+          channel as the parent (e.g., to the rich client's output panel) instead of printing to console.
+        </p>
         <p>
           See <a href="../subagent_ui_hooks.html">Subagent UI Hooks API</a> for complete documentation.
         </p>
