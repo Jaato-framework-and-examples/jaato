@@ -9,6 +9,7 @@ prompt_toolkit's ANSI() for display in FormattedTextControl windows.
 
 import shutil
 import sys
+import time
 from io import StringIO
 from typing import Any, Callable, Dict, List, Optional
 
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 from plan_panel import PlanPanel
 from output_buffer import OutputBuffer
 from agent_panel import AgentPanel
+from clipboard import ClipboardConfig, ClipboardProvider, create_provider
 
 
 class RichRenderer:
@@ -82,7 +84,12 @@ class PTDisplay:
     INPUT_MIN_HEIGHT = 1   # Minimum input height (single line)
     INPUT_MAX_HEIGHT = 10  # Maximum input height before scrolling
 
-    def __init__(self, input_handler: Optional["InputHandler"] = None, agent_registry: Optional["AgentRegistry"] = None):
+    def __init__(
+        self,
+        input_handler: Optional["InputHandler"] = None,
+        agent_registry: Optional["AgentRegistry"] = None,
+        clipboard_config: Optional[ClipboardConfig] = None,
+    ):
         """Initialize the display.
 
         Args:
@@ -90,6 +97,8 @@ class PTDisplay:
                           If provided, enables tab completion for commands and files.
             agent_registry: Optional AgentRegistry for agent visibility panel.
                           If provided, enables the agent panel (AGENT_PANEL_WIDTH_RATIO width).
+            clipboard_config: Optional ClipboardConfig for copy/paste operations.
+                             If not provided, uses config from environment.
         """
         self._width, self._height = shutil.get_terminal_size()
 
@@ -132,6 +141,18 @@ class PTDisplay:
         self._model_provider: str = ""
         self._model_name: str = ""
         self._context_usage: Dict[str, Any] = {}
+
+        # Temporary status message (for copy feedback, etc.)
+        self._status_message: Optional[str] = None
+        self._status_message_expires: float = 0.0
+
+        # Clipboard support
+        self._clipboard_config = clipboard_config or ClipboardConfig.from_env()
+        self._clipboard: ClipboardProvider = create_provider(self._clipboard_config)
+
+        # Mouse selection tracking (for preemptive copy)
+        self._mouse_selection_start: Optional[int] = None  # Start Y coordinate
+        self._mouse_selecting: bool = False
 
         # Permission input filtering state
         self._waiting_for_channel_input: bool = False
@@ -283,6 +304,17 @@ class PTDisplay:
 
     def _get_status_bar_content(self):
         """Get status bar content as formatted text."""
+        # Check for temporary status message (e.g., copy feedback)
+        if self._status_message and time.time() < self._status_message_expires:
+            return [
+                ("class:status-bar.label", " "),
+                ("class:status-bar.value bold", self._status_message),
+                ("class:status-bar", " "),
+            ]
+        elif self._status_message:
+            # Message expired, clear it
+            self._status_message = None
+
         # Agent name (FIRST field, from selected agent if registry present)
         if self._agent_registry:
             agent_name = self._agent_registry.get_selected_agent_name()
@@ -411,6 +443,84 @@ class PTDisplay:
         panel = self._agent_panel.render(available_height)
         # Use full-width renderer - Panel's width parameter handles sizing
         return to_formatted_text(ANSI(self._renderer.render(panel)))
+
+    def set_status_message(self, message: str, timeout: float = 2.0) -> None:
+        """Set a temporary status bar message.
+
+        Args:
+            message: The message to display.
+            timeout: How long to show the message (seconds).
+        """
+        self._status_message = message
+        self._status_message_expires = time.time() + timeout
+        if self._app:
+            self._app.invalidate()
+
+    def _yank_last_response(self) -> None:
+        """Copy the last model response to clipboard (chrome-free)."""
+        # Get the appropriate buffer (selected agent if registry present)
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if not buffer:
+                buffer = self._output_buffer
+        else:
+            buffer = self._output_buffer
+
+        # Extract chrome-free text using configured sources
+        text = buffer.get_last_response_text(sources=self._clipboard_config.sources)
+
+        if text:
+            self._clipboard.copy(text)
+            # Count lines for feedback
+            line_count = text.count('\n') + 1
+            self.set_status_message(f"Yanked {line_count} line{'s' if line_count != 1 else ''}")
+        else:
+            self.set_status_message("Nothing to yank")
+
+    def _yank_selection(self, start_y: int, end_y: int) -> None:
+        """Copy selected screen region to clipboard (chrome-free).
+
+        Args:
+            start_y: Start Y coordinate (screen row).
+            end_y: End Y coordinate (screen row).
+        """
+        # Get the appropriate buffer
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if not buffer:
+                buffer = self._output_buffer
+        else:
+            buffer = self._output_buffer
+
+        # Calculate visible area height (account for status bar and input)
+        input_height = self._get_input_height()
+        visible_height = self._height - 1 - input_height  # minus status bar and input
+
+        # Get visible line range in buffer coordinates
+        visible_start, visible_end = buffer.get_visible_line_range(visible_height)
+
+        # Map screen Y coordinates to buffer line indices
+        # Screen Y is relative to output panel (after status bar)
+        # Ensure start <= end
+        if start_y > end_y:
+            start_y, end_y = end_y, start_y
+
+        # Convert screen coordinates to buffer coordinates
+        buffer_start = visible_start + start_y
+        buffer_end = visible_start + end_y
+
+        # Extract chrome-free text
+        text = buffer.get_text_in_line_range(
+            buffer_start, buffer_end,
+            sources=self._clipboard_config.sources
+        )
+
+        if text:
+            self._clipboard.copy(text)
+            line_count = text.count('\n') + 1
+            self.set_status_message(f"Yanked {line_count} line{'s' if line_count != 1 else ''}")
+        else:
+            self.set_status_message("Nothing to yank (no matching content)")
 
     def _build_app(self) -> None:
         """Build the prompt_toolkit application."""
@@ -600,6 +710,11 @@ class PTDisplay:
             else:
                 self._output_buffer.toggle_tools_expanded()
             self._app.invalidate()
+
+        @kb.add("c-y")
+        def handle_ctrl_y(event):
+            """Handle Ctrl+Y - yank (copy) last response to clipboard."""
+            self._yank_last_response()
 
         # Status bar at top (always visible, 1 line)
         status_bar = Window(
