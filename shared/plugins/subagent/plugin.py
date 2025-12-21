@@ -1417,6 +1417,14 @@ class SubagentPlugin:
             )
 
         try:
+            # Save current thread-local agent_name so we can restore it after
+            # subagent completes. This is critical because subagents run
+            # synchronously in the same thread as the parent agent.
+            # Without this restore, the parent's TodoPlugin context would be
+            # corrupted after spawning a subagent.
+            from shared.plugins.todo.plugin import _thread_local as todo_thread_local
+            saved_agent_name = getattr(todo_thread_local, 'agent_name', None)
+
             # Create session from runtime with profile's configuration
             # profile.plugins is always a list (possibly empty); pass it directly
             # Empty list = no tools, non-empty list = only those tools
@@ -1629,6 +1637,12 @@ class SubagentPlugin:
                 response='',
                 error=str(e)
             )
+
+        finally:
+            # Restore the parent's thread-local agent_name context
+            # This ensures the parent agent's TodoPlugin operations use
+            # the correct agent context after subagent execution completes
+            todo_thread_local.agent_name = saved_agent_name
 
     def _run_subagent_legacy(
         self,
