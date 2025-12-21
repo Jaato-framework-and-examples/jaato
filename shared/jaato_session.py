@@ -998,6 +998,11 @@ class JaatoSession:
 
             # Emit hook: tool starting
             if self._ui_hooks:
+                # Signal UI to flush any pending output before displaying tool tree
+                # This ensures text appears before tool trees in async/buffered UIs
+                if on_output:
+                    self._trace(f"SESSION_OUTPUT_FLUSH before tool {name}")
+                    on_output("system", "", "flush")
                 self._trace(f"SESSION_TOOL_START name={name} call_id={fc.id}")
                 self._ui_hooks.on_tool_call_start(
                     agent_id=self._agent_id,
