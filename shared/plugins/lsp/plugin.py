@@ -75,6 +75,8 @@ class LSPToolPlugin:
         self._failed_servers: Dict[str, str] = {}
         self._log: deque = deque(maxlen=MAX_LOG_ENTRIES)
         self._log_lock = threading.Lock()
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
 
     def _log_event(
         self,
@@ -97,12 +99,34 @@ class LSPToolPlugin:
     def name(self) -> str:
         return "lsp"
 
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging.
+
+        Uses JAATO_TRACE_LOG env var, or defaults to /tmp/rich_client_trace.log.
+        Silently skips if trace file cannot be written.
+        """
+        import tempfile
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [LSP{agent_prefix}] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass  # Silently skip if trace file cannot be written
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the LSP plugin by starting the background thread.
 
         Args:
             config: Optional configuration dict. Supports:
                 - config_path: Path to .lsp.json file (overrides default search)
+                - agent_name: Name for trace logging
         """
         if self._initialized:
             return
@@ -110,14 +134,18 @@ class LSPToolPlugin:
         # Expand variables in config values (e.g., ${projectPath}, ${workspaceRoot})
         config = expand_variables(config) if config else {}
 
-        # Extract custom config path from plugin_configs
+        # Extract config values
+        self._agent_name = config.get('agent_name')
         self._custom_config_path = config.get('config_path')
 
+        self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True
+        self._trace(f"initialize: connected_servers={list(self._connected_servers)}")
 
     def shutdown(self) -> None:
         """Shutdown the LSP plugin and clean up resources."""
+        self._trace("shutdown: cleaning up resources")
         if self._request_queue:
             self._request_queue.put((None, None))
         if self._thread and self._thread.is_alive():
@@ -869,10 +897,12 @@ Example:
 
     def _execute_method(self, method: str, args: Dict[str, Any]) -> Any:
         """Execute an LSP method synchronously."""
+        self._trace(f"execute: {method} args={args}")
         if not self._initialized:
             self.initialize()
 
         if not self._connected_servers:
+            self._trace(f"execute: {method} FAILED - no servers connected")
             return {"error": "No LSP servers connected. Use 'lsp connect <server>' first."}
 
         try:
@@ -880,11 +910,15 @@ Example:
             status, result = self._response_queue.get(timeout=30)
 
             if status == 'error':
+                self._trace(f"execute: {method} ERROR - {result}")
                 return {"error": result}
+            self._trace(f"execute: {method} OK")
             return result
         except queue.Empty:
+            self._trace(f"execute: {method} TIMEOUT")
             return {"error": "LSP request timed out"}
         except Exception as e:
+            self._trace(f"execute: {method} EXCEPTION - {e}")
             return {"error": str(e)}
 
     def _exec_goto_definition(self, args: Dict[str, Any]) -> Any:
