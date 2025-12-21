@@ -10,7 +10,7 @@ prompt_toolkit's ANSI() for display in FormattedTextControl windows.
 import shutil
 import sys
 from io import StringIO
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
@@ -113,9 +113,6 @@ class PTDisplay:
 
         # Rich renderer
         self._renderer = RichRenderer(self._width)
-
-        # Layout configuration
-        self._plan_height = 12
 
         # Input handling with optional completion
         self._input_handler = input_handler
@@ -229,9 +226,60 @@ class PTDisplay:
         # Clamp to configured limits
         return max(self.INPUT_MIN_HEIGHT, min(height, self.INPUT_MAX_HEIGHT))
 
-    def _has_plan(self) -> bool:
-        """Check if plan panel should be visible."""
-        return self._plan_panel.is_visible
+    def _get_current_plan_data(self) -> Optional[Dict[str, Any]]:
+        """Get plan data for the currently selected agent.
+
+        Uses agent registry if available (per-agent plans), otherwise
+        falls back to the global PlanPanel.
+        """
+        if self._agent_registry:
+            return self._agent_registry.get_selected_plan_data()
+        return self._plan_panel._plan_data
+
+    def _get_current_plan_symbols(self) -> List[tuple]:
+        """Get plan symbols for the currently selected agent.
+
+        Returns formatted text tuples for prompt_toolkit status bar.
+        """
+        plan_data = self._get_current_plan_data()
+        if not plan_data:
+            return []
+
+        steps = plan_data.get("steps", [])
+        if not steps:
+            return []
+
+        # Map status to prompt_toolkit style classes
+        style_map = {
+            "pending": "class:plan.pending",
+            "in_progress": "class:plan.in-progress",
+            "completed": "class:plan.completed",
+            "failed": "class:plan.failed",
+            "skipped": "class:plan.skipped",
+        }
+
+        symbol_map = {
+            "pending": "○",
+            "in_progress": "◐",
+            "completed": "●",
+            "failed": "✗",
+            "skipped": "⊘",
+        }
+
+        # Sort by sequence and build formatted tuples
+        sorted_steps = sorted(steps, key=lambda s: s.get("sequence", 0))
+        result = []
+        for step in sorted_steps:
+            status = step.get("status", "pending")
+            symbol = symbol_map.get(status, "○")
+            style = style_map.get(status, "class:plan.pending")
+            result.append((style, symbol))
+
+        return result
+
+    def _current_plan_has_data(self) -> bool:
+        """Check if there's plan data for the current agent."""
+        return self._get_current_plan_data() is not None
 
     def _get_status_bar_content(self):
         """Get status bar content as formatted text."""
@@ -264,10 +312,22 @@ class PTDisplay:
             context_str = "100% available"
 
         # Build formatted text with columns
-        # Agent | Provider | Model | Context
-        return [
+        # Agent | Plan symbols | Provider | Model | Context
+        result = [
             ("class:status-bar.label", " Agent: "),
             ("class:status-bar.value", agent_name),
+        ]
+
+        # Add plan symbols if there's an active plan (use selected agent's plan if registry present)
+        plan_symbols = self._get_current_plan_symbols()
+        if plan_symbols:
+            result.append(("class:status-bar.separator", "  │  "))
+            result.extend(plan_symbols)
+            # Add hint to show popup (only when popup is not visible)
+            if not self._plan_panel.is_popup_visible:
+                result.append(("class:status-bar.label", " [Ctrl+P to expand]"))
+
+        result.extend([
             ("class:status-bar.separator", "  │  "),
             ("class:status-bar.label", "Provider: "),
             ("class:status-bar.value", provider),
@@ -278,7 +338,9 @@ class PTDisplay:
             ("class:status-bar.label", "Context: "),
             ("class:status-bar.value", context_str),
             ("class:status-bar", " "),
-        ]
+        ])
+
+        return result
 
     def _get_scroll_page_size(self) -> int:
         """Get the number of lines to scroll per page (half the visible height)."""
@@ -286,17 +348,25 @@ class PTDisplay:
         self._update_dimensions()
         input_height = self._get_input_height()
         available_height = self._height - 1 - input_height  # minus status bar and input area
-        if self._plan_panel.has_plan:
-            available_height -= self._plan_height
         # Scroll by half the visible content area
         return max(3, (available_height - 4) // 2)
 
-    def _get_plan_content(self):
-        """Get rendered plan content as ANSI for prompt_toolkit."""
-        if self._plan_panel.has_plan:
-            rendered = self._plan_panel.render()
-            return to_formatted_text(ANSI(self._renderer.render(rendered)))
-        return to_formatted_text(ANSI(""))
+    def _get_plan_popup_content(self):
+        """Get rendered plan popup content as ANSI for prompt_toolkit."""
+        # Calculate popup width (about 60% of terminal, min 40, max 80)
+        popup_width = max(40, min(80, int(self._width * 0.6)))
+
+        # Use current agent's plan data (from registry if available)
+        plan_data = self._get_current_plan_data()
+
+        # Temporarily set plan data on panel for rendering
+        # (render_popup uses self._plan_data internally)
+        original_data = self._plan_panel._plan_data
+        self._plan_panel._plan_data = plan_data
+        rendered = self._plan_panel.render_popup(width=popup_width)
+        self._plan_panel._plan_data = original_data
+
+        return to_formatted_text(ANSI(self._renderer.render(rendered)))
 
     def _get_output_content(self):
         """Get rendered output content as ANSI for prompt_toolkit."""
@@ -319,8 +389,6 @@ class PTDisplay:
         # Calculate available height for output (account for dynamic input height)
         input_height = self._get_input_height()
         available_height = self._height - 1 - input_height  # minus status bar and input area
-        if self._plan_panel.has_plan:
-            available_height -= self._plan_height
 
         # Calculate width (OUTPUT_PANEL_WIDTH_RATIO if agent panel present)
         output_width_ratio = self.OUTPUT_PANEL_WIDTH_RATIO if self._agent_panel else 1.0
@@ -342,8 +410,6 @@ class PTDisplay:
         # Calculate available height for agent panel (account for dynamic input height)
         input_height = self._get_input_height()
         available_height = self._height - 1 - input_height  # minus status bar and input area
-        if self._plan_panel.has_plan:
-            available_height -= self._plan_height
 
         # Render agent panel (width is set on AgentPanel instance)
         panel = self._agent_panel.render(available_height)
@@ -510,18 +576,12 @@ class PTDisplay:
             """Handle Down arrow - history/completion navigation."""
             event.current_buffer.auto_down()
 
-        @kb.add("f1")
-        def handle_f1(event):
-            """Handle F1 - toggle plan panel collapse/expand."""
-            if self._plan_panel.has_plan:
-                self._plan_panel.toggle_collapsed()
-                self._app.invalidate()
-
-        @kb.add("c-f1")
-        def handle_ctrl_f1(event):
-            """Handle Ctrl+F1 - toggle plan panel visibility."""
-            if self._plan_panel.has_plan:
-                self._plan_panel.toggle_hidden()
+        @kb.add("c-p")
+        def handle_ctrl_p(event):
+            """Handle Ctrl+P - toggle plan popup visibility."""
+            # Check if current agent has a plan (registry or fallback)
+            if self._current_plan_has_data():
+                self._plan_panel.toggle_popup()
                 self._app.invalidate()
 
         @kb.add("f2")
@@ -550,21 +610,6 @@ class PTDisplay:
             FormattedTextControl(self._get_status_bar_content),
             height=1,
             style="class:status-bar",
-        )
-
-        # Plan panel (conditional - hidden when no plan)
-        # Height is dynamic: smaller when collapsed
-        def get_plan_height():
-            if self._plan_panel.is_collapsed:
-                return 7  # Compact: title + progress bar + prev step + current step + borders
-            return self._plan_height
-
-        plan_window = ConditionalContainer(
-            Window(
-                FormattedTextControl(self._get_plan_content),
-                height=get_plan_height,
-            ),
-            filter=Condition(self._has_plan),
         )
 
         # Output panel (fills remaining space)
@@ -618,12 +663,40 @@ class PTDisplay:
         # Input row (label + optional input area)
         input_row = VSplit([prompt_label, input_window])
 
-        # Root layout with completions menu
+        # Plan popup (floating overlay, shown with Ctrl+P)
+        def get_popup_height():
+            """Calculate popup height by rendering content and counting lines."""
+            plan_data = self._get_current_plan_data()
+            if not plan_data:
+                return 6
+
+            # Render the popup to get actual line count
+            popup_width = max(40, min(80, int(self._width * 0.6)))
+            original_data = self._plan_panel._plan_data
+            self._plan_panel._plan_data = plan_data
+            rendered = self._plan_panel.render_popup(width=popup_width)
+            self._plan_panel._plan_data = original_data
+
+            # Render to string and count lines
+            rendered_str = self._renderer.render(rendered)
+            line_count = rendered_str.count('\n') + 1
+
+            # Cap at available screen height
+            return min(line_count, self._height - 4)
+
+        plan_popup_window = ConditionalContainer(
+            Window(
+                FormattedTextControl(self._get_plan_popup_content),
+                height=get_popup_height,
+            ),
+            filter=Condition(lambda: self._plan_panel.is_popup_visible and self._current_plan_has_data()),
+        )
+
+        # Root layout with completions menu and plan popup
         from prompt_toolkit.layout.containers import FloatContainer, Float
         root = FloatContainer(
             content=HSplit([
                 status_bar,
-                plan_window,
                 content_area,  # Output panel (or VSplit with output + agent panel)
                 input_row,
             ]),
@@ -632,6 +705,11 @@ class PTDisplay:
                     xcursor=True,
                     ycursor=True,
                     content=CompletionsMenu(max_height=8),
+                ),
+                Float(
+                    top=1,  # Below status bar
+                    left=2,
+                    content=plan_popup_window,
                 ),
             ],
         )
@@ -747,20 +825,41 @@ class PTDisplay:
 
     # Plan panel methods
 
-    def update_plan(self, plan_data: Dict[str, Any]) -> None:
-        """Update the plan panel."""
-        self._plan_panel.update_plan(plan_data)
+    def update_plan(self, plan_data: Dict[str, Any], agent_id: Optional[str] = None) -> None:
+        """Update the plan for an agent.
+
+        Args:
+            plan_data: Plan status dict with title, status, steps, progress.
+            agent_id: Which agent's plan to update. If None, updates the global
+                     plan panel (backwards compatibility) or "main" in registry.
+        """
+        if self._agent_registry:
+            # Route through registry for per-agent plan tracking
+            target_id = agent_id or "main"
+            self._agent_registry.update_plan(target_id, plan_data)
+        else:
+            # Fallback to global plan panel
+            self._plan_panel.update_plan(plan_data)
         self.refresh()
 
-    def clear_plan(self) -> None:
-        """Clear the plan panel."""
-        self._plan_panel.clear()
+    def clear_plan(self, agent_id: Optional[str] = None) -> None:
+        """Clear the plan for an agent.
+
+        Args:
+            agent_id: Which agent's plan to clear. If None, clears the global
+                     plan panel (backwards compatibility) or "main" in registry.
+        """
+        if self._agent_registry:
+            target_id = agent_id or "main"
+            self._agent_registry.clear_plan(target_id)
+        else:
+            self._plan_panel.clear()
         self.refresh()
 
     @property
     def has_plan(self) -> bool:
-        """Check if there's an active plan."""
-        return self._plan_panel.has_plan
+        """Check if there's an active plan for the current agent."""
+        return self._current_plan_has_data()
 
     # Output buffer methods
 
@@ -852,8 +951,6 @@ class PTDisplay:
         # Calculate page size based on available height
         if page_size is None:
             available = self._height - 2  # minus input row and status bar
-            if self._plan_panel.has_plan:
-                available -= self._plan_height
             # Account for panel borders
             page_size = max(5, available - 4)
 
