@@ -13,7 +13,10 @@ import threading
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from datetime import datetime
 
-from .config import SubagentConfig, SubagentProfile, SubagentResult, discover_profiles
+from .config import (
+    SubagentConfig, SubagentProfile, SubagentResult,
+    discover_profiles, expand_plugin_configs
+)
 from ..base import UserCommand, CommandCompletion
 from ..model_provider.types import ToolSchema
 
@@ -1383,8 +1386,14 @@ class SubagentPlugin:
             # profile.plugins is always a list (possibly empty); pass it directly
             # Empty list = no tools, non-empty list = only those tools
 
+            # Expand variables in plugin_configs (e.g., ${projectPath}, ${workspaceRoot})
+            # Uses default context: cwd, workspaceRoot, HOME, USER, plus env vars
+            expansion_context = {}
+            raw_plugin_configs = profile.plugin_configs.copy() if profile.plugin_configs else {}
+            expanded_configs = expand_plugin_configs(raw_plugin_configs, expansion_context)
+
             # Inject agent_name into each plugin's config for trace logging
-            effective_plugin_configs = profile.plugin_configs.copy() if profile.plugin_configs else {}
+            effective_plugin_configs = expanded_configs
             for plugin_name in (profile.plugins or []):
                 if plugin_name not in effective_plugin_configs:
                     effective_plugin_configs[plugin_name] = {}

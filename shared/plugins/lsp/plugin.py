@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..base import UserCommand, CommandParameter, CommandCompletion
 from ..model_provider.types import ToolSchema
+from ..subagent.config import expand_variables
 from .lsp_client import LSPClient, ServerConfig, Location, Diagnostic, Hover
 
 
@@ -106,9 +107,11 @@ class LSPToolPlugin:
         if self._initialized:
             return
 
+        # Expand variables in config values (e.g., ${projectPath}, ${workspaceRoot})
+        config = expand_variables(config) if config else {}
+
         # Extract custom config path from plugin_configs
-        if config:
-            self._custom_config_path = config.get('config_path')
+        self._custom_config_path = config.get('config_path')
 
         self._ensure_thread()
         self._initialized = True

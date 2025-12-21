@@ -1,11 +1,14 @@
 {
   "name": "skill-code-020-generate-microservice-java-spring",
   "description": "[GENERATE Flow] Create complete new Spring Boot microservice from scratch. USE WHEN: (1) no existing project - starting fresh, (2) request asks to create/generate/scaffold a new service or application, (3) multiple modules needed (API layer, persistence, resilience patterns). TRIGGERS: generation-request with service name and package structure. Holistic execution - all features synthesized together in one pass.",
-  "plugins": ["cli", "file_edit", "references", "artifact_tracker", "todo", "filesystem_query", "gc_hybrid"],
+  "plugins": ["cli", "file_edit", "references", "artifact_tracker", "todo", "filesystem_query", "gc_hybrid", "lsp"],
   "plugin_configs": {
     "references": {
       "preselected": ["enablement-consumer-prompt", "skill-020-microservice-java-spring"],
       "exclude_tools": ["selectReferences"]
+    },
+    "lsp": {
+      "config_path": "${workspaceRoot}/.lsp.json"
     }
   },
   "system_instructions": "First read enablement-consumer-prompt for execution model and validation framework. Then follow the skill specification and apply templates from module dependencies.",

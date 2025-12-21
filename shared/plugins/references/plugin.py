@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ..model_provider.types import ToolSchema
+from ..subagent.config import expand_variables
 
 from .models import ReferenceSource, InjectionMode, SourceType
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
@@ -90,6 +91,9 @@ class ReferencesPlugin:
                    - exclude_tools: List of tool names to exclude (e.g., ["selectReferences"])
         """
         config = config or {}
+
+        # Expand variables in config values (e.g., ${projectPath}, ${workspaceRoot})
+        config = expand_variables(config) if config else {}
 
         # Extract agent name for trace logging
         self._agent_name = config.get("agent_name")
