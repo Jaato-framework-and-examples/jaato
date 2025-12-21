@@ -53,6 +53,87 @@ class LogEntry:
         return ' '.join(parts)
 
 
+class LogCapture:
+    """File-like object that captures LSP server stderr and routes to log buffer.
+
+    This class uses an OS pipe to provide a real file descriptor that can be
+    passed to subprocess stderr. A background thread reads from the pipe and
+    routes messages to the LSP plugin's internal log buffer via a callback.
+
+    The asyncio subprocess requires a file-like object with a valid fileno()
+    for stderr redirection. Pure Python wrappers don't work because subprocess
+    needs a real file descriptor.
+    """
+
+    def __init__(self, log_callback: Callable[[str, str, Optional[str], Optional[str]], None]):
+        """Initialize the log capture with an OS pipe.
+
+        Args:
+            log_callback: Function to call with (level, event, server, details).
+                         Should match the signature of LSPToolPlugin._log_event.
+        """
+        self._log_callback = log_callback
+        # Create a pipe - write end for subprocess, read end for our thread
+        self._read_fd, self._write_fd = os.pipe()
+        # Wrap write end as a file object (this is what fileno() returns)
+        self._write_file = os.fdopen(self._write_fd, 'w', encoding='utf-8')
+        self._closed = False
+        self._reader_thread: Optional[threading.Thread] = None
+        # Start background thread to read from pipe
+        self._start_reader()
+
+    def _start_reader(self) -> None:
+        """Start background thread to read from the pipe."""
+        def reader():
+            try:
+                # Wrap read end as file for line-by-line reading
+                with os.fdopen(self._read_fd, 'r', encoding='utf-8', errors='replace') as read_file:
+                    for line in read_file:
+                        line = line.rstrip('\n\r')
+                        if line:
+                            self._log_callback(LOG_DEBUG, "Server output", None, line)
+            except (OSError, ValueError):
+                # Pipe closed or other error during shutdown
+                pass
+
+        self._reader_thread = threading.Thread(target=reader, daemon=True)
+        self._reader_thread.start()
+
+    def write(self, text: str) -> int:
+        """Write text to the pipe (called for compatibility)."""
+        if self._closed:
+            return 0
+        try:
+            self._write_file.write(text)
+            self._write_file.flush()
+            return len(text)
+        except (OSError, ValueError):
+            return 0
+
+    def flush(self) -> None:
+        """Flush the write buffer."""
+        if not self._closed:
+            try:
+                self._write_file.flush()
+            except (OSError, ValueError):
+                pass
+
+    def close(self) -> None:
+        """Close the log capture and stop the reader thread."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._write_file.close()
+        except (OSError, ValueError):
+            pass
+        # Reader thread will exit when it sees the pipe closed
+
+    def fileno(self) -> int:
+        """Return the write end file descriptor for subprocess redirection."""
+        return self._write_fd
+
+
 class LSPToolPlugin:
     """Plugin that provides LSP (Language Server Protocol) tool execution.
 
@@ -77,6 +158,8 @@ class LSPToolPlugin:
         self._log_lock = threading.Lock()
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
+        # Stderr capture for LSP server output
+        self._errlog: Optional[LogCapture] = None
 
     def _log_event(
         self,
@@ -150,6 +233,10 @@ class LSPToolPlugin:
             self._request_queue.put((None, None))
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
+        # Close stderr capture
+        if self._errlog:
+            self._errlog.close()
+            self._errlog = None
         self._clients = {}
         self._loop = None
         self._thread = None
@@ -631,6 +718,9 @@ Example:
     def _thread_main(self) -> None:
         """Background thread running the LSP event loop."""
 
+        # Create stderr capture that routes to internal log buffer
+        self._errlog = LogCapture(self._log_event)
+
         async def run_lsp():
             self._log_event(LOG_INFO, "LSP plugin initializing")
 
@@ -654,7 +744,7 @@ Example:
                         root_uri=spec.get('rootUri'),
                         language_id=spec.get('languageId'),
                     )
-                    client = LSPClient(config)
+                    client = LSPClient(config, errlog=self._errlog)
                     await asyncio.wait_for(client.start(), timeout=15.0)
                     self._clients[name] = client
                     self._connected_servers.add(name)
