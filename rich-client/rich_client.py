@@ -1885,6 +1885,7 @@ class RichClient:
             ("  ↑/↓       - Navigate prompt history (or completion menu)", "dim"),
             ("  ←/→       - Move cursor within line", "dim"),
             ("  Ctrl+A/E  - Jump to start/end of line", "dim"),
+            ("  Ctrl+Y    - Yank (copy) last response to clipboard", "dim"),
             ("  TAB/Enter - Accept selected completion", "dim"),
             ("  Escape    - Dismiss completion menu", "dim"),
             ("  Esc+Esc   - Clear input", "dim"),

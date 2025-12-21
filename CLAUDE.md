@@ -338,6 +338,12 @@ Key types in `shared/plugins/model_provider/types.py`:
 | `AI_RETRY_MAX_DELAY` | Maximum retry delay in seconds (default: 30.0) |
 | `AI_RETRY_LOG_SILENT` | Suppress retry logging (`1`/`true`/`yes`) |
 
+### Clipboard
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_COPY_MECHANISM` | Clipboard provider: `osc52` (default) |
+| `JAATO_COPY_SOURCES` | Sources to include: `model` (default), or `model&user&tool` |
+
 ## Additional Documentation
 
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI
