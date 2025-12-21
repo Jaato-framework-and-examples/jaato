@@ -347,6 +347,33 @@ The cancellation mechanism works through shared `CancelToken` objects:
 - Subagents check both their own and parent's token before each operation
 - When parent is cancelled, all children see it and stop gracefully
 
+## Callback Propagation
+
+Subagents automatically inherit callbacks from the parent to ensure consistent behavior across all agents:
+
+### Retry Callback
+
+Rate limit retry messages are routed through the same channel as the parent:
+
+```python
+# Rich client sets up retry callback on subagent plugin
+subagent_plugin.set_retry_callback(on_retry)
+
+# When subagents are spawned, they inherit this callback
+# Retry messages appear in the output panel, not console
+```
+
+The retry callback ensures that API rate limit retries from subagents are displayed consistently with the parent's output (e.g., in the rich client's output panel rather than raw console output).
+
+### UI Hooks
+
+UI hooks are similarly propagated to subagent sessions for consistent agent lifecycle tracking:
+
+```python
+subagent_plugin.set_ui_hooks(hooks)
+# All spawned subagents emit lifecycle events through these hooks
+```
+
 ## Shared State
 
 Thread-safe shared state for inter-agent communication:
