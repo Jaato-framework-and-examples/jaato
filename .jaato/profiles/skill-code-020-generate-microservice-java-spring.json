@@ -1,7 +1,7 @@
 {
   "name": "skill-code-020-generate-microservice-java-spring",
   "description": "[GENERATE Flow] Create complete new Spring Boot microservice from scratch. USE WHEN: (1) no existing project - starting fresh, (2) request asks to create/generate/scaffold a new service or application, (3) multiple modules needed (API layer, persistence, resilience patterns). TRIGGERS: generation-request with service name and package structure. Holistic execution - all features synthesized together in one pass.",
-  "plugins": ["cli", "file_edit", "references", "artifact_tracker", "todo", "filesystem_query", "gc_hybrid", "lsp"],
+  "plugins": ["cli", "file_edit", "references", "artifact_tracker", "todo", "filesystem_query", "lsp"],
   "plugin_configs": {
     "references": {
       "preselected": ["enablement-consumer-prompt", "skill-020-microservice-java-spring"],
@@ -10,6 +10,13 @@
     "lsp": {
       "config_path": "${workspaceRoot}/.lsp.json"
     }
+  },
+  "gc": {
+    "type": "hybrid",
+    "threshold_percent": 80.0,
+    "preserve_recent_turns": 5,
+    "notify_on_gc": true,
+    "summarize_middle_turns": 10
   },
   "system_instructions": "First read enablement-consumer-prompt for execution model and validation framework. Then follow the skill specification and apply templates from module dependencies.\n\nTOOL ASSESSMENT (required at task completion):\nWhen completing your task, provide a detailed tool usage assessment:\n1. TOOLS USED: List each tool used and how it contributed to task success\n2. TOOLS NOT USED: List available tools that were not needed for this task and why\n3. MISSING TOOLS: Suggest any tools that would have been beneficial but were not available\n4. RECOMMENDATIONS: Any suggestions for improving the tool configuration for similar tasks",
   "max_turns": 20,

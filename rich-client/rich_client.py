@@ -39,6 +39,7 @@ from shared import (
 )
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
 from shared.plugins.base import parse_command_args
+from shared.plugins.gc import load_gc_from_file
 
 # Reuse input handling from simple-client
 from input_handler import InputHandler
@@ -310,6 +311,12 @@ class RichClient:
 
         # Configure tools
         self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
+
+        # Load GC configuration from .jaato/gc.json if present
+        gc_result = load_gc_from_file()
+        if gc_result:
+            gc_plugin, gc_config = gc_result
+            self._jaato.set_gc_plugin(gc_plugin, gc_config)
 
         # Setup session plugin
         self._setup_session_plugin()

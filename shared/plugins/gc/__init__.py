@@ -109,6 +109,90 @@ def load_gc_plugin(name: str, config: Optional[Dict] = None) -> GCPlugin:
     return plugin
 
 
+def load_gc_from_file(
+    file_path: str = ".jaato/gc.json"
+) -> Optional[tuple["GCPlugin", "GCConfig"]]:
+    """Load GC configuration from a JSON file.
+
+    Loads GC configuration from a JSON file (default: .jaato/gc.json)
+    and returns an initialized GC plugin with its config.
+
+    The JSON file should have this structure:
+        {
+            "type": "hybrid",          // "truncate", "summarize", or "hybrid"
+            "threshold_percent": 80.0,
+            "preserve_recent_turns": 5,
+            "notify_on_gc": true,
+            "summarize_middle_turns": 10,  // For hybrid strategy
+            "max_turns": null,
+            "plugin_config": {}
+        }
+
+    Args:
+        file_path: Path to the JSON config file (default: .jaato/gc.json).
+
+    Returns:
+        Tuple of (GCPlugin, GCConfig) if file exists and is valid,
+        None if file doesn't exist or is invalid.
+
+    Example:
+        result = load_gc_from_file()
+        if result:
+            gc_plugin, gc_config = result
+            client.set_gc_plugin(gc_plugin, gc_config)
+    """
+    import json
+    import logging
+    from pathlib import Path
+
+    logger = logging.getLogger(__name__)
+
+    config_path = Path(file_path)
+    if not config_path.exists():
+        return None
+
+    try:
+        with open(config_path, 'r') as f:
+            data = json.load(f)
+
+        gc_type = data.get('type', 'truncate')
+        # Map gc type names (e.g., "truncate" -> "gc_truncate")
+        gc_plugin_name = gc_type if gc_type.startswith('gc_') else f'gc_{gc_type}'
+
+        # Build plugin init config
+        gc_init_config = {
+            'preserve_recent_turns': data.get('preserve_recent_turns', 5),
+            'notify_on_gc': data.get('notify_on_gc', True),
+        }
+        if data.get('summarize_middle_turns') is not None:
+            gc_init_config['summarize_middle_turns'] = data['summarize_middle_turns']
+        # Merge plugin-specific config
+        gc_init_config.update(data.get('plugin_config') or {})
+
+        gc_plugin = load_gc_plugin(gc_plugin_name, gc_init_config)
+
+        # Create GCConfig for the client
+        gc_config = GCConfig(
+            threshold_percent=data.get('threshold_percent', 80.0),
+            max_turns=data.get('max_turns'),
+            preserve_recent_turns=data.get('preserve_recent_turns', 5),
+            plugin_config=data.get('plugin_config') or {},
+        )
+
+        logger.info("Loaded GC config from %s: type=%s", file_path, gc_type)
+        return gc_plugin, gc_config
+
+    except json.JSONDecodeError as e:
+        logger.warning("Invalid JSON in GC config file %s: %s", file_path, e)
+        return None
+    except ValueError as e:
+        logger.warning("Failed to load GC plugin from %s: %s", file_path, e)
+        return None
+    except Exception as e:
+        logger.warning("Error reading GC config file %s: %s", file_path, e)
+        return None
+
+
 __all__ = [
     # Core types
     "GCPlugin",
@@ -118,6 +202,7 @@ __all__ = [
     # Discovery
     "discover_gc_plugins",
     "load_gc_plugin",
+    "load_gc_from_file",
     "GC_PLUGIN_ENTRY_POINT",
     # Utilities
     "Turn",

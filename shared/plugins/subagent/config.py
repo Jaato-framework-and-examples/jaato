@@ -124,6 +124,43 @@ def expand_plugin_configs(
 
 
 @dataclass
+class GCProfileConfig:
+    """Garbage collection configuration for a profile.
+
+    Defines the GC strategy and its configuration for a subagent or main agent.
+
+    Attributes:
+        type: GC strategy type ('truncate', 'summarize', 'hybrid').
+        threshold_percent: Trigger GC when context usage exceeds this percentage.
+        preserve_recent_turns: Number of recent turns to always preserve.
+        notify_on_gc: Whether to inject a notification into history after GC.
+        summarize_middle_turns: For hybrid strategy, number of middle turns to summarize.
+        max_turns: Trigger GC when turn count exceeds this limit.
+        plugin_config: Additional plugin-specific configuration.
+    """
+    type: str = "truncate"
+    threshold_percent: float = 80.0
+    preserve_recent_turns: int = 5
+    notify_on_gc: bool = True
+    summarize_middle_turns: Optional[int] = None  # For hybrid strategy
+    max_turns: Optional[int] = None
+    plugin_config: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'GCProfileConfig':
+        """Create GCProfileConfig from a dictionary."""
+        return cls(
+            type=data.get('type', 'truncate'),
+            threshold_percent=data.get('threshold_percent', 80.0),
+            preserve_recent_turns=data.get('preserve_recent_turns', 5),
+            notify_on_gc=data.get('notify_on_gc', True),
+            summarize_middle_turns=data.get('summarize_middle_turns'),
+            max_turns=data.get('max_turns'),
+            plugin_config=data.get('plugin_config', {}),
+        )
+
+
+@dataclass
 class SubagentProfile:
     """Configuration profile for a subagent.
 
@@ -141,6 +178,7 @@ class SubagentProfile:
         auto_approved: Whether this subagent can be spawned without permission.
         icon: Optional custom ASCII art icon (3 lines) for UI visualization.
         icon_name: Optional name of predefined icon (e.g., "code_assistant").
+        gc: Optional garbage collection configuration for this subagent.
     """
     name: str
     description: str
@@ -152,6 +190,7 @@ class SubagentProfile:
     auto_approved: bool = False
     icon: Optional[List[str]] = None
     icon_name: Optional[str] = None
+    gc: Optional[GCProfileConfig] = None
 
 
 def _parse_profile_file(file_path: Path) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
@@ -246,6 +285,11 @@ def discover_profiles(
         if name is None or data is None:
             continue
 
+        # Parse GC configuration if present
+        gc_config = None
+        if 'gc' in data and data['gc']:
+            gc_config = GCProfileConfig.from_dict(data['gc'])
+
         # Create SubagentProfile from parsed data
         profile = SubagentProfile(
             name=name,
@@ -258,6 +302,7 @@ def discover_profiles(
             auto_approved=data.get('auto_approved', False),
             icon=data.get('icon'),
             icon_name=data.get('icon_name'),
+            gc=gc_config,
         )
 
         profiles[name] = profile
@@ -333,6 +378,11 @@ class SubagentConfig:
         """
         profiles = {}
         for name, profile_data in data.get('profiles', {}).items():
+            # Parse GC configuration if present
+            gc_config = None
+            if 'gc' in profile_data and profile_data['gc']:
+                gc_config = GCProfileConfig.from_dict(profile_data['gc'])
+
             profiles[name] = SubagentProfile(
                 name=name,
                 description=profile_data.get('description', ''),
@@ -344,6 +394,7 @@ class SubagentConfig:
                 auto_approved=profile_data.get('auto_approved', False),
                 icon=profile_data.get('icon'),
                 icon_name=profile_data.get('icon_name'),
+                gc=gc_config,
             )
 
         return cls(
