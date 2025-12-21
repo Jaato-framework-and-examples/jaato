@@ -178,6 +178,35 @@ The subagent plugin automatically discovers profile definitions from `.jaato/pro
 }
 ```
 
+**Profile with garbage collection configuration:**
+```json
+{
+  "name": "long-running-agent",
+  "description": "Agent for extended tasks requiring context management",
+  "plugins": ["cli", "file_edit"],
+  "gc": {
+    "type": "hybrid",
+    "threshold_percent": 80.0,
+    "preserve_recent_turns": 5,
+    "notify_on_gc": true,
+    "summarize_middle_turns": 10
+  },
+  "max_turns": 50
+}
+```
+
+The `gc` field configures context garbage collection for the subagent:
+
+| GC Option | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `type` | string | `"truncate"` | GC strategy: `"truncate"`, `"summarize"`, or `"hybrid"` |
+| `threshold_percent` | float | 80.0 | Trigger GC when context usage exceeds this % |
+| `preserve_recent_turns` | int | 5 | Number of recent turns to always preserve |
+| `notify_on_gc` | bool | true | Inject notification into history after GC |
+| `summarize_middle_turns` | int | null | For hybrid: turns to summarize (not truncate) |
+| `max_turns` | int | null | Trigger GC when turn count exceeds this |
+| `plugin_config` | object | {} | Additional plugin-specific configuration |
+
 The `plugin_configs` field allows per-plugin configuration overrides:
 
 | Plugin | Config Option | Description |

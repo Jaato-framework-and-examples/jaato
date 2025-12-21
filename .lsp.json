@@ -1,0 +1,61 @@
+{
+  "languageServers": {
+    "java": {
+      "command": "jdtls",
+      "args": [
+        "-configuration", "${workspaceRoot}/.jdtls/config",
+        "-data", "${workspaceRoot}/.jdtls/workspace"
+      ],
+      "languageId": "java",
+      "autoConnect": true,
+      "initializationOptions": {
+        "settings": {
+          "java.format.enabled": true,
+          "java.completion.enabled": true
+        }
+      }
+    },
+    "spring-boot": {
+      "command": "spring-boot-language-server",
+      "args": ["--stdio"],
+      "languageId": "java",
+      "filePatterns": ["**/application*.properties", "**/application*.yml", "**/*.java"],
+      "initializationOptions": {
+        "enableJdtClasspath": true
+      }
+    },
+    "python": {
+      "command": "pyright-langserver",
+      "args": ["--stdio"],
+      "languageId": "python",
+      "autoConnect": true
+    },
+    "typescript": {
+      "command": "typescript-language-server",
+      "args": ["--stdio"],
+      "languageId": "typescript",
+      "env": {
+        "NODE_OPTIONS": "--max-old-space-size=4096"
+      }
+    },
+    "rust": {
+      "command": "rust-analyzer",
+      "args": [],
+      "languageId": "rust"
+    },
+    "go": {
+      "command": "gopls",
+      "args": ["serve"],
+      "languageId": "go"
+    },
+    "cobol": {
+      "command": "cobol-language-support",
+      "args": ["--stdio"],
+      "languageId": "cobol",
+      "initializationOptions": {
+        "dialect": "enterprise",
+        "copybook-paths": ["${workspaceRoot}/copybooks"]
+      }
+    }
+  }
+}

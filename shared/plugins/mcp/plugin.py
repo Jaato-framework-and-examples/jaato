@@ -14,6 +14,7 @@ from typing import Dict, List, Any, Callable, Optional, Tuple
 
 from ..base import UserCommand, CommandParameter, CommandCompletion
 from ..model_provider.types import ToolSchema
+from ..subagent.config import expand_variables
 
 
 # Message types for background thread communication
@@ -186,7 +187,8 @@ class MCPToolPlugin:
         self._initialized = False
         self._mcp_patch_applied = False
         # Configuration state
-        self._config_path: Optional[str] = None
+        self._config_path: Optional[str] = None  # Path config was loaded from
+        self._custom_config_path: Optional[str] = None  # User-specified path via plugin_configs
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}  # server -> error message
@@ -243,12 +245,20 @@ class MCPToolPlugin:
                 pass
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """Initialize the MCP plugin by starting the background thread."""
+        """Initialize the MCP plugin by starting the background thread.
+
+        Args:
+            config: Optional configuration dict. Supports:
+                - config_path: Path to .mcp.json file (overrides default search)
+                - agent_name: Name for trace logging
+        """
         if self._initialized:
             return
-        # Extract agent name for trace logging
-        if config:
-            self._agent_name = config.get("agent_name")
+        # Expand variables in config values (e.g., ${projectPath}, ${workspaceRoot})
+        config = expand_variables(config) if config else {}
+        # Extract config from plugin_configs
+        self._agent_name = config.get("agent_name")
+        self._custom_config_path = config.get("config_path")
         self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True
@@ -679,10 +689,11 @@ Examples:
         # Send connect request to background thread
         try:
             spec = servers[server_name]
+            # Expand variables in command and args (e.g., ${workspaceRoot})
             self._request_queue.put((MSG_CONNECT_SERVER, {
                 'name': server_name,
-                'command': spec.get('command'),
-                'args': spec.get('args', []),
+                'command': expand_variables(spec.get('command')),
+                'args': expand_variables(spec.get('args', [])),
                 'env': spec.get('env', {}),
             }))
 
@@ -883,11 +894,14 @@ Examples:
         return '\n'.join(lines)
 
     def _load_config_cache(self) -> None:
-        """Load configuration into cache if not already loaded."""
+        """Load configuration into cache if not already loaded.
+
+        Uses custom config path if specified via plugin_configs.
+        """
         if self._config_cache:
             return
 
-        registry = self._load_mcp_registry()
+        registry = self._load_mcp_registry(self._custom_config_path)
         self._config_cache = registry
 
     def _save_config(self) -> Optional[str]:
@@ -1013,7 +1027,13 @@ Examples:
         self._mcp_patch_applied = True
 
     def _load_mcp_registry(self, registry_path: Optional[str] = None) -> Dict[str, Any]:
-        """Load MCP registry from specified path or default locations."""
+        """Load MCP registry from specified path or default locations.
+
+        Search order:
+        1. registry_path (if specified via plugin_configs.config_path)
+        2. .mcp.json in current working directory
+        3. ~/.mcp.json in home directory
+        """
         default_paths = [
             os.path.join(os.getcwd(), '.mcp.json'),
             os.path.expanduser('~/.mcp.json')
@@ -1030,8 +1050,10 @@ Examples:
                         data = json.load(f)
                     # Track which path we loaded from
                     self._config_path = path
+                    self._log_event(LOG_INFO, f"Loaded config from {path}")
                     return data
-                except Exception:
+                except Exception as e:
+                    self._log_event(LOG_WARN, f"Failed to load {path}: {e}")
                     continue
         return {}
 
@@ -1060,7 +1082,7 @@ Examples:
 
             self._log_event(LOG_INFO, "MCP plugin initializing")
 
-            registry = self._load_mcp_registry()
+            registry = self._load_mcp_registry(self._custom_config_path)
             servers = registry.get('mcpServers', {})
 
             if servers:
@@ -1082,8 +1104,9 @@ Examples:
             # Helper to connect a single server
             async def connect_server(mgr: MCPClientManager, name: str, spec: dict) -> Tuple[bool, str]:
                 """Connect to a server and return (success, error_message)."""
-                cmd = spec.get('command', 'unknown')
-                args = spec.get('args', [])
+                # Expand variables in command and args (e.g., ${workspaceRoot})
+                cmd = expand_variables(spec.get('command', 'unknown'))
+                args = expand_variables(spec.get('args', []))
                 args_str = ' '.join(str(a) for a in args) if args else ''
                 self._log_event(LOG_INFO, "Connecting to server", server=name,
                               details=f"command: {cmd} {args_str}".strip())

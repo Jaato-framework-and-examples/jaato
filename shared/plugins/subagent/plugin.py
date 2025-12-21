@@ -13,9 +13,13 @@ import threading
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from datetime import datetime
 
-from .config import SubagentConfig, SubagentProfile, SubagentResult, discover_profiles
+from .config import (
+    SubagentConfig, SubagentProfile, SubagentResult, GCProfileConfig,
+    discover_profiles, expand_plugin_configs
+)
 from ..base import UserCommand, CommandCompletion
 from ..model_provider.types import ToolSchema
+from ..gc import load_gc_plugin, GCConfig
 
 if TYPE_CHECKING:
     from ...jaato_runtime import JaatoRuntime
@@ -1383,8 +1387,14 @@ class SubagentPlugin:
             # profile.plugins is always a list (possibly empty); pass it directly
             # Empty list = no tools, non-empty list = only those tools
 
+            # Expand variables in plugin_configs (e.g., ${projectPath}, ${workspaceRoot})
+            # Uses default context: cwd, workspaceRoot, HOME, USER, plus env vars
+            expansion_context = {}
+            raw_plugin_configs = profile.plugin_configs.copy() if profile.plugin_configs else {}
+            expanded_configs = expand_plugin_configs(raw_plugin_configs, expansion_context)
+
             # Inject agent_name into each plugin's config for trace logging
-            effective_plugin_configs = profile.plugin_configs.copy() if profile.plugin_configs else {}
+            effective_plugin_configs = expanded_configs
             for plugin_name in (profile.plugins or []):
                 if plugin_name not in effective_plugin_configs:
                     effective_plugin_configs[plugin_name] = {}
@@ -1415,6 +1425,43 @@ class SubagentPlugin:
                         f.flush()
                 except (IOError, OSError):
                     pass  # Silently skip if trace file cannot be written
+
+            # Initialize GC from profile configuration if specified
+            if profile.gc:
+                gc_type = profile.gc.type
+                # Map gc type names (e.g., "truncate" -> "gc_truncate")
+                gc_plugin_name = gc_type if gc_type.startswith('gc_') else f'gc_{gc_type}'
+                try:
+                    # Build plugin config from profile's gc settings
+                    gc_init_config = {
+                        'preserve_recent_turns': profile.gc.preserve_recent_turns,
+                        'notify_on_gc': profile.gc.notify_on_gc,
+                    }
+                    if profile.gc.summarize_middle_turns is not None:
+                        gc_init_config['summarize_middle_turns'] = profile.gc.summarize_middle_turns
+                    # Merge any plugin-specific config
+                    gc_init_config.update(profile.gc.plugin_config or {})
+
+                    gc_plugin = load_gc_plugin(gc_plugin_name, gc_init_config)
+
+                    # Create GCConfig for the session
+                    gc_config = GCConfig(
+                        threshold_percent=profile.gc.threshold_percent,
+                        max_turns=profile.gc.max_turns,
+                        preserve_recent_turns=profile.gc.preserve_recent_turns,
+                        plugin_config=profile.gc.plugin_config or {},
+                    )
+
+                    session.set_gc_plugin(gc_plugin, gc_config)
+                    logger.debug(
+                        "Initialized GC plugin '%s' for subagent '%s'",
+                        gc_plugin_name, profile.name
+                    )
+                except ValueError as e:
+                    logger.warning(
+                        "Failed to load GC plugin '%s' for subagent '%s': %s",
+                        gc_plugin_name, profile.name, e
+                    )
 
             # Set agent context for permission checks
             session.set_agent_context(
