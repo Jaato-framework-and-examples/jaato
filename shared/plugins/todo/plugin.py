@@ -385,7 +385,7 @@ class TodoPlugin:
 
         # Report creation
         if self._reporter:
-            self._reporter.report_plan_created(plan)
+            self._reporter.report_plan_created(plan, agent_id=self._agent_name)
 
         return {
             "plan_id": plan.plan_id,
@@ -493,7 +493,7 @@ class TodoPlugin:
 
         # Report update
         if self._reporter:
-            self._reporter.report_step_update(plan, step)
+            self._reporter.report_step_update(plan, step, agent_id=self._agent_name)
 
         return {
             "step_id": step.step_id,
@@ -585,7 +585,7 @@ class TodoPlugin:
 
         # Report completion
         if self._reporter:
-            self._reporter.report_plan_completed(plan)
+            self._reporter.report_plan_completed(plan, agent_id=self._agent_name)
 
         # Clear current plan
         self._current_plan_id = None
@@ -625,7 +625,7 @@ class TodoPlugin:
 
         # Report the addition
         if self._reporter:
-            self._reporter.report_step_update(plan, new_step)
+            self._reporter.report_step_update(plan, new_step, agent_id=self._agent_name)
 
         return {
             "step_id": new_step.step_id,
@@ -678,7 +678,7 @@ class TodoPlugin:
         self._current_plan_id = plan.plan_id
 
         if self._reporter:
-            self._reporter.report_plan_created(plan)
+            self._reporter.report_plan_created(plan, agent_id=self._agent_name)
 
         return plan
 
@@ -722,7 +722,7 @@ class TodoPlugin:
             self._storage.save_plan(plan)
 
         if self._reporter:
-            self._reporter.report_step_update(plan, step)
+            self._reporter.report_step_update(plan, step, agent_id=self._agent_name)
 
         return step
 
