@@ -44,18 +44,34 @@ class TodoReporter(ABC):
         ...
 
     @abstractmethod
-    def report_plan_created(self, plan: TodoPlan) -> None:
-        """Report that a new plan was created."""
+    def report_plan_created(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
+        """Report that a new plan was created.
+
+        Args:
+            plan: The newly created plan.
+            agent_id: Optional agent identifier for multi-agent tracking.
+        """
         ...
 
     @abstractmethod
-    def report_step_update(self, plan: TodoPlan, step: TodoStep) -> None:
-        """Report that a step's status changed."""
+    def report_step_update(self, plan: TodoPlan, step: TodoStep, agent_id: Optional[str] = None) -> None:
+        """Report that a step's status changed.
+
+        Args:
+            plan: The plan containing the step.
+            step: The step that was updated.
+            agent_id: Optional agent identifier for multi-agent tracking.
+        """
         ...
 
     @abstractmethod
-    def report_plan_completed(self, plan: TodoPlan) -> None:
-        """Report that a plan was completed/failed/cancelled."""
+    def report_plan_completed(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
+        """Report that a plan was completed/failed/cancelled.
+
+        Args:
+            plan: The completed plan.
+            agent_id: Optional agent identifier for multi-agent tracking.
+        """
         ...
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
@@ -199,7 +215,7 @@ class ConsoleReporter(TodoReporter):
             return self._color(f"[{datetime.now().strftime('%H:%M:%S')}] ", "gray")
         return ""
 
-    def report_plan_created(self, plan: TodoPlan) -> None:
+    def report_plan_created(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
         """Report new plan creation."""
         self._print("", "write")  # Start new output block
         self._print("=" * self._width)
@@ -216,7 +232,7 @@ class ConsoleReporter(TodoReporter):
             self._print(self._render_progress_bar(plan.get_progress()))
         self._print("")
 
-    def report_step_update(self, plan: TodoPlan, step: TodoStep) -> None:
+    def report_step_update(self, plan: TodoPlan, step: TodoStep, agent_id: Optional[str] = None) -> None:
         """Report step status change.
 
         When compact mode is enabled (inplace_updates=True), only final statuses
@@ -263,7 +279,7 @@ class ConsoleReporter(TodoReporter):
             progress_line = f"    {self._render_progress_bar(progress)}"
             self._print(progress_line)
 
-    def report_plan_completed(self, plan: TodoPlan) -> None:
+    def report_plan_completed(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
         """Report plan completion."""
         self._print("", "write")  # Start new output block
         self._print("=" * self._width)
@@ -360,18 +376,18 @@ class WebhookReporter(TodoReporter):
         except requests.RequestException:
             return False
 
-    def report_plan_created(self, plan: TodoPlan) -> None:
+    def report_plan_created(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
         """Report new plan via webhook."""
         event = ProgressEvent.create("plan_created", plan)
         self._send_event(event)
 
-    def report_step_update(self, plan: TodoPlan, step: TodoStep) -> None:
+    def report_step_update(self, plan: TodoPlan, step: TodoStep, agent_id: Optional[str] = None) -> None:
         """Report step update via webhook."""
         event_type = f"step_{step.status.value}"
         event = ProgressEvent.create(event_type, plan, step)
         self._send_event(event)
 
-    def report_plan_completed(self, plan: TodoPlan) -> None:
+    def report_plan_completed(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
         """Report plan completion via webhook."""
         event = ProgressEvent.create(f"plan_{plan.status.value}", plan)
         self._send_event(event)
@@ -469,18 +485,18 @@ class FileReporter(TodoReporter):
                 "progress": progress,
             }, f, indent=2)
 
-    def report_plan_created(self, plan: TodoPlan) -> None:
+    def report_plan_created(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
         """Report new plan to filesystem."""
         event = ProgressEvent.create("plan_created", plan)
         self._write_event(plan, event)
 
-    def report_step_update(self, plan: TodoPlan, step: TodoStep) -> None:
+    def report_step_update(self, plan: TodoPlan, step: TodoStep, agent_id: Optional[str] = None) -> None:
         """Report step update to filesystem."""
         event_type = f"step_{step.status.value}"
         event = ProgressEvent.create(event_type, plan, step)
         self._write_event(plan, event)
 
-    def report_plan_completed(self, plan: TodoPlan) -> None:
+    def report_plan_completed(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
         """Report plan completion to filesystem."""
         event = ProgressEvent.create(f"plan_{plan.status.value}", plan)
         self._write_event(plan, event)
@@ -518,27 +534,27 @@ class MultiReporter(TodoReporter):
         for reporter in self._reporters:
             reporter.shutdown()
 
-    def report_plan_created(self, plan: TodoPlan) -> None:
+    def report_plan_created(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
         """Report to all underlying reporters."""
         for reporter in self._reporters:
             try:
-                reporter.report_plan_created(plan)
+                reporter.report_plan_created(plan, agent_id)
             except Exception:
                 pass  # Don't let one reporter failure stop others
 
-    def report_step_update(self, plan: TodoPlan, step: TodoStep) -> None:
+    def report_step_update(self, plan: TodoPlan, step: TodoStep, agent_id: Optional[str] = None) -> None:
         """Report to all underlying reporters."""
         for reporter in self._reporters:
             try:
-                reporter.report_step_update(plan, step)
+                reporter.report_step_update(plan, step, agent_id)
             except Exception:
                 pass
 
-    def report_plan_completed(self, plan: TodoPlan) -> None:
+    def report_plan_completed(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
         """Report to all underlying reporters."""
         for reporter in self._reporters:
             try:
-                reporter.report_plan_completed(plan)
+                reporter.report_plan_completed(plan, agent_id)
             except Exception:
                 pass
 

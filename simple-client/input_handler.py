@@ -58,6 +58,12 @@ class InputHandler:
             'status-bar.label': 'bg:#333333 #888888',
             'status-bar.value': 'bg:#333333 #ffffff bold',
             'status-bar.separator': 'bg:#333333 #555555',
+            # Plan symbol styles (for status bar breadcrumb)
+            'plan.pending': 'bg:#333333 #555555',
+            'plan.in-progress': 'bg:#333333 #5555ff',
+            'plan.completed': 'bg:#333333 #00aa00',
+            'plan.failed': 'bg:#333333 #ff5555',
+            'plan.skipped': 'bg:#333333 #ffaa00',
         }) if HAS_PROMPT_TOOLKIT else None
 
     @property

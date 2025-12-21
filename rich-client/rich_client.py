@@ -331,10 +331,33 @@ class RichClient:
         if not self.todo_plugin or not self._display:
             return
 
+        # Create callbacks that map agent_name to registry agent_id
+        # The reporter passes (plan_data, agent_name) where agent_name is the
+        # TodoPlugin's _agent_name (e.g., None for main, "researcher" for subagent)
+        #
+        # Registry agent_id format:
+        #   - Main agent: "main"
+        #   - Subagents: "{parent}.{profile_name}" e.g., "main.researcher"
+        def update_callback(plan_data, agent_name):
+            if agent_name is None or agent_name == "main":
+                target_id = "main"
+            else:
+                # Subagent: construct parent.name format
+                # (subagents are registered as "main.{profile_name}")
+                target_id = f"main.{agent_name}"
+            self._display.update_plan(plan_data, agent_id=target_id)
+
+        def clear_callback(agent_name):
+            if agent_name is None or agent_name == "main":
+                target_id = "main"
+            else:
+                target_id = f"main.{agent_name}"
+            self._display.clear_plan(agent_id=target_id)
+
         # Create live reporter with callbacks to display
         live_reporter = create_live_reporter(
-            update_callback=self._display.update_plan,
-            clear_callback=self._display.clear_plan,
+            update_callback=update_callback,
+            clear_callback=clear_callback,
             output_callback=self._create_output_callback(),
         )
 
