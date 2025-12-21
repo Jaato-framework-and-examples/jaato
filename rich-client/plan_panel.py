@@ -168,16 +168,16 @@ class PlanPanel:
         # Separator
         elements.append(Text("─" * (width - 4), style="dim"))
 
-        # Progress line
+        # Progress line with close hint
         total = progress.get("total", 0)
         completed = progress.get("completed", 0)
         percent = progress.get("percent", 0)
         progress_text = Text()
         progress_text.append(f" {percent:.0f}% ", style="bold")
         progress_text.append(f"({completed}/{total})", style="dim")
-        # Calculate padding to right-align [Ctrl+P]
+        # Calculate padding to right-align hint
         left_content = f" {percent:.0f}% ({completed}/{total})"
-        right_content = "[Ctrl+P]"
+        right_content = "[Ctrl+P to close]"
         padding = max(1, width - 4 - len(left_content) - len(right_content))
         progress_text.append(" " * padding)
         progress_text.append(right_content, style="dim")

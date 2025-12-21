@@ -323,6 +323,9 @@ class PTDisplay:
         if plan_symbols:
             result.append(("class:status-bar.separator", "  │  "))
             result.extend(plan_symbols)
+            # Add hint to show popup (only when popup is not visible)
+            if not self._plan_panel.is_popup_visible:
+                result.append(("class:status-bar.label", " [Ctrl+P to expand]"))
 
         result.extend([
             ("class:status-bar.separator", "  │  "),
