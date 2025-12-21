@@ -41,7 +41,9 @@ class TodoPlugin:
         self._storage: Optional[TodoStorage] = None
         self._reporter: Optional[TodoReporter] = None
         self._initialized = False
-        self._current_plan_id: Optional[str] = None
+        # Track current plan per agent (agent_name -> plan_id)
+        # This allows multiple agents to have their own active plans
+        self._current_plan_ids: Dict[Optional[str], str] = {}
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
 
@@ -108,16 +110,21 @@ class TodoPlugin:
             print("Falling back to in-memory storage")
             self._storage = InMemoryStorage()
 
-        # Initialize reporter
-        reporter_type = config.get("reporter_type") or self._config.reporter_type
-        reporter_config = config.get("reporter_config") or self._config.to_reporter_config()
+        # Initialize reporter (preserve existing if not explicitly overridden)
+        # This allows the LivePlanReporter set by rich_client to survive
+        # re-initialization when subagents configure their agent_name
+        reporter_type = config.get("reporter_type")
+        if reporter_type or not self._reporter:
+            # Only create new reporter if explicitly requested or none exists
+            reporter_type = reporter_type or self._config.reporter_type
+            reporter_config = config.get("reporter_config") or self._config.to_reporter_config()
 
-        try:
-            self._reporter = create_reporter(reporter_type, reporter_config)
-        except (ValueError, RuntimeError) as e:
-            print(f"Warning: Failed to initialize {reporter_type} reporter: {e}")
-            print("Falling back to console reporter")
-            self._reporter = ConsoleReporter()
+            try:
+                self._reporter = create_reporter(reporter_type, reporter_config)
+            except (ValueError, RuntimeError) as e:
+                print(f"Warning: Failed to initialize {reporter_type} reporter: {e}")
+                print("Falling back to console reporter")
+                self._reporter = ConsoleReporter()
 
         self._initialized = True
         self._trace(f"initialize: storage={storage_type}, reporter={reporter_type}")
@@ -130,7 +137,7 @@ class TodoPlugin:
         self._storage = None
         self._reporter = None
         self._initialized = False
-        self._current_plan_id = None
+        self._current_plan_ids.clear()
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for TODO tools."""
@@ -380,8 +387,8 @@ class TodoPlugin:
         if self._storage:
             self._storage.save_plan(plan)
 
-        # Set as current plan
-        self._current_plan_id = plan.plan_id
+        # Set as current plan for this agent
+        self._current_plan_ids[self._agent_name] = plan.plan_id
 
         # Report creation
         if self._reporter:
@@ -587,8 +594,8 @@ class TodoPlugin:
         if self._reporter:
             self._reporter.report_plan_completed(plan, agent_id=self._agent_name)
 
-        # Clear current plan
-        self._current_plan_id = None
+        # Clear current plan for this agent
+        self._current_plan_ids.pop(self._agent_name, None)
 
         return {
             "plan_id": plan.plan_id,
@@ -637,10 +644,11 @@ class TodoPlugin:
         }
 
     def _get_current_plan(self) -> Optional[TodoPlan]:
-        """Get the current active plan."""
-        if not self._current_plan_id or not self._storage:
+        """Get the current active plan for this agent."""
+        plan_id = self._current_plan_ids.get(self._agent_name)
+        if not plan_id or not self._storage:
             return None
-        return self._storage.get_plan(self._current_plan_id)
+        return self._storage.get_plan(plan_id)
 
     def _get_most_recent_plan(self) -> Optional[TodoPlan]:
         """Get the most recently created plan from storage."""
@@ -675,7 +683,7 @@ class TodoPlugin:
         if self._storage:
             self._storage.save_plan(plan)
 
-        self._current_plan_id = plan.plan_id
+        self._current_plan_ids[self._agent_name] = plan.plan_id
 
         if self._reporter:
             self._reporter.report_plan_created(plan, agent_id=self._agent_name)
