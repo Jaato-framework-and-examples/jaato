@@ -334,9 +334,13 @@ Keyboard shortcuts:
         Args:
             part: A content part (text, function_call, or function_response).
         """
-        # Text content
-        if hasattr(part, 'text') and part.text:
+        # Text content - use 'is not None' to properly handle empty strings
+        # (which can occur when SDK returns parts we don't fully recognize)
+        if hasattr(part, 'text') and part.text is not None:
             text = part.text
+            if not text:
+                # Empty text part - skip display (don't show as "unknown")
+                return
             if len(text) > 500:
                 text = text[:500] + f"... [{len(part.text)} chars total]"
             print(f"  {text}")

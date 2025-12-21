@@ -113,27 +113,45 @@ class TodoPlugin:
             # Use defaults
             self._config = TodoConfig()
 
-        # Initialize storage
-        storage_type = config.get("storage_type") or self._config.storage_type
-        storage_path = config.get("storage_path") or self._config.storage_path
-        use_directory = config.get("storage_use_directory", self._config.storage_use_directory)
+        # Initialize storage (preserve existing if not explicitly overridden)
+        # This allows plans from other agents to persist when a new agent
+        # re-initializes the shared plugin
+        storage_type_explicit = config.get("storage_type")
+        if storage_type_explicit or not self._storage:
+            storage_type = storage_type_explicit or self._config.storage_type
+            storage_path = config.get("storage_path") or self._config.storage_path
+            use_directory = config.get("storage_use_directory", self._config.storage_use_directory)
 
-        try:
-            self._storage = create_storage(
-                storage_type=storage_type,
-                path=storage_path,
-                use_directory=use_directory,
-            )
-        except (ValueError, OSError) as e:
-            print(f"Warning: Failed to initialize storage: {e}")
-            print("Falling back to in-memory storage")
-            self._storage = InMemoryStorage()
+            try:
+                self._storage = create_storage(
+                    storage_type=storage_type,
+                    path=storage_path,
+                    use_directory=use_directory,
+                )
+            except (ValueError, OSError) as e:
+                print(f"Warning: Failed to initialize storage: {e}")
+                print("Falling back to in-memory storage")
+                self._storage = InMemoryStorage()
+        else:
+            storage_type = "preserved"
 
         # Initialize reporter (preserve existing if not explicitly overridden)
         # This allows the LivePlanReporter set by rich_client to survive
         # re-initialization when subagents configure their agent_name
+        #
+        # Priority:
+        # 1. Injected reporter from parent (for subagents inheriting UI)
+        # 2. Explicit reporter_type in config
+        # 3. Existing reporter (preserve)
+        # 4. Create from config/defaults
+        injected_reporter = config.get("_injected_reporter")
         reporter_type = config.get("reporter_type")
-        if reporter_type or not self._reporter:
+
+        if injected_reporter:
+            # Use reporter injected by parent (e.g., subagent inheriting LivePlanReporter)
+            self._reporter = injected_reporter
+            self._trace(f"initialize: using injected reporter {type(injected_reporter).__name__}")
+        elif reporter_type or not self._reporter:
             # Only create new reporter if explicitly requested or none exists
             reporter_type = reporter_type or self._config.reporter_type
             reporter_config = config.get("reporter_config") or self._config.to_reporter_config()
@@ -149,14 +167,19 @@ class TodoPlugin:
         self._trace(f"initialize: storage={storage_type}, reporter={reporter_type}")
 
     def shutdown(self) -> None:
-        """Shutdown the TODO plugin."""
-        self._trace("shutdown: cleaning up")
-        if self._reporter:
-            self._reporter.shutdown()
-        self._storage = None
-        self._reporter = None
+        """Shutdown the TODO plugin.
+
+        Note: We preserve _current_plan_ids and _storage across shutdown/
+        re-initialization because this plugin is shared between multiple
+        agents. Each agent's plan data and tracking should persist even
+        when another agent re-initializes the plugin with different config.
+        """
+        self._trace("shutdown: cleaning up (preserving plan tracking and storage)")
+        # Don't shutdown reporter - it's shared and may still be in use
+        # self._reporter will be replaced in initialize() if needed
         self._initialized = False
-        self._current_plan_ids.clear()
+        # Do NOT clear _current_plan_ids - it tracks plans per agent
+        # Do NOT clear _storage - it contains plans that should persist
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for TODO tools."""
