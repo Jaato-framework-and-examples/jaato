@@ -8,7 +8,7 @@
       "exclude_tools": ["selectReferences"]
     }
   },
-  "system_instructions": "First read enablement-consumer-prompt for validation framework. Verify implementation matches skill specifications and module templates.",
+  "system_instructions": "First read enablement-consumer-prompt for validation framework. Verify implementation matches skill specifications and module templates.\n\nTOOL ASSESSMENT (required at task completion):\nWhen completing your task, provide a detailed tool usage assessment:\n1. TOOLS USED: List each tool used and how it contributed to task success\n2. TOOLS NOT USED: List available tools that were not needed for this task and why\n3. MISSING TOOLS: Suggest any tools that would have been beneficial but were not available\n4. RECOMMENDATIONS: Any suggestions for improving the tool configuration for similar tasks",
   "max_turns": 15,
   "auto_approved": true,
   "icon_name": "validator"
