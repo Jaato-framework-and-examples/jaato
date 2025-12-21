@@ -629,6 +629,8 @@ class JaatoSession:
         if not self._provider:
             raise RuntimeError("Session not configured. Call configure() first.")
 
+        self._trace(f"SESSION_SEND_MESSAGE len={len(message)} streaming={self._use_streaming}")
+
         # Check and perform GC if needed (pre-send)
         if self._gc_plugin and self._gc_config and self._gc_config.check_before_send:
             self._maybe_collect_before_send()
@@ -798,6 +800,7 @@ class JaatoSession:
                     if on_output:
                         # First chunk uses "write" to start block, subsequent use "append"
                         mode = "append" if first_chunk_sent else "write"
+                        self._trace(f"SESSION_OUTPUT mode={mode} len={len(chunk)} preview={repr(chunk[:50])}")
                         on_output("model", chunk, mode)
                         first_chunk_sent = True
 
@@ -808,6 +811,10 @@ class JaatoSession:
                         on_chunk=streaming_callback,
                         cancel_token=self._cancel_token,
                         on_usage_update=wrapped_usage_callback
+                        # Note: on_function_call is intentionally NOT used here.
+                        # The SDK may deliver function calls before preceding text,
+                        # which would cause tool trees to appear in wrong positions.
+                        # Tool trees are displayed during parts processing instead.
                     ),
                     context="send_message_streaming",
                     on_retry=self._on_retry,
@@ -822,6 +829,7 @@ class JaatoSession:
                 )
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
+            self._trace(f"SESSION_STREAMING_COMPLETE parts_count={len(response.parts)} finish={response.finish_reason}")
 
             # Check for cancellation after initial message (including parent)
             if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
@@ -841,6 +849,7 @@ class JaatoSession:
 
             # Handle function calling loop - process parts in order to support interleaved text/tools
             accumulated_text: List[str] = []
+            self._trace(f"SESSION_PARTS_PROCESSING parts_count={len(response.parts)}")
 
             def get_pending_function_calls() -> List[FunctionCall]:
                 """Extract function calls from response.parts."""
@@ -871,7 +880,8 @@ class JaatoSession:
 
                 # Process parts in order - emit text, collect function calls into groups
                 current_fc_group: List[FunctionCall] = []
-                for part in response.parts:
+                for idx, part in enumerate(response.parts):
+                    self._trace(f"SESSION_PART[{idx}] text={bool(part.text)} fc={part.function_call.name if part.function_call else None}")
                     if part.text:
                         # Before emitting text, execute any pending function calls
                         if current_fc_group:
@@ -988,6 +998,12 @@ class JaatoSession:
 
             # Emit hook: tool starting
             if self._ui_hooks:
+                # Signal UI to flush any pending output before displaying tool tree
+                # This ensures text appears before tool trees in async/buffered UIs
+                if on_output:
+                    self._trace(f"SESSION_OUTPUT_FLUSH before tool {name}")
+                    on_output("system", "", "flush")
+                self._trace(f"SESSION_TOOL_START name={name} call_id={fc.id}")
                 self._ui_hooks.on_tool_call_start(
                     agent_id=self._agent_id,
                     tool_name=name,
@@ -1058,6 +1074,7 @@ class JaatoSession:
                 if on_output:
                     # First chunk after tool results starts a new block
                     mode = "append" if first_chunk_after_tools[0] else "write"
+                    self._trace(f"SESSION_TOOL_RESULT_OUTPUT mode={mode} len={len(chunk)} preview={repr(chunk[:50])}")
                     on_output("model", chunk, mode)
                     first_chunk_after_tools[0] = True
 
@@ -1067,6 +1084,8 @@ class JaatoSession:
                     on_chunk=streaming_callback,
                     cancel_token=self._cancel_token,
                     on_usage_update=wrapped_usage_callback
+                    # Note: on_function_call is intentionally NOT used here.
+                    # See comment in send_message for explanation.
                 ),
                 context="send_tool_results_streaming",
                 on_retry=self._on_retry,

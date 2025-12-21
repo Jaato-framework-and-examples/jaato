@@ -195,6 +195,10 @@ class OutputBuffer:
                     is_new_turn = (self._last_turn_source != source)
                     self._last_turn_source = source
                 self._current_block = (source, [text], is_new_turn)
+        elif mode == "flush":
+            # Flush mode: process pending output but don't add any content
+            # Used to synchronize output before UI events like tool tree rendering
+            self._flush_current_block()
         else:
             # Standalone line (unknown mode)
             self._flush_current_block()
