@@ -110,16 +110,21 @@ class TodoPlugin:
             print("Falling back to in-memory storage")
             self._storage = InMemoryStorage()
 
-        # Initialize reporter
-        reporter_type = config.get("reporter_type") or self._config.reporter_type
-        reporter_config = config.get("reporter_config") or self._config.to_reporter_config()
+        # Initialize reporter (preserve existing if not explicitly overridden)
+        # This allows the LivePlanReporter set by rich_client to survive
+        # re-initialization when subagents configure their agent_name
+        reporter_type = config.get("reporter_type")
+        if reporter_type or not self._reporter:
+            # Only create new reporter if explicitly requested or none exists
+            reporter_type = reporter_type or self._config.reporter_type
+            reporter_config = config.get("reporter_config") or self._config.to_reporter_config()
 
-        try:
-            self._reporter = create_reporter(reporter_type, reporter_config)
-        except (ValueError, RuntimeError) as e:
-            print(f"Warning: Failed to initialize {reporter_type} reporter: {e}")
-            print("Falling back to console reporter")
-            self._reporter = ConsoleReporter()
+            try:
+                self._reporter = create_reporter(reporter_type, reporter_config)
+            except (ValueError, RuntimeError) as e:
+                print(f"Warning: Failed to initialize {reporter_type} reporter: {e}")
+                print("Falling back to console reporter")
+                self._reporter = ConsoleReporter()
 
         self._initialized = True
         self._trace(f"initialize: storage={storage_type}, reporter={reporter_type}")
