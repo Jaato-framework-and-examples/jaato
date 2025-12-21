@@ -1,0 +1,28 @@
+{
+  "languageServers": {
+    "python": {
+      "command": "pyright-langserver",
+      "args": ["--stdio"],
+      "languageId": "python",
+      "autoConnect": true
+    },
+    "typescript": {
+      "command": "typescript-language-server",
+      "args": ["--stdio"],
+      "languageId": "typescript",
+      "env": {
+        "NODE_OPTIONS": "--max-old-space-size=4096"
+      }
+    },
+    "rust": {
+      "command": "rust-analyzer",
+      "args": [],
+      "languageId": "rust"
+    },
+    "go": {
+      "command": "gopls",
+      "args": ["serve"],
+      "languageId": "go"
+    }
+  }
+}
