@@ -24,6 +24,7 @@ from ..gc import load_gc_plugin, GCConfig
 if TYPE_CHECKING:
     from ...jaato_runtime import JaatoRuntime
     from .ui_hooks import AgentUIHooks
+    from ...retry_utils import RetryCallback
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,8 @@ class SubagentPlugin:
         # Shared state for inter-agent communication
         self._shared_state: Dict[str, Any] = {}  # key -> value (thread-safe via lock)
         self._state_lock = threading.Lock()  # Protect shared state access
+        # Retry callback for subagent sessions (propagated from parent)
+        self._retry_callback: Optional['RetryCallback'] = None
 
     @property
     def name(self) -> str:
@@ -625,6 +628,21 @@ class SubagentPlugin:
             hooks: Implementation of AgentUIHooks protocol.
         """
         self._ui_hooks = hooks
+
+    def set_retry_callback(self, callback: Optional['RetryCallback']) -> None:
+        """Set retry callback for subagent sessions.
+
+        When set, subagent sessions will use this callback for retry
+        notifications instead of printing to console. This ensures retry
+        messages from subagents are routed through the same channel as
+        the parent (e.g., to a rich client's output panel).
+
+        Args:
+            callback: Function called on each retry attempt.
+                Signature: (message: str, attempt: int, max_attempts: int, delay: float) -> None
+                Set to None to revert to console output.
+        """
+        self._retry_callback = callback
 
     def _execute_list_profiles(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List available subagent profiles.
@@ -1478,6 +1496,10 @@ class SubagentPlugin:
             # Pass UI hooks to session for tool call tracking
             if self._ui_hooks:
                 session.set_ui_hooks(self._ui_hooks, agent_id)
+
+            # Set retry callback so retry messages go through parent's channel
+            if self._retry_callback:
+                session.set_retry_callback(self._retry_callback)
 
             # Wrap output callback to route through UI hooks
             def subagent_output_callback(source: str, text: str, mode: str) -> None:
