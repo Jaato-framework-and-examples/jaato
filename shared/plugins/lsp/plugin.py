@@ -67,7 +67,8 @@ class LSPToolPlugin:
         self._request_queue: Optional[queue.Queue] = None
         self._response_queue: Optional[queue.Queue] = None
         self._initialized = False
-        self._config_path: Optional[str] = None
+        self._config_path: Optional[str] = None  # Explicit config path from plugin_configs
+        self._custom_config_path: Optional[str] = None  # User-specified path
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}
@@ -96,9 +97,19 @@ class LSPToolPlugin:
         return "lsp"
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """Initialize the LSP plugin by starting the background thread."""
+        """Initialize the LSP plugin by starting the background thread.
+
+        Args:
+            config: Optional configuration dict. Supports:
+                - config_path: Path to .lsp.json file (overrides default search)
+        """
         if self._initialized:
             return
+
+        # Extract custom config path from plugin_configs
+        if config:
+            self._custom_config_path = config.get('config_path')
+
         self._ensure_thread()
         self._initialized = True
 
@@ -545,13 +556,24 @@ Example:
         return '\n'.join(lines) if lines else "No matching log entries."
 
     def _load_config_cache(self, force: bool = False) -> None:
+        """Load LSP configuration from file.
+
+        Search order:
+        1. Custom path from plugin_configs (config_path)
+        2. .lsp.json in current working directory
+        3. ~/.lsp.json in home directory
+        """
         if self._config_cache and not force:
             return
 
-        paths = [
+        # Build search paths - custom path takes priority
+        paths = []
+        if self._custom_config_path:
+            paths.append(self._custom_config_path)
+        paths.extend([
             os.path.join(os.getcwd(), '.lsp.json'),
             os.path.expanduser('~/.lsp.json'),
-        ]
+        ])
 
         for path in paths:
             if os.path.exists(path):
@@ -559,8 +581,10 @@ Example:
                     with open(path, 'r', encoding='utf-8') as f:
                         self._config_cache = json.load(f)
                     self._config_path = path
+                    self._log_event(LOG_INFO, f"Loaded config from {path}")
                     return
-                except Exception:
+                except Exception as e:
+                    self._log_event(LOG_WARN, f"Failed to load {path}: {e}")
                     continue
         self._config_cache = {}
 

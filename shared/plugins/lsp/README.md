@@ -159,6 +159,37 @@ Create `.lsp.json` in your project root or home directory:
 | `rootUri` | string | Workspace root URI (defaults to cwd) |
 | `autoConnect` | boolean | Connect on plugin initialization (default: true) |
 
+### Configuration Search Order
+
+1. Custom path from `plugin_configs` (see below)
+2. `.lsp.json` in current working directory
+3. `~/.lsp.json` in home directory
+
+### Using with Subagent Profiles
+
+You can specify a custom `.lsp.json` path per subagent using `plugin_configs`:
+
+```json
+// .jaato/profiles/cobol_agent.json
+{
+  "name": "cobol_agent",
+  "description": "COBOL development agent with z/OS tooling",
+  "plugins": ["lsp", "mcp", "cli"],
+  "plugin_configs": {
+    "lsp": {
+      "config_path": "/projects/mainframe/.lsp.json"
+    },
+    "mcp": {
+      "config_path": "/projects/mainframe/.mcp.json"
+    }
+  },
+  "system_instructions": "You are a COBOL expert working with IBM z/OS systems."
+}
+```
+
+This allows different subagents to use different LSP server configurations
+for the same codebase or different projects.
+
 ## Tools
 
 ### lsp_goto_definition
