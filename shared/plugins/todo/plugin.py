@@ -12,6 +12,7 @@ Progress is reported through configurable transport protocols
 
 import os
 import tempfile
+import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -21,6 +22,11 @@ from .storage import TodoStorage, create_storage, InMemoryStorage
 from .channels import TodoReporter, ConsoleReporter, create_reporter
 from .config_loader import load_config, TodoConfig
 from ..base import UserCommand
+
+
+# Thread-local storage for per-agent context
+# This allows each agent (running in its own thread) to have its own agent_name
+_thread_local = threading.local()
 
 
 class TodoPlugin:
@@ -44,8 +50,21 @@ class TodoPlugin:
         # Track current plan per agent (agent_name -> plan_id)
         # This allows multiple agents to have their own active plans
         self._current_plan_ids: Dict[Optional[str], str] = {}
-        # Agent context for trace logging
-        self._agent_name: Optional[str] = None
+        # Note: agent_name is stored in thread-local storage, not instance
+
+    @property
+    def _agent_name(self) -> Optional[str]:
+        """Get the agent name for the current thread.
+
+        Uses thread-local storage so each agent session (running in its
+        own thread) has its own agent_name context.
+        """
+        return getattr(_thread_local, 'agent_name', None)
+
+    @_agent_name.setter
+    def _agent_name(self, value: Optional[str]) -> None:
+        """Set the agent name for the current thread."""
+        _thread_local.agent_name = value
 
     @property
     def name(self) -> str:
