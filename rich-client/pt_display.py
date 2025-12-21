@@ -114,9 +114,6 @@ class PTDisplay:
         # Rich renderer
         self._renderer = RichRenderer(self._width)
 
-        # Layout configuration
-        self._plan_height = 12
-
         # Input handling with optional completion
         self._input_handler = input_handler
         self._input_buffer = Buffer(
@@ -229,10 +226,6 @@ class PTDisplay:
         # Clamp to configured limits
         return max(self.INPUT_MIN_HEIGHT, min(height, self.INPUT_MAX_HEIGHT))
 
-    def _has_plan(self) -> bool:
-        """Check if plan panel should be visible."""
-        return self._plan_panel.is_visible
-
     def _get_status_bar_content(self):
         """Get status bar content as formatted text."""
         # Agent name (FIRST field, from selected agent if registry present)
@@ -264,10 +257,19 @@ class PTDisplay:
             context_str = "100% available"
 
         # Build formatted text with columns
-        # Agent | Provider | Model | Context
-        return [
+        # Agent | Plan symbols | Provider | Model | Context
+        result = [
             ("class:status-bar.label", " Agent: "),
             ("class:status-bar.value", agent_name),
+        ]
+
+        # Add plan symbols if there's an active plan
+        plan_symbols = self._plan_panel.get_status_symbols_formatted()
+        if plan_symbols:
+            result.append(("class:status-bar.separator", "  │  "))
+            result.extend(plan_symbols)
+
+        result.extend([
             ("class:status-bar.separator", "  │  "),
             ("class:status-bar.label", "Provider: "),
             ("class:status-bar.value", provider),
@@ -278,7 +280,9 @@ class PTDisplay:
             ("class:status-bar.label", "Context: "),
             ("class:status-bar.value", context_str),
             ("class:status-bar", " "),
-        ]
+        ])
+
+        return result
 
     def _get_scroll_page_size(self) -> int:
         """Get the number of lines to scroll per page (half the visible height)."""
@@ -286,17 +290,15 @@ class PTDisplay:
         self._update_dimensions()
         input_height = self._get_input_height()
         available_height = self._height - 1 - input_height  # minus status bar and input area
-        if self._plan_panel.has_plan:
-            available_height -= self._plan_height
         # Scroll by half the visible content area
         return max(3, (available_height - 4) // 2)
 
-    def _get_plan_content(self):
-        """Get rendered plan content as ANSI for prompt_toolkit."""
-        if self._plan_panel.has_plan:
-            rendered = self._plan_panel.render()
-            return to_formatted_text(ANSI(self._renderer.render(rendered)))
-        return to_formatted_text(ANSI(""))
+    def _get_plan_popup_content(self):
+        """Get rendered plan popup content as ANSI for prompt_toolkit."""
+        # Calculate popup width (about 60% of terminal, min 40, max 80)
+        popup_width = max(40, min(80, int(self._width * 0.6)))
+        rendered = self._plan_panel.render_popup(width=popup_width)
+        return to_formatted_text(ANSI(self._renderer.render(rendered)))
 
     def _get_output_content(self):
         """Get rendered output content as ANSI for prompt_toolkit."""
@@ -319,8 +321,6 @@ class PTDisplay:
         # Calculate available height for output (account for dynamic input height)
         input_height = self._get_input_height()
         available_height = self._height - 1 - input_height  # minus status bar and input area
-        if self._plan_panel.has_plan:
-            available_height -= self._plan_height
 
         # Calculate width (OUTPUT_PANEL_WIDTH_RATIO if agent panel present)
         output_width_ratio = self.OUTPUT_PANEL_WIDTH_RATIO if self._agent_panel else 1.0
@@ -342,8 +342,6 @@ class PTDisplay:
         # Calculate available height for agent panel (account for dynamic input height)
         input_height = self._get_input_height()
         available_height = self._height - 1 - input_height  # minus status bar and input area
-        if self._plan_panel.has_plan:
-            available_height -= self._plan_height
 
         # Render agent panel (width is set on AgentPanel instance)
         panel = self._agent_panel.render(available_height)
@@ -510,18 +508,11 @@ class PTDisplay:
             """Handle Down arrow - history/completion navigation."""
             event.current_buffer.auto_down()
 
-        @kb.add("f1")
-        def handle_f1(event):
-            """Handle F1 - toggle plan panel collapse/expand."""
+        @kb.add("c-p")
+        def handle_ctrl_p(event):
+            """Handle Ctrl+P - toggle plan popup visibility."""
             if self._plan_panel.has_plan:
-                self._plan_panel.toggle_collapsed()
-                self._app.invalidate()
-
-        @kb.add("c-f1")
-        def handle_ctrl_f1(event):
-            """Handle Ctrl+F1 - toggle plan panel visibility."""
-            if self._plan_panel.has_plan:
-                self._plan_panel.toggle_hidden()
+                self._plan_panel.toggle_popup()
                 self._app.invalidate()
 
         @kb.add("f2")
@@ -550,21 +541,6 @@ class PTDisplay:
             FormattedTextControl(self._get_status_bar_content),
             height=1,
             style="class:status-bar",
-        )
-
-        # Plan panel (conditional - hidden when no plan)
-        # Height is dynamic: smaller when collapsed
-        def get_plan_height():
-            if self._plan_panel.is_collapsed:
-                return 7  # Compact: title + progress bar + prev step + current step + borders
-            return self._plan_height
-
-        plan_window = ConditionalContainer(
-            Window(
-                FormattedTextControl(self._get_plan_content),
-                height=get_plan_height,
-            ),
-            filter=Condition(self._has_plan),
         )
 
         # Output panel (fills remaining space)
@@ -618,12 +594,31 @@ class PTDisplay:
         # Input row (label + optional input area)
         input_row = VSplit([prompt_label, input_window])
 
-        # Root layout with completions menu
+        # Plan popup (floating overlay, shown with Ctrl+P)
+        def get_popup_height():
+            """Calculate popup height based on plan steps."""
+            if not self._plan_panel.has_plan:
+                return 5
+            plan_data = self._plan_panel._plan_data
+            steps = plan_data.get("steps", []) if plan_data else []
+            # Each step is 1-2 lines, plus title (1) + separator (1) + progress (1) + borders (2)
+            base_height = 5
+            step_lines = len(steps) * 2  # Assume 2 lines per step (step + result)
+            return min(base_height + step_lines, self._height - 4)
+
+        plan_popup_window = ConditionalContainer(
+            Window(
+                FormattedTextControl(self._get_plan_popup_content),
+                height=get_popup_height,
+            ),
+            filter=Condition(lambda: self._plan_panel.is_popup_visible),
+        )
+
+        # Root layout with completions menu and plan popup
         from prompt_toolkit.layout.containers import FloatContainer, Float
         root = FloatContainer(
             content=HSplit([
                 status_bar,
-                plan_window,
                 content_area,  # Output panel (or VSplit with output + agent panel)
                 input_row,
             ]),
@@ -632,6 +627,11 @@ class PTDisplay:
                     xcursor=True,
                     ycursor=True,
                     content=CompletionsMenu(max_height=8),
+                ),
+                Float(
+                    top=1,  # Below status bar
+                    left=2,
+                    content=plan_popup_window,
                 ),
             ],
         )
@@ -852,8 +852,6 @@ class PTDisplay:
         # Calculate page size based on available height
         if page_size is None:
             available = self._height - 2  # minus input row and status bar
-            if self._plan_panel.has_plan:
-                available -= self._plan_height
             # Account for panel borders
             page_size = max(5, available - 4)
 
