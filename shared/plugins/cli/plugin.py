@@ -223,6 +223,33 @@ Shell features like pipes (|), redirections (>, >>), and command chaining (&&, |
 
 The tool returns stdout, stderr, and returncode from the executed command.
 
+LONG-RUNNING COMMANDS AND AUTO-BACKGROUNDING:
+Commands that take longer than 10 seconds are automatically moved to background execution.
+When this happens, instead of stdout/stderr, you receive:
+{
+    "auto_backgrounded": true,
+    "task_id": "abc-123",
+    "message": "Task exceeded 10.0s threshold, continuing in background..."
+}
+
+Known slow commands that will be auto-backgrounded:
+- Package managers: npm install, pip install, cargo build, mvn install, gradle build
+- Build commands: make, cmake, docker build
+- Test suites: pytest, npm test, mvn test, cargo test
+
+When a command is auto-backgrounded, use these tools to monitor it:
+- listBackgroundTasks() - See all running background tasks
+- getBackgroundTaskStatus(task_id="abc-123") - Check if a specific task is done
+- getBackgroundTaskResult(task_id="abc-123") - Get stdout/stderr once complete
+
+Example workflow for a Maven build:
+1. cli_based_tool(command="mvn clean install")
+2. Receive: {"auto_backgrounded": true, "task_id": "xyz-789", ...}
+3. getBackgroundTaskStatus(task_id="xyz-789") -> {"status": "RUNNING", ...}
+4. (wait or do other work)
+5. getBackgroundTaskStatus(task_id="xyz-789") -> {"status": "COMPLETED", ...}
+6. getBackgroundTaskResult(task_id="xyz-789") -> {"stdout": "...", "stderr": "...", "returncode": 0}
+
 ERROR HANDLING:
 - A non-zero returncode indicates the command failed - always check stderr for details
 - "File exists" or "Directory exists" errors mean the goal is already achieved - consider the step successful and continue

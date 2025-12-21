@@ -174,32 +174,101 @@ permission_plugin.initialize({
 client.configure_tools(registry, permission_plugin)
 ```
 
+## Auto-Backgrounding
+
+Commands that exceed a configurable threshold (default: 10 seconds) are automatically moved to background execution. This prevents long-running operations from blocking the model.
+
+### How It Works
+
+When a command exceeds the threshold, instead of the normal response, you receive:
+
+```json
+{
+  "auto_backgrounded": true,
+  "task_id": "abc-123",
+  "threshold_seconds": 10.0,
+  "message": "Task exceeded 10.0s threshold, continuing in background..."
+}
+```
+
+### Known Slow Commands
+
+The plugin estimates duration for common slow operations:
+
+| Command Pattern | Estimated Duration |
+|-----------------|-------------------|
+| `mvn install` | 60s |
+| `gradle build` | 45s |
+| `cargo build` | 60s |
+| `npm install` | 30s |
+| `pip install` | 20s |
+| `pytest` | 30s |
+| `docker build` | 60s |
+
+### Monitoring Background Tasks
+
+Use the background plugin's tools to monitor auto-backgrounded commands:
+
+```python
+# List all running background tasks
+listBackgroundTasks()
+
+# Check status of a specific task
+getBackgroundTaskStatus(task_id="abc-123")
+# Returns: {"status": "RUNNING", "plugin": "cli", "tool": "cli_based_tool", ...}
+
+# Get result once complete
+getBackgroundTaskResult(task_id="abc-123")
+# Returns: {"stdout": "...", "stderr": "...", "returncode": 0}
+```
+
+### Example Workflow
+
+```
+1. Model: cli_based_tool(command="mvn clean install")
+2. Response: {"auto_backgrounded": true, "task_id": "xyz-789", ...}
+3. Model: getBackgroundTaskStatus(task_id="xyz-789")
+4. Response: {"status": "RUNNING", ...}
+5. (Model does other work or waits)
+6. Model: getBackgroundTaskStatus(task_id="xyz-789")
+7. Response: {"status": "COMPLETED", ...}
+8. Model: getBackgroundTaskResult(task_id="xyz-789")
+9. Response: {"stdout": "BUILD SUCCESS...", "returncode": 0}
+```
+
+### Configuration
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `auto_background_threshold` | float | `10.0` | Seconds before auto-backgrounding |
+| `background_max_workers` | int | `4` | Max concurrent background tasks |
+
+```python
+registry.expose_all({
+    "cli": {
+        "auto_background_threshold": 30.0,  # Increase threshold to 30s
+        "background_max_workers": 8
+    }
+})
+```
+
 ## System Instructions
 
-The plugin provides these system instructions to the model:
+The plugin provides comprehensive system instructions to the model covering:
+- Filesystem operations (create, read, write, delete, move files)
+- Search and filtering (find, grep, pipes)
+- Version control (git commands)
+- Running programs and tests
+- **Auto-backgrounding behavior** and how to monitor background tasks
+- Error handling guidance
 
-```
-You have access to `cli_based_tool` which executes local shell commands.
-
-Use it to run commands like `ls`, `cat`, `grep`, `find`, `git`, `gh`, etc.
-
-Example usage:
-- List files: cli_based_tool(command="ls -la")
-- Read a file: cli_based_tool(command="cat /path/to/file")
-- Check git status: cli_based_tool(command="git status")
-- Search for text: cli_based_tool(command="grep -r 'pattern' /path")
-
-Shell features like pipes and redirections are supported:
-- Filter output: cli_based_tool(command="ls -la | grep '.py'")
-- Chain commands: cli_based_tool(command="cd /tmp && ls -la")
-- Redirect output: cli_based_tool(command="echo 'hello' > /tmp/test.txt")
-- Find oldest file: cli_based_tool(command="ls -t | tail -1")
-
-The tool returns stdout, stderr, and returncode from the executed command.
-```
+See `get_system_instructions()` in `plugin.py` for the full text.
 
 ## Configuration Reference
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `extra_paths` | list[str] | `[]` | Additional directories to add to PATH |
+| `max_output_chars` | int | `50000` | Maximum characters to return from stdout/stderr |
+| `auto_background_threshold` | float | `10.0` | Seconds before auto-backgrounding |
+| `background_max_workers` | int | `4` | Max concurrent background tasks |
