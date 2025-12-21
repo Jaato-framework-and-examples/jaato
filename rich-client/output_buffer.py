@@ -1284,3 +1284,164 @@ class OutputBuffer:
             height=height,  # Constrain panel to exact height
             width=width,  # Constrain panel to exact width (preserves right border)
         )
+
+    # -------------------------------------------------------------------------
+    # Chrome-free text extraction (for clipboard operations)
+    # -------------------------------------------------------------------------
+
+    def _should_include_source(self, source: str, sources: Optional[set] = None) -> bool:
+        """Check if a source should be included based on filter.
+
+        Args:
+            source: The source type to check.
+            sources: Set of sources to include. If None, includes all.
+
+        Returns:
+            True if the source should be included.
+        """
+        if sources is None:
+            return True
+        if source in sources:
+            return True
+        # Handle prefix matching (e.g., "tool" matches "tool:grep")
+        if ":" in source:
+            prefix = source.split(":")[0]
+            if prefix in sources:
+                return True
+        return False
+
+    def get_last_response_text(self, sources: Optional[set] = None) -> Optional[str]:
+        """Get text from the last model response (chrome-free).
+
+        Extracts text from the most recent contiguous block of model output,
+        excluding turn headers and other UI chrome.
+
+        Args:
+            sources: Set of sources to include (default: {"model"}).
+
+        Returns:
+            The extracted text, or None if no matching content.
+        """
+        if sources is None:
+            sources = {"model"}
+
+        # Get all lines including current streaming block
+        all_lines = list(self._lines) + self._get_current_block_lines()
+
+        if not all_lines:
+            return None
+
+        # Find the last contiguous block of matching source lines
+        result_lines: List[str] = []
+        in_block = False
+
+        # Walk backwards to find the last matching block
+        for line in reversed(all_lines):
+            if self._should_include_source(line.source, sources):
+                result_lines.append(line.text)
+                in_block = True
+            elif in_block:
+                # We've exited the block, stop
+                break
+
+        if not result_lines:
+            return None
+
+        # Reverse since we walked backwards
+        result_lines.reverse()
+
+        # Join and clean up
+        text = "\n".join(result_lines)
+        return text.strip() if text.strip() else None
+
+    def get_text_in_line_range(
+        self,
+        start_line: int,
+        end_line: int,
+        sources: Optional[set] = None
+    ) -> Optional[str]:
+        """Get text from a range of display lines (chrome-free).
+
+        Used for mouse selection - maps screen coordinates to content.
+
+        Args:
+            start_line: Start display line (0-indexed from top of buffer).
+            end_line: End display line (inclusive).
+            sources: Set of sources to include. If None, includes all.
+
+        Returns:
+            The extracted text, or None if no matching content.
+        """
+        all_lines = list(self._lines) + self._get_current_block_lines()
+
+        if not all_lines:
+            return None
+
+        result_lines: List[str] = []
+        current_display_line = 0
+
+        for line in all_lines:
+            line_end = current_display_line + line.display_lines
+
+            # Check if this line overlaps with the selection range
+            if line_end > start_line and current_display_line <= end_line:
+                if self._should_include_source(line.source, sources):
+                    result_lines.append(line.text)
+
+            current_display_line = line_end
+
+            # Stop if we've passed the selection range
+            if current_display_line > end_line:
+                break
+
+        if not result_lines:
+            return None
+
+        text = "\n".join(result_lines)
+        return text.strip() if text.strip() else None
+
+    def get_all_text(self, sources: Optional[set] = None) -> Optional[str]:
+        """Get all text from the buffer (chrome-free).
+
+        Args:
+            sources: Set of sources to include. If None, includes all.
+
+        Returns:
+            The extracted text, or None if no matching content.
+        """
+        all_lines = list(self._lines) + self._get_current_block_lines()
+
+        if not all_lines:
+            return None
+
+        result_lines: List[str] = []
+
+        for line in all_lines:
+            if self._should_include_source(line.source, sources):
+                result_lines.append(line.text)
+
+        if not result_lines:
+            return None
+
+        text = "\n".join(result_lines)
+        return text.strip() if text.strip() else None
+
+    def get_visible_line_range(self, visible_height: int) -> Tuple[int, int]:
+        """Get the display line range currently visible on screen.
+
+        Used for mouse selection to map screen Y coordinates to buffer lines.
+
+        Args:
+            visible_height: Height of the visible area in display lines.
+
+        Returns:
+            Tuple of (start_line, end_line) display line indices.
+        """
+        all_lines = list(self._lines) + self._get_current_block_lines()
+        total_display_lines = sum(line.display_lines for line in all_lines)
+
+        # Calculate visible range based on scroll offset
+        end_line = total_display_lines - self._scroll_offset
+        start_line = max(0, end_line - visible_height)
+
+        return (start_line, end_line)
