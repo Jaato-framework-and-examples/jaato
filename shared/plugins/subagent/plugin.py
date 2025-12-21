@@ -110,6 +110,8 @@ class SubagentPlugin:
         self._state_lock = threading.Lock()  # Protect shared state access
         # Retry callback for subagent sessions (propagated from parent)
         self._retry_callback: Optional['RetryCallback'] = None
+        # Plan reporter for subagent TodoPlugins (propagated from parent)
+        self._plan_reporter: Optional[Any] = None  # TodoReporter instance
 
     @property
     def name(self) -> str:
@@ -643,6 +645,20 @@ class SubagentPlugin:
                 Set to None to revert to console output.
         """
         self._retry_callback = callback
+
+    def set_plan_reporter(self, reporter: Optional[Any]) -> None:
+        """Set plan reporter for subagent TodoPlugins.
+
+        When set, subagent TodoPlugins will use this reporter instead of
+        creating a ConsoleReporter. This ensures subagent plans are
+        displayed in the same location as the parent (e.g., in a rich
+        client's status bar popup instead of console).
+
+        Args:
+            reporter: TodoReporter instance to use for subagent plans.
+                Set to None to let subagents create their own reporters.
+        """
+        self._plan_reporter = reporter
 
     def _execute_list_profiles(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """List available subagent profiles.
@@ -1412,12 +1428,16 @@ class SubagentPlugin:
             expanded_configs = expand_plugin_configs(raw_plugin_configs, expansion_context)
 
             # Inject agent_name into each plugin's config for trace logging
+            # Inject plan reporter into todo plugin for UI display
             effective_plugin_configs = expanded_configs
             for plugin_name in (profile.plugins or []):
                 if plugin_name not in effective_plugin_configs:
                     effective_plugin_configs[plugin_name] = {}
                 if "agent_name" not in effective_plugin_configs[plugin_name]:
                     effective_plugin_configs[plugin_name]["agent_name"] = profile.name
+                # Inject plan reporter so subagent plans show in UI instead of console
+                if plugin_name == "todo" and self._plan_reporter:
+                    effective_plugin_configs[plugin_name]["_injected_reporter"] = self._plan_reporter
 
             session = self._runtime.create_session(
                 model=model,
@@ -1649,7 +1669,12 @@ class SubagentPlugin:
         # Expose only the plugins specified in the profile
         failed_plugins = []
         for plugin_name in profile.plugins:
-            plugin_config = profile.plugin_configs.get(plugin_name, {})
+            plugin_config = profile.plugin_configs.get(plugin_name, {}).copy()
+            # Inject plan reporter for todo plugin so subagent plans show in UI
+            if plugin_name == "todo" and self._plan_reporter:
+                # Pass reporter directly - TodoPlugin will use it instead of
+                # creating a ConsoleReporter
+                plugin_config["_injected_reporter"] = self._plan_reporter
             try:
                 registry.expose_tool(plugin_name, plugin_config)
             except Exception as e:

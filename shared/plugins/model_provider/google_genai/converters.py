@@ -159,7 +159,20 @@ def part_from_sdk(part: types.Part) -> Part:
             "data": inline.data
         })
 
-    # Unknown - return empty text
+    # Unknown part type - log a warning and return empty text
+    # This helps diagnose when the SDK returns new/unexpected part types
+    import sys
+    part_attrs = []
+    for attr in ['text', 'function_call', 'function_response', 'inline_data',
+                 'executable_code', 'code_execution_result', 'thought']:
+        if hasattr(part, attr):
+            val = getattr(part, attr)
+            if val is not None:
+                part_attrs.append(f"{attr}={type(val).__name__}")
+    if part_attrs:
+        print(f"[google_genai/converters] Warning: Unknown SDK part type with attrs: {part_attrs}",
+              file=sys.stderr)
+
     return Part(text="")
 
 

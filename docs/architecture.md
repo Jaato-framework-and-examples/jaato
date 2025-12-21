@@ -1163,8 +1163,11 @@ Hooks and callbacks are set at multiple levels to ensure all agents (main and su
 | `JaatoSession` | `set_retry_callback(callback)` | Routes retry notifications through custom handler |
 | `SubagentPlugin` | `set_ui_hooks(hooks)` | Stores hooks, passes to spawned sessions |
 | `SubagentPlugin` | `set_retry_callback(callback)` | Stores callback, passes to spawned sessions |
+| `SubagentPlugin` | `set_plan_reporter(reporter)` | Injects plan reporter into subagent TodoPlugins |
 
 The retry callback (`RetryCallback`) ensures rate limit retry messages from subagents are routed through the same channel as the parent (e.g., to the rich client's output panel) instead of printing to console.
+
+The plan reporter ensures subagent plans are displayed in the UI (e.g., status bar popup) instead of the console. The reporter is injected via `_injected_reporter` in the TodoPlugin config when subagents are spawned.
 
 ### Available Hooks
 

@@ -881,7 +881,10 @@ class JaatoSession:
                 # Process parts in order - emit text, collect function calls into groups
                 current_fc_group: List[FunctionCall] = []
                 for idx, part in enumerate(response.parts):
-                    self._trace(f"SESSION_PART[{idx}] text={bool(part.text)} fc={part.function_call.name if part.function_call else None}")
+                    # Enhanced trace: show empty text parts (which indicate unknown SDK parts)
+                    text_info = "empty" if part.text == "" else bool(part.text) if part.text else None
+                    fc_info = part.function_call.name if part.function_call else None
+                    self._trace(f"SESSION_PART[{idx}] text={text_info} fc={fc_info}")
                     if part.text:
                         # Before emitting text, execute any pending function calls
                         if current_fc_group:
