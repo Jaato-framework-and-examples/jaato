@@ -208,6 +208,13 @@ Session/client methods:
 - `client.is_processing` / `session.is_running`: Check if message in progress
 - `client.supports_stop` / `session.supports_stop`: Check if stop is supported
 - `client.set_streaming_enabled(bool)`: Toggle streaming mode
+- `session.set_retry_callback(callback)`: Route retry notifications through custom handler
+
+Retry callback signature: `(message: str, attempt: int, max_attempts: int, delay: float) -> None`
+
+When using subagents, the retry callback is automatically propagated to subagent sessions
+via `SubagentPlugin.set_retry_callback()`, ensuring retry messages from all agents route
+through the same channel (e.g., rich client's output panel) instead of printing to console.
 
 ### Proactive Garbage Collection
 
