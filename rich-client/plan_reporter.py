@@ -23,11 +23,15 @@ class LivePlanReporter(TodoReporter):
 
     Instead of printing to console, this reporter calls back to the
     display to update the sticky plan panel in-place.
+
+    Supports per-agent plan tracking by passing agent_id to callbacks.
     """
 
     def __init__(self):
-        self._update_callback: Optional[Callable[[Dict[str, Any]], None]] = None
-        self._clear_callback: Optional[Callable[[], None]] = None
+        # Callback signature: (plan_data: Dict, agent_id: Optional[str]) -> None
+        self._update_callback: Optional[Callable[[Dict[str, Any], Optional[str]], None]] = None
+        # Callback signature: (agent_id: Optional[str]) -> None
+        self._clear_callback: Optional[Callable[[Optional[str]], None]] = None
         self._output_callback: Optional[Callable[[str, str, str], None]] = None
 
     @property
@@ -38,8 +42,10 @@ class LivePlanReporter(TodoReporter):
         """Initialize with callbacks to display.
 
         Config options:
-            update_callback: Callable[[Dict], None] - called with plan data to update panel
-            clear_callback: Callable[[], None] - called to clear the panel
+            update_callback: Callable[[Dict, Optional[str]], None] - called with
+                            (plan_data, agent_id) to update panel
+            clear_callback: Callable[[Optional[str]], None] - called with agent_id
+                           to clear the panel
             output_callback: Callable[[str, str, str], None] - for supplementary output
         """
         if config:
@@ -47,11 +53,11 @@ class LivePlanReporter(TodoReporter):
             self._clear_callback = config.get("clear_callback")
             self._output_callback = config.get("output_callback")
 
-    def _emit_plan_update(self, plan: TodoPlan) -> None:
+    def _emit_plan_update(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
         """Emit plan update to the display."""
         if self._update_callback:
             plan_data = self._plan_to_display_dict(plan)
-            self._update_callback(plan_data)
+            self._update_callback(plan_data, agent_id)
 
     def _plan_to_display_dict(self, plan: TodoPlan) -> Dict[str, Any]:
         """Convert TodoPlan to display-friendly dict."""
@@ -80,15 +86,15 @@ class LivePlanReporter(TodoReporter):
         if self._output_callback:
             self._output_callback(source, text, mode)
 
-    def report_plan_created(self, plan: TodoPlan) -> None:
+    def report_plan_created(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
         """Report new plan creation - update the sticky panel."""
-        self._emit_plan_update(plan)
+        self._emit_plan_update(plan, agent_id)
         # Also emit a message to the output panel
         self._emit_output("plan", f"Plan created: {plan.title}", "write")
 
-    def report_step_update(self, plan: TodoPlan, step: TodoStep) -> None:
+    def report_step_update(self, plan: TodoPlan, step: TodoStep, agent_id: Optional[str] = None) -> None:
         """Report step status change - update the sticky panel."""
-        self._emit_plan_update(plan)
+        self._emit_plan_update(plan, agent_id)
 
         # Emit step details to output for completed/failed steps
         if step.status == StepStatus.COMPLETED and step.result:
@@ -104,9 +110,9 @@ class LivePlanReporter(TodoReporter):
                 "write"
             )
 
-    def report_plan_completed(self, plan: TodoPlan) -> None:
+    def report_plan_completed(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
         """Report plan completion - update panel and emit summary."""
-        self._emit_plan_update(plan)
+        self._emit_plan_update(plan, agent_id)
 
         # Emit completion message to output
         progress = plan.get_progress()
@@ -136,15 +142,15 @@ class LivePlanReporter(TodoReporter):
 
 
 def create_live_reporter(
-    update_callback: Callable[[Dict[str, Any]], None],
-    clear_callback: Optional[Callable[[], None]] = None,
+    update_callback: Callable[[Dict[str, Any], Optional[str]], None],
+    clear_callback: Optional[Callable[[Optional[str]], None]] = None,
     output_callback: Optional[Callable[[str, str, str], None]] = None,
 ) -> LivePlanReporter:
     """Factory to create a configured LivePlanReporter.
 
     Args:
-        update_callback: Called with plan data dict to update the panel.
-        clear_callback: Called to clear the panel.
+        update_callback: Called with (plan_data, agent_id) to update the panel.
+        clear_callback: Called with agent_id to clear the panel.
         output_callback: Called with (source, text, mode) for output.
 
     Returns:
