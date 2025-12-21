@@ -1152,15 +1152,19 @@ Model> ⠋ thinking...
        └─ web_search({'query': 'python docs'})
 ```
 
-### Hook Propagation
+### Hook and Callback Propagation
 
-Hooks are set at multiple levels to ensure all agents (main and subagents) emit lifecycle events:
+Hooks and callbacks are set at multiple levels to ensure all agents (main and subagents) behave consistently:
 
 | Component | Method | Purpose |
 |-----------|--------|---------|
 | `JaatoClient` | `set_ui_hooks(hooks)` | Sets hooks on main agent, passes to session |
 | `JaatoSession` | `set_ui_hooks(hooks, agent_id)` | Stores hooks for tool lifecycle emission |
+| `JaatoSession` | `set_retry_callback(callback)` | Routes retry notifications through custom handler |
 | `SubagentPlugin` | `set_ui_hooks(hooks)` | Stores hooks, passes to spawned sessions |
+| `SubagentPlugin` | `set_retry_callback(callback)` | Stores callback, passes to spawned sessions |
+
+The retry callback (`RetryCallback`) ensures rate limit retry messages from subagents are routed through the same channel as the parent (e.g., to the rich client's output panel) instead of printing to console.
 
 ### Available Hooks
 
