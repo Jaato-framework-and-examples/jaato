@@ -689,10 +689,11 @@ Examples:
         # Send connect request to background thread
         try:
             spec = servers[server_name]
+            # Expand variables in command and args (e.g., ${workspaceRoot})
             self._request_queue.put((MSG_CONNECT_SERVER, {
                 'name': server_name,
-                'command': spec.get('command'),
-                'args': spec.get('args', []),
+                'command': expand_variables(spec.get('command')),
+                'args': expand_variables(spec.get('args', [])),
                 'env': spec.get('env', {}),
             }))
 
@@ -1103,8 +1104,9 @@ Examples:
             # Helper to connect a single server
             async def connect_server(mgr: MCPClientManager, name: str, spec: dict) -> Tuple[bool, str]:
                 """Connect to a server and return (success, error_message)."""
-                cmd = spec.get('command', 'unknown')
-                args = spec.get('args', [])
+                # Expand variables in command and args (e.g., ${workspaceRoot})
+                cmd = expand_variables(spec.get('command', 'unknown'))
+                args = expand_variables(spec.get('args', []))
                 args_str = ' '.join(str(a) for a in args) if args else ''
                 self._log_event(LOG_INFO, "Connecting to server", server=name,
                               details=f"command: {cmd} {args_str}".strip())
