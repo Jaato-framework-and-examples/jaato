@@ -1,7 +1,7 @@
 {
   "name": "validator-tier4-cicd",
   "description": "[Tier 4 - CI/CD] Final pre-deployment quality gate. RUN WHEN: Code is ready for deployment/merge. RUN AFTER: Tiers 1-3 pass. CHECKS: Full test suite, coverage thresholds, security scans, container build.",
-  "plugins": ["cli", "references", "artifact_tracker"],
+  "plugins": ["cli", "file_edit", "references", "artifact_tracker", "background"],
   "plugin_configs": {
     "references": {
       "preselected": ["enablement-consumer-prompt"],
