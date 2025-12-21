@@ -365,6 +365,13 @@ class RichClient:
         if hasattr(self.todo_plugin, '_reporter'):
             self.todo_plugin._reporter = live_reporter
 
+        # Also set reporter on subagent plugin so subagent TodoPlugins use it
+        if self.registry:
+            subagent_plugin = self.registry.get_plugin("subagent")
+            if subagent_plugin and hasattr(subagent_plugin, 'set_plan_reporter'):
+                subagent_plugin.set_plan_reporter(live_reporter)
+                self._trace("Plan reporter configured for subagent plugin")
+
     def _trace(self, msg: str) -> None:
         """Write trace message to file for debugging."""
         import datetime

@@ -132,8 +132,20 @@ class TodoPlugin:
         # Initialize reporter (preserve existing if not explicitly overridden)
         # This allows the LivePlanReporter set by rich_client to survive
         # re-initialization when subagents configure their agent_name
+        #
+        # Priority:
+        # 1. Injected reporter from parent (for subagents inheriting UI)
+        # 2. Explicit reporter_type in config
+        # 3. Existing reporter (preserve)
+        # 4. Create from config/defaults
+        injected_reporter = config.get("_injected_reporter")
         reporter_type = config.get("reporter_type")
-        if reporter_type or not self._reporter:
+
+        if injected_reporter:
+            # Use reporter injected by parent (e.g., subagent inheriting LivePlanReporter)
+            self._reporter = injected_reporter
+            self._trace(f"initialize: using injected reporter {type(injected_reporter).__name__}")
+        elif reporter_type or not self._reporter:
             # Only create new reporter if explicitly requested or none exists
             reporter_type = reporter_type or self._config.reporter_type
             reporter_config = config.get("reporter_config") or self._config.to_reporter_config()
