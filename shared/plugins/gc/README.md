@@ -104,7 +104,61 @@ Each plugin accepts additional options via `initialize()`:
 | `summarizer` | summarize, hybrid | Function to generate summaries |
 | `summarize_middle_turns` | hybrid | Turns to summarize (not truncate) |
 
-## Usage with JaatoClient
+## Configuration Methods
+
+GC can be configured in three ways:
+
+### 1. File-Based Configuration (Main Agent)
+
+Create `.jaato/gc.json` in your project root:
+
+```json
+{
+  "type": "hybrid",
+  "threshold_percent": 80.0,
+  "preserve_recent_turns": 5,
+  "notify_on_gc": true,
+  "summarize_middle_turns": 10,
+  "max_turns": null,
+  "plugin_config": {}
+}
+```
+
+The rich client automatically loads this file on startup. For custom clients:
+
+```python
+from shared.plugins.gc import load_gc_from_file
+
+result = load_gc_from_file()  # Defaults to .jaato/gc.json
+if result:
+    gc_plugin, gc_config = result
+    client.set_gc_plugin(gc_plugin, gc_config)
+```
+
+### 2. Profile-Based Configuration (Subagents)
+
+Add a `gc` field to subagent profile JSON files in `.jaato/profiles/`:
+
+```json
+{
+  "name": "my-subagent",
+  "description": "A specialized subagent",
+  "plugins": ["cli", "file_edit"],
+  "gc": {
+    "type": "hybrid",
+    "threshold_percent": 80.0,
+    "preserve_recent_turns": 5,
+    "notify_on_gc": true,
+    "summarize_middle_turns": 10
+  }
+}
+```
+
+The subagent plugin automatically initializes GC when spawning agents with this configuration.
+
+### 3. Programmatic Configuration
+
+For direct control in custom clients:
 
 ```python
 from shared.jaato_client import JaatoClient

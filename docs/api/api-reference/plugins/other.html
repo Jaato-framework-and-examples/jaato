@@ -705,58 +705,72 @@ cancelBackgroundTask(task_id="cli_abc123")</code></pre>
             removing or summarizing old conversation history.
           </p>
 
-          <h3>gc_truncate</h3>
-          <p>
-            Simple truncation strategy. Removes oldest messages when
-            context exceeds limit.
-          </p>
+          <h3>Available Strategies</h3>
+          <ul>
+            <li><strong>gc_truncate</strong>: Simple truncation. Removes oldest messages when context exceeds limit.</li>
+            <li><strong>gc_summarize</strong>: Summarization. Compresses old messages into a summary.</li>
+            <li><strong>gc_hybrid</strong>: Generational. Preserves recent, summarizes middle, truncates ancient.</li>
+          </ul>
 
-          <h3>gc_summarize</h3>
-          <p>
-            Summarization strategy. Compresses old messages into a summary
-            to preserve context while reducing tokens.
-          </p>
-
-          <h3>gc_hybrid</h3>
-          <p>
-            Combined approach. Summarizes old messages, then truncates
-            if still over limit.
-          </p>
+          <h3>Configuration Methods</h3>
+          <p>GC can be configured in three ways:</p>
+          <ol>
+            <li><strong>File-based</strong>: Create <code>.jaato/gc.json</code> for main agent</li>
+            <li><strong>Profile-based</strong>: Add <code>gc</code> field to subagent profiles</li>
+            <li><strong>Programmatic</strong>: Use <code>set_gc_plugin()</code> for direct control</li>
+          </ol>
 
           <div class="callout callout-info">
-            <div class="callout-title">Client-Configured</div>
-            GC plugins are configured directly on the client via
-            <code>configure_gc()</code>, not through the registry.
+            <div class="callout-title">Auto-Loading</div>
+            The rich client automatically loads GC config from
+            <code>.jaato/gc.json</code> on startup if the file exists.
           </div>
         </div>
         <div class="panel-code">
-          <div class="code-label">GC configuration</div>
+          <div class="code-label">File-based (.jaato/gc.json)</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared.plugins.gc_truncate import TruncateGCPlugin
-
-gc_plugin = TruncateGCPlugin()
-gc_plugin.initialize({
-    'max_tokens': 100000,
-    'target_tokens': 80000,  # After GC
-    'preserve_system': True,
-    'preserve_recent_turns': 3,
-})
-
-client.configure_gc(gc_plugin=gc_plugin)</code></pre>
+            <pre><code class="language-json">{
+  "type": "hybrid",
+  "threshold_percent": 80.0,
+  "preserve_recent_turns": 5,
+  "notify_on_gc": true,
+  "summarize_middle_turns": 10
+}</code></pre>
           </div>
 
-          <div class="code-label" style="margin-top: 24px;">Summarization GC</div>
+          <div class="code-label" style="margin-top: 24px;">Profile-based (subagents)</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared.plugins.gc_summarize import SummarizeGCPlugin
+            <pre><code class="language-json">{
+  "name": "long-running-agent",
+  "plugins": ["cli", "file_edit"],
+  "gc": {
+    "type": "hybrid",
+    "threshold_percent": 80.0,
+    "preserve_recent_turns": 5
+  }
+}</code></pre>
+          </div>
 
-gc_plugin = SummarizeGCPlugin()
-gc_plugin.initialize({
-    'max_tokens': 100000,
-    'summarize_threshold': 80000,
-    'summary_model': 'gemini-2.5-flash',
+          <div class="code-label" style="margin-top: 24px;">Programmatic</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc import load_gc_from_file
+
+# Load from .jaato/gc.json
+result = load_gc_from_file()
+if result:
+    gc_plugin, gc_config = result
+    client.set_gc_plugin(gc_plugin, gc_config)
+
+# Or manually configure
+from shared.plugins.gc import load_gc_plugin, GCConfig
+
+gc_plugin = load_gc_plugin('gc_hybrid', {
+    'preserve_recent_turns': 5,
+    'summarize_middle_turns': 10
 })
-
-client.configure_gc(gc_plugin=gc_plugin)</code></pre>
+client.set_gc_plugin(gc_plugin, GCConfig(
+    threshold_percent=80.0
+))</code></pre>
           </div>
         </div>
       </section>

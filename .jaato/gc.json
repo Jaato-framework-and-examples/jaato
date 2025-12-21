@@ -1,0 +1,9 @@
+{
+  "type": "hybrid",
+  "threshold_percent": 80.0,
+  "preserve_recent_turns": 5,
+  "notify_on_gc": true,
+  "summarize_middle_turns": 10,
+  "max_turns": null,
+  "plugin_config": {}
+}
