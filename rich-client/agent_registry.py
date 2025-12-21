@@ -370,3 +370,21 @@ class AgentRegistry:
         """
         with self._lock:
             return list(self._agent_order)
+
+    def find_agent_id_by_name(self, name: str) -> Optional[str]:
+        """Find agent_id by profile/agent name.
+
+        This is useful for mapping from TodoPlugin's agent_name (profile name)
+        to the actual agent_id in the registry.
+
+        Args:
+            name: Agent/profile name to search for.
+
+        Returns:
+            agent_id if found, None otherwise.
+        """
+        with self._lock:
+            for agent_id, agent in self._agents.items():
+                if agent.name == name:
+                    return agent_id
+            return None

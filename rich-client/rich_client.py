@@ -333,25 +333,33 @@ class RichClient:
 
         # Create callbacks that map agent_name to registry agent_id
         # The reporter passes (plan_data, agent_name) where agent_name is the
-        # TodoPlugin's _agent_name (e.g., None for main, "researcher" for subagent)
+        # TodoPlugin's _agent_name (e.g., None for main, "skill-code-020..." for subagent)
         #
         # Registry agent_id format:
         #   - Main agent: "main"
-        #   - Subagents: "{parent}.{profile_name}" e.g., "main.researcher"
+        #   - Subagents: "subagent_N" (e.g., "subagent_1", "subagent_2")
+        #
+        # We need to look up the actual agent_id by name since subagent IDs
+        # don't follow a predictable pattern from the profile name.
         def update_callback(plan_data, agent_name):
             if agent_name is None or agent_name == "main":
                 target_id = "main"
             else:
-                # Subagent: construct parent.name format
-                # (subagents are registered as "main.{profile_name}")
-                target_id = f"main.{agent_name}"
+                # Look up the agent_id by profile name
+                target_id = self._agent_registry.find_agent_id_by_name(agent_name)
+                if not target_id:
+                    # Fallback: try direct match (shouldn't happen normally)
+                    self._trace(f"Plan update: agent_name '{agent_name}' not found in registry")
+                    target_id = agent_name
             self._display.update_plan(plan_data, agent_id=target_id)
 
         def clear_callback(agent_name):
             if agent_name is None or agent_name == "main":
                 target_id = "main"
             else:
-                target_id = f"main.{agent_name}"
+                target_id = self._agent_registry.find_agent_id_by_name(agent_name)
+                if not target_id:
+                    target_id = agent_name
             self._display.clear_plan(agent_id=target_id)
 
         # Create live reporter with callbacks to display
