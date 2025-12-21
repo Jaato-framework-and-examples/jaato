@@ -110,15 +110,13 @@ class RichClient:
         if self.verbose and self._display:
             self._display.add_system_message(msg, style="cyan")
 
-    def _create_output_callback(self, stop_spinner_on_first: bool = False,
+    def _create_output_callback(self,
                                   suppress_sources: Optional[set] = None) -> Callable[[str, str, str], None]:
         """Create callback for real-time output to display.
 
         Args:
-            stop_spinner_on_first: If True, stop the spinner on first output.
             suppress_sources: Set of source names to suppress (e.g., {"permission"})
         """
-        first_output_received = [False]  # Use list for mutability in closure
         suppress = suppress_sources or set()
 
         def callback(source: str, text: str, mode: str) -> None:
@@ -126,10 +124,9 @@ class RichClient:
                 # Skip suppressed sources (e.g., permission output shown in tool tree)
                 if source in suppress:
                     return
-                # Stop spinner on first output if requested
-                if stop_spinner_on_first and not first_output_received[0]:
-                    first_output_received[0] = True
-                    self._display.stop_spinner()
+                # Note: Spinner is NOT stopped here. It remains active during the
+                # entire turn to show "thinking..." when model pauses between chunks.
+                # The spinner is stopped when status changes to "done".
                 # Skip ALL sources when UI hooks are active - the hooks handle
                 # routing all output (model, system, plugin) to the correct buffer
                 # via on_agent_output. Without this, output gets duplicated.
@@ -535,9 +532,10 @@ class RichClient:
             def on_agent_output(self, agent_id, source, text, mode):
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
-                    # Stop spinner on first output from model
-                    if source == "model" and buffer.spinner_active:
-                        buffer.stop_spinner()
+                    # Note: We do NOT stop the spinner on model output.
+                    # The spinner should remain active during the entire turn
+                    # to show "thinking..." when the model pauses between chunks.
+                    # The spinner is stopped when status changes to "done".
                     buffer.append(source, text, mode)
                     # Auto-scroll to bottom and refresh display
                     buffer.scroll_to_bottom()
@@ -895,8 +893,9 @@ class RichClient:
         # Spinner is already started by on_agent_status_changed hook
         # (called from _handle_input before this method)
 
-        # Create callback that stops spinner on first output
-        output_callback = self._create_output_callback(stop_spinner_on_first=True)
+        # Create callback - spinner stays active during entire turn
+        # to show "thinking..." when model pauses between streaming chunks
+        output_callback = self._create_output_callback()
 
         # Track maximum token usage seen during this turn (to avoid jumping backwards)
         # Start at 0 - streaming prompt_tokens already includes full history,
@@ -1035,8 +1034,14 @@ class RichClient:
             finally:
                 self._model_running = False
                 self._model_thread = None
-                # Ensure spinner is stopped (in case no output was received)
-                if self._display:
+                # Signal that main agent is done - this stops the spinner
+                if self._ui_hooks:
+                    self._ui_hooks.on_agent_status_changed(
+                        agent_id="main",
+                        status="done"
+                    )
+                elif self._display:
+                    # Fallback: directly stop spinner if no hooks
                     self._display.stop_spinner()
                 self._trace("[model_thread] finished")
 
