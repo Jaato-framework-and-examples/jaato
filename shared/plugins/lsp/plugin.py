@@ -277,8 +277,12 @@ class LSPToolPlugin:
             ),
             ToolSchema(
                 name="lsp_find_references",
-                description="Find all references to a symbol at a specific position. "
-                           "Returns a list of locations where the symbol is used.",
+                description=(
+                    "Find all references to a symbol at a specific position. "
+                    "Use this for impact analysis before modifying a method or class - "
+                    "shows all callers/usages across the codebase, more accurate than grep "
+                    "for understanding true dependencies."
+                ),
                 parameters={
                     "type": "object",
                     "properties": {
@@ -304,8 +308,11 @@ class LSPToolPlugin:
             ),
             ToolSchema(
                 name="lsp_hover",
-                description="Get hover information (type info, documentation) for a symbol "
-                           "at a specific position.",
+                description=(
+                    "Get hover information (type info, documentation) for a symbol at a position. "
+                    "Use this to verify method signatures, parameter types, and return types when "
+                    "integrating with existing code - faster than reading through source files."
+                ),
                 parameters={
                     "type": "object",
                     "properties": {
@@ -327,8 +334,13 @@ class LSPToolPlugin:
             ),
             ToolSchema(
                 name="lsp_get_diagnostics",
-                description="Get diagnostic information (errors, warnings) for a file. "
-                           "The file must be opened first.",
+                description=(
+                    "Get diagnostic information (errors, warnings) for a file. "
+                    "RECOMMENDED: Use this as a pre-flight check BEFORE running Maven/Gradle builds. "
+                    "LSP diagnostics return in milliseconds vs 30-60s for a full build, catching "
+                    "type errors, missing imports, and syntax issues instantly. Fix any errors "
+                    "reported here before attempting a build to avoid wasted build cycles."
+                ),
                 parameters={
                     "type": "object",
                     "properties": {
