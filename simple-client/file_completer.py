@@ -26,6 +26,7 @@ DEFAULT_COMMANDS = [
     ("tools disable", "Disable a tool (usage: tools disable <name> or 'all')"),
     ("keybindings", "Manage keyboard shortcuts"),
     ("keybindings list", "Show current keybinding configuration"),
+    ("keybindings set", "Set a keybinding (usage: keybindings set <action> <key> [--save])"),
     ("keybindings reload", "Reload keybindings from config files"),
     ("plugins", "List available plugins with status"),
     ("reset", "Clear conversation history"),
