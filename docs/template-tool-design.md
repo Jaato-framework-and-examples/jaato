@@ -444,4 +444,5 @@ Template rendering requires approval since it writes files."""
 5. Add Jinja2 dependency to requirements.txt
 6. Write tests for variable substitution, conditionals, loops
 7. Add integration test with permission system
-8. Document in CLAUDE.md
+8. **Register in README.md**: Add to "Available Plugins" section under "File & Content Management"
+9. Document in CLAUDE.md
