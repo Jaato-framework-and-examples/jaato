@@ -254,82 +254,73 @@ class LSPToolPlugin:
         return [
             ToolSchema(
                 name="lsp_goto_definition",
-                description="Go to the definition of a symbol at a specific position in a file. "
-                           "Returns the file path and line number where the symbol is defined.",
+                description=(
+                    "Find the definition of a symbol (class, method, variable, etc.). "
+                    "Returns the file path and line number where the symbol is defined. "
+                    "Useful for navigating to where something is implemented."
+                ),
                 parameters={
                     "type": "object",
                     "properties": {
+                        "symbol": {
+                            "type": "string",
+                            "description": "Name of the symbol to find (e.g., 'UserService', 'processOrder')"
+                        },
                         "file_path": {
                             "type": "string",
-                            "description": "Path to the source file"
-                        },
-                        "line": {
-                            "type": "integer",
-                            "description": "Line number (0-indexed)"
-                        },
-                        "character": {
-                            "type": "integer",
-                            "description": "Character position in the line (0-indexed)"
+                            "description": "Optional: file to search in for context (helps with disambiguation)"
                         }
                     },
-                    "required": ["file_path", "line", "character"]
+                    "required": ["symbol"]
                 }
             ),
             ToolSchema(
                 name="lsp_find_references",
                 description=(
-                    "Find all references to a symbol at a specific position. "
-                    "Use this for impact analysis before modifying a method or class - "
-                    "shows all callers/usages across the codebase, more accurate than grep "
-                    "for understanding true dependencies."
+                    "Find all references to a symbol across the codebase. "
+                    "Use for impact analysis before modifying a method or class - "
+                    "shows all callers/usages. More accurate than grep for understanding "
+                    "true dependencies (understands scope, not just text matching)."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
+                        "symbol": {
+                            "type": "string",
+                            "description": "Name of the symbol to find references for"
+                        },
                         "file_path": {
                             "type": "string",
-                            "description": "Path to the source file"
-                        },
-                        "line": {
-                            "type": "integer",
-                            "description": "Line number (0-indexed)"
-                        },
-                        "character": {
-                            "type": "integer",
-                            "description": "Character position in the line (0-indexed)"
+                            "description": "Optional: file where the symbol is defined (helps with disambiguation)"
                         },
                         "include_declaration": {
                             "type": "boolean",
                             "description": "Include the declaration in results (default: true)"
                         }
                     },
-                    "required": ["file_path", "line", "character"]
+                    "required": ["symbol"]
                 }
             ),
             ToolSchema(
                 name="lsp_hover",
                 description=(
-                    "Get hover information (type info, documentation) for a symbol at a position. "
-                    "Use this to verify method signatures, parameter types, and return types when "
-                    "integrating with existing code - faster than reading through source files."
+                    "Get type information and documentation for a symbol. "
+                    "Use to verify method signatures, parameter types, and return types "
+                    "when integrating with existing code - faster than reading source files."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
+                        "symbol": {
+                            "type": "string",
+                            "description": "Name of the symbol to get info for"
+                        },
                         "file_path": {
                             "type": "string",
-                            "description": "Path to the source file"
-                        },
-                        "line": {
-                            "type": "integer",
-                            "description": "Line number (0-indexed)"
-                        },
-                        "character": {
-                            "type": "integer",
-                            "description": "Character position in the line (0-indexed)"
+                            "description": "Optional: file containing the symbol (helps with disambiguation)"
                         }
                     },
-                    "required": ["file_path", "line", "character"]
+                    "required": ["symbol"]
                 }
             ),
             ToolSchema(
@@ -382,29 +373,28 @@ class LSPToolPlugin:
             ),
             ToolSchema(
                 name="lsp_rename_symbol",
-                description="Rename a symbol across all files. Returns the workspace edit "
-                           "that would be applied (does not apply automatically).",
+                description=(
+                    "Rename a symbol across all files. Returns the workspace edit "
+                    "that would be applied (preview only - does not apply automatically). "
+                    "Use for safe refactoring with full scope awareness."
+                ),
                 parameters={
                     "type": "object",
                     "properties": {
-                        "file_path": {
+                        "symbol": {
                             "type": "string",
-                            "description": "Path to the source file"
-                        },
-                        "line": {
-                            "type": "integer",
-                            "description": "Line number (0-indexed)"
-                        },
-                        "character": {
-                            "type": "integer",
-                            "description": "Character position in the line (0-indexed)"
+                            "description": "Current name of the symbol to rename"
                         },
                         "new_name": {
                             "type": "string",
                             "description": "New name for the symbol"
+                        },
+                        "file_path": {
+                            "type": "string",
+                            "description": "Optional: file where the symbol is defined (helps with disambiguation)"
                         }
                     },
-                    "required": ["file_path", "line", "character", "new_name"]
+                    "required": ["symbol", "new_name"]
                 }
             ),
         ]
@@ -426,17 +416,22 @@ class LSPToolPlugin:
         }
 
     def get_system_instructions(self) -> Optional[str]:
-        return """LSP (Language Server Protocol) tools provide semantic code intelligence:
-- lsp_goto_definition: Navigate to where a symbol is defined
-- lsp_find_references: Find all usages of a symbol
-- lsp_hover: Get type information and documentation
-- lsp_get_diagnostics: Get errors and warnings for a file
-- lsp_document_symbols: List all symbols in a file
-- lsp_workspace_symbols: Search for symbols across the project
-- lsp_rename_symbol: Get rename edits for a symbol
+        return """LSP (Language Server Protocol) tools provide semantic code intelligence.
 
-Use 'lsp status' to see connected language servers.
-Line and character positions are 0-indexed."""
+Symbol-based tools (just provide the symbol name):
+- lsp_goto_definition(symbol): Find where a symbol is defined
+- lsp_find_references(symbol): Find all usages across the codebase
+- lsp_hover(symbol): Get type info and documentation
+- lsp_rename_symbol(symbol, new_name): Preview rename across all files
+
+File-based tools:
+- lsp_get_diagnostics(file_path): Get errors/warnings - use BEFORE builds for fast feedback
+- lsp_document_symbols(file_path): List all symbols in a file
+
+Query-based tools:
+- lsp_workspace_symbols(query): Search for symbols across the project
+
+Use 'lsp status' to see connected language servers."""
 
     def get_auto_approved_tools(self) -> List[str]:
         # All LSP tools are read-only except rename
@@ -998,6 +993,68 @@ Example:
             return path
         return uri
 
+    def _find_symbol_position(
+        self, symbol: str, file_path: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Find the position of a symbol in the codebase.
+
+        This enables symbol-based tool calls instead of requiring exact positions.
+        The model can say "find references to UserService" instead of providing
+        line/character coordinates.
+
+        Args:
+            symbol: Name of the symbol to find (class, method, variable, etc.)
+            file_path: Optional file to search in. If not provided, searches workspace.
+
+        Returns:
+            Dict with 'file_path', 'line', 'character' if found, or None.
+        """
+        import re
+
+        # If file_path is provided, search in that file
+        if file_path and os.path.isfile(file_path):
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                    lines = f.readlines()
+
+                # Search for symbol as a word boundary match
+                pattern = re.compile(r'\b' + re.escape(symbol) + r'\b')
+
+                for line_num, line in enumerate(lines):
+                    match = pattern.search(line)
+                    if match:
+                        return {
+                            'file_path': file_path,
+                            'line': line_num,
+                            'character': match.start()
+                        }
+            except (IOError, OSError) as e:
+                self._trace(f"_find_symbol_position: error reading {file_path}: {e}")
+
+        # Fall back to workspace symbols search
+        result = self._execute_method('workspace_symbols', {'query': symbol})
+        if isinstance(result, list) and len(result) > 0:
+            # Find exact match first, then prefix match
+            for sym in result:
+                if sym.get('name') == symbol:
+                    loc = sym.get('location', {})
+                    return {
+                        'file_path': loc.get('file_path') or self._uri_to_path(loc.get('uri', '')),
+                        'line': loc.get('line', 0),
+                        'character': loc.get('character', 0)
+                    }
+
+            # If no exact match, use first result
+            sym = result[0]
+            loc = sym.get('location', {})
+            return {
+                'file_path': loc.get('file_path') or self._uri_to_path(loc.get('uri', '')),
+                'line': loc.get('line', 0),
+                'character': loc.get('character', 0)
+            }
+
+        return None
+
     # Tool executor methods
 
     def _execute_method(self, method: str, args: Dict[str, Any]) -> Any:
@@ -1027,25 +1084,94 @@ Example:
             return {"error": str(e)}
 
     def _exec_goto_definition(self, args: Dict[str, Any]) -> Any:
-        return self._execute_method('goto_definition', args)
+        """Find definition of a symbol."""
+        symbol = args.get('symbol')
+        file_path = args.get('file_path')
+
+        if not symbol:
+            return {"error": "symbol parameter is required"}
+
+        pos = self._find_symbol_position(symbol, file_path)
+        if not pos:
+            return {"error": f"Symbol '{symbol}' not found in codebase"}
+
+        return self._execute_method('goto_definition', {
+            'file_path': pos['file_path'],
+            'line': pos['line'],
+            'character': pos['character']
+        })
 
     def _exec_find_references(self, args: Dict[str, Any]) -> Any:
-        return self._execute_method('find_references', args)
+        """Find all references to a symbol."""
+        symbol = args.get('symbol')
+        file_path = args.get('file_path')
+        include_declaration = args.get('include_declaration', True)
+
+        if not symbol:
+            return {"error": "symbol parameter is required"}
+
+        pos = self._find_symbol_position(symbol, file_path)
+        if not pos:
+            return {"error": f"Symbol '{symbol}' not found in codebase"}
+
+        return self._execute_method('find_references', {
+            'file_path': pos['file_path'],
+            'line': pos['line'],
+            'character': pos['character'],
+            'include_declaration': include_declaration
+        })
 
     def _exec_hover(self, args: Dict[str, Any]) -> Any:
-        return self._execute_method('hover', args)
+        """Get hover information for a symbol."""
+        symbol = args.get('symbol')
+        file_path = args.get('file_path')
+
+        if not symbol:
+            return {"error": "symbol parameter is required"}
+
+        pos = self._find_symbol_position(symbol, file_path)
+        if not pos:
+            return {"error": f"Symbol '{symbol}' not found in codebase"}
+
+        return self._execute_method('hover', {
+            'file_path': pos['file_path'],
+            'line': pos['line'],
+            'character': pos['character']
+        })
 
     def _exec_get_diagnostics(self, args: Dict[str, Any]) -> Any:
+        """Get diagnostics for a file (unchanged - already file-based)."""
         return self._execute_method('get_diagnostics', args)
 
     def _exec_document_symbols(self, args: Dict[str, Any]) -> Any:
+        """Get symbols in a file (unchanged - already file-based)."""
         return self._execute_method('document_symbols', args)
 
     def _exec_workspace_symbols(self, args: Dict[str, Any]) -> Any:
+        """Search for symbols in workspace (unchanged - already query-based)."""
         return self._execute_method('workspace_symbols', args)
 
     def _exec_rename_symbol(self, args: Dict[str, Any]) -> Any:
-        return self._execute_method('rename_symbol', args)
+        """Rename a symbol across all files."""
+        symbol = args.get('symbol')
+        new_name = args.get('new_name')
+        file_path = args.get('file_path')
+
+        if not symbol:
+            return {"error": "symbol parameter is required"}
+        if not new_name:
+            return {"error": "new_name parameter is required"}
+
+        pos = self._find_symbol_position(symbol, file_path)
+        if not pos:
+            return {"error": f"Symbol '{symbol}' not found in codebase"}
+
+        return self._execute_method('rename_symbol', {
+            'file_path': pos['file_path'],
+            'line': pos['line'],
+            'character': pos['character'],
+            'new_name': new_name
+        })
 
 
 def create_plugin() -> LSPToolPlugin:
