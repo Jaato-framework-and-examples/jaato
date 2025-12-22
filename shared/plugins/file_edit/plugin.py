@@ -5,6 +5,7 @@ integrated permission approval (showing diffs) and automatic backups.
 """
 
 import os
+import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from .diff_utils import (
     generate_unified_diff,
     generate_new_file_diff,
     generate_delete_file_diff,
+    generate_move_file_diff,
     summarize_diff,
     DEFAULT_MAX_LINES,
 )
@@ -30,6 +32,8 @@ class FileEditPlugin:
     - updateFile: Modify existing file (shows diff for approval, creates backup)
     - writeNewFile: Create new file (shows content for approval)
     - removeFile: Delete file (shows confirmation, creates backup)
+    - moveFile: Move/rename file (shows confirmation, creates backup)
+    - renameFile: Alias for moveFile (for discoverability)
     - undoFileChange: Restore from most recent backup (auto-approved)
 
     Integrates with the permission system to show formatted diffs
@@ -205,6 +209,54 @@ class FileEditPlugin:
                 }
             ),
             ToolSchema(
+                name="moveFile",
+                description="Move or rename a file. ALWAYS use this instead of `mv` CLI command. "
+                           "Creates destination directories if needed and creates a backup before "
+                           "moving. Fails if destination already exists unless overwrite=True.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "source_path": {
+                            "type": "string",
+                            "description": "Path to the source file to move"
+                        },
+                        "destination_path": {
+                            "type": "string",
+                            "description": "Path where the file should be moved to"
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "If True, overwrite destination if it exists. Default is False."
+                        }
+                    },
+                    "required": ["source_path", "destination_path"]
+                }
+            ),
+            ToolSchema(
+                name="renameFile",
+                description="Rename a file (alias for moveFile). ALWAYS use this instead of `mv` CLI "
+                           "command. Creates destination directories if needed and creates a backup "
+                           "before renaming. Fails if destination already exists unless overwrite=True.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "source_path": {
+                            "type": "string",
+                            "description": "Path to the source file to rename"
+                        },
+                        "destination_path": {
+                            "type": "string",
+                            "description": "New path/name for the file"
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "If True, overwrite destination if it exists. Default is False."
+                        }
+                    },
+                    "required": ["source_path", "destination_path"]
+                }
+            ),
+            ToolSchema(
                 name="undoFileChange",
                 description="Restore a file from its most recent backup. Use this to undo a previous "
                            "updateFile or removeFile operation.",
@@ -228,6 +280,8 @@ class FileEditPlugin:
             "updateFile": self._execute_update_file,
             "writeNewFile": self._execute_write_new_file,
             "removeFile": self._execute_remove_file,
+            "moveFile": self._execute_move_file,
+            "renameFile": self._execute_move_file,  # Alias for moveFile
             "undoFileChange": self._execute_undo_file_change,
         }
 
@@ -239,6 +293,7 @@ IMPORTANT: Always prefer these tools over CLI commands:
 - Use `readFile` instead of `cat`, `head`, `tail`, or `less`
 - Use `updateFile`/`writeNewFile` instead of `echo >`, `sed`, or heredocs
 - Use `removeFile` instead of `rm`
+- Use `moveFile`/`renameFile` instead of `mv`
 
 These tools provide structured output, automatic backups, and proper encoding handling.
 
@@ -247,6 +302,8 @@ Tools available:
 - `updateFile(path, new_content)`: Update an existing file. Shows diff for approval and creates backup.
 - `writeNewFile(path, content)`: Create a new file. Shows content for approval. Fails if file exists.
 - `removeFile(path)`: Delete a file. Creates backup before deletion.
+- `moveFile(source_path, destination_path, overwrite=False)`: Move or rename a file. Creates destination directories if needed. Creates backup before moving. Fails if destination exists unless overwrite=True.
+- `renameFile(source_path, destination_path, overwrite=False)`: Alias for moveFile. Use for renaming files.
 - `undoFileChange(path)`: Restore a file from its most recent backup.
 
 IMPORTANT: When using updateFile or writeNewFile, provide the raw file content directly.
@@ -254,9 +311,9 @@ Do NOT wrap the content in quotes, triple-quotes (''' or \"\"\"), or treat it as
 For example, to create a Python file, the content should start with 'import ...' or actual code,
 NOT with ''' or quotes around the code. The content parameter value is written verbatim to the file.
 
-File modifications (updateFile, writeNewFile, removeFile) will show you a preview
+File modifications (updateFile, writeNewFile, removeFile, moveFile) will show you a preview
 and require approval before execution. Backups are automatically created for
-updateFile and removeFile operations."""
+updateFile, removeFile, and moveFile operations."""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved.
@@ -294,6 +351,8 @@ updateFile and removeFile operations."""
             return self._format_write_new_file(arguments)
         elif tool_name == "removeFile":
             return self._format_remove_file(arguments)
+        elif tool_name in ("moveFile", "renameFile"):
+            return self._format_move_file(arguments)
 
         return None
 
@@ -379,6 +438,50 @@ updateFile and removeFile operations."""
 
         lines = content.splitlines()
         summary = f"Delete file: {path} ({len(lines)} lines, backup will be created)"
+
+        return PermissionDisplayInfo(
+            summary=summary,
+            details=diff_text,
+            format_hint="diff",
+            truncated=truncated,
+            original_lines=total_lines if truncated else None
+        )
+
+    def _format_move_file(self, arguments: Dict[str, Any]) -> Optional[PermissionDisplayInfo]:
+        """Format moveFile/renameFile for permission display."""
+        source_path = arguments.get("source_path", "")
+        destination_path = arguments.get("destination_path", "")
+        overwrite = arguments.get("overwrite", False)
+
+        source = Path(source_path)
+        destination = Path(destination_path)
+
+        if not source.exists():
+            # Source doesn't exist - skip permission, let executor return the error
+            return None
+
+        if destination.exists() and not overwrite:
+            # Destination exists and overwrite not set - skip permission, let executor return the error
+            return None
+
+        try:
+            content = source.read_text()
+        except OSError as e:
+            return PermissionDisplayInfo(
+                summary=f"Move file: {source_path} (read error)",
+                details=f"Error reading source file: {e}",
+                format_hint="text"
+            )
+
+        diff_text, truncated, total_lines = generate_move_file_diff(
+            source_path, destination_path, content, max_lines=DEFAULT_MAX_LINES
+        )
+
+        lines = content.splitlines()
+        if overwrite and destination.exists():
+            summary = f"Move file: {source_path} -> {destination_path} ({len(lines)} lines, overwrite enabled)"
+        else:
+            summary = f"Move file: {source_path} -> {destination_path} ({len(lines)} lines)"
 
         return PermissionDisplayInfo(
             summary=summary,
@@ -509,6 +612,69 @@ updateFile and removeFile operations."""
             return result
         except OSError as e:
             return {"error": f"Failed to delete file: {e}"}
+
+    def _execute_move_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute moveFile/renameFile tool."""
+        source_path = args.get("source_path", "")
+        destination_path = args.get("destination_path", "")
+        overwrite = args.get("overwrite", False)
+        self._trace(f"moveFile: source={source_path}, dest={destination_path}, overwrite={overwrite}")
+
+        if not source_path:
+            return {"error": "source_path is required", "source": source_path}
+
+        if not destination_path:
+            return {"error": "destination_path is required", "source": source_path}
+
+        source = Path(source_path)
+        destination = Path(destination_path)
+
+        if not source.exists():
+            return {"error": "Source file does not exist", "source": source_path}
+
+        if not source.is_file():
+            return {"error": f"Source is not a file: {source_path}", "source": source_path}
+
+        if destination.exists() and not overwrite:
+            return {
+                "error": "Destination file already exists. Use overwrite=True to replace it.",
+                "source": source_path,
+                "destination": destination_path
+            }
+
+        # Create backup of source file before moving
+        backup_path = None
+        if self._backup_manager:
+            backup_path = self._backup_manager.create_backup(source)
+
+        # If overwriting, also backup the destination
+        dest_backup_path = None
+        if destination.exists() and overwrite and self._backup_manager:
+            dest_backup_path = self._backup_manager.create_backup(destination)
+
+        try:
+            # Create destination parent directories if needed
+            destination.parent.mkdir(parents=True, exist_ok=True)
+
+            # Move the file (this handles overwrite if destination exists)
+            shutil.move(str(source), str(destination))
+
+            result = {
+                "success": True,
+                "source": source_path,
+                "destination": destination_path
+            }
+            if backup_path:
+                result["source_backup"] = str(backup_path)
+            if dest_backup_path:
+                result["destination_backup"] = str(dest_backup_path)
+            return result
+        except OSError as e:
+            return {
+                "error": f"Failed to move file: {e}",
+                "source": source_path,
+                "destination": destination_path
+            }
 
     def _execute_undo_file_change(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute undoFileChange tool."""
