@@ -159,6 +159,24 @@ def part_from_sdk(part: types.Part) -> Part:
             "data": inline.data
         })
 
+    # Thought part (Gemini 2.0+ thinking mode)
+    if hasattr(part, 'thought') and part.thought is not None:
+        return Part(thought=part.thought)
+
+    # Executable code part
+    if hasattr(part, 'executable_code') and part.executable_code is not None:
+        # Extract code string from SDK's ExecutableCode type
+        code = part.executable_code
+        code_str = getattr(code, 'code', str(code)) if code else ""
+        return Part(executable_code=code_str)
+
+    # Code execution result part
+    if hasattr(part, 'code_execution_result') and part.code_execution_result is not None:
+        result = part.code_execution_result
+        # Extract output from SDK's CodeExecutionResult type
+        output = getattr(result, 'output', str(result)) if result else ""
+        return Part(code_execution_result=output)
+
     # Unknown part type - log a warning and return empty text
     # This helps diagnose when the SDK returns new/unexpected part types
     import sys
@@ -503,6 +521,12 @@ def serialize_message(message: Message) -> Dict[str, Any]:
                 'data': base64.b64encode(part.inline_data.get('data', b'')).decode('utf-8')
                         if part.inline_data.get('data') else None
             })
+        elif part.thought is not None:
+            parts.append({'type': 'thought', 'thought': part.thought})
+        elif part.executable_code is not None:
+            parts.append({'type': 'executable_code', 'code': part.executable_code})
+        elif part.code_execution_result is not None:
+            parts.append({'type': 'code_execution_result', 'output': part.code_execution_result})
 
     return {
         'role': message.role.value,
@@ -538,6 +562,12 @@ def deserialize_message(data: Dict[str, Any]) -> Message:
                 'mime_type': p.get('mime_type'),
                 'data': raw_data
             }))
+        elif ptype == 'thought':
+            parts.append(Part(thought=p.get('thought', '')))
+        elif ptype == 'executable_code':
+            parts.append(Part(executable_code=p.get('code', '')))
+        elif ptype == 'code_execution_result':
+            parts.append(Part(code_execution_result=p.get('output', '')))
 
     return Message(
         role=Role(data['role']),
