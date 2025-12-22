@@ -48,6 +48,7 @@ from input_handler import InputHandler
 from pt_display import PTDisplay
 from plan_reporter import create_live_reporter
 from agent_registry import AgentRegistry
+from keybindings import load_keybindings, detect_terminal, list_available_profiles
 
 
 class RichClient:
@@ -1138,6 +1139,10 @@ class RichClient:
             self._display.clear_output()
             return
 
+        if user_input.lower().startswith('keybindings'):
+            self._handle_keybindings_command(user_input)
+            return
+
         if user_input.lower() == 'history':
             self._show_history()
             return
@@ -1187,10 +1192,12 @@ class RichClient:
         Args:
             initial_prompt: Optional prompt to run before entering interactive mode.
         """
-        # Create the display with input handler and agent registry
+        # Create the display with input handler, agent registry, and keybindings
+        keybinding_config = load_keybindings()
         self._display = PTDisplay(
             input_handler=self._input_handler,
-            agent_registry=self._agent_registry
+            agent_registry=self._agent_registry,
+            keybinding_config=keybinding_config
         )
 
         # Set model info in status bar
@@ -1319,6 +1326,284 @@ class RichClient:
             ("    tools enable <n>   - Enable a tool (or 'all')", "dim"),
             ("    tools disable <n>  - Disable a tool (or 'all')", "dim"),
         ])
+
+    def _handle_keybindings_command(self, user_input: str) -> None:
+        """Handle the keybindings command with subcommands.
+
+        Subcommands:
+            keybindings              - Show current keybindings
+            keybindings list         - Show current keybindings
+            keybindings reload       - Reload keybindings from config files
+            keybindings set <action> <key> [--save]  - Set a keybinding
+            keybindings profile      - Show/switch terminal profiles
+
+        Args:
+            user_input: The full user input string starting with 'keybindings'.
+        """
+        if not self._display:
+            return
+
+        parts = user_input.strip().split()
+        subcommand = parts[1].lower() if len(parts) > 1 else "list"
+
+        if subcommand == "list" or subcommand == "keybindings":
+            self._show_keybindings()
+            return
+
+        if subcommand == "reload":
+            self._reload_keybindings()
+            return
+
+        if subcommand == "set":
+            self._set_keybinding(parts[2:])
+            return
+
+        if subcommand == "profile":
+            self._handle_profile_command(parts[2:])
+            return
+
+        # Unknown subcommand - show help
+        self._display.show_lines([
+            (f"[Unknown subcommand: {subcommand}]", "yellow"),
+            ("  Available subcommands:", ""),
+            ("    keybindings list              - Show current keybindings", "dim"),
+            ("    keybindings set <action> <key> [--save]", "dim"),
+            ("                                  - Set a keybinding (optionally persist)", "dim"),
+            ("    keybindings profile           - Show current terminal profile", "dim"),
+            ("    keybindings profile <name>    - Switch to a different profile", "dim"),
+            ("    keybindings reload            - Reload keybindings from config", "dim"),
+        ])
+
+    def _show_keybindings(self) -> None:
+        """Show current keybinding configuration."""
+        if not self._display:
+            return
+
+        config = self._display._keybinding_config
+        bindings = config.to_dict()
+
+        # Show profile info first
+        detected = detect_terminal()
+        lines = [
+            ("Current Keybindings:", "bold"),
+            (f"  Profile: {config.profile}", "cyan"),
+            (f"  Terminal: {detected}", "dim"),
+            (f"  Source: {config.profile_source}", "dim"),
+            ("", ""),
+        ]
+
+        # Group by category
+        categories = {
+            "Input": ["submit", "newline", "clear_input"],
+            "Exit/Cancel": ["cancel", "exit"],
+            "Scrolling": ["scroll_up", "scroll_down", "scroll_top", "scroll_bottom"],
+            "Navigation": ["nav_up", "nav_down"],
+            "Pager": ["pager_quit", "pager_next"],
+            "Features": ["toggle_plan", "toggle_tools", "cycle_agents", "yank", "view_full"],
+        }
+
+        for category, keys in categories.items():
+            lines.append((f"  {category}:", "cyan"))
+            for key in keys:
+                if key in bindings:
+                    value = bindings[key]
+                    if isinstance(value, list):
+                        value_str = " ".join(value)
+                    else:
+                        value_str = value
+                    padding = max(2, 16 - len(key))
+                    lines.append((f"    {key}{' ' * padding}{value_str}", "dim"))
+            lines.append(("", ""))
+
+        lines.extend([
+            ("Profile-specific config files:", "bold"),
+            (f"  .jaato/keybindings.{detected}.json (terminal-specific)", "dim"),
+            ("  .jaato/keybindings.json (base)", "dim"),
+            ("  Environment: JAATO_KEYBINDING_PROFILE=<name>", "dim"),
+            ("", ""),
+            ("Use 'keybindings profile' to view/switch profiles.", "italic"),
+        ])
+
+        self._display.show_lines(lines)
+
+    def _reload_keybindings(self) -> None:
+        """Reload keybindings from configuration files."""
+        if not self._display:
+            return
+
+        try:
+            self._display.reload_keybindings()
+            self._display.show_lines([
+                ("[Keybindings reloaded successfully]", "green"),
+                ("New keybindings are now active.", "dim"),
+            ])
+        except Exception as e:
+            self._display.show_lines([
+                (f"[Error reloading keybindings: {e}]", "red"),
+            ])
+
+    def _set_keybinding(self, args: list) -> None:
+        """Set a keybinding for an action.
+
+        Args:
+            args: List of arguments: <action> <key> [--save]
+        """
+        if not self._display:
+            return
+
+        from keybindings import DEFAULT_KEYBINDINGS
+
+        # Parse arguments
+        save_to_file = "--save" in args
+        args = [a for a in args if a != "--save"]
+
+        if len(args) < 2:
+            self._display.show_lines([
+                ("[Error: Missing arguments]", "red"),
+                ("  Usage: keybindings set <action> <key> [--save]", "dim"),
+                ("", ""),
+                ("  Examples:", "bold"),
+                ("    keybindings set yank c-shift-y", "dim"),
+                ("    keybindings set toggle_plan f1 --save", "dim"),
+                ("    keybindings set newline escape enter", "dim"),
+                ("", ""),
+                ("  Available actions:", "bold"),
+            ])
+            # Show available actions
+            actions = list(DEFAULT_KEYBINDINGS.keys())
+            for i in range(0, len(actions), 4):
+                chunk = actions[i:i+4]
+                self._display.show_lines([
+                    ("    " + ", ".join(chunk), "dim"),
+                ])
+            return
+
+        action = args[0].lower()
+        # Key can be multiple words for multi-key sequences (e.g., "escape enter")
+        key = " ".join(args[1:])
+
+        # Validate action
+        if action not in DEFAULT_KEYBINDINGS:
+            self._display.show_lines([
+                (f"[Error: Unknown action '{action}']", "red"),
+                ("", ""),
+                ("  Available actions:", "bold"),
+            ])
+            actions = list(DEFAULT_KEYBINDINGS.keys())
+            for i in range(0, len(actions), 4):
+                chunk = actions[i:i+4]
+                self._display.show_lines([
+                    ("    " + ", ".join(chunk), "dim"),
+                ])
+            return
+
+        # Get current config and set the binding
+        config = self._display._keybinding_config
+        old_value = getattr(config, action)
+        if isinstance(old_value, list):
+            old_str = " ".join(old_value)
+        else:
+            old_str = old_value
+
+        # Set the new binding
+        if not config.set_binding(action, key):
+            self._display.show_lines([
+                (f"[Error: Failed to set binding for '{action}']", "red"),
+            ])
+            return
+
+        # Rebuild the app with new keybindings
+        self._display._build_app()
+
+        # Get the normalized key for display
+        new_value = getattr(config, action)
+        if isinstance(new_value, list):
+            new_str = " ".join(new_value)
+        else:
+            new_str = new_value
+
+        lines = [
+            (f"[Keybinding updated: {action}]", "green"),
+            (f"  {old_str} → {new_str}", "dim"),
+        ]
+
+        # Save to file if requested
+        if save_to_file:
+            if config.save_to_file():
+                lines.append(("  Saved to .jaato/keybindings.json", "cyan"))
+            else:
+                lines.append(("  [Warning: Failed to save to file]", "yellow"))
+        else:
+            lines.append(("  (session only - use --save to persist)", "dim italic"))
+
+        self._display.show_lines(lines)
+
+    def _handle_profile_command(self, args: list) -> None:
+        """Handle the keybindings profile subcommand.
+
+        Args:
+            args: List of arguments after 'keybindings profile'
+        """
+        if not self._display:
+            return
+
+        config = self._display._keybinding_config
+        detected = detect_terminal()
+        available = list_available_profiles()
+
+        # No args - show current profile and available profiles
+        if not args:
+            lines = [
+                ("Keybinding Profiles:", "bold"),
+                ("", ""),
+                (f"  Detected terminal: {detected}", "cyan"),
+                (f"  Current profile:   {config.profile}", "green"),
+                (f"  Source:            {config.profile_source}", "dim"),
+                ("", ""),
+                ("  Available profiles:", "bold"),
+            ]
+
+            for profile in available:
+                marker = " (active)" if profile == config.profile else ""
+                marker2 = " (detected)" if profile == detected and profile != config.profile else ""
+                lines.append((f"    - {profile}{marker}{marker2}", "dim"))
+
+            lines.extend([
+                ("", ""),
+                ("  To switch profiles:", "bold"),
+                ("    keybindings profile <name>     - Switch to a profile", "dim"),
+                ("    JAATO_KEYBINDING_PROFILE=name  - Override via env var", "dim"),
+                ("", ""),
+                ("  To create a profile:", "bold"),
+                (f"    Create .jaato/keybindings.{detected}.json", "dim"),
+            ])
+
+            self._display.show_lines(lines)
+            return
+
+        # Switch to specified profile
+        new_profile = args[0].lower()
+
+        # Load with new profile
+        try:
+            new_config = load_keybindings(profile=new_profile)
+            self._display._keybinding_config = new_config
+            self._display._build_app()
+
+            lines = [
+                (f"[Switched to profile: {new_profile}]", "green"),
+                (f"  Source: {new_config.profile_source}", "dim"),
+            ]
+
+            if new_profile not in available:
+                lines.append((f"  (no config file found, using defaults)", "yellow"))
+
+            self._display.show_lines(lines)
+
+        except Exception as e:
+            self._display.show_lines([
+                (f"[Error switching profile: {e}]", "red"),
+            ])
 
     def _get_tool_status(self) -> list:
         """Get status of all tools including enabled/disabled state."""
@@ -1835,6 +2120,11 @@ class RichClient:
             ("                        tools list          - List all tools with status", "dim"),
             ("                        tools enable <n>    - Enable a tool (or 'all')", "dim"),
             ("                        tools disable <n>   - Disable a tool (or 'all')", "dim"),
+            ("  keybindings [sub] - Manage keyboard shortcuts", "dim"),
+            ("                        keybindings list    - Show current keybindings", "dim"),
+            ("                        keybindings set     - Set a keybinding", "dim"),
+            ("                        keybindings profile - Show/switch terminal profiles", "dim"),
+            ("                        keybindings reload  - Reload from config files", "dim"),
             ("  plugins           - List available plugins with status", "dim"),
             ("  reset             - Clear conversation history", "dim"),
             ("  history           - Show full conversation history", "dim"),
