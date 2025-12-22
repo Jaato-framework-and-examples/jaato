@@ -64,6 +64,7 @@ class TestEnvironmentPluginToolSchemas:
         assert "shell" in aspect_enum
         assert "arch" in aspect_enum
         assert "cwd" in aspect_enum
+        assert "terminal" in aspect_enum
         assert "context" in aspect_enum
         assert "all" in aspect_enum
 
@@ -91,6 +92,7 @@ class TestEnvironmentPluginExecution:
         assert "shell" in result
         assert "arch" in result
         assert "cwd" in result
+        assert "terminal" in result
 
     def test_get_environment_explicit_all(self):
         """Test getting all environment info explicitly."""
@@ -101,6 +103,7 @@ class TestEnvironmentPluginExecution:
         assert "shell" in result
         assert "arch" in result
         assert "cwd" in result
+        assert "terminal" in result
 
     def test_get_environment_os_aspect(self):
         """Test getting OS info only."""
@@ -138,6 +141,19 @@ class TestEnvironmentPluginExecution:
         # cwd returns a string directly
         assert isinstance(result, str)
         assert os.path.isabs(result)
+
+    def test_get_environment_terminal_aspect(self):
+        """Test getting terminal info only."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "terminal"}))
+
+        # Terminal info should have these keys
+        assert "term" in result
+        assert "term_program" in result
+        assert "colorterm" in result
+        assert "multiplexer" in result
+        assert "color_depth" in result
+        assert "emulator" in result
 
     def test_get_environment_invalid_aspect(self):
         """Test handling of invalid aspect."""
@@ -213,6 +229,71 @@ class TestEnvironmentPluginShellInfo:
         assert result["path_separator"] == ";"
         assert result["dir_separator"] == "\\"
         assert "powershell_available" in result
+
+
+class TestEnvironmentPluginTerminalInfo:
+    """Tests for terminal information accuracy."""
+
+    def test_terminal_term_from_env(self, monkeypatch):
+        """Test that TERM is read from environment."""
+        monkeypatch.setenv("TERM", "xterm-256color")
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "terminal"}))
+
+        assert result["term"] == "xterm-256color"
+
+    def test_terminal_color_depth_256(self, monkeypatch):
+        """Test 256 color detection."""
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.delenv("COLORTERM", raising=False)
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "terminal"}))
+
+        assert result["color_depth"] == "256"
+
+    def test_terminal_color_depth_truecolor(self, monkeypatch):
+        """Test truecolor detection via COLORTERM."""
+        monkeypatch.setenv("TERM", "xterm")
+        monkeypatch.setenv("COLORTERM", "truecolor")
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "terminal"}))
+
+        assert result["color_depth"] == "24bit"
+
+    def test_terminal_tmux_detection(self, monkeypatch):
+        """Test tmux multiplexer detection."""
+        monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,12345,0")
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "terminal"}))
+
+        assert result["multiplexer"] == "tmux"
+
+    def test_terminal_screen_detection(self, monkeypatch):
+        """Test screen multiplexer detection."""
+        monkeypatch.delenv("TMUX", raising=False)
+        monkeypatch.setenv("STY", "12345.pts-0.hostname")
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "terminal"}))
+
+        assert result["multiplexer"] == "screen"
+
+    def test_terminal_no_multiplexer(self, monkeypatch):
+        """Test no multiplexer detected."""
+        monkeypatch.delenv("TMUX", raising=False)
+        monkeypatch.delenv("STY", raising=False)
+        monkeypatch.setenv("TERM", "xterm")
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "terminal"}))
+
+        assert result["multiplexer"] is None
+
+    def test_terminal_emulator_from_term_program(self, monkeypatch):
+        """Test emulator detection from TERM_PROGRAM."""
+        monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "terminal"}))
+
+        assert result["emulator"] == "iTerm.app"
 
 
 class TestEnvironmentPluginArchInfo:
