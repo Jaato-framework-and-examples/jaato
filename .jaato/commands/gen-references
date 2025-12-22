@@ -1,0 +1,85 @@
+Generate reference catalog JSON files from a folder structure.
+
+## Input
+- **Source folder**: `{{$1}}`
+- **Output directory**: `{{$2:.jaato/references}}`
+
+## Task
+
+Scan the folder `{{$1}}` recursively and generate reference JSON files for each documentation folder found. Save the generated files to `{{$2:.jaato/references}}`.
+
+## Instructions
+
+1. **Traverse the source folder** (`{{$1}}`) recursively to find documentation folders.
+   - Look for folders containing documentation files like: `MODULE.md`, `SKILL.md`, `ERI.md`, `OVERVIEW.md`, `README.md`, or similar.
+   - Each folder with documentation becomes one reference entry.
+
+2. **For each documentation folder found**, create a JSON file with this structure:
+   ```json
+   {
+     "id": "<folder-name>",
+     "name": "<Human Readable Name>",
+     "description": "<Brief description extracted from the documentation>",
+     "type": "local",
+     "path": "./<relative-path-to-folder>/",
+     "mode": "selectable",
+     "tags": ["<tag1>", "<tag2>", ...],
+     "fetchHint": "<Hint on which file to read first>"
+   }
+   ```
+
+3. **Derive the reference properties**:
+   - **id**: Use the folder name as-is (e.g., `mod-code-001-circuit-breaker-java-resilience4j`)
+   - **name**: Parse the folder name to create a human-readable title:
+     - `mod-code-001-xxx` → `MOD-001: Xxx (formatted)`
+     - `skill-001-xxx` → `SKILL-001: Xxx (formatted)`
+     - `eri-code-001-xxx` → `ERI-001: Xxx (formatted)`
+     - For other patterns, convert hyphens to spaces and title-case
+   - **description**: Read the main documentation file (MODULE.md, SKILL.md, etc.) and extract the first paragraph or summary
+   - **type**: Always `"local"` for folder references
+   - **path**: Relative path from project root, starting with `./` (e.g., `./.jaato/docs/modules/mod-code-001.../`)
+   - **mode**: Default to `"selectable"`. Use `"auto"` only for foundational references that should always be loaded
+   - **tags**: Extract from:
+     - Folder path components (e.g., `modules` → `module`, `skills` → `skill`)
+     - Technology keywords in folder name (e.g., `java`, `spring`, `resilience4j`)
+     - Content type indicators (e.g., `templates`, `circuit-breaker`, `retry`)
+   - **fetchHint**: Suggest the main file to read (e.g., `"Read MODULE.md for templates"`, `"Read SKILL.md for full specification"`)
+
+4. **Save each reference** as a separate JSON file:
+   - Filename: `<id>.json` (e.g., `mod-code-001-circuit-breaker-java-resilience4j.json`)
+   - Location: `{{$2:.jaato/references}}/`
+
+5. **Skip folders that**:
+   - Don't contain any documentation files
+   - Are hidden (start with `.`)
+   - Are named `node_modules`, `__pycache__`, `.git`, etc.
+
+6. **Report results**:
+   - List all generated reference files
+   - Note any folders that were skipped and why
+   - Provide a summary count
+
+## Example
+
+For a folder structure like:
+```
+.jaato/docs/
+├── modules/
+│   ├── mod-code-001-circuit-breaker-java-resilience4j/
+│   │   └── MODULE.md
+│   └── mod-code-002-retry-java-resilience4j/
+│       └── MODULE.md
+└── skills/
+    └── skill-001-circuit-breaker-java-resilience4j/
+        ├── SKILL.md
+        └── OVERVIEW.md
+```
+
+Generate files:
+- `.jaato/references/mod-code-001-circuit-breaker-java-resilience4j.json`
+- `.jaato/references/mod-code-002-retry-java-resilience4j.json`
+- `.jaato/references/skill-001-circuit-breaker-java-resilience4j.json`
+
+## Begin
+
+Start by listing the contents of `{{$1}}` to understand the folder structure, then proceed with generating the reference files.
