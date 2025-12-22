@@ -388,6 +388,14 @@ class PTDisplay:
         # Calculate popup width (about 60% of terminal, min 40, max 80)
         popup_width = max(40, min(80, int(self._width * 0.6)))
 
+        # Calculate max visible steps based on terminal height
+        # Reserve space for: status bar (1), input area (3), popup borders (3), progress bar (2)
+        available_height = self._height - 9
+        # Each step takes at least 1 line, results/errors take 1 more
+        # Aim for reasonable step visibility (at least 3, at most 15)
+        max_steps = max(3, min(15, available_height // 2))
+        self._plan_panel.set_popup_max_visible_steps(max_steps)
+
         # Use current agent's plan data (from registry if available)
         plan_data = self._get_current_plan_data()
 
@@ -674,12 +682,26 @@ class PTDisplay:
 
         @kb.add("up")
         def handle_up(event):
-            """Handle Up arrow - history/completion navigation."""
+            """Handle Up arrow - scroll popup if visible, otherwise history/completion."""
+            # If plan popup is visible, scroll it up
+            if self._plan_panel.is_popup_visible and self._current_plan_has_data():
+                plan_data = self._get_current_plan_data()
+                if self._plan_panel.scroll_popup_up(plan_data):
+                    self._app.invalidate()
+                return
+            # Normal mode - history/completion navigation
             event.current_buffer.auto_up()
 
         @kb.add("down")
         def handle_down(event):
-            """Handle Down arrow - history/completion navigation."""
+            """Handle Down arrow - scroll popup if visible, otherwise history/completion."""
+            # If plan popup is visible, scroll it down
+            if self._plan_panel.is_popup_visible and self._current_plan_has_data():
+                plan_data = self._get_current_plan_data()
+                if self._plan_panel.scroll_popup_down(plan_data):
+                    self._app.invalidate()
+                return
+            # Normal mode - history/completion navigation
             event.current_buffer.auto_down()
 
         @kb.add("c-p")
