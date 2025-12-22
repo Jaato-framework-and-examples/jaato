@@ -26,6 +26,8 @@ class PlanPanel:
     def __init__(self):
         self._plan_data: Optional[Dict[str, Any]] = None
         self._popup_visible: bool = False
+        self._popup_scroll_offset: int = 0  # Scroll position in popup
+        self._popup_max_visible_steps: int = 10  # Max steps visible at once
 
     def update_plan(self, plan_data: Dict[str, Any]) -> None:
         """Update the plan data to render.
@@ -39,6 +41,7 @@ class PlanPanel:
         """Clear the current plan."""
         self._plan_data = None
         self._popup_visible = False
+        self._popup_scroll_offset = 0
 
     @property
     def has_plan(self) -> bool:
@@ -53,6 +56,50 @@ class PlanPanel:
     def toggle_popup(self) -> None:
         """Toggle popup visibility (Ctrl+P)."""
         self._popup_visible = not self._popup_visible
+        if not self._popup_visible:
+            self._popup_scroll_offset = 0  # Reset scroll when closing
+
+    def scroll_popup_up(self, plan_data: Optional[Dict[str, Any]] = None) -> bool:
+        """Scroll popup up by one step.
+
+        Args:
+            plan_data: Optional plan data (for per-agent plans).
+
+        Returns:
+            True if scrolled, False if already at top.
+        """
+        if self._popup_scroll_offset > 0:
+            self._popup_scroll_offset -= 1
+            return True
+        return False
+
+    def scroll_popup_down(self, plan_data: Optional[Dict[str, Any]] = None) -> bool:
+        """Scroll popup down by one step.
+
+        Args:
+            plan_data: Optional plan data (for per-agent plans).
+
+        Returns:
+            True if scrolled, False if already at bottom.
+        """
+        data = plan_data if plan_data is not None else self._plan_data
+        if not data:
+            return False
+
+        steps = data.get("steps", [])
+        max_offset = max(0, len(steps) - self._popup_max_visible_steps)
+        if self._popup_scroll_offset < max_offset:
+            self._popup_scroll_offset += 1
+            return True
+        return False
+
+    def set_popup_max_visible_steps(self, max_steps: int) -> None:
+        """Set the maximum number of steps visible in the popup.
+
+        Args:
+            max_steps: Maximum number of steps to show at once.
+        """
+        self._popup_max_visible_steps = max(3, max_steps)  # At least 3 steps
 
     def get_status_symbols(self) -> str:
         """Get plan progress as compact symbols for status bar.
@@ -138,10 +185,32 @@ class PlanPanel:
         # Build content
         elements = []
 
-        # Steps list
+        # Steps list with scroll support
         if steps:
             sorted_steps = sorted(steps, key=lambda s: s.get("sequence", 0))
-            for step in sorted_steps:
+            total_steps = len(sorted_steps)
+
+            # Calculate visible window
+            start_idx = self._popup_scroll_offset
+            end_idx = min(start_idx + self._popup_max_visible_steps, total_steps)
+
+            # Ensure scroll offset is valid
+            max_offset = max(0, total_steps - self._popup_max_visible_steps)
+            if self._popup_scroll_offset > max_offset:
+                self._popup_scroll_offset = max_offset
+                start_idx = self._popup_scroll_offset
+                end_idx = min(start_idx + self._popup_max_visible_steps, total_steps)
+
+            # Show "more above" indicator
+            if start_idx > 0:
+                more_above = Text()
+                more_above.append(f" ↑ {start_idx} more above ", style="dim italic")
+                more_above.append("[↑/↓ to scroll]", style="dim")
+                elements.append(more_above)
+
+            # Render visible steps
+            visible_steps = sorted_steps[start_idx:end_idx]
+            for step in visible_steps:
                 seq = step.get("sequence", "?")
                 desc = step.get("description", "")
                 step_status = step.get("status", "pending")
@@ -168,6 +237,14 @@ class PlanPanel:
                     error_line.append("    ✗ ", style="dim")
                     error_line.append(error, style="dim red")
                     elements.append(error_line)
+
+            # Show "more below" indicator
+            remaining = total_steps - end_idx
+            if remaining > 0:
+                more_below = Text()
+                more_below.append(f" ↓ {remaining} more below ", style="dim italic")
+                more_below.append("[↑/↓ to scroll]", style="dim")
+                elements.append(more_below)
 
         # Separator
         elements.append(Text("─" * (width - 4), style="dim"))

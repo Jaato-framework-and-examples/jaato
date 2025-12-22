@@ -168,7 +168,7 @@ Search file contents using a regular expression.
 |-----------|------|----------|-------------|
 | `pattern` | string | Yes | Regex pattern to search for |
 | `path` | string | No | File or directory to search (default: cwd) |
-| `file_glob` | string | No | Only search files matching this glob |
+| `file_glob` | array | No | Only search files matching these glob patterns (e.g., `["*.py"]` or `["**/*.java", "**/*.kt"]`) |
 | `context_lines` | integer | No | Lines of context (default: 2) |
 | `case_sensitive` | boolean | No | Case-sensitive search (default: true) |
 | `max_results` | integer | No | Maximum matches (default: 500) |
@@ -324,6 +324,10 @@ Search file contents with regex:
 - `import\\s+module` - find imports
 - `TODO|FIXME|HACK` - find code comments
 
+The file_glob parameter accepts an array of glob patterns:
+- Single type: `file_glob=["*.py"]`
+- Multiple types: `file_glob=["**/*.java", "**/*.kt", "**/*.scala"]`
+
 Tips:
 - Use glob_files first to locate files, then grep_content to search within them
 - Both tools respect .gitignore-style exclusions (node_modules, __pycache__, etc.)
@@ -348,7 +352,7 @@ glob_files(pattern="**/*.py")
 # Model calls:
 grep_content(
     pattern="def\\s+process_",
-    file_glob="*.py",
+    file_glob=["*.py"],
     context_lines=3
 )
 
@@ -369,6 +373,18 @@ glob_files(pattern="**/*.{json,yaml,yml,toml}")
 grep_content(
     pattern="error|exception|fail",
     case_sensitive=False,
-    file_glob="*.log"
+    file_glob=["*.log"]
 )
+```
+
+### Search across multiple file types
+
+```python
+# Model calls:
+grep_content(
+    pattern="@CircuitBreaker",
+    file_glob=["**/*.java", "**/*.kt", "**/*.scala"]
+)
+
+# Returns matches from Java, Kotlin, and Scala files in a single call
 ```

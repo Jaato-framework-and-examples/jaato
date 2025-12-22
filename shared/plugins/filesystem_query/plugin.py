@@ -154,10 +154,11 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
                             ),
                         },
                         "file_glob": {
-                            "type": "string",
+                            "type": "array",
+                            "items": {"type": "string"},
                             "description": (
-                                "Only search files matching this glob pattern. "
-                                "Examples: '*.py', '*.{js,ts}', 'test_*.py'"
+                                "Only search files matching these glob patterns. "
+                                "Examples: ['*.py'], ['**/*.java', '**/*.kt', '**/*.scala']"
                             ),
                         },
                         "context_lines": {
@@ -222,6 +223,10 @@ Search file contents with regex:
 - `class\\s+ClassName` - find class definitions
 - `import\\s+module` - find imports
 - `TODO|FIXME|HACK` - find code comments
+
+The file_glob parameter accepts an array of glob patterns:
+- Single type: `file_glob=["*.py"]`
+- Multiple types: `file_glob=["**/*.java", "**/*.kt", "**/*.scala"]`
 
 Tips:
 - Use glob_files first to locate files, then grep_content to search within them
@@ -415,24 +420,30 @@ Tips:
         if search_path.is_file():
             files_to_search = [search_path]
         else:
-            # Get all files, optionally filtered by glob
-            glob_pattern = file_glob if file_glob else "**/*"
-            for match in search_path.glob(glob_pattern):
-                if match.is_file():
-                    rel_path = str(match.relative_to(search_path))
+            # Use provided patterns or default to all files
+            glob_patterns = file_glob if file_glob else ["**/*"]
 
-                    # Check exclusions
-                    if self._config.should_exclude(rel_path):
-                        continue
+            # Use a set to avoid duplicate files when patterns overlap
+            seen_files: set = set()
 
-                    # Skip files that are too large
-                    try:
-                        if match.stat().st_size > self._config.max_file_size_kb * 1024:
+            for glob_pattern in glob_patterns:
+                for match in search_path.glob(glob_pattern):
+                    if match.is_file() and match not in seen_files:
+                        seen_files.add(match)
+                        rel_path = str(match.relative_to(search_path))
+
+                        # Check exclusions
+                        if self._config.should_exclude(rel_path):
                             continue
-                    except (OSError, PermissionError):
-                        continue
 
-                    files_to_search.append(match)
+                        # Skip files that are too large
+                        try:
+                            if match.stat().st_size > self._config.max_file_size_kb * 1024:
+                                continue
+                        except (OSError, PermissionError):
+                            continue
+
+                        files_to_search.append(match)
 
         # Search files
         matches: List[Dict[str, Any]] = []

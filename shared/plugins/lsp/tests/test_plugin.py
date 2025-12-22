@@ -362,16 +362,31 @@ class TestLSPToolPluginBasics:
         plugin._initialized = True
         schemas = plugin.get_tool_schemas()
 
-        # Find goto_definition schema
+        # Find goto_definition schema - now uses symbol-based API
         goto_def = next(s for s in schemas if s.name == "lsp_goto_definition")
 
         assert goto_def.description
         assert "definition" in goto_def.description.lower()
         assert goto_def.parameters["type"] == "object"
-        assert "file_path" in goto_def.parameters["properties"]
-        assert "line" in goto_def.parameters["properties"]
-        assert "character" in goto_def.parameters["properties"]
-        assert set(goto_def.parameters["required"]) == {"file_path", "line", "character"}
+        assert "symbol" in goto_def.parameters["properties"]
+        assert "file_path" in goto_def.parameters["properties"]  # Optional for disambiguation
+        assert set(goto_def.parameters["required"]) == {"symbol"}
+
+    def test_symbol_based_tools(self):
+        """Test that symbol-based tools have correct schema structure."""
+        plugin = LSPToolPlugin()
+        plugin._initialized = True
+        schemas = plugin.get_tool_schemas()
+
+        # Symbol-based tools should require 'symbol' not 'line'/'character'
+        symbol_tools = ["lsp_goto_definition", "lsp_find_references", "lsp_hover", "lsp_rename_symbol"]
+
+        for tool_name in symbol_tools:
+            schema = next(s for s in schemas if s.name == tool_name)
+            assert "symbol" in schema.parameters["properties"], f"{tool_name} should have 'symbol' parameter"
+            assert "symbol" in schema.parameters.get("required", []), f"{tool_name} should require 'symbol'"
+            assert "line" not in schema.parameters.get("required", []), f"{tool_name} should not require 'line'"
+            assert "character" not in schema.parameters.get("required", []), f"{tool_name} should not require 'character'"
 
     def test_get_executors(self):
         plugin = LSPToolPlugin()
@@ -425,7 +440,10 @@ class TestLSPToolPluginBasics:
         assert instructions is not None
         assert "lsp_goto_definition" in instructions
         assert "lsp_find_references" in instructions
-        assert "0-indexed" in instructions
+        # Symbol-based API - should mention symbol parameter
+        assert "symbol" in instructions.lower()
+        # Diagnostics recommendation
+        assert "lsp_get_diagnostics" in instructions
 
 
 class TestLSPToolPluginCommands:
