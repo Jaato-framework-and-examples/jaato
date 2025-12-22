@@ -253,6 +253,7 @@
                 <li><a href="#architecture">Architecture</a></li>
                 <li><a href="#configuration">Configuration</a></li>
                 <li><a href="#tools">Tools</a></li>
+                <li><a href="#refactoring">Refactoring</a></li>
                 <li><a href="#commands">Commands</a></li>
                 <li><a href="#servers">Language Servers</a></li>
             </ul>
@@ -494,15 +495,75 @@ return result
 }</code></pre>
                 </div>
 
+            </div>
+
+            <h3 id="refactoring">Refactoring Tools</h3>
+            <p>These tools modify files and require explicit approval (not auto-approved).</p>
+            <div class="grid">
                 <div class="tool-card">
                     <h4>lsp_rename_symbol</h4>
                     <span class="badge badge-write">Write</span>
-                    <p>Preview workspace edits for renaming a symbol.</p>
+                    <p>Rename a symbol across all files in the workspace. Set <code>apply: true</code> to apply changes.</p>
                     <pre><code>{
   "symbol": "old_name",
-  "new_name": "better_name"
+  "new_name": "better_name",
+  "apply": false  // default: preview only
+}</code></pre>
+                    <p><strong>Preview response:</strong></p>
+                    <pre><code>{
+  "mode": "preview",
+  "files_affected": 5,
+  "changes": [{"file": "/path/to/service.py", "edits": 3}],
+  "message": "Would rename... Set apply=true to apply."
 }</code></pre>
                 </div>
+
+                <div class="tool-card">
+                    <h4>lsp_get_code_actions</h4>
+                    <span class="badge badge-read">Read-only</span>
+                    <p>Discover available refactoring operations for a code region (extract method, inline, etc.).</p>
+                    <pre><code>{
+  "file_path": "/path/to/file.py",
+  "start_line": 10, "start_column": 1,
+  "end_line": 20, "end_column": 1,
+  "only_refactorings": true  // optional
+}</code></pre>
+                    <p><strong>Returns:</strong></p>
+                    <pre><code>{
+  "actions": [
+    {"title": "Extract method", "kind": "refactor.extract"},
+    {"title": "Inline variable", "kind": "refactor.inline"}
+  ],
+  "count": 2
+}</code></pre>
+                </div>
+
+                <div class="tool-card">
+                    <h4>lsp_apply_code_action</h4>
+                    <span class="badge badge-write">Write</span>
+                    <p>Apply a code action by its exact title. Use with <code>lsp_get_code_actions</code> to discover available actions first.</p>
+                    <pre><code>{
+  "file_path": "/path/to/file.py",
+  "start_line": 10, "start_column": 1,
+  "end_line": 20, "end_column": 1,
+  "action_title": "Extract method"
+}</code></pre>
+                    <p><strong>Returns:</strong></p>
+                    <pre><code>{
+  "action": "Extract method",
+  "success": true,
+  "files_modified": ["/path/to/file.py"]
+}</code></pre>
+                </div>
+            </div>
+
+            <div class="note">
+                <div class="note-title">Refactoring Workflow</div>
+                <p>
+                    1. Use <code>lsp_get_code_actions</code> to discover available refactorings for a selection<br>
+                    2. Choose an action from the returned list<br>
+                    3. Apply it with <code>lsp_apply_code_action</code> using the exact title
+                </p>
             </div>
 
             <h3>File-Based Tools</h3>
@@ -654,6 +715,68 @@ return result
                     <td><code>.lsp.json</code></td>
                 </tr>
             </table>
+
+            <h3>Language Server Refactoring Capabilities</h3>
+            <p>Different language servers support different refactoring operations:</p>
+            <table>
+                <tr>
+                    <th>Server</th>
+                    <th>Rename</th>
+                    <th>Extract Method</th>
+                    <th>Inline</th>
+                    <th>Organize Imports</th>
+                </tr>
+                <tr>
+                    <td>pyright (Python)</td>
+                    <td>Yes</td>
+                    <td>Limited</td>
+                    <td>No</td>
+                    <td>Yes</td>
+                </tr>
+                <tr>
+                    <td>pylsp (Python)</td>
+                    <td>Yes</td>
+                    <td>Yes (via rope)</td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                </tr>
+                <tr>
+                    <td>jdtls (Java)</td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                </tr>
+                <tr>
+                    <td>typescript-language-server</td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                </tr>
+                <tr>
+                    <td>gopls (Go)</td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                    <td>Limited</td>
+                    <td>Yes</td>
+                </tr>
+                <tr>
+                    <td>rust-analyzer</td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                </tr>
+                <tr>
+                    <td>clangd (C/C++)</td>
+                    <td>Yes</td>
+                    <td>Limited</td>
+                    <td>Limited</td>
+                    <td>Yes</td>
+                </tr>
+            </table>
+            <p>Use <code>lsp status</code> to see the capabilities of connected servers.</p>
         </section>
     </main>
 
