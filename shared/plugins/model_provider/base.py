@@ -456,3 +456,24 @@ class ModelProviderPlugin(Protocol):
             True if stop/cancel is supported, False otherwise.
         """
         ...
+
+    # ==================== Agent Context ====================
+    # Optional agent identification for tracing
+
+    def set_agent_context(
+        self,
+        agent_type: str = "main",
+        agent_name: Optional[str] = None,
+        agent_id: str = "main"
+    ) -> None:
+        """Set agent context for trace identification.
+
+        This allows traces to identify which agent (main or subagent)
+        produced the trace, useful for debugging multi-agent scenarios.
+
+        Args:
+            agent_type: Type of agent ("main" or "subagent").
+            agent_name: Optional name for the agent (e.g., profile name).
+            agent_id: Unique identifier for the agent instance.
+        """
+        ...
