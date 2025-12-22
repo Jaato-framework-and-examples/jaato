@@ -248,18 +248,116 @@ Returns:
 {"contents": "def calculate_total(items: List[Item]) -> Decimal\n\nCalculate the total price..."}
 ```
 
+### Refactoring Tools
+
+These tools modify files. They require explicit approval (not auto-approved).
+
 #### lsp_rename_symbol
 
-Preview workspace edits for renaming a symbol.
+Rename a symbol across all files in the workspace.
 
 ```json
 {
   "symbol": "old_name",
-  "new_name": "better_name"
+  "new_name": "better_name",
+  "apply": false  // default: preview only
 }
 ```
 
-Returns a workspace edit object describing changes needed.
+**Preview mode (default):**
+```json
+{
+  "mode": "preview",
+  "symbol": "old_name",
+  "new_name": "better_name",
+  "files_affected": 5,
+  "changes": [
+    {"file": "/path/to/service.py", "edits": 3},
+    {"file": "/path/to/handler.py", "edits": 2}
+  ],
+  "message": "Would rename 'old_name' to 'better_name' in 5 file(s). Set apply=true to apply."
+}
+```
+
+**Apply mode (`apply: true`):**
+```json
+{
+  "mode": "applied",
+  "symbol": "old_name",
+  "new_name": "better_name",
+  "success": true,
+  "files_modified": ["/path/to/service.py", "/path/to/handler.py"],
+  "changes": [
+    {"file": "/path/to/service.py", "edits_applied": 3, "lines_before": 100, "lines_after": 100}
+  ]
+}
+```
+
+#### lsp_get_code_actions
+
+Discover available refactoring operations for a code region.
+
+```json
+{
+  "file_path": "/path/to/file.py",
+  "start_line": 10,
+  "start_column": 1,
+  "end_line": 20,
+  "end_column": 1,
+  "only_refactorings": true  // optional: filter to refactoring actions only
+}
+```
+
+Returns:
+```json
+{
+  "actions": [
+    {"title": "Extract method", "kind": "refactor.extract", "has_edit": true, "affected_files": 1},
+    {"title": "Extract to constant", "kind": "refactor.extract.constant"},
+    {"title": "Inline variable", "kind": "refactor.inline"}
+  ],
+  "count": 3
+}
+```
+
+Common code action kinds:
+- `refactor.extract` - Extract method/function/variable
+- `refactor.inline` - Inline variable/function
+- `refactor.rewrite` - Rewrite/restructure code
+- `quickfix` - Quick fixes for diagnostics
+- `source.organizeImports` - Organize imports
+
+#### lsp_apply_code_action
+
+Apply a discovered code action by its title.
+
+```json
+{
+  "file_path": "/path/to/file.py",
+  "start_line": 10,
+  "start_column": 1,
+  "end_line": 20,
+  "end_column": 1,
+  "action_title": "Extract method"
+}
+```
+
+Returns:
+```json
+{
+  "action": "Extract method",
+  "success": true,
+  "files_modified": ["/path/to/file.py"],
+  "changes": [
+    {"file": "/path/to/file.py", "edits_applied": 2, "lines_before": 100, "lines_after": 108}
+  ]
+}
+```
+
+**Workflow example:**
+1. Call `lsp_get_code_actions` to see available refactorings
+2. Choose an action from the list
+3. Call `lsp_apply_code_action` with the exact title
 
 ### File-Based Tools
 
@@ -395,9 +493,26 @@ schemas = plugin.get_tool_schemas()
 executors = plugin.get_executors()
 ```
 
+## Language Server Capabilities
+
+Different language servers support different refactoring operations:
+
+| Server | Rename | Extract Method | Inline | Organize Imports |
+|--------|--------|----------------|--------|------------------|
+| pyright (Python) | Yes | Limited | No | Yes |
+| pylsp (Python) | Yes | Yes (via rope) | Yes | Yes |
+| jdtls (Java) | Yes | Yes | Yes | Yes |
+| typescript-language-server | Yes | Yes | Yes | Yes |
+| gopls (Go) | Yes | Yes | Limited | Yes |
+| rust-analyzer | Yes | Yes | Yes | Yes |
+| clangd (C/C++) | Yes | Limited | Limited | Yes |
+
+Use `lsp status` to see the capabilities of connected servers.
+
 ## Limitations
 
 1. **Workspace scope**: Most LSP features work within a single workspace/project
 2. **Document sync**: Files must be "opened" before some features work
 3. **Server-specific**: Capabilities vary by language server implementation
 4. **Diagnostics**: Received asynchronously via notifications (may have slight delay)
+5. **Refactoring scope**: Extract method and similar refactorings depend on server support

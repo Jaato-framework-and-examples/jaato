@@ -52,6 +52,136 @@ class Location:
 
 
 @dataclass
+class TextEdit:
+    """A textual edit applicable to a text document."""
+    range: Range
+    new_text: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"range": self.range.to_dict(), "newText": self.new_text}
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "TextEdit":
+        return cls(
+            range=Range.from_dict(d["range"]),
+            new_text=d.get("newText", "")
+        )
+
+
+@dataclass
+class WorkspaceEdit:
+    """A workspace edit represents changes to many resources in the workspace.
+
+    The edit should either provide `changes` or `documentChanges`. If the client
+    can handle versioned document edits and if `documentChanges` are present,
+    the latter are preferred over `changes`.
+    """
+    # Simple map of uri -> list of text edits
+    changes: Dict[str, List[TextEdit]] = field(default_factory=dict)
+    # More structured document changes (not always present)
+    document_changes: Optional[List[Dict[str, Any]]] = None
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "WorkspaceEdit":
+        changes: Dict[str, List[TextEdit]] = {}
+
+        # Parse 'changes' format: { uri: TextEdit[] }
+        if "changes" in d and d["changes"]:
+            for uri, edits in d["changes"].items():
+                changes[uri] = [TextEdit.from_dict(e) for e in edits]
+
+        # Parse 'documentChanges' format if present
+        document_changes = d.get("documentChanges")
+        if document_changes:
+            for doc_change in document_changes:
+                # Handle TextDocumentEdit format
+                if "textDocument" in doc_change and "edits" in doc_change:
+                    uri = doc_change["textDocument"]["uri"]
+                    if uri not in changes:
+                        changes[uri] = []
+                    changes[uri].extend([TextEdit.from_dict(e) for e in doc_change["edits"]])
+
+        return cls(changes=changes, document_changes=document_changes)
+
+    def get_affected_files(self) -> List[str]:
+        """Return list of URIs that would be affected by this edit."""
+        return list(self.changes.keys())
+
+
+@dataclass
+class CodeAction:
+    """A code action represents a change that can be performed in code.
+
+    Examples: refactoring, quick fixes, extract method, etc.
+    """
+    title: str
+    kind: Optional[str] = None  # e.g., "refactor.extract", "quickfix"
+    diagnostics: List["Diagnostic"] = field(default_factory=list)
+    is_preferred: bool = False
+    disabled: Optional[str] = None  # Reason if disabled
+    edit: Optional[WorkspaceEdit] = None
+    command: Optional[Dict[str, Any]] = None  # Command to execute
+    data: Optional[Any] = None  # Additional data for resolve
+
+    # Known code action kinds (from LSP spec)
+    KIND_QUICKFIX = "quickfix"
+    KIND_REFACTOR = "refactor"
+    KIND_REFACTOR_EXTRACT = "refactor.extract"
+    KIND_REFACTOR_INLINE = "refactor.inline"
+    KIND_REFACTOR_REWRITE = "refactor.rewrite"
+    KIND_SOURCE = "source"
+    KIND_SOURCE_ORGANIZE_IMPORTS = "source.organizeImports"
+    KIND_SOURCE_FIX_ALL = "source.fixAll"
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "CodeAction":
+        edit = None
+        if d.get("edit"):
+            edit = WorkspaceEdit.from_dict(d["edit"])
+
+        disabled = None
+        if d.get("disabled"):
+            disabled = d["disabled"].get("reason", str(d["disabled"]))
+
+        return cls(
+            title=d.get("title", ""),
+            kind=d.get("kind"),
+            diagnostics=[],  # Not parsing diagnostics for simplicity
+            is_preferred=d.get("isPreferred", False),
+            disabled=disabled,
+            edit=edit,
+            command=d.get("command"),
+            data=d.get("data")
+        )
+
+    def is_refactoring(self) -> bool:
+        """Check if this is a refactoring action."""
+        return self.kind is not None and self.kind.startswith("refactor")
+
+    def is_quickfix(self) -> bool:
+        """Check if this is a quick fix action."""
+        return self.kind == self.KIND_QUICKFIX
+
+    def to_summary(self) -> Dict[str, Any]:
+        """Return a summary suitable for tool output."""
+        summary: Dict[str, Any] = {
+            "title": self.title,
+            "kind": self.kind or "unknown"
+        }
+        if self.is_preferred:
+            summary["preferred"] = True
+        if self.disabled:
+            summary["disabled"] = self.disabled
+        if self.edit:
+            summary["has_edit"] = True
+            summary["affected_files"] = len(self.edit.changes)
+        if self.command:
+            summary["has_command"] = True
+            summary["command_name"] = self.command.get("command", "unknown")
+        return summary
+
+
+@dataclass
 class Diagnostic:
     """A diagnostic (error, warning, etc.)."""
     range: Range
@@ -525,8 +655,13 @@ class LSPClient:
             return []
         return [SymbolInformation.from_dict(sym) for sym in result]
 
-    async def rename(self, path: str, line: int, character: int, new_name: str) -> Dict[str, Any]:
-        """Rename symbol at position."""
+    async def rename(self, path: str, line: int, character: int, new_name: str) -> Optional[WorkspaceEdit]:
+        """Rename symbol at position.
+
+        Returns:
+            WorkspaceEdit containing all changes needed for the rename,
+            or None if the rename is not possible.
+        """
         uri = self.uri_from_path(path)
         params = {
             "textDocument": {"uri": uri},
@@ -535,7 +670,29 @@ class LSPClient:
         }
 
         result = await self._send_request("textDocument/rename", params)
-        return result or {}
+        if result is None:
+            return None
+        return WorkspaceEdit.from_dict(result)
+
+    async def prepare_rename(self, path: str, line: int, character: int) -> Optional[Dict[str, Any]]:
+        """Check if rename is valid at position and get the text to be renamed.
+
+        Returns:
+            Dict with 'range' and optionally 'placeholder' if rename is possible,
+            or None if rename is not supported at this position.
+        """
+        uri = self.uri_from_path(path)
+        params = {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": character}
+        }
+
+        try:
+            result = await self._send_request("textDocument/prepareRename", params)
+            return result
+        except Exception:
+            # prepareRename is optional - server may not support it
+            return None
 
     def get_diagnostics(self, path: str) -> List[Diagnostic]:
         """Get cached diagnostics for a file."""
@@ -543,18 +700,93 @@ class LSPClient:
         return self._diagnostics.get(uri, [])
 
     async def get_code_actions(
-        self, path: str, start_line: int, start_char: int, end_line: int, end_char: int
-    ) -> List[Dict[str, Any]]:
-        """Get available code actions for a range."""
+        self,
+        path: str,
+        start_line: int,
+        start_char: int,
+        end_line: int,
+        end_char: int,
+        only_kinds: Optional[List[str]] = None
+    ) -> List[CodeAction]:
+        """Get available code actions for a range.
+
+        Args:
+            path: File path
+            start_line: Start line (0-indexed)
+            start_char: Start character (0-indexed)
+            end_line: End line (0-indexed)
+            end_char: End character (0-indexed)
+            only_kinds: Optional list of code action kinds to filter
+                       (e.g., ["refactor.extract", "refactor.inline"])
+
+        Returns:
+            List of available CodeAction objects.
+        """
         uri = self.uri_from_path(path)
+        context: Dict[str, Any] = {"diagnostics": []}
+        if only_kinds:
+            context["only"] = only_kinds
+
         params = {
             "textDocument": {"uri": uri},
             "range": {
                 "start": {"line": start_line, "character": start_char},
                 "end": {"line": end_line, "character": end_char}
             },
-            "context": {"diagnostics": []}
+            "context": context
         }
 
         result = await self._send_request("textDocument/codeAction", params)
-        return result or []
+        if result is None:
+            return []
+
+        actions = []
+        for item in result:
+            # Server may return Command or CodeAction
+            if "title" in item:
+                actions.append(CodeAction.from_dict(item))
+        return actions
+
+    async def resolve_code_action(self, action: CodeAction) -> CodeAction:
+        """Resolve a code action to get its edit/command if not already present.
+
+        Some servers return minimal code actions that need to be resolved
+        to get the actual workspace edit.
+        """
+        if action.edit is not None:
+            return action  # Already resolved
+
+        # Build the request payload from the action
+        params = {
+            "title": action.title,
+            "kind": action.kind,
+            "data": action.data
+        }
+
+        try:
+            result = await self._send_request("codeAction/resolve", params)
+            if result:
+                return CodeAction.from_dict(result)
+        except Exception:
+            pass  # resolve is optional
+        return action
+
+    async def execute_command(self, command: str, arguments: Optional[List[Any]] = None) -> Any:
+        """Execute a workspace command.
+
+        This is used for code actions that return a command instead of (or
+        in addition to) a workspace edit.
+
+        Args:
+            command: The command identifier
+            arguments: Optional arguments for the command
+
+        Returns:
+            The result of the command execution (varies by command).
+        """
+        params: Dict[str, Any] = {"command": command}
+        if arguments:
+            params["arguments"] = arguments
+
+        result = await self._send_request("workspace/executeCommand", params)
+        return result
