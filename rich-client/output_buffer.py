@@ -279,6 +279,8 @@ class OutputBuffer:
     def stop_spinner(self) -> None:
         """Stop showing spinner and finalize tool tree if complete."""
         self._spinner_active = False
+        # Flush any pending streaming text before finalizing the turn
+        self._flush_current_block()
         # Convert tool tree to scrollable lines if all tools are done
         self.finalize_tool_tree()
 
@@ -380,6 +382,9 @@ class OutputBuffer:
         Called when a turn is complete to make the tool summary scroll
         with the rest of the content instead of staying fixed.
         """
+        # Flush any pending streaming text first to ensure proper ordering
+        self._flush_current_block()
+
         if not self._active_tools:
             return
 
