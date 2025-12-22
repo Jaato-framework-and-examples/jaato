@@ -441,7 +441,12 @@ Template rendering requires approval since it writes files."""
 2. Update `file_edit` imports to use new location
 3. Create `shared/plugins/template/` directory structure
 4. Implement `TemplatePlugin` following existing patterns
-5. Add Jinja2 dependency to requirements.txt
-6. Write tests for variable substitution, conditionals, loops
-7. Add integration test with permission system
-8. Document in CLAUDE.md
+5. Add Jinja2 dependency to `pyproject.toml` dependencies
+6. **Register in pyproject.toml**: Add entry point under `[project.entry-points."jaato.plugins"]`:
+   ```toml
+   template = "shared.plugins.template:create_plugin"
+   ```
+7. Write tests for variable substitution, conditionals, loops
+8. Add integration test with permission system
+9. **Register in README.md**: Add to "Available Plugins" section under "File & Content Management"
+10. Document in CLAUDE.md
