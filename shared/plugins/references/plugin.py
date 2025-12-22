@@ -188,6 +188,8 @@ class ReferencesPlugin:
         if not initial_ids:
             return []
 
+        self._trace(f"transitive: starting from {initial_ids}")
+
         # Track all resolved IDs and order of discovery
         resolved_ids: List[str] = list(initial_ids)
         resolved_set: Set[str] = set(initial_ids)
@@ -201,6 +203,7 @@ class ReferencesPlugin:
                 break
 
             newly_found: Set[str] = set()
+            self._trace(f"transitive: [depth={depth}] scanning {sorted(pending)}")
 
             for ref_id in pending:
                 source = catalog_by_id.get(ref_id)
@@ -210,34 +213,38 @@ class ReferencesPlugin:
                 # Get content from the source
                 content = self._get_reference_content(source)
                 if not content:
-                    self._trace(f"transitive: no content for '{ref_id}' (type={source.type.value})")
+                    self._trace(f"transitive:   '{ref_id}' -> no content (type={source.type.value})")
                     continue
+
+                self._trace(f"transitive:   '{ref_id}' -> {len(content)} chars")
 
                 # Find references mentioned in content
                 mentioned_ids = self._find_referenced_ids(content, catalog_ids)
 
-                # Add any newly discovered references
-                for mentioned_id in mentioned_ids:
-                    if mentioned_id not in resolved_set and mentioned_id != ref_id:
+                # Filter to only newly discovered ones
+                new_mentions = mentioned_ids - resolved_set - {ref_id}
+                if new_mentions:
+                    self._trace(f"transitive:   '{ref_id}' => {sorted(new_mentions)}")
+                    for mentioned_id in new_mentions:
                         newly_found.add(mentioned_id)
                         resolved_set.add(mentioned_id)
                         resolved_ids.append(mentioned_id)
-                        self._trace(
-                            f"transitive: '{ref_id}' -> '{mentioned_id}' (depth={depth})"
-                        )
 
             # Next iteration processes newly found IDs
             pending = newly_found
 
-            if newly_found:
-                self._trace(
-                    f"transitive: depth={depth}, found {len(newly_found)} new: {sorted(newly_found)}"
-                )
-
         if pending:
             self._trace(
-                f"transitive: max depth {max_depth} reached, stopping with {len(pending)} unresolved"
+                f"transitive: max depth {max_depth} reached, {len(pending)} unresolved"
             )
+
+        # Final summary
+        transitive_count = len(resolved_ids) - len(initial_ids)
+        if transitive_count > 0:
+            transitive_ids = resolved_ids[len(initial_ids):]
+            self._trace(f"transitive: added {transitive_count}: {transitive_ids}")
+        else:
+            self._trace("transitive: no additional references found")
 
         return resolved_ids
 
