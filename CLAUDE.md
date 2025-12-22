@@ -344,13 +344,6 @@ Key types in `shared/plugins/model_provider/types.py`:
 | `JAATO_COPY_MECHANISM` | Clipboard provider: `osc52` (default) |
 | `JAATO_COPY_SOURCES` | Sources to include: `model` (default), or `model&user&tool` |
 
-### Keybindings
-| Variable | Purpose |
-|----------|---------|
-| `JAATO_KEY_<ACTION>` | Override specific keybinding (e.g., `JAATO_KEY_YANK=c-shift-y`) |
-
-See `.jaato/keybindings.example.json` for all configurable actions.
-
 ## Rich Client Keybindings
 
 The rich client supports customizable keybindings via:
