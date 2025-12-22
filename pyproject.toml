@@ -53,6 +53,7 @@ references = "shared.plugins.references:create_plugin"
 memory = "shared.plugins.memory:create_plugin"
 calculator = "shared.plugins.calculator:create_plugin"
 filesystem_query = "shared.plugins.filesystem_query:create_plugin"
+template = "shared.plugins.template:create_plugin"
 
 # Entry points for GC strategy plugins
 # GC plugins implement context window garbage collection strategies
