@@ -301,6 +301,7 @@ When configuring the references plugin for subagent profiles, you can use additi
 | Option | Description |
 |--------|-------------|
 | `preselected` | List of source IDs to pre-select at startup. Sources are looked up from the master catalog and automatically included in system instructions. |
+| `transitive_injection` | Enable transitive reference detection (default: `true`). When enabled, pre-selected references are scanned for mentions of other catalog references, which are then automatically injected. |
 | `exclude_tools` | List of tool names to exclude (e.g., `["selectReferences"]`). Useful when all references are pre-selected and no user interaction is needed. |
 | `sources` | Can be a list of source IDs (strings) or full source objects. IDs are resolved from the master catalog. |
 
@@ -311,6 +312,32 @@ When `preselected` is specified:
 2. They are included in system instructions alongside AUTO sources
 3. The model fetches them immediately without user interaction
 4. They appear as "selected" in `listReferences` output
+
+**Transitive Reference Injection:**
+
+When `transitive_injection` is enabled (default), the plugin automatically discovers and injects references mentioned within pre-selected sources:
+
+1. Pre-selected reference content is parsed for mentions of other catalog reference IDs
+2. Any discovered references are automatically added to the selected set
+3. This process continues recursively (with cycle detection and max depth limit)
+4. Supports LOCAL and INLINE source types for content parsing
+
+Example scenario:
+- You pre-select `skill-001-circuit-breaker`
+- Its content mentions `api-guidelines` and `error-handling-patterns`
+- Both are automatically injected without explicit pre-selection
+
+To disable transitive injection:
+```json
+{
+  "plugin_configs": {
+    "references": {
+      "preselected": ["skill-001"],
+      "transitive_injection": false
+    }
+  }
+}
+```
 
 ## Environment Variables
 

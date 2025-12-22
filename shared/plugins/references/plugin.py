@@ -10,10 +10,11 @@ This plugin only manages the catalog and user interaction.
 """
 
 import os
+import re
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from ..model_provider.types import ToolSchema
 from ..subagent.config import expand_variables
@@ -22,6 +23,10 @@ from .models import ReferenceSource, InjectionMode, SourceType
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
 from .config_loader import load_config, ReferencesConfig, resolve_source_paths
 from ..base import UserCommand, CommandCompletion
+
+
+# Maximum depth for transitive reference resolution to prevent runaway recursion
+MAX_TRANSITIVE_DEPTH = 10
 
 
 class ReferencesPlugin:
@@ -73,6 +78,169 @@ class ReferencesPlugin:
             except (IOError, OSError):
                 pass  # Silently skip if trace file cannot be written
 
+    def _get_reference_content(self, source: ReferenceSource) -> Optional[str]:
+        """Get the content of a reference source for transitive detection.
+
+        Only LOCAL and INLINE sources are supported for content extraction.
+        URL and MCP sources would require external fetching which is deferred
+        to the model.
+
+        Args:
+            source: The reference source to get content from.
+
+        Returns:
+            The content string if available, None otherwise.
+        """
+        if source.type == SourceType.INLINE:
+            return source.content
+
+        if source.type == SourceType.LOCAL:
+            # Use resolved_path if available, otherwise original path
+            file_path = source.resolved_path or source.path
+            if not file_path:
+                return None
+
+            path_obj = Path(file_path)
+
+            # Handle directory sources - concatenate all file contents
+            if path_obj.is_dir():
+                contents: List[str] = []
+                # Include common documentation file extensions
+                doc_extensions = (
+                    '.md', '.txt', '.json', '.yaml', '.yml',
+                    '.html', '.htm', '.rst', '.adoc'
+                )
+                try:
+                    for item in sorted(path_obj.rglob("*")):
+                        if item.is_file():
+                            # Include files with doc extensions or README files (any extension)
+                            is_doc_ext = item.suffix.lower() in doc_extensions
+                            is_readme = item.stem.upper() == 'README'
+                            if is_doc_ext or is_readme:
+                                try:
+                                    contents.append(item.read_text(encoding='utf-8'))
+                                except (IOError, OSError, UnicodeDecodeError):
+                                    pass  # Skip unreadable files
+                except (PermissionError, OSError):
+                    pass
+                return "\n".join(contents) if contents else None
+
+            # Handle regular file
+            if path_obj.is_file():
+                try:
+                    return path_obj.read_text(encoding='utf-8')
+                except (IOError, OSError, UnicodeDecodeError):
+                    return None
+
+        return None
+
+    def _find_referenced_ids(self, content: str, catalog_ids: Set[str]) -> Set[str]:
+        """Find reference IDs mentioned in content.
+
+        Searches for catalog IDs appearing as whole words in the content.
+        This handles common patterns like:
+        - Direct ID mentions: "skill-001-circuit-breaker"
+        - Reference syntax: "@ref:skill-001" or "[[skill-001]]"
+        - Prose mentions: "see skill-001-circuit-breaker for details"
+
+        Args:
+            content: The content to search for reference mentions.
+            catalog_ids: Set of valid reference IDs from the catalog.
+
+        Returns:
+            Set of reference IDs found in the content.
+        """
+        found_ids: Set[str] = set()
+
+        for ref_id in catalog_ids:
+            # Escape special regex characters in the ID
+            escaped_id = re.escape(ref_id)
+            # Match as a whole word (with word boundaries or common delimiters)
+            # Pattern allows for common reference syntaxes like @ref:id, [[id]], `id`
+            pattern = rf'(?:^|[\s\[\]`@:,;()\'"{{}}])({escaped_id})(?:[\s\[\]`@:,;()\'"{{}}]|$)'
+            if re.search(pattern, content, re.MULTILINE):
+                found_ids.add(ref_id)
+
+        return found_ids
+
+    def _resolve_transitive_references(
+        self,
+        initial_ids: List[str],
+        catalog_by_id: Dict[str, ReferenceSource],
+        max_depth: int = MAX_TRANSITIVE_DEPTH
+    ) -> List[str]:
+        """Resolve transitive references from pre-selected sources.
+
+        Starting from the initially selected reference IDs, reads their content
+        and finds mentions of other references in the catalog. Recursively
+        resolves those references until no new references are found or max
+        depth is reached.
+
+        Args:
+            initial_ids: List of initially selected/pre-selected reference IDs.
+            catalog_by_id: Mapping of reference ID to ReferenceSource.
+            max_depth: Maximum recursion depth to prevent runaway resolution.
+
+        Returns:
+            List of all resolved reference IDs (initial + transitively discovered),
+            in order of discovery (initial IDs first, then discovered ones).
+        """
+        if not initial_ids:
+            return []
+
+        # Track all resolved IDs and order of discovery
+        resolved_ids: List[str] = list(initial_ids)
+        resolved_set: Set[str] = set(initial_ids)
+
+        # IDs to process in this iteration
+        pending: Set[str] = set(initial_ids)
+        catalog_ids = set(catalog_by_id.keys())
+
+        for depth in range(max_depth):
+            if not pending:
+                break
+
+            newly_found: Set[str] = set()
+
+            for ref_id in pending:
+                source = catalog_by_id.get(ref_id)
+                if not source:
+                    continue
+
+                # Get content from the source
+                content = self._get_reference_content(source)
+                if not content:
+                    self._trace(f"transitive: no content for '{ref_id}' (type={source.type.value})")
+                    continue
+
+                # Find references mentioned in content
+                mentioned_ids = self._find_referenced_ids(content, catalog_ids)
+
+                # Add any newly discovered references
+                for mentioned_id in mentioned_ids:
+                    if mentioned_id not in resolved_set and mentioned_id != ref_id:
+                        newly_found.add(mentioned_id)
+                        resolved_set.add(mentioned_id)
+                        resolved_ids.append(mentioned_id)
+                        self._trace(
+                            f"transitive: '{ref_id}' -> '{mentioned_id}' (depth={depth})"
+                        )
+
+            # Next iteration processes newly found IDs
+            pending = newly_found
+
+            if newly_found:
+                self._trace(
+                    f"transitive: depth={depth}, found {len(newly_found)} new: {sorted(newly_found)}"
+                )
+
+        if pending:
+            self._trace(
+                f"transitive: max depth {max_depth} reached, stopping with {len(pending)} unresolved"
+            )
+
+        return resolved_ids
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the plugin with configuration.
 
@@ -88,6 +256,10 @@ class ReferencesPlugin:
                    - preselected: List of source IDs to pre-select at startup.
                                   Sources are looked up from the master catalog
                                   and automatically added to available sources.
+                   - transitive_injection: Enable transitive reference detection (default: True).
+                                           When enabled, pre-selected references are scanned for
+                                           mentions of other catalog references, which are then
+                                           automatically injected.
                    - exclude_tools: List of tool names to exclude (e.g., ["selectReferences"])
         """
         config = config or {}
@@ -186,6 +358,39 @@ class ReferencesPlugin:
             self._selected_source_ids = valid_preselected
         else:
             self._selected_source_ids = []
+
+        # Resolve transitive references if enabled (default: True)
+        # This scans pre-selected references for mentions of other catalog references
+        # and automatically adds them to the selected set
+        transitive_enabled = config.get("transitive_injection", True)
+        if transitive_enabled and self._selected_source_ids:
+            # Build complete catalog including inline sources
+            full_catalog = dict(catalog_by_id)
+            for source in self._sources:
+                if source.id not in full_catalog:
+                    full_catalog[source.id] = source
+
+            # Resolve transitive references
+            all_resolved = self._resolve_transitive_references(
+                self._selected_source_ids,
+                full_catalog
+            )
+
+            # Add newly discovered sources to self._sources and self._selected_source_ids
+            current_source_ids = {s.id for s in self._sources}
+            for ref_id in all_resolved:
+                if ref_id not in self._selected_source_ids:
+                    self._selected_source_ids.append(ref_id)
+                # Ensure source is in self._sources
+                if ref_id not in current_source_ids and ref_id in full_catalog:
+                    self._sources.append(full_catalog[ref_id])
+                    current_source_ids.add(ref_id)
+
+            # Log transitive injection results
+            transitive_count = len(all_resolved) - len(valid_preselected) if preselected else 0
+            if transitive_count > 0:
+                transitive_ids = [rid for rid in all_resolved if rid not in valid_preselected]
+                self._trace(f"transitive: injected {transitive_count} additional: {transitive_ids}")
 
         # Capture excluded tools
         self._exclude_tools = config.get("exclude_tools", [])
