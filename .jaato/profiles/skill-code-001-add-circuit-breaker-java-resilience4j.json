@@ -1,7 +1,7 @@
 {
   "name": "skill-code-001-add-circuit-breaker-java-resilience4j",
   "description": "[ADD Flow] Add circuit breaker pattern to existing Java service. USE WHEN: (1) Java/Spring project already exists, (2) service makes external API calls that need fault tolerance, (3) request explicitly mentions circuit breaker, resilience, or fault tolerance. TRIGGERS: feature.type=circuit_breaker, existing projectPath, targeted module changes.",
-  "plugins": ["cli", "file_edit", "references", "artifact_tracker", "todo", "filesystem_query", "lsp", "background"],
+  "plugins": ["cli", "file_edit", "template", "references", "artifact_tracker", "todo", "filesystem_query", "lsp", "background"],
   "plugin_configs": {
     "references": {
       "preselected": ["enablement-consumer-prompt", "skill-001-circuit-breaker-java-resilience4j"],
