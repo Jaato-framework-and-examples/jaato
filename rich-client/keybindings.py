@@ -240,6 +240,64 @@ class KeybindingConfig:
             "view_full": self.view_full,
         }
 
+    def set_binding(self, action: str, key: KeyBinding) -> bool:
+        """Set a keybinding for a specific action.
+
+        Args:
+            action: The action name (e.g., "submit", "cancel")
+            key: The key binding (string or list for multi-key)
+
+        Returns:
+            True if the action was valid and binding was set.
+        """
+        if action not in DEFAULT_KEYBINDINGS:
+            return False
+
+        normalized = normalize_key(key)
+        setattr(self, action, normalized)
+        return True
+
+    def save_to_file(self, path: str = ".jaato/keybindings.json") -> bool:
+        """Save current keybindings to a JSON file.
+
+        Args:
+            path: Path to save the config file.
+
+        Returns:
+            True if saved successfully, False otherwise.
+        """
+        config_path = Path(path)
+
+        # Ensure parent directory exists
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            # Load existing file to preserve comments/structure if it exists
+            existing_data = {}
+            if config_path.exists():
+                try:
+                    with open(config_path, 'r') as f:
+                        existing_data = json.load(f)
+                except (json.JSONDecodeError, Exception):
+                    pass
+
+            # Update with current bindings
+            current = self.to_dict()
+            existing_data.update(current)
+
+            # Remove internal keys that start with _
+            save_data = {k: v for k, v in existing_data.items() if not k.startswith('_')}
+
+            with open(config_path, 'w') as f:
+                json.dump(save_data, f, indent=2)
+
+            logger.info(f"Saved keybindings to {path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to save keybindings to {path}: {e}")
+            return False
+
 
 def load_keybindings(
     project_path: str = ".jaato/keybindings.json",

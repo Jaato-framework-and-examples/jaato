@@ -1331,9 +1331,10 @@ class RichClient:
         """Handle the keybindings command with subcommands.
 
         Subcommands:
-            keybindings           - Show current keybindings
-            keybindings list      - Show current keybindings
-            keybindings reload    - Reload keybindings from config files
+            keybindings              - Show current keybindings
+            keybindings list         - Show current keybindings
+            keybindings reload       - Reload keybindings from config files
+            keybindings set <action> <key> [--save]  - Set a keybinding
 
         Args:
             user_input: The full user input string starting with 'keybindings'.
@@ -1352,12 +1353,18 @@ class RichClient:
             self._reload_keybindings()
             return
 
+        if subcommand == "set":
+            self._set_keybinding(parts[2:])
+            return
+
         # Unknown subcommand - show help
         self._display.show_lines([
             (f"[Unknown subcommand: {subcommand}]", "yellow"),
             ("  Available subcommands:", ""),
-            ("    keybindings list   - Show current keybindings", "dim"),
-            ("    keybindings reload - Reload keybindings from config", "dim"),
+            ("    keybindings list              - Show current keybindings", "dim"),
+            ("    keybindings reload            - Reload keybindings from config", "dim"),
+            ("    keybindings set <action> <key> [--save]", "dim"),
+            ("                                  - Set a keybinding (optionally persist)", "dim"),
         ])
 
     def _show_keybindings(self) -> None:
@@ -1422,6 +1429,102 @@ class RichClient:
             self._display.show_lines([
                 (f"[Error reloading keybindings: {e}]", "red"),
             ])
+
+    def _set_keybinding(self, args: list) -> None:
+        """Set a keybinding for an action.
+
+        Args:
+            args: List of arguments: <action> <key> [--save]
+        """
+        if not self._display:
+            return
+
+        from keybindings import DEFAULT_KEYBINDINGS
+
+        # Parse arguments
+        save_to_file = "--save" in args
+        args = [a for a in args if a != "--save"]
+
+        if len(args) < 2:
+            self._display.show_lines([
+                ("[Error: Missing arguments]", "red"),
+                ("  Usage: keybindings set <action> <key> [--save]", "dim"),
+                ("", ""),
+                ("  Examples:", "bold"),
+                ("    keybindings set yank c-shift-y", "dim"),
+                ("    keybindings set toggle_plan f1 --save", "dim"),
+                ("    keybindings set newline escape enter", "dim"),
+                ("", ""),
+                ("  Available actions:", "bold"),
+            ])
+            # Show available actions
+            actions = list(DEFAULT_KEYBINDINGS.keys())
+            for i in range(0, len(actions), 4):
+                chunk = actions[i:i+4]
+                self._display.show_lines([
+                    ("    " + ", ".join(chunk), "dim"),
+                ])
+            return
+
+        action = args[0].lower()
+        # Key can be multiple words for multi-key sequences (e.g., "escape enter")
+        key = " ".join(args[1:])
+
+        # Validate action
+        if action not in DEFAULT_KEYBINDINGS:
+            self._display.show_lines([
+                (f"[Error: Unknown action '{action}']", "red"),
+                ("", ""),
+                ("  Available actions:", "bold"),
+            ])
+            actions = list(DEFAULT_KEYBINDINGS.keys())
+            for i in range(0, len(actions), 4):
+                chunk = actions[i:i+4]
+                self._display.show_lines([
+                    ("    " + ", ".join(chunk), "dim"),
+                ])
+            return
+
+        # Get current config and set the binding
+        config = self._display._keybinding_config
+        old_value = getattr(config, action)
+        if isinstance(old_value, list):
+            old_str = " ".join(old_value)
+        else:
+            old_str = old_value
+
+        # Set the new binding
+        if not config.set_binding(action, key):
+            self._display.show_lines([
+                (f"[Error: Failed to set binding for '{action}']", "red"),
+            ])
+            return
+
+        # Rebuild the app with new keybindings
+        self._display._build_app()
+
+        # Get the normalized key for display
+        new_value = getattr(config, action)
+        if isinstance(new_value, list):
+            new_str = " ".join(new_value)
+        else:
+            new_str = new_value
+
+        lines = [
+            (f"[Keybinding updated: {action}]", "green"),
+            (f"  {old_str} → {new_str}", "dim"),
+        ]
+
+        # Save to file if requested
+        if save_to_file:
+            if config.save_to_file():
+                lines.append(("  Saved to .jaato/keybindings.json", "cyan"))
+            else:
+                lines.append(("  [Warning: Failed to save to file]", "yellow"))
+        else:
+            lines.append(("  (session only - use --save to persist)", "dim italic"))
+
+        self._display.show_lines(lines)
 
     def _get_tool_status(self) -> list:
         """Get status of all tools including enabled/disabled state."""
@@ -1940,6 +2043,7 @@ class RichClient:
             ("                        tools disable <n>   - Disable a tool (or 'all')", "dim"),
             ("  keybindings [sub] - Manage keyboard shortcuts", "dim"),
             ("                        keybindings list    - Show current keybindings", "dim"),
+            ("                        keybindings set     - Set a keybinding", "dim"),
             ("                        keybindings reload  - Reload from config files", "dim"),
             ("  plugins           - List available plugins with status", "dim"),
             ("  reset             - Clear conversation history", "dim"),
