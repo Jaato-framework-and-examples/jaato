@@ -40,7 +40,7 @@ Thumbs.db
 !.jaato/docs/
 !.jaato/profiles/
 !.jaato/references/
+!.jaato/commands/
 
 # Test folders
 tests_enablement_2.0/
-.jaato
