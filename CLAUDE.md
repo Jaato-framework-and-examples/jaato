@@ -344,6 +344,62 @@ Key types in `shared/plugins/model_provider/types.py`:
 | `JAATO_COPY_MECHANISM` | Clipboard provider: `osc52` (default) |
 | `JAATO_COPY_SOURCES` | Sources to include: `model` (default), or `model&user&tool` |
 
+### Keybindings
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_KEY_<ACTION>` | Override specific keybinding (e.g., `JAATO_KEY_YANK=c-shift-y`) |
+
+See `.jaato/keybindings.example.json` for all configurable actions.
+
+## Rich Client Keybindings
+
+The rich client supports customizable keybindings via:
+1. **Project config**: `.jaato/keybindings.json`
+2. **User config**: `~/.jaato/keybindings.json`
+3. **Environment variables**: `JAATO_KEY_<ACTION>=<key>`
+
+Priority: Environment variables > Project config > User config > Defaults
+
+### Configuration File Format
+
+```json
+{
+  "submit": "enter",
+  "newline": ["escape", "enter"],
+  "clear_input": ["escape", "escape"],
+  "cancel": "c-c",
+  "exit": "c-d",
+  "scroll_up": "pageup",
+  "scroll_down": "pagedown",
+  "scroll_top": "home",
+  "scroll_bottom": "end",
+  "nav_up": "up",
+  "nav_down": "down",
+  "pager_quit": "q",
+  "pager_next": "space",
+  "toggle_plan": "c-p",
+  "toggle_tools": "c-t",
+  "cycle_agents": "f2",
+  "yank": "c-y",
+  "view_full": "v"
+}
+```
+
+### Key Syntax (prompt_toolkit)
+
+- Simple keys: `enter`, `space`, `tab`, `q`, `v`
+- Control: `c-c`, `c-d`, `c-p` (Ctrl+C, Ctrl+D, Ctrl+P)
+- Function keys: `f1`, `f2`, `f12`
+- Special: `pageup`, `pagedown`, `home`, `end`, `up`, `down`
+- Multi-key sequences: `["escape", "enter"]` or `"escape enter"`
+
+### Reloading Keybindings
+
+Use the `/keybindings reload` command to reload keybindings without restarting:
+```
+/keybindings reload
+```
+
 ## Additional Documentation
 
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI
