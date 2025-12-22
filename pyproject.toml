@@ -44,18 +44,18 @@ dev = [
 # Entry points for plugin discovery
 # External packages can register plugins by adding to this group
 [project.entry-points."jaato.plugins"]
+artifact_tracker = "shared.plugins.artifact_tracker:create_plugin"
+background = "shared.plugins.background:create_plugin"
+calculator = "shared.plugins.calculator:create_plugin"
 cli = "shared.plugins.cli:create_plugin"
 environment = "shared.plugins.environment:create_plugin"
 mcp = "shared.plugins.mcp:create_plugin"
 lsp = "shared.plugins.lsp:create_plugin"
 multimodal = "shared.plugins.multimodal:create_plugin"
 permission = "shared.plugins.permission:create_plugin"
-todo = "shared.plugins.todo:create_plugin"
 references = "shared.plugins.references:create_plugin"
-memory = "shared.plugins.memory:create_plugin"
-calculator = "shared.plugins.calculator:create_plugin"
-filesystem_query = "shared.plugins.filesystem_query:create_plugin"
 template = "shared.plugins.template:create_plugin"
+todo = "shared.plugins.todo:create_plugin"
 
 # Entry points for GC strategy plugins
 # GC plugins implement context window garbage collection strategies
