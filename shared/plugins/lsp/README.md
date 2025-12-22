@@ -192,15 +192,20 @@ for the same codebase or different projects.
 
 ## Tools
 
-### lsp_goto_definition
+The LSP tools use a **symbol-based API** - just provide the symbol name instead of
+line/character positions. This is more natural for AI agents who understand code
+semantically, not positionally.
 
-Navigate to where a symbol is defined.
+### Symbol-Based Tools
+
+#### lsp_goto_definition
+
+Find where a symbol is defined.
 
 ```json
 {
-  "file_path": "/path/to/file.py",
-  "line": 10,
-  "character": 5
+  "symbol": "UserService",
+  "file_path": "/path/to/file.py"  // optional, helps with disambiguation
 }
 ```
 
@@ -209,15 +214,13 @@ Returns:
 [{"file": "/path/to/module.py", "line": 42, "character": 0}]
 ```
 
-### lsp_find_references
+#### lsp_find_references
 
 Find all usages of a symbol across the workspace.
 
 ```json
 {
-  "file_path": "/path/to/file.py",
-  "line": 10,
-  "character": 5,
+  "symbol": "processOrder",
   "include_declaration": true
 }
 ```
@@ -225,31 +228,44 @@ Find all usages of a symbol across the workspace.
 Returns:
 ```json
 [
-  {"file": "/path/to/file.py", "line": 10, "character": 5},
-  {"file": "/path/to/other.py", "line": 25, "character": 12}
+  {"file": "/path/to/service.py", "line": 10, "character": 5},
+  {"file": "/path/to/handler.py", "line": 25, "character": 12}
 ]
 ```
 
-### lsp_hover
+#### lsp_hover
 
 Get type information and documentation for a symbol.
 
 ```json
 {
-  "file_path": "/path/to/file.py",
-  "line": 10,
-  "character": 5
+  "symbol": "calculate_total"
 }
 ```
 
 Returns:
 ```json
-{"contents": "def my_function(x: int) -> str\n\nDocstring here..."}
+{"contents": "def calculate_total(items: List[Item]) -> Decimal\n\nCalculate the total price..."}
 ```
 
-### lsp_get_diagnostics
+#### lsp_rename_symbol
 
-Get errors and warnings for a file.
+Preview workspace edits for renaming a symbol.
+
+```json
+{
+  "symbol": "old_name",
+  "new_name": "better_name"
+}
+```
+
+Returns a workspace edit object describing changes needed.
+
+### File-Based Tools
+
+#### lsp_get_diagnostics
+
+Get errors and warnings for a file. **RECOMMENDED: Use BEFORE builds for instant feedback.**
 
 ```json
 {
@@ -270,7 +286,7 @@ Returns:
 ]
 ```
 
-### lsp_document_symbols
+#### lsp_document_symbols
 
 List all symbols defined in a file.
 
@@ -288,7 +304,9 @@ Returns:
 ]
 ```
 
-### lsp_workspace_symbols
+### Query-Based Tools
+
+#### lsp_workspace_symbols
 
 Search for symbols across the entire workspace.
 
@@ -305,21 +323,6 @@ Returns:
   {"name": "MyClassHelper", "kind": "Class", "location": "/path/to/utils.py:5"}
 ]
 ```
-
-### lsp_rename_symbol
-
-Get workspace edits for renaming a symbol.
-
-```json
-{
-  "file_path": "/path/to/file.py",
-  "line": 10,
-  "character": 5,
-  "new_name": "better_name"
-}
-```
-
-Returns a workspace edit object describing changes needed.
 
 ## User Commands
 

@@ -458,17 +458,20 @@ return result
 
         <section id="tools">
             <h2>Tools</h2>
-            <p>All tools use 0-indexed positions internally but return 1-indexed values for display.</p>
+            <p>
+                The LSP tools use a <strong>symbol-based API</strong> - just provide the symbol name instead of
+                line/character positions. This is more natural for AI agents who understand code semantically.
+            </p>
 
+            <h3>Symbol-Based Tools</h3>
             <div class="grid">
                 <div class="tool-card">
                     <h4>lsp_goto_definition</h4>
                     <span class="badge badge-read">Read-only</span>
-                    <p>Navigate to where a symbol is defined.</p>
+                    <p>Find where a symbol is defined.</p>
                     <pre><code>{
-  "file_path": "/path/to/file.py",
-  "line": 10,
-  "character": 5
+  "symbol": "UserService",
+  "file_path": "/path/to/file.py"  // optional
 }</code></pre>
                 </div>
 
@@ -477,9 +480,7 @@ return result
                     <span class="badge badge-read">Read-only</span>
                     <p>Find all usages of a symbol across the workspace.</p>
                     <pre><code>{
-  "file_path": "/path/to/file.py",
-  "line": 10,
-  "character": 5,
+  "symbol": "processOrder",
   "include_declaration": true
 }</code></pre>
                 </div>
@@ -487,18 +488,29 @@ return result
                 <div class="tool-card">
                     <h4>lsp_hover</h4>
                     <span class="badge badge-read">Read-only</span>
-                    <p>Get type information and documentation.</p>
+                    <p>Get type information and documentation for a symbol.</p>
                     <pre><code>{
-  "file_path": "/path/to/file.py",
-  "line": 10,
-  "character": 5
+  "symbol": "calculate_total"
 }</code></pre>
                 </div>
 
                 <div class="tool-card">
+                    <h4>lsp_rename_symbol</h4>
+                    <span class="badge badge-write">Write</span>
+                    <p>Preview workspace edits for renaming a symbol.</p>
+                    <pre><code>{
+  "symbol": "old_name",
+  "new_name": "better_name"
+}</code></pre>
+                </div>
+            </div>
+
+            <h3>File-Based Tools</h3>
+            <div class="grid">
+                <div class="tool-card">
                     <h4>lsp_get_diagnostics</h4>
                     <span class="badge badge-read">Read-only</span>
-                    <p>Get errors and warnings for a file.</p>
+                    <p>Get errors and warnings for a file. <strong>RECOMMENDED:</strong> Use BEFORE builds for instant feedback.</p>
                     <pre><code>{
   "file_path": "/path/to/file.py"
 }</code></pre>
@@ -512,34 +524,25 @@ return result
   "file_path": "/path/to/file.py"
 }</code></pre>
                 </div>
+            </div>
 
+            <h3>Query-Based Tools</h3>
+            <div class="grid">
                 <div class="tool-card">
                     <h4>lsp_workspace_symbols</h4>
                     <span class="badge badge-read">Read-only</span>
-                    <p>Search for symbols across the workspace.</p>
+                    <p>Search for symbols across the entire workspace.</p>
                     <pre><code>{
   "query": "MyClass"
-}</code></pre>
-                </div>
-
-                <div class="tool-card">
-                    <h4>lsp_rename_symbol</h4>
-                    <span class="badge badge-write">Write</span>
-                    <p>Get workspace edits for renaming a symbol.</p>
-                    <pre><code>{
-  "file_path": "/path/to/file.py",
-  "line": 10,
-  "character": 5,
-  "new_name": "better_name"
 }</code></pre>
                 </div>
             </div>
 
             <div class="note">
-                <div class="note-title">Position Indexing</div>
+                <div class="note-title">Symbol Lookup</div>
                 <p>
-                    LSP uses 0-indexed positions. Line 1 in your editor = <code>line: 0</code> in LSP.
-                    Tool results are converted to 1-indexed for human readability.
+                    Symbol-based tools automatically locate symbols in your codebase. If a symbol appears
+                    in multiple files, provide the optional <code>file_path</code> parameter to disambiguate.
                 </p>
             </div>
         </section>
