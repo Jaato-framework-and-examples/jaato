@@ -706,6 +706,8 @@ Provides tools for reading, modifying, and managing files with integrated permis
 - `updateFile`: Update existing file (shows diff for approval, creates backup)
 - `writeNewFile`: Create new file (shows content for approval)
 - `removeFile`: Delete file (creates backup)
+- `moveFile`: Move or rename file (creates backup, shows confirmation)
+- `renameFile`: Alias for moveFile (for discoverability)
 - `undoFileChange`: Restore from most recent backup (auto-approved)
 
 **Auto-approved:** `readFile`, `undoFileChange`
