@@ -1,7 +1,7 @@
 {
   "name": "validator-tier3-pattern-compliance",
   "description": "[Tier 3 - Pattern] Skill/module template compliance verification. RUN WHEN: Code implements patterns from skills (circuit breaker, retry, etc.). RUN AFTER: Tier 2 passes. CHECKS: Implementation matches templates, configuration values within bounds.",
-  "plugins": ["cli", "file_edit", "references", "artifact_tracker", "filesystem_query", "background"],
+  "plugins": ["artifact_tracker", "background", "cli", "environment", "file_edit", "mcp", "references", "todo"],
   "plugin_configs": {
     "references": {
       "preselected": ["enablement-consumer-prompt", "skill-001-circuit-breaker-java-resilience4j", "skill-020-microservice-java-spring"],
