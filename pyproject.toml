@@ -46,6 +46,7 @@ dev = [
 [project.entry-points."jaato.plugins"]
 cli = "shared.plugins.cli:create_plugin"
 mcp = "shared.plugins.mcp:create_plugin"
+lsp = "shared.plugins.lsp:create_plugin"
 multimodal = "shared.plugins.multimodal:create_plugin"
 permission = "shared.plugins.permission:create_plugin"
 todo = "shared.plugins.todo:create_plugin"
