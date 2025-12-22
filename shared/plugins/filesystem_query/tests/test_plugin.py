@@ -330,7 +330,7 @@ class TestGrepContent:
             result = plugin._execute_grep_content({
                 "pattern": "pattern",
                 "path": tmpdir,
-                "file_glob": "*.py",
+                "file_glob": ["*.py"],
             })
 
             assert result["total_matches"] == 1
@@ -417,6 +417,49 @@ class TestGrepContent:
             assert result["files_with_matches"] == 1
             assert result["matches"][0]["file"] == "main.py"
 
+    def test_grep_content_file_glob_array(self):
+        """Test file_glob with array of patterns."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "test.java").write_text("@CircuitBreaker")
+            (Path(tmpdir) / "test.kt").write_text("@CircuitBreaker")
+            (Path(tmpdir) / "test.scala").write_text("@CircuitBreaker")
+            (Path(tmpdir) / "test.py").write_text("@CircuitBreaker")
+            (Path(tmpdir) / "test.txt").write_text("@CircuitBreaker")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize()
+
+            result = plugin._execute_grep_content({
+                "pattern": "@CircuitBreaker",
+                "path": tmpdir,
+                "file_glob": ["*.java", "*.kt", "*.scala"],
+            })
+
+            # Should find in Java, Kotlin, and Scala files only
+            assert result["total_matches"] == 3
+            assert result["files_with_matches"] == 3
+            matched_files = {m["file"] for m in result["matches"]}
+            assert matched_files == {"test.java", "test.kt", "test.scala"}
+
+    def test_grep_content_file_glob_array_no_duplicates(self):
+        """Test that overlapping patterns don't produce duplicate results."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "main.py").write_text("pattern here")
+            (Path(tmpdir) / "test.py").write_text("pattern here")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize()
+
+            result = plugin._execute_grep_content({
+                "pattern": "pattern",
+                "path": tmpdir,
+                # Both patterns match the same .py files
+                "file_glob": ["*.py", "*.py"],
+            })
+
+            # Should not have duplicates
+            assert result["total_matches"] == 2
+            assert result["files_with_matches"] == 2
 
 class TestBackgroundCapable:
     """Tests for background execution support."""
