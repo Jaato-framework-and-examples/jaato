@@ -128,6 +128,15 @@ class JaatoSession:
         self._gc_threshold_crossed: bool = False  # Set when threshold crossed during streaming
         self._gc_threshold_callback: Optional[GCThresholdCallback] = None
 
+    def _get_trace_prefix(self) -> str:
+        """Get the trace prefix including agent context."""
+        if self._agent_type == "main":
+            return "session:main"
+        elif self._agent_name:
+            return f"session:subagent:{self._agent_name}"
+        else:
+            return f"session:subagent:{self._agent_id}"
+
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
         trace_path = os.environ.get("JAATO_TRACE_LOG")
@@ -140,9 +149,10 @@ class JaatoSession:
         if trace_path == "":
             return
         try:
+            prefix = self._get_trace_prefix()
             with open(trace_path, "a") as f:
                 ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] [session] {msg}\n")
+                f.write(f"[{ts}] [{prefix}] {msg}\n")
                 f.flush()
         except (IOError, OSError):
             pass
@@ -167,7 +177,7 @@ class JaatoSession:
         agent_type: str = "main",
         agent_name: Optional[str] = None
     ) -> None:
-        """Set the agent context for permission checks.
+        """Set the agent context for permission checks and trace identification.
 
         Args:
             agent_type: Type of agent ("main" or "subagent").
@@ -184,6 +194,14 @@ class JaatoSession:
             self._executor.set_permission_plugin(
                 self._runtime.permission_plugin,
                 context=context
+            )
+
+        # Propagate agent context to provider for trace identification
+        if self._provider and hasattr(self._provider, 'set_agent_context'):
+            self._provider.set_agent_context(
+                agent_type=agent_type,
+                agent_name=agent_name,
+                agent_id=self._agent_id
             )
 
     def set_ui_hooks(
@@ -341,6 +359,14 @@ class JaatoSession:
 
         # Create provider for this session
         self._provider = self._runtime.create_provider(self._model_name)
+
+        # Propagate agent context to provider for trace identification
+        if hasattr(self._provider, 'set_agent_context'):
+            self._provider.set_agent_context(
+                agent_type=self._agent_type,
+                agent_name=self._agent_name,
+                agent_id=self._agent_id
+            )
 
         # Create executor
         self._executor = ToolExecutor(ledger=self._runtime.ledger)
@@ -542,6 +568,14 @@ class JaatoSession:
 
             # Create new provider for the new model
             self._provider = self._runtime.create_provider(model_name)
+
+            # Propagate agent context to new provider for trace identification
+            if hasattr(self._provider, 'set_agent_context'):
+                self._provider.set_agent_context(
+                    agent_type=self._agent_type,
+                    agent_name=self._agent_name,
+                    agent_id=self._agent_id
+                )
 
             # Recreate session with existing history
             self._create_provider_session(history=history)
