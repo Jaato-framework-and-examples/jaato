@@ -13,7 +13,10 @@ from typing import Any, Callable, Dict, List, Optional
 from ..base import UserCommand, CommandParameter, CommandCompletion
 from ..model_provider.types import ToolSchema
 from ..subagent.config import expand_variables
-from .lsp_client import LSPClient, ServerConfig, Location, Diagnostic, Hover
+from .lsp_client import (
+    LSPClient, ServerConfig, Location, Diagnostic, Hover,
+    TextEdit, WorkspaceEdit, CodeAction, Range, Position
+)
 
 
 # Message types for background thread communication
@@ -29,6 +32,143 @@ LOG_ERROR = 'ERROR'
 LOG_WARN = 'WARN'
 
 MAX_LOG_ENTRIES = 500
+
+
+def _uri_to_file_path(uri: str) -> str:
+    """Convert a file URI to a local file path."""
+    if uri.startswith('file://'):
+        path = uri[7:]
+        if os.name == 'nt' and path.startswith('/'):
+            path = path[1:]
+        return path
+    return uri
+
+
+def _apply_text_edits_to_content(content: str, edits: List[TextEdit]) -> str:
+    """Apply a list of text edits to content.
+
+    Edits are applied in reverse order (bottom-to-top, right-to-left)
+    to preserve position validity.
+    """
+    lines = content.split('\n')
+
+    # Sort edits in reverse order to apply from bottom to top
+    sorted_edits = sorted(
+        edits,
+        key=lambda e: (e.range.start.line, e.range.start.character),
+        reverse=True
+    )
+
+    for edit in sorted_edits:
+        start_line = edit.range.start.line
+        start_char = edit.range.start.character
+        end_line = edit.range.end.line
+        end_char = edit.range.end.character
+
+        # Ensure line indices are within bounds
+        if start_line >= len(lines):
+            continue
+
+        if end_line >= len(lines):
+            end_line = len(lines) - 1
+            end_char = len(lines[end_line]) if lines else 0
+
+        # Get the parts we're keeping
+        before = lines[start_line][:start_char] if start_line < len(lines) else ""
+        after = lines[end_line][end_char:] if end_line < len(lines) else ""
+
+        # Split the new text into lines
+        new_text_lines = edit.new_text.split('\n')
+
+        if len(new_text_lines) == 1:
+            # Single line replacement
+            lines[start_line] = before + new_text_lines[0] + after
+            # Remove any lines between start and end
+            del lines[start_line + 1:end_line + 1]
+        else:
+            # Multi-line replacement
+            new_text_lines[0] = before + new_text_lines[0]
+            new_text_lines[-1] = new_text_lines[-1] + after
+
+            # Replace the range with new lines
+            lines[start_line:end_line + 1] = new_text_lines
+
+    return '\n'.join(lines)
+
+
+def apply_workspace_edit(
+    workspace_edit: WorkspaceEdit,
+    dry_run: bool = False
+) -> Dict[str, Any]:
+    """Apply a workspace edit to files on disk.
+
+    Args:
+        workspace_edit: The WorkspaceEdit to apply
+        dry_run: If True, validate but don't actually write files
+
+    Returns:
+        Dict with:
+            - success: bool indicating overall success
+            - files_modified: list of file paths that were modified
+            - changes: list of change descriptions per file
+            - errors: list of any errors encountered
+    """
+    result: Dict[str, Any] = {
+        "success": True,
+        "files_modified": [],
+        "changes": [],
+        "errors": []
+    }
+
+    for uri, edits in workspace_edit.changes.items():
+        file_path = _uri_to_file_path(uri)
+
+        try:
+            # Read the current file content
+            if not os.path.isfile(file_path):
+                result["errors"].append({
+                    "file": file_path,
+                    "error": "File not found"
+                })
+                result["success"] = False
+                continue
+
+            with open(file_path, 'r', encoding='utf-8') as f:
+                original_content = f.read()
+
+            # Apply edits
+            new_content = _apply_text_edits_to_content(original_content, edits)
+
+            # Count changes for reporting
+            change_info = {
+                "file": file_path,
+                "edits_applied": len(edits),
+                "lines_before": len(original_content.split('\n')),
+                "lines_after": len(new_content.split('\n'))
+            }
+
+            if not dry_run:
+                # Write the modified content back
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+                result["files_modified"].append(file_path)
+
+            result["changes"].append(change_info)
+
+        except IOError as e:
+            result["errors"].append({
+                "file": file_path,
+                "error": str(e)
+            })
+            result["success"] = False
+        except Exception as e:
+            result["errors"].append({
+                "file": file_path,
+                "error": f"Unexpected error: {e}"
+            })
+            result["success"] = False
+
+    return result
 
 
 @dataclass
@@ -374,9 +514,10 @@ class LSPToolPlugin:
             ToolSchema(
                 name="lsp_rename_symbol",
                 description=(
-                    "Rename a symbol across all files. Returns the workspace edit "
-                    "that would be applied (preview only - does not apply automatically). "
-                    "Use for safe refactoring with full scope awareness."
+                    "Rename a symbol across all files in the workspace. "
+                    "By default performs a dry-run showing what would change. "
+                    "Set apply=true to actually apply the changes. "
+                    "Returns detailed information about which files were modified."
                 ),
                 parameters={
                     "type": "object",
@@ -392,9 +533,91 @@ class LSPToolPlugin:
                         "file_path": {
                             "type": "string",
                             "description": "Optional: file where the symbol is defined (helps with disambiguation)"
+                        },
+                        "apply": {
+                            "type": "boolean",
+                            "description": "If true, apply the rename. If false (default), preview only."
                         }
                     },
                     "required": ["symbol", "new_name"]
+                }
+            ),
+            ToolSchema(
+                name="lsp_get_code_actions",
+                description=(
+                    "Get available code actions (refactorings, quick fixes) for a code region. "
+                    "Returns a list of available actions that can be applied with lsp_apply_code_action. "
+                    "Use this to discover what refactoring operations the language server supports "
+                    "(e.g., extract method, extract variable, inline, organize imports)."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to the source file"
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "Start line of the selection (1-indexed)"
+                        },
+                        "start_column": {
+                            "type": "integer",
+                            "description": "Start column of the selection (1-indexed)"
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": "End line of the selection (1-indexed)"
+                        },
+                        "end_column": {
+                            "type": "integer",
+                            "description": "End column of the selection (1-indexed)"
+                        },
+                        "only_refactorings": {
+                            "type": "boolean",
+                            "description": "If true, only return refactoring actions (not quick fixes)"
+                        }
+                    },
+                    "required": ["file_path", "start_line", "start_column", "end_line", "end_column"]
+                }
+            ),
+            ToolSchema(
+                name="lsp_apply_code_action",
+                description=(
+                    "Apply a code action (refactoring or quick fix) by its title. "
+                    "First use lsp_get_code_actions to discover available actions, "
+                    "then call this tool with the exact title of the action to apply. "
+                    "Returns details of files modified."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to the source file"
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "Start line of the selection (1-indexed)"
+                        },
+                        "start_column": {
+                            "type": "integer",
+                            "description": "Start column of the selection (1-indexed)"
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": "End line of the selection (1-indexed)"
+                        },
+                        "end_column": {
+                            "type": "integer",
+                            "description": "End column of the selection (1-indexed)"
+                        },
+                        "action_title": {
+                            "type": "string",
+                            "description": "Exact title of the code action to apply (from lsp_get_code_actions)"
+                        }
+                    },
+                    "required": ["file_path", "start_line", "start_column", "end_line", "end_column", "action_title"]
                 }
             ),
         ]
@@ -412,6 +635,8 @@ class LSPToolPlugin:
             "lsp_document_symbols": self._exec_document_symbols,
             "lsp_workspace_symbols": self._exec_workspace_symbols,
             "lsp_rename_symbol": self._exec_rename_symbol,
+            "lsp_get_code_actions": self._exec_get_code_actions,
+            "lsp_apply_code_action": self._exec_apply_code_action,
             "lsp": lambda args: self.execute_user_command('lsp', args),
         }
 
@@ -422,7 +647,13 @@ Symbol-based tools (just provide the symbol name):
 - lsp_goto_definition(symbol): Find where a symbol is defined
 - lsp_find_references(symbol): Find all usages across the codebase
 - lsp_hover(symbol): Get type info and documentation
-- lsp_rename_symbol(symbol, new_name): Preview rename across all files
+
+Refactoring tools:
+- lsp_rename_symbol(symbol, new_name, apply=True): Rename symbol across all files
+  - Set apply=False (default) to preview changes, apply=True to apply them
+- lsp_get_code_actions(file_path, start_line, start_column, end_line, end_column):
+  - Discover available refactorings for a code region (extract method, inline, etc.)
+- lsp_apply_code_action(file_path, ..., action_title): Apply a discovered code action
 
 File-based tools:
 - lsp_get_diagnostics(file_path): Get errors/warnings - use BEFORE builds for fast feedback
@@ -431,10 +662,11 @@ File-based tools:
 Query-based tools:
 - lsp_workspace_symbols(query): Search for symbols across the project
 
-Use 'lsp status' to see connected language servers."""
+Use 'lsp status' to see connected language servers and their capabilities."""
 
     def get_auto_approved_tools(self) -> List[str]:
-        # All LSP tools are read-only except rename
+        # Read-only tools are auto-approved
+        # lsp_rename_symbol and lsp_apply_code_action modify files - NOT auto-approved
         return [
             "lsp_goto_definition",
             "lsp_find_references",
@@ -442,6 +674,7 @@ Use 'lsp status' to see connected language servers."""
             "lsp_get_diagnostics",
             "lsp_document_symbols",
             "lsp_workspace_symbols",
+            "lsp_get_code_actions",  # Read-only: just lists available actions
             "lsp",
         ]
 
@@ -951,10 +1184,36 @@ Example:
             ]
 
         elif method == 'rename_symbol':
-            edits = await client.rename(
+            workspace_edit = await client.rename(
                 file_path, args['line'], args['character'], args['new_name']
             )
-            return edits
+            return workspace_edit
+
+        elif method == 'get_code_actions':
+            actions = await client.get_code_actions(
+                file_path,
+                args['start_line'],
+                args['start_char'],
+                args['end_line'],
+                args['end_char'],
+                only_kinds=args.get('only_kinds')
+            )
+            return actions
+
+        elif method == 'resolve_code_action':
+            # Resolve a code action to get its edit
+            action = args.get('action')
+            if action:
+                resolved = await client.resolve_code_action(action)
+                return resolved
+            return None
+
+        elif method == 'execute_command':
+            # Execute a workspace command
+            command = args.get('command')
+            arguments = args.get('arguments')
+            result = await client.execute_command(command, arguments)
+            return result
 
         else:
             raise ValueError(f"Unknown method: {method}")
@@ -1152,10 +1411,14 @@ Example:
         return self._execute_method('workspace_symbols', args)
 
     def _exec_rename_symbol(self, args: Dict[str, Any]) -> Any:
-        """Rename a symbol across all files."""
+        """Rename a symbol across all files.
+
+        If apply=True, applies the changes to files. Otherwise returns a preview.
+        """
         symbol = args.get('symbol')
         new_name = args.get('new_name')
         file_path = args.get('file_path')
+        apply = args.get('apply', False)
 
         if not symbol:
             return {"error": "symbol parameter is required"}
@@ -1166,12 +1429,224 @@ Example:
         if not pos:
             return {"error": f"Symbol '{symbol}' not found in codebase"}
 
-        return self._execute_method('rename_symbol', {
+        # Get the workspace edit from LSP
+        result = self._execute_method('rename_symbol', {
             'file_path': pos['file_path'],
             'line': pos['line'],
             'character': pos['character'],
             'new_name': new_name
         })
+
+        # Check for errors
+        if isinstance(result, dict) and 'error' in result:
+            return result
+
+        # Handle case where rename returns None or empty
+        if result is None:
+            return {"error": f"LSP server could not rename symbol '{symbol}'"}
+
+        # result should be a WorkspaceEdit object
+        if isinstance(result, WorkspaceEdit):
+            workspace_edit = result
+        elif isinstance(result, dict):
+            # Fallback if somehow we got a raw dict
+            workspace_edit = WorkspaceEdit.from_dict(result)
+        else:
+            return {"error": f"Unexpected response from LSP server: {type(result)}"}
+
+        # Prepare the result info
+        affected_files = workspace_edit.get_affected_files()
+        file_info = []
+        for uri in affected_files:
+            path = self._uri_to_path(uri)
+            edits = workspace_edit.changes.get(uri, [])
+            file_info.append({
+                "file": path,
+                "edits": len(edits)
+            })
+
+        if not apply:
+            # Preview mode - return what would be changed
+            return {
+                "mode": "preview",
+                "symbol": symbol,
+                "new_name": new_name,
+                "files_affected": len(affected_files),
+                "changes": file_info,
+                "message": f"Would rename '{symbol}' to '{new_name}' in {len(affected_files)} file(s). Set apply=true to apply."
+            }
+        else:
+            # Apply the changes
+            apply_result = apply_workspace_edit(workspace_edit, dry_run=False)
+
+            return {
+                "mode": "applied",
+                "symbol": symbol,
+                "new_name": new_name,
+                "success": apply_result["success"],
+                "files_modified": apply_result["files_modified"],
+                "changes": apply_result["changes"],
+                "errors": apply_result["errors"] if apply_result["errors"] else None
+            }
+
+    def _exec_get_code_actions(self, args: Dict[str, Any]) -> Any:
+        """Get available code actions for a code region."""
+        file_path = args.get('file_path')
+        start_line = args.get('start_line')
+        start_column = args.get('start_column')
+        end_line = args.get('end_line')
+        end_column = args.get('end_column')
+        only_refactorings = args.get('only_refactorings', False)
+
+        if not file_path:
+            return {"error": "file_path parameter is required"}
+        if start_line is None or start_column is None:
+            return {"error": "start_line and start_column are required"}
+        if end_line is None or end_column is None:
+            return {"error": "end_line and end_column are required"}
+
+        # Convert 1-indexed to 0-indexed
+        start_line_0 = start_line - 1
+        start_char_0 = start_column - 1
+        end_line_0 = end_line - 1
+        end_char_0 = end_column - 1
+
+        # Build filter for code action kinds
+        only_kinds = None
+        if only_refactorings:
+            only_kinds = ["refactor", "refactor.extract", "refactor.inline", "refactor.rewrite"]
+
+        result = self._execute_method('get_code_actions', {
+            'file_path': file_path,
+            'start_line': start_line_0,
+            'start_char': start_char_0,
+            'end_line': end_line_0,
+            'end_char': end_char_0,
+            'only_kinds': only_kinds
+        })
+
+        if isinstance(result, dict) and 'error' in result:
+            return result
+
+        if not result:
+            return {
+                "actions": [],
+                "message": "No code actions available for this selection"
+            }
+
+        # Format actions for output
+        actions_list = []
+        if isinstance(result, list):
+            for action in result:
+                if isinstance(action, CodeAction):
+                    actions_list.append(action.to_summary())
+                elif isinstance(action, dict):
+                    # Fallback for raw dict
+                    actions_list.append({
+                        "title": action.get("title", "Unknown"),
+                        "kind": action.get("kind", "unknown")
+                    })
+
+        return {
+            "actions": actions_list,
+            "count": len(actions_list)
+        }
+
+    def _exec_apply_code_action(self, args: Dict[str, Any]) -> Any:
+        """Apply a code action by its title."""
+        file_path = args.get('file_path')
+        start_line = args.get('start_line')
+        start_column = args.get('start_column')
+        end_line = args.get('end_line')
+        end_column = args.get('end_column')
+        action_title = args.get('action_title')
+
+        if not file_path:
+            return {"error": "file_path parameter is required"}
+        if start_line is None or start_column is None:
+            return {"error": "start_line and start_column are required"}
+        if end_line is None or end_column is None:
+            return {"error": "end_line and end_column are required"}
+        if not action_title:
+            return {"error": "action_title parameter is required"}
+
+        # Convert 1-indexed to 0-indexed
+        start_line_0 = start_line - 1
+        start_char_0 = start_column - 1
+        end_line_0 = end_line - 1
+        end_char_0 = end_column - 1
+
+        # First, get all available code actions
+        actions_result = self._execute_method('get_code_actions', {
+            'file_path': file_path,
+            'start_line': start_line_0,
+            'start_char': start_char_0,
+            'end_line': end_line_0,
+            'end_char': end_char_0
+        })
+
+        if isinstance(actions_result, dict) and 'error' in actions_result:
+            return actions_result
+
+        if not actions_result:
+            return {"error": "No code actions available for this selection"}
+
+        # Find the action with matching title
+        matching_action = None
+        for action in actions_result:
+            if isinstance(action, CodeAction):
+                if action.title == action_title:
+                    matching_action = action
+                    break
+            elif isinstance(action, dict) and action.get('title') == action_title:
+                matching_action = CodeAction.from_dict(action)
+                break
+
+        if not matching_action:
+            available = [a.title if isinstance(a, CodeAction) else a.get('title', '?') for a in actions_result[:5]]
+            return {
+                "error": f"Code action '{action_title}' not found",
+                "available_actions": available
+            }
+
+        # Check if action is disabled
+        if matching_action.disabled:
+            return {"error": f"Code action is disabled: {matching_action.disabled}"}
+
+        # If action doesn't have an edit, try to resolve it
+        if matching_action.edit is None and matching_action.data is not None:
+            resolved = self._execute_method('resolve_code_action', {'action': matching_action})
+            if isinstance(resolved, CodeAction):
+                matching_action = resolved
+
+        # Apply the workspace edit if present
+        if matching_action.edit:
+            apply_result = apply_workspace_edit(matching_action.edit, dry_run=False)
+            result = {
+                "action": action_title,
+                "success": apply_result["success"],
+                "files_modified": apply_result["files_modified"],
+                "changes": apply_result["changes"]
+            }
+            if apply_result["errors"]:
+                result["errors"] = apply_result["errors"]
+            return result
+
+        # Execute command if present (some actions only have commands)
+        if matching_action.command:
+            cmd = matching_action.command
+            cmd_result = self._execute_method('execute_command', {
+                'command': cmd.get('command'),
+                'arguments': cmd.get('arguments')
+            })
+
+            return {
+                "action": action_title,
+                "command_executed": cmd.get('command'),
+                "result": cmd_result
+            }
+
+        return {"error": f"Code action '{action_title}' has no edit or command to apply"}
 
 
 def create_plugin() -> LSPToolPlugin:

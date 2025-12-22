@@ -693,3 +693,452 @@ class TestLSPClientIntegration:
 
             await client.stop()
             mock_process.terminate.assert_called()
+
+
+# =============================================================================
+# New Refactoring Types Tests
+# =============================================================================
+
+from ..lsp_client import TextEdit, WorkspaceEdit, CodeAction
+
+
+class TestTextEdit:
+    """Test TextEdit dataclass."""
+
+    def test_from_dict(self):
+        edit = TextEdit.from_dict({
+            "range": {
+                "start": {"line": 10, "character": 5},
+                "end": {"line": 10, "character": 15}
+            },
+            "newText": "newValue"
+        })
+        assert edit.range.start.line == 10
+        assert edit.range.start.character == 5
+        assert edit.range.end.line == 10
+        assert edit.range.end.character == 15
+        assert edit.new_text == "newValue"
+
+    def test_to_dict(self):
+        edit = TextEdit(
+            range=Range(Position(5, 0), Position(5, 10)),
+            new_text="replacement"
+        )
+        d = edit.to_dict()
+        assert d["range"]["start"]["line"] == 5
+        assert d["range"]["end"]["character"] == 10
+        assert d["newText"] == "replacement"
+
+    def test_empty_new_text(self):
+        edit = TextEdit.from_dict({
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}},
+            "newText": ""
+        })
+        assert edit.new_text == ""
+
+
+class TestWorkspaceEdit:
+    """Test WorkspaceEdit dataclass."""
+
+    def test_from_dict_changes_format(self):
+        edit = WorkspaceEdit.from_dict({
+            "changes": {
+                "file:///test.py": [
+                    {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}, "newText": "foo"},
+                    {"range": {"start": {"line": 5, "character": 0}, "end": {"line": 5, "character": 3}}, "newText": "foo"}
+                ],
+                "file:///other.py": [
+                    {"range": {"start": {"line": 10, "character": 4}, "end": {"line": 10, "character": 7}}, "newText": "foo"}
+                ]
+            }
+        })
+        assert len(edit.changes) == 2
+        assert len(edit.changes["file:///test.py"]) == 2
+        assert len(edit.changes["file:///other.py"]) == 1
+
+    def test_from_dict_document_changes_format(self):
+        edit = WorkspaceEdit.from_dict({
+            "documentChanges": [
+                {
+                    "textDocument": {"uri": "file:///test.py", "version": 1},
+                    "edits": [
+                        {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}, "newText": "bar"}
+                    ]
+                }
+            ]
+        })
+        assert len(edit.changes) == 1
+        assert "file:///test.py" in edit.changes
+        assert edit.changes["file:///test.py"][0].new_text == "bar"
+
+    def test_get_affected_files(self):
+        edit = WorkspaceEdit.from_dict({
+            "changes": {
+                "file:///a.py": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "newText": "x"}],
+                "file:///b.py": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "newText": "y"}],
+                "file:///c.py": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "newText": "z"}]
+            }
+        })
+        files = edit.get_affected_files()
+        assert len(files) == 3
+        assert "file:///a.py" in files
+        assert "file:///b.py" in files
+        assert "file:///c.py" in files
+
+    def test_empty_workspace_edit(self):
+        edit = WorkspaceEdit.from_dict({})
+        assert len(edit.changes) == 0
+        assert edit.get_affected_files() == []
+
+
+class TestCodeAction:
+    """Test CodeAction dataclass."""
+
+    def test_from_dict_minimal(self):
+        action = CodeAction.from_dict({
+            "title": "Extract method"
+        })
+        assert action.title == "Extract method"
+        assert action.kind is None
+        assert action.edit is None
+        assert action.command is None
+
+    def test_from_dict_full(self):
+        action = CodeAction.from_dict({
+            "title": "Extract to function 'newFunc'",
+            "kind": "refactor.extract",
+            "isPreferred": True,
+            "edit": {
+                "changes": {
+                    "file:///test.py": [
+                        {"range": {"start": {"line": 10, "character": 0}, "end": {"line": 15, "character": 0}}, "newText": "def newFunc():\n    pass\n"}
+                    ]
+                }
+            }
+        })
+        assert action.title == "Extract to function 'newFunc'"
+        assert action.kind == "refactor.extract"
+        assert action.is_preferred is True
+        assert action.edit is not None
+        assert len(action.edit.changes) == 1
+
+    def test_from_dict_with_command(self):
+        action = CodeAction.from_dict({
+            "title": "Organize imports",
+            "kind": "source.organizeImports",
+            "command": {
+                "command": "python.sortImports",
+                "arguments": ["/path/to/file.py"]
+            }
+        })
+        assert action.command is not None
+        assert action.command["command"] == "python.sortImports"
+
+    def test_from_dict_disabled(self):
+        action = CodeAction.from_dict({
+            "title": "Extract variable",
+            "kind": "refactor.extract",
+            "disabled": {"reason": "Selection is not an expression"}
+        })
+        assert action.disabled == "Selection is not an expression"
+
+    def test_is_refactoring(self):
+        refactor = CodeAction.from_dict({"title": "Extract", "kind": "refactor.extract"})
+        quickfix = CodeAction.from_dict({"title": "Fix", "kind": "quickfix"})
+        source = CodeAction.from_dict({"title": "Organize", "kind": "source.organizeImports"})
+
+        assert refactor.is_refactoring() is True
+        assert quickfix.is_refactoring() is False
+        assert source.is_refactoring() is False
+
+    def test_is_quickfix(self):
+        quickfix = CodeAction.from_dict({"title": "Fix", "kind": "quickfix"})
+        refactor = CodeAction.from_dict({"title": "Extract", "kind": "refactor.extract"})
+
+        assert quickfix.is_quickfix() is True
+        assert refactor.is_quickfix() is False
+
+    def test_to_summary(self):
+        action = CodeAction.from_dict({
+            "title": "Extract method",
+            "kind": "refactor.extract",
+            "isPreferred": True,
+            "edit": {
+                "changes": {
+                    "file:///a.py": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "newText": "x"}],
+                    "file:///b.py": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "newText": "y"}]
+                }
+            }
+        })
+        summary = action.to_summary()
+        assert summary["title"] == "Extract method"
+        assert summary["kind"] == "refactor.extract"
+        assert summary["preferred"] is True
+        assert summary["has_edit"] is True
+        assert summary["affected_files"] == 2
+
+
+# =============================================================================
+# Workspace Edit Application Tests
+# =============================================================================
+
+from ..plugin import _apply_text_edits_to_content, apply_workspace_edit
+
+
+class TestApplyTextEditsToContent:
+    """Test text edit application logic."""
+
+    def test_single_line_replacement(self):
+        content = "hello world"
+        edits = [TextEdit(Range(Position(0, 6), Position(0, 11)), "universe")]
+        result = _apply_text_edits_to_content(content, edits)
+        assert result == "hello universe"
+
+    def test_insertion(self):
+        content = "hello world"
+        edits = [TextEdit(Range(Position(0, 5), Position(0, 5)), " beautiful")]
+        result = _apply_text_edits_to_content(content, edits)
+        assert result == "hello beautiful world"
+
+    def test_deletion(self):
+        content = "hello beautiful world"
+        edits = [TextEdit(Range(Position(0, 5), Position(0, 15)), "")]
+        result = _apply_text_edits_to_content(content, edits)
+        assert result == "hello world"
+
+    def test_multiple_edits_same_line(self):
+        content = "foo bar baz"
+        edits = [
+            TextEdit(Range(Position(0, 0), Position(0, 3)), "FOO"),
+            TextEdit(Range(Position(0, 8), Position(0, 11)), "BAZ")
+        ]
+        result = _apply_text_edits_to_content(content, edits)
+        assert result == "FOO bar BAZ"
+
+    def test_multi_line_content(self):
+        content = "line1\nline2\nline3"
+        edits = [TextEdit(Range(Position(1, 0), Position(1, 5)), "REPLACED")]
+        result = _apply_text_edits_to_content(content, edits)
+        assert result == "line1\nREPLACED\nline3"
+
+    def test_cross_line_replacement(self):
+        content = "line1\nline2\nline3"
+        edits = [TextEdit(Range(Position(0, 3), Position(2, 2)), "X")]
+        result = _apply_text_edits_to_content(content, edits)
+        assert result == "linXne3"
+
+    def test_insert_new_lines(self):
+        content = "line1\nline2"
+        edits = [TextEdit(Range(Position(1, 0), Position(1, 0)), "inserted\n")]
+        result = _apply_text_edits_to_content(content, edits)
+        assert result == "line1\ninserted\nline2"
+
+    def test_empty_content(self):
+        content = ""
+        edits = [TextEdit(Range(Position(0, 0), Position(0, 0)), "new content")]
+        result = _apply_text_edits_to_content(content, edits)
+        assert result == "new content"
+
+    def test_edits_applied_in_reverse_order(self):
+        """Edits should be applied bottom-to-top to preserve positions."""
+        content = "aaa\nbbb\nccc"
+        edits = [
+            TextEdit(Range(Position(0, 0), Position(0, 3)), "AAA"),
+            TextEdit(Range(Position(2, 0), Position(2, 3)), "CCC")
+        ]
+        result = _apply_text_edits_to_content(content, edits)
+        assert result == "AAA\nbbb\nCCC"
+
+
+class TestApplyWorkspaceEdit:
+    """Test workspace edit file application."""
+
+    def test_apply_to_single_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_file = os.path.join(tmpdir, "test.py")
+            with open(test_file, 'w') as f:
+                f.write("old_name = 1\nprint(old_name)")
+
+            uri = f"file://{test_file}"
+            edit = WorkspaceEdit(changes={
+                uri: [
+                    TextEdit(Range(Position(0, 0), Position(0, 8)), "new_name"),
+                    TextEdit(Range(Position(1, 6), Position(1, 14)), "new_name")
+                ]
+            })
+
+            result = apply_workspace_edit(edit)
+
+            assert result["success"] is True
+            assert len(result["files_modified"]) == 1
+            assert test_file in result["files_modified"]
+
+            with open(test_file, 'r') as f:
+                content = f.read()
+            assert content == "new_name = 1\nprint(new_name)"
+
+    def test_dry_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_file = os.path.join(tmpdir, "test.py")
+            original = "original content"
+            with open(test_file, 'w') as f:
+                f.write(original)
+
+            uri = f"file://{test_file}"
+            edit = WorkspaceEdit(changes={
+                uri: [TextEdit(Range(Position(0, 0), Position(0, 8)), "modified")]
+            })
+
+            result = apply_workspace_edit(edit, dry_run=True)
+
+            assert result["success"] is True
+            assert len(result["files_modified"]) == 0  # No files modified in dry run
+            assert len(result["changes"]) == 1  # But changes are reported
+
+            with open(test_file, 'r') as f:
+                content = f.read()
+            assert content == original  # File unchanged
+
+    def test_file_not_found(self):
+        edit = WorkspaceEdit(changes={
+            "file:///nonexistent/path/file.py": [
+                TextEdit(Range(Position(0, 0), Position(0, 5)), "test")
+            ]
+        })
+
+        result = apply_workspace_edit(edit)
+
+        assert result["success"] is False
+        assert len(result["errors"]) == 1
+        assert "not found" in result["errors"][0]["error"].lower()
+
+
+# =============================================================================
+# Refactoring Tool Tests
+# =============================================================================
+
+class TestRefactoringToolSchemas:
+    """Test that refactoring tool schemas are properly defined."""
+
+    def test_rename_symbol_has_apply_parameter(self):
+        plugin = LSPToolPlugin()
+        plugin._initialized = True
+        schemas = plugin.get_tool_schemas()
+
+        rename_schema = next(s for s in schemas if s.name == "lsp_rename_symbol")
+        assert "apply" in rename_schema.parameters["properties"]
+        assert rename_schema.parameters["properties"]["apply"]["type"] == "boolean"
+
+    def test_get_code_actions_schema(self):
+        plugin = LSPToolPlugin()
+        plugin._initialized = True
+        schemas = plugin.get_tool_schemas()
+
+        schema = next(s for s in schemas if s.name == "lsp_get_code_actions")
+        props = schema.parameters["properties"]
+
+        assert "file_path" in props
+        assert "start_line" in props
+        assert "start_column" in props
+        assert "end_line" in props
+        assert "end_column" in props
+        assert "only_refactorings" in props
+
+        required = set(schema.parameters["required"])
+        assert required == {"file_path", "start_line", "start_column", "end_line", "end_column"}
+
+    def test_apply_code_action_schema(self):
+        plugin = LSPToolPlugin()
+        plugin._initialized = True
+        schemas = plugin.get_tool_schemas()
+
+        schema = next(s for s in schemas if s.name == "lsp_apply_code_action")
+        props = schema.parameters["properties"]
+
+        assert "file_path" in props
+        assert "action_title" in props
+
+        required = set(schema.parameters["required"])
+        assert "action_title" in required
+
+    def test_get_code_actions_is_auto_approved(self):
+        plugin = LSPToolPlugin()
+        approved = plugin.get_auto_approved_tools()
+        assert "lsp_get_code_actions" in approved
+
+    def test_apply_code_action_not_auto_approved(self):
+        plugin = LSPToolPlugin()
+        approved = plugin.get_auto_approved_tools()
+        assert "lsp_apply_code_action" not in approved
+
+    def test_rename_symbol_not_auto_approved(self):
+        plugin = LSPToolPlugin()
+        approved = plugin.get_auto_approved_tools()
+        assert "lsp_rename_symbol" not in approved
+
+
+class TestRefactoringExecutors:
+    """Test refactoring executor methods."""
+
+    def test_get_code_actions_validates_parameters(self):
+        plugin = LSPToolPlugin()
+        plugin._initialized = True
+        plugin._connected_servers = set()  # No servers connected
+
+        # Missing file_path
+        result = plugin._exec_get_code_actions({
+            "start_line": 1, "start_column": 1,
+            "end_line": 1, "end_column": 10
+        })
+        assert "error" in result
+        assert "file_path" in result["error"]
+
+        # Missing start parameters
+        result = plugin._exec_get_code_actions({
+            "file_path": "/test.py",
+            "end_line": 1, "end_column": 10
+        })
+        assert "error" in result
+
+    def test_apply_code_action_validates_parameters(self):
+        plugin = LSPToolPlugin()
+        plugin._initialized = True
+        plugin._connected_servers = set()
+
+        # Missing action_title
+        result = plugin._exec_apply_code_action({
+            "file_path": "/test.py",
+            "start_line": 1, "start_column": 1,
+            "end_line": 1, "end_column": 10
+        })
+        assert "error" in result
+        assert "action_title" in result["error"]
+
+    def test_rename_symbol_validates_parameters(self):
+        plugin = LSPToolPlugin()
+        plugin._initialized = True
+        plugin._connected_servers = set()
+
+        # Missing symbol
+        result = plugin._exec_rename_symbol({"new_name": "foo"})
+        assert "error" in result
+        assert "symbol" in result["error"]
+
+        # Missing new_name
+        result = plugin._exec_rename_symbol({"symbol": "bar"})
+        assert "error" in result
+        assert "new_name" in result["error"]
+
+
+class TestSystemInstructions:
+    """Test updated system instructions."""
+
+    def test_system_instructions_mention_refactoring(self):
+        plugin = LSPToolPlugin()
+        instructions = plugin.get_system_instructions()
+
+        assert "Refactoring tools" in instructions
+        assert "lsp_rename_symbol" in instructions
+        assert "lsp_get_code_actions" in instructions
+        assert "lsp_apply_code_action" in instructions
+        assert "apply=True" in instructions or "apply=true" in instructions.lower()
