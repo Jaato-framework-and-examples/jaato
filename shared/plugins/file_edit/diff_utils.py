@@ -167,6 +167,59 @@ def get_diff_stats(old_content: str, new_content: str) -> dict:
     }
 
 
+def generate_move_file_diff(
+    source_path: str,
+    destination_path: str,
+    content: str,
+    max_lines: Optional[int] = DEFAULT_MAX_LINES
+) -> Tuple[str, bool, int]:
+    """Generate a diff showing a file move (rename operation).
+
+    Shows the source being removed and destination being created.
+
+    Args:
+        source_path: Original file path
+        destination_path: New file path
+        content: Current content of the file being moved
+        max_lines: Maximum lines to include. None for unlimited.
+
+    Returns:
+        Tuple of (diff_string, was_truncated, total_lines)
+    """
+    lines = content.splitlines()
+    # Header (4 lines) + removal lines + separator (1) + header (3) + addition lines
+    total_lines = 4 + len(lines) + 1 + 3 + len(lines)
+
+    diff_parts = [
+        f"# Move: {source_path} -> {destination_path}",
+        "",
+        f"--- a/{source_path}",
+        f"+++ /dev/null",
+        f"@@ -1,{len(lines)} +0,0 @@"
+    ]
+
+    # Add removal lines with - prefix
+    for line in lines:
+        diff_parts.append(f"-{line}")
+
+    diff_parts.append("")
+    diff_parts.append(f"--- /dev/null")
+    diff_parts.append(f"+++ b/{destination_path}")
+    diff_parts.append(f"@@ -0,0 +1,{len(lines)} @@")
+
+    # Add addition lines with + prefix
+    for line in lines:
+        diff_parts.append(f"+{line}")
+
+    truncated = False
+    if max_lines is not None and len(diff_parts) > max_lines:
+        diff_parts = diff_parts[:max_lines]
+        truncated = True
+
+    diff_text = "\n".join(diff_parts)
+    return diff_text, truncated, total_lines
+
+
 def summarize_diff(old_content: str, new_content: str, file_path: str) -> str:
     """Generate a brief summary of changes.
 

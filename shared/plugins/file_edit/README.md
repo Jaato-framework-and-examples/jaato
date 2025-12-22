@@ -17,7 +17,7 @@ This plugin enables the model to perform file operations with safety features:
 
 ## Tool Declarations
 
-The plugin exposes five tools:
+The plugin exposes seven tools:
 
 | Tool | Description | Auto-approved |
 |------|-------------|---------------|
@@ -25,6 +25,8 @@ The plugin exposes five tools:
 | `updateFile` | Update an existing file | No (shows diff) |
 | `writeNewFile` | Create a new file | No (shows content) |
 | `removeFile` | Delete a file | No (shows confirmation) |
+| `moveFile` | Move or rename a file | No (shows confirmation) |
+| `renameFile` | Alias for moveFile | No (shows confirmation) |
 | `undoFileChange` | Restore from backup | Yes |
 
 ### readFile
@@ -113,6 +115,50 @@ Delete a file. Creates a backup before deletion so it can be restored.
   "backup": ".jaato/backups/_path_to_file.txt_2025-12-06T14-30-00.bak"
 }
 ```
+
+### moveFile
+
+Move or rename a file. Creates destination directories if needed. Creates a backup before moving. Fails if destination already exists unless overwrite=True.
+
+**Parameters:**
+```json
+{
+  "source_path": "Path to the source file to move",
+  "destination_path": "Path where the file should be moved to",
+  "overwrite": false
+}
+```
+
+**Response (success):**
+```json
+{
+  "success": true,
+  "source": "/path/to/original.java",
+  "destination": "/path/to/new/location.java",
+  "source_backup": ".jaato/backups/_path_to_original.java_2025-12-06T14-30-00.bak"
+}
+```
+
+**Response (error - source doesn't exist):**
+```json
+{
+  "error": "Source file does not exist",
+  "source": "/path/to/original.java"
+}
+```
+
+**Response (error - destination exists):**
+```json
+{
+  "error": "Destination file already exists. Use overwrite=True to replace it.",
+  "source": "/path/to/original.java",
+  "destination": "/path/to/new/location.java"
+}
+```
+
+### renameFile
+
+Alias for `moveFile`. Use for renaming files (same parameters and response format).
 
 ### undoFileChange
 
@@ -238,11 +284,13 @@ You have access to file editing tools:
 - `updateFile(path, new_content)`: Update an existing file. Shows diff for approval and creates backup.
 - `writeNewFile(path, content)`: Create a new file. Shows content for approval. Fails if file exists.
 - `removeFile(path)`: Delete a file. Creates backup before deletion.
+- `moveFile(source_path, destination_path, overwrite=False)`: Move or rename a file. Creates destination directories if needed. Creates backup before moving.
+- `renameFile(source_path, destination_path, overwrite=False)`: Alias for moveFile. Use for renaming files.
 - `undoFileChange(path)`: Restore a file from its most recent backup.
 
-File modifications (updateFile, writeNewFile, removeFile) will show you a preview
+File modifications (updateFile, writeNewFile, removeFile, moveFile) will show you a preview
 and require approval before execution. Backups are automatically created for
-updateFile and removeFile operations.
+updateFile, removeFile, and moveFile operations.
 ```
 
 ## Configuration Reference

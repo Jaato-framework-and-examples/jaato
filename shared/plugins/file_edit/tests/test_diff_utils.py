@@ -6,6 +6,7 @@ from ..diff_utils import (
     generate_unified_diff,
     generate_new_file_diff,
     generate_delete_file_diff,
+    generate_move_file_diff,
     get_diff_stats,
     summarize_diff,
     DEFAULT_MAX_LINES,
@@ -215,3 +216,61 @@ class TestSummarizeDiff:
 
         assert "test.txt" in summary
         assert "no line changes" in summary.lower()
+
+
+class TestGenerateMoveFileDiff:
+    """Tests for move file diff generation."""
+
+    def test_move_file_diff_basic(self):
+        content = "line1\nline2\nline3\n"
+
+        diff, truncated, total = generate_move_file_diff(
+            "old/path.txt", "new/path.txt", content
+        )
+
+        assert truncated is False
+        # Check header
+        assert "# Move: old/path.txt -> new/path.txt" in diff
+        # Check removal section
+        assert "--- a/old/path.txt" in diff
+        assert "+++ /dev/null" in diff
+        assert "-line1" in diff
+        assert "-line2" in diff
+        assert "-line3" in diff
+        # Check addition section
+        assert "--- /dev/null" in diff
+        assert "+++ b/new/path.txt" in diff
+        assert "+line1" in diff
+        assert "+line2" in diff
+        assert "+line3" in diff
+
+    def test_move_file_diff_empty_content(self):
+        diff, truncated, total = generate_move_file_diff(
+            "source.txt", "dest.txt", ""
+        )
+
+        assert "# Move: source.txt -> dest.txt" in diff
+        assert "--- a/source.txt" in diff
+        assert "+++ b/dest.txt" in diff
+
+    def test_move_file_diff_truncation(self):
+        content = "\n".join([f"line{i}" for i in range(100)])
+
+        diff, truncated, total = generate_move_file_diff(
+            "old.txt", "new.txt", content, max_lines=20
+        )
+
+        assert truncated is True
+        assert len(diff.split("\n")) <= 20
+
+    def test_move_file_diff_unlimited(self):
+        content = "\n".join([f"line{i}" for i in range(100)])
+
+        diff, truncated, total = generate_move_file_diff(
+            "old.txt", "new.txt", content, max_lines=None
+        )
+
+        assert truncated is False
+        # Should contain all lines (header + removal lines + addition lines)
+        diff_lines = diff.split("\n")
+        assert len(diff_lines) > 200  # 100 lines removed + 100 lines added + headers
