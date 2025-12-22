@@ -414,7 +414,7 @@ def extract_parts_from_response(response) -> List[Part]:
             continue
 
         for sdk_part in (candidate.content.parts or []):
-            if hasattr(sdk_part, 'text') and sdk_part.text:
+            if hasattr(sdk_part, 'text') and sdk_part.text is not None:
                 parts.append(Part.from_text(sdk_part.text))
             elif hasattr(sdk_part, 'function_call') and sdk_part.function_call:
                 fc = function_call_from_sdk(sdk_part.function_call)
