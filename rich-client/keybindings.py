@@ -3,7 +3,9 @@
 Allows users to customize keybindings via:
 1. JSON config file: .jaato/keybindings.json (project-level)
                      ~/.jaato/keybindings.json (user-level fallback)
-2. Environment variables: JAATO_KEY_<ACTION>=<key>
+2. Terminal-specific profiles: .jaato/keybindings.<terminal>.json
+3. Environment variables: JAATO_KEY_<ACTION>=<key>
+4. Profile override: JAATO_KEYBINDING_PROFILE=<profile>
 
 Key syntax follows prompt_toolkit conventions:
 - Simple keys: "enter", "space", "tab", "q", "v"
@@ -11,6 +13,12 @@ Key syntax follows prompt_toolkit conventions:
 - Function keys: "f1", "f2", "f12"
 - Special: "pageup", "pagedown", "home", "end", "up", "down"
 - Multi-key sequences: ["escape", "enter"] for Escape then Enter
+
+Terminal profiles allow different keybindings for different terminals:
+- Auto-detected from $TERM_PROGRAM, $TERMINAL, $TERM, etc.
+- Can be overridden with JAATO_KEYBINDING_PROFILE environment variable
+- Profile-specific files: .jaato/keybindings.tmux.json, etc.
+- Or embedded in main config under "_profiles" key
 """
 
 import json
@@ -18,7 +26,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +90,114 @@ DEFAULT_KEYBINDINGS = {
 }
 
 
+def detect_terminal() -> str:
+    """Detect the current terminal type from environment variables.
+
+    Returns:
+        Terminal identifier string (lowercase), e.g., "tmux", "iterm2", "vscode", etc.
+        Returns "default" if no specific terminal is detected.
+    """
+    # Check for explicit profile override first
+    override = os.environ.get("JAATO_KEYBINDING_PROFILE", "").strip().lower()
+    if override:
+        return override
+
+    # Check common terminal environment variables
+    term_program = os.environ.get("TERM_PROGRAM", "").lower()
+    terminal = os.environ.get("TERMINAL", "").lower()
+    term = os.environ.get("TERM", "").lower()
+
+    # tmux detection (check TMUX env var exists)
+    if os.environ.get("TMUX"):
+        return "tmux"
+
+    # screen detection
+    if term.startswith("screen"):
+        return "screen"
+
+    # iTerm2
+    if "iterm" in term_program:
+        return "iterm2"
+
+    # VS Code integrated terminal
+    if term_program == "vscode" or os.environ.get("VSCODE_INJECTION"):
+        return "vscode"
+
+    # Alacritty
+    if "alacritty" in term_program or "alacritty" in terminal:
+        return "alacritty"
+
+    # Kitty
+    if "kitty" in term_program or os.environ.get("KITTY_WINDOW_ID"):
+        return "kitty"
+
+    # WezTerm
+    if "wezterm" in term_program or os.environ.get("WEZTERM_PANE"):
+        return "wezterm"
+
+    # Hyper
+    if "hyper" in term_program:
+        return "hyper"
+
+    # Windows Terminal
+    if os.environ.get("WT_SESSION"):
+        return "windows-terminal"
+
+    # Apple Terminal
+    if term_program == "apple_terminal":
+        return "apple-terminal"
+
+    # GNOME Terminal
+    if "gnome-terminal" in terminal or os.environ.get("GNOME_TERMINAL_SCREEN"):
+        return "gnome-terminal"
+
+    # Konsole
+    if os.environ.get("KONSOLE_VERSION"):
+        return "konsole"
+
+    # xterm
+    if term.startswith("xterm"):
+        return "xterm"
+
+    return "default"
+
+
+def list_available_profiles(base_dir: str = ".jaato") -> List[str]:
+    """List available keybinding profiles.
+
+    Scans for profile-specific config files like keybindings.tmux.json.
+
+    Args:
+        base_dir: Directory to scan for profile files.
+
+    Returns:
+        List of profile names (e.g., ["default", "tmux", "iterm2"]).
+    """
+    profiles = ["default"]
+    base_path = Path(base_dir)
+
+    if base_path.exists():
+        for f in base_path.glob("keybindings.*.json"):
+            # Extract profile name from keybindings.<profile>.json
+            parts = f.stem.split(".")
+            if len(parts) == 2 and parts[0] == "keybindings":
+                profile = parts[1]
+                if profile not in profiles:
+                    profiles.append(profile)
+
+    # Also check user directory
+    user_path = Path.home() / ".jaato"
+    if user_path.exists():
+        for f in user_path.glob("keybindings.*.json"):
+            parts = f.stem.split(".")
+            if len(parts) == 2 and parts[0] == "keybindings":
+                profile = parts[1]
+                if profile not in profiles:
+                    profiles.append(profile)
+
+    return sorted(profiles)
+
+
 @dataclass
 class KeybindingConfig:
     """Configuration for keybindings in the rich client.
@@ -92,6 +208,11 @@ class KeybindingConfig:
 
     When loading from JSON or environment, space-separated strings
     are automatically converted to lists: "escape enter" -> ["escape", "enter"]
+
+    Supports terminal-specific profiles:
+    - Auto-detected from environment (tmux, iterm2, vscode, etc.)
+    - Profile-specific files: .jaato/keybindings.tmux.json
+    - Embedded profiles: "_profiles": {"tmux": {...}} in main config
     """
     # Input submission
     submit: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["submit"])
@@ -122,6 +243,10 @@ class KeybindingConfig:
     cycle_agents: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["cycle_agents"])
     yank: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["yank"])
     view_full: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["view_full"])
+
+    # Profile metadata (not a keybinding)
+    _profile: str = field(default="default")
+    _profile_source: str = field(default="default")  # Where profile was loaded from
 
     def get_key_args(self, action: str) -> tuple:
         """Get the key arguments for kb.add() for a given action.
@@ -183,15 +308,20 @@ class KeybindingConfig:
     def from_file(
         cls,
         project_path: str = ".jaato/keybindings.json",
-        user_path: Optional[str] = None
+        user_path: Optional[str] = None,
+        profile: Optional[str] = None,
     ) -> Optional["KeybindingConfig"]:
-        """Load keybinding config from a JSON file.
+        """Load keybinding config from a JSON file with profile support.
 
-        Tries project-level config first, then falls back to user-level.
+        Supports terminal-specific profiles:
+        1. Profile-specific file: .jaato/keybindings.<profile>.json
+        2. Embedded profile: "_profiles": {"<profile>": {...}} in main config
+        3. Falls back to base config if profile not found
 
         Args:
             project_path: Project-level config path (default: .jaato/keybindings.json)
             user_path: User-level config path (default: ~/.jaato/keybindings.json)
+            profile: Profile name to load (default: auto-detect from terminal)
 
         Returns:
             KeybindingConfig if a config file was found and loaded, None otherwise.
@@ -199,7 +329,38 @@ class KeybindingConfig:
         if user_path is None:
             user_path = str(Path.home() / ".jaato" / "keybindings.json")
 
-        # Try project path first
+        # Auto-detect profile if not specified
+        if profile is None:
+            profile = detect_terminal()
+
+        project_dir = str(Path(project_path).parent)
+        user_dir = str(Path(user_path).parent)
+
+        # Try profile-specific files first (if not default profile)
+        if profile != "default":
+            profile_paths = [
+                f"{project_dir}/keybindings.{profile}.json",
+                f"{user_dir}/keybindings.{profile}.json",
+            ]
+            for path in profile_paths:
+                config_path = Path(path)
+                if config_path.exists():
+                    try:
+                        with open(config_path, 'r') as f:
+                            data = json.load(f)
+
+                        logger.info(f"Loaded keybindings profile '{profile}' from {path}")
+                        config = cls.from_dict(data)
+                        config._profile = profile
+                        config._profile_source = path
+                        return config
+
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Invalid JSON in keybindings file {path}: {e}")
+                    except Exception as e:
+                        logger.warning(f"Error reading keybindings file {path}: {e}")
+
+        # Try base config files (with embedded profile support)
         for path in [project_path, user_path]:
             config_path = Path(path)
             if config_path.exists():
@@ -207,8 +368,24 @@ class KeybindingConfig:
                     with open(config_path, 'r') as f:
                         data = json.load(f)
 
+                    # Check for embedded profile
+                    profiles = data.get("_profiles", {})
+                    if profile != "default" and profile in profiles:
+                        # Merge base config with profile overrides
+                        base_data = {k: v for k, v in data.items() if not k.startswith("_")}
+                        base_data.update(profiles[profile])
+                        logger.info(f"Loaded keybindings profile '{profile}' (embedded) from {path}")
+                        config = cls.from_dict(base_data)
+                        config._profile = profile
+                        config._profile_source = f"{path} [embedded]"
+                        return config
+
+                    # Use base config
                     logger.info(f"Loaded keybindings from {path}")
-                    return cls.from_dict(data)
+                    config = cls.from_dict(data)
+                    config._profile = "default"
+                    config._profile_source = path
+                    return config
 
                 except json.JSONDecodeError as e:
                     logger.warning(f"Invalid JSON in keybindings file {path}: {e}")
@@ -216,6 +393,16 @@ class KeybindingConfig:
                     logger.warning(f"Error reading keybindings file {path}: {e}")
 
         return None
+
+    @property
+    def profile(self) -> str:
+        """Get the current profile name."""
+        return self._profile
+
+    @property
+    def profile_source(self) -> str:
+        """Get the source file/location of the current profile."""
+        return self._profile_source
 
     def to_dict(self) -> Dict[str, KeyBinding]:
         """Export configuration to a dictionary."""
@@ -257,15 +444,31 @@ class KeybindingConfig:
         setattr(self, action, normalized)
         return True
 
-    def save_to_file(self, path: str = ".jaato/keybindings.json") -> bool:
+    def save_to_file(
+        self,
+        path: Optional[str] = None,
+        profile: Optional[str] = None,
+    ) -> bool:
         """Save current keybindings to a JSON file.
 
         Args:
-            path: Path to save the config file.
+            path: Path to save the config file. If None, uses default based on profile.
+            profile: Profile name for profile-specific file. If None, uses current profile.
+                     Use "default" to save to base keybindings.json.
 
         Returns:
             True if saved successfully, False otherwise.
         """
+        # Determine profile and path
+        if profile is None:
+            profile = self._profile
+
+        if path is None:
+            if profile == "default":
+                path = ".jaato/keybindings.json"
+            else:
+                path = f".jaato/keybindings.{profile}.json"
+
         config_path = Path(path)
 
         # Ensure parent directory exists
@@ -301,21 +504,26 @@ class KeybindingConfig:
 
 def load_keybindings(
     project_path: str = ".jaato/keybindings.json",
-    user_path: Optional[str] = None
+    user_path: Optional[str] = None,
+    profile: Optional[str] = None,
 ) -> KeybindingConfig:
-    """Load keybindings with fallback chain.
+    """Load keybindings with fallback chain and profile support.
 
     Priority order:
     1. Environment variables (JAATO_KEY_*)
-    2. Project-level file (.jaato/keybindings.json)
-    3. User-level file (~/.jaato/keybindings.json)
-    4. Default values
+    2. Profile-specific file (.jaato/keybindings.<profile>.json)
+    3. Embedded profile in base config
+    4. Base config file (.jaato/keybindings.json)
+    5. User-level file (~/.jaato/keybindings.json)
+    6. Default values
 
+    Profile is auto-detected from terminal environment if not specified.
     Environment variables override file-based settings.
 
     Args:
         project_path: Project-level config path
         user_path: User-level config path
+        profile: Profile name (default: auto-detect from terminal)
 
     Returns:
         Merged KeybindingConfig with all sources applied.
@@ -323,8 +531,8 @@ def load_keybindings(
     # Start with defaults
     config = KeybindingConfig()
 
-    # Try to load from file (project or user level)
-    file_config = KeybindingConfig.from_file(project_path, user_path)
+    # Try to load from file with profile support
+    file_config = KeybindingConfig.from_file(project_path, user_path, profile)
     if file_config:
         config = file_config
 
@@ -344,7 +552,11 @@ def load_keybindings(
     if env_data:
         merged = config.to_dict()
         merged.update(env_data)
+        profile_backup = config._profile
+        source_backup = config._profile_source
         config = KeybindingConfig.from_dict(merged)
+        config._profile = profile_backup
+        config._profile_source = source_backup
         logger.info(f"Applied environment keybinding overrides: {list(env_data.keys())}")
 
     return config

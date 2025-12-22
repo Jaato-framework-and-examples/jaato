@@ -48,7 +48,7 @@ from input_handler import InputHandler
 from pt_display import PTDisplay
 from plan_reporter import create_live_reporter
 from agent_registry import AgentRegistry
-from keybindings import load_keybindings
+from keybindings import load_keybindings, detect_terminal, list_available_profiles
 
 
 class RichClient:
@@ -1335,6 +1335,7 @@ class RichClient:
             keybindings list         - Show current keybindings
             keybindings reload       - Reload keybindings from config files
             keybindings set <action> <key> [--save]  - Set a keybinding
+            keybindings profile      - Show/switch terminal profiles
 
         Args:
             user_input: The full user input string starting with 'keybindings'.
@@ -1357,14 +1358,20 @@ class RichClient:
             self._set_keybinding(parts[2:])
             return
 
+        if subcommand == "profile":
+            self._handle_profile_command(parts[2:])
+            return
+
         # Unknown subcommand - show help
         self._display.show_lines([
             (f"[Unknown subcommand: {subcommand}]", "yellow"),
             ("  Available subcommands:", ""),
             ("    keybindings list              - Show current keybindings", "dim"),
-            ("    keybindings reload            - Reload keybindings from config", "dim"),
             ("    keybindings set <action> <key> [--save]", "dim"),
             ("                                  - Set a keybinding (optionally persist)", "dim"),
+            ("    keybindings profile           - Show current terminal profile", "dim"),
+            ("    keybindings profile <name>    - Switch to a different profile", "dim"),
+            ("    keybindings reload            - Reload keybindings from config", "dim"),
         ])
 
     def _show_keybindings(self) -> None:
@@ -1375,8 +1382,13 @@ class RichClient:
         config = self._display._keybinding_config
         bindings = config.to_dict()
 
+        # Show profile info first
+        detected = detect_terminal()
         lines = [
             ("Current Keybindings:", "bold"),
+            (f"  Profile: {config.profile}", "cyan"),
+            (f"  Terminal: {detected}", "dim"),
+            (f"  Source: {config.profile_source}", "dim"),
             ("", ""),
         ]
 
@@ -1404,12 +1416,12 @@ class RichClient:
             lines.append(("", ""))
 
         lines.extend([
-            ("Config files checked (in order):", "bold"),
-            ("  .jaato/keybindings.json (project)", "dim"),
-            ("  ~/.jaato/keybindings.json (user)", "dim"),
-            ("  Environment: JAATO_KEY_<ACTION>=<key>", "dim"),
+            ("Profile-specific config files:", "bold"),
+            (f"  .jaato/keybindings.{detected}.json (terminal-specific)", "dim"),
+            ("  .jaato/keybindings.json (base)", "dim"),
+            ("  Environment: JAATO_KEYBINDING_PROFILE=<name>", "dim"),
             ("", ""),
-            ("Use 'keybindings reload' to reload from config files.", "italic"),
+            ("Use 'keybindings profile' to view/switch profiles.", "italic"),
         ])
 
         self._display.show_lines(lines)
@@ -1525,6 +1537,73 @@ class RichClient:
             lines.append(("  (session only - use --save to persist)", "dim italic"))
 
         self._display.show_lines(lines)
+
+    def _handle_profile_command(self, args: list) -> None:
+        """Handle the keybindings profile subcommand.
+
+        Args:
+            args: List of arguments after 'keybindings profile'
+        """
+        if not self._display:
+            return
+
+        config = self._display._keybinding_config
+        detected = detect_terminal()
+        available = list_available_profiles()
+
+        # No args - show current profile and available profiles
+        if not args:
+            lines = [
+                ("Keybinding Profiles:", "bold"),
+                ("", ""),
+                (f"  Detected terminal: {detected}", "cyan"),
+                (f"  Current profile:   {config.profile}", "green"),
+                (f"  Source:            {config.profile_source}", "dim"),
+                ("", ""),
+                ("  Available profiles:", "bold"),
+            ]
+
+            for profile in available:
+                marker = " (active)" if profile == config.profile else ""
+                marker2 = " (detected)" if profile == detected and profile != config.profile else ""
+                lines.append((f"    - {profile}{marker}{marker2}", "dim"))
+
+            lines.extend([
+                ("", ""),
+                ("  To switch profiles:", "bold"),
+                ("    keybindings profile <name>     - Switch to a profile", "dim"),
+                ("    JAATO_KEYBINDING_PROFILE=name  - Override via env var", "dim"),
+                ("", ""),
+                ("  To create a profile:", "bold"),
+                (f"    Create .jaato/keybindings.{detected}.json", "dim"),
+            ])
+
+            self._display.show_lines(lines)
+            return
+
+        # Switch to specified profile
+        new_profile = args[0].lower()
+
+        # Load with new profile
+        try:
+            new_config = load_keybindings(profile=new_profile)
+            self._display._keybinding_config = new_config
+            self._display._build_app()
+
+            lines = [
+                (f"[Switched to profile: {new_profile}]", "green"),
+                (f"  Source: {new_config.profile_source}", "dim"),
+            ]
+
+            if new_profile not in available:
+                lines.append((f"  (no config file found, using defaults)", "yellow"))
+
+            self._display.show_lines(lines)
+
+        except Exception as e:
+            self._display.show_lines([
+                (f"[Error switching profile: {e}]", "red"),
+            ])
 
     def _get_tool_status(self) -> list:
         """Get status of all tools including enabled/disabled state."""
@@ -2044,6 +2123,7 @@ class RichClient:
             ("  keybindings [sub] - Manage keyboard shortcuts", "dim"),
             ("                        keybindings list    - Show current keybindings", "dim"),
             ("                        keybindings set     - Set a keybinding", "dim"),
+            ("                        keybindings profile - Show/switch terminal profiles", "dim"),
             ("                        keybindings reload  - Reload from config files", "dim"),
             ("  plugins           - List available plugins with status", "dim"),
             ("  reset             - Clear conversation history", "dim"),
