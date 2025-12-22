@@ -245,8 +245,9 @@ class PermissionPlugin:
         return [
             ToolSchema(
                 name="askPermission",
-                description="Request permission to execute a tool. You MUST explain your intent - "
-                           "what you are trying to achieve or discover with this tool execution.",
+                description="Request permission to execute a tool or proceed with an action. "
+                           "This is the ONLY valid way to ask for user approval - never ask in plain text. "
+                           "You MUST explain your intent - what you are trying to achieve or discover.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -281,19 +282,30 @@ class PermissionPlugin:
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the permission system."""
-        return """Tool execution is controlled by a permission system. Before executing tools,
-you may use `askPermission` to check if a tool is allowed.
+        return """Tool execution is controlled by a permission system.
+
+CRITICAL: When you need user approval or permission to proceed, you MUST use the `askPermission` tool.
+DO NOT ask for permission in plain text like "Do you approve?" or "Please confirm".
+Plain text permission requests are NOT valid and will NOT be processed by the permission system.
+
+WRONG (never do this):
+- "Please review the plan. Do you approve?"
+- "Should I proceed with this implementation?"
+- "Do I have your permission to continue?"
+
+CORRECT (always use the tool):
+- Call `askPermission` with tool_name, intent, and optional arguments
 
 The askPermission tool takes:
-- tool_name: Name of the tool to check
-- intent: (REQUIRED) A clear explanation of what you intend to achieve or discover with this tool
-- arguments: (optional) Arguments that would be passed to the tool
+- tool_name: Name of the tool or action to check permission for
+- intent: (REQUIRED) A clear explanation of what you intend to achieve or discover
+- arguments: (optional) Arguments or details about the specific action
 
 You MUST always provide an intent explaining WHY you need to execute the tool.
 The intent should describe what you are trying to accomplish, not just repeat the command.
 
-It returns whether the tool is allowed and the reason for the decision.
-If a tool is denied, do not attempt to execute it."""
+It returns whether the action is allowed and the reason for the decision.
+If permission is denied, do not attempt to proceed with that action."""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved.
