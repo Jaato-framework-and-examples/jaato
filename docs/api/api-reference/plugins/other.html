@@ -414,10 +414,18 @@ retrieve_memories(
           <table>
             <tbody>
               <tr><td><code>preselected</code></td><td>List of source IDs to pre-select at startup</td></tr>
+              <tr><td><code>transitive_injection</code></td><td>Enable transitive detection (default: <code>true</code>). Scans pre-selected content for mentions of other catalog references.</td></tr>
               <tr><td><code>exclude_tools</code></td><td>List of tools to hide (e.g., <code>["selectReferences"]</code>)</td></tr>
               <tr><td><code>sources</code></td><td>Override available sources (IDs or full objects)</td></tr>
             </tbody>
           </table>
+
+          <h3>Transitive Injection</h3>
+          <p>
+            When enabled (default), pre-selected references are scanned for mentions
+            of other catalog reference IDs. Discovered references are automatically
+            added to the injection set, recursively with cycle detection.
+          </p>
         </div>
         <div class="panel-code">
           <div class="code-label">references.json catalog</div>
