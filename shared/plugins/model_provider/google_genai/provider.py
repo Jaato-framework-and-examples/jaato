@@ -945,7 +945,7 @@ class GoogleGenAIProvider:
                     accumulated_text.append(chunk_text)
                     on_chunk(chunk_text)
 
-                # Extract function calls if present
+                # Extract function calls and other special parts if present
                 if hasattr(chunk, 'candidates') and chunk.candidates:
                     candidate = chunk.candidates[0]
                     if hasattr(candidate, 'content') and candidate.content:
@@ -963,6 +963,28 @@ class GoogleGenAIProvider:
                                     # Add function call as a part
                                     parts.append(Part.from_function_call(fc))
                                     function_calls.append(fc)
+
+                            # Capture thought parts (Gemini thinking mode)
+                            elif hasattr(part, 'thought') and part.thought:
+                                self._trace(f"STREAM_THOUGHT len={len(part.thought)}")
+                                flush_text_block()
+                                parts.append(Part(thought=part.thought))
+
+                            # Capture executable code parts
+                            elif hasattr(part, 'executable_code') and part.executable_code:
+                                code = part.executable_code
+                                code_str = getattr(code, 'code', str(code)) if code else ""
+                                self._trace(f"STREAM_CODE len={len(code_str)}")
+                                flush_text_block()
+                                parts.append(Part(executable_code=code_str))
+
+                            # Capture code execution result parts
+                            elif hasattr(part, 'code_execution_result') and part.code_execution_result:
+                                result = part.code_execution_result
+                                output = getattr(result, 'output', str(result)) if result else ""
+                                self._trace(f"STREAM_EXEC_RESULT len={len(output)}")
+                                flush_text_block()
+                                parts.append(Part(code_execution_result=output))
 
                     # Extract finish reason from last chunk
                     if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
@@ -1109,7 +1131,7 @@ class GoogleGenAIProvider:
                     accumulated_text.append(chunk_text)
                     on_chunk(chunk_text)
 
-                # Extract function calls if present
+                # Extract function calls and other special parts if present
                 if hasattr(chunk, 'candidates') and chunk.candidates:
                     candidate = chunk.candidates[0]
                     if hasattr(candidate, 'content') and candidate.content:
@@ -1127,6 +1149,28 @@ class GoogleGenAIProvider:
                                     # Add function call as a part
                                     parts.append(Part.from_function_call(fc))
                                     function_calls.append(fc)
+
+                            # Capture thought parts (Gemini thinking mode)
+                            elif hasattr(part, 'thought') and part.thought:
+                                self._trace(f"STREAM_TOOL_THOUGHT len={len(part.thought)}")
+                                flush_text_block()
+                                parts.append(Part(thought=part.thought))
+
+                            # Capture executable code parts
+                            elif hasattr(part, 'executable_code') and part.executable_code:
+                                code = part.executable_code
+                                code_str = getattr(code, 'code', str(code)) if code else ""
+                                self._trace(f"STREAM_TOOL_CODE len={len(code_str)}")
+                                flush_text_block()
+                                parts.append(Part(executable_code=code_str))
+
+                            # Capture code execution result parts
+                            elif hasattr(part, 'code_execution_result') and part.code_execution_result:
+                                result = part.code_execution_result
+                                output = getattr(result, 'output', str(result)) if result else ""
+                                self._trace(f"STREAM_TOOL_EXEC_RESULT len={len(output)}")
+                                flush_text_block()
+                                parts.append(Part(code_execution_result=output))
 
                     # Extract finish reason from last chunk
                     if hasattr(candidate, 'finish_reason') and candidate.finish_reason:

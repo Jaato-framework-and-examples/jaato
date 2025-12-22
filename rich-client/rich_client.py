@@ -2043,6 +2043,27 @@ class RichClient:
             size = len(data) if data else 0
             lines.append((f"  📎 INLINE DATA: {mime_type} ({size} bytes)", "cyan"))
 
+        # Thought/reasoning part (Gemini thinking mode)
+        elif hasattr(part, 'thought') and part.thought:
+            thought = part.thought
+            if len(thought) > 500:
+                thought = thought[:500] + f"... [{len(part.thought)} chars total]"
+            lines.append((f"  💭 THOUGHT: {thought}", "dim"))
+
+        # Executable code part
+        elif hasattr(part, 'executable_code') and part.executable_code:
+            code = part.executable_code
+            if len(code) > 300:
+                code = code[:300] + "..."
+            lines.append((f"  💻 CODE: {code}", "cyan"))
+
+        # Code execution result part
+        elif hasattr(part, 'code_execution_result') and part.code_execution_result:
+            output = part.code_execution_result
+            if len(output) > 300:
+                output = output[:300] + "..."
+            lines.append((f"  📋 EXEC RESULT: {output}", "green"))
+
         else:
             # Unknown part type - show diagnostic info like simple client
             part_type = type(part).__name__

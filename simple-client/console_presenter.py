@@ -385,6 +385,34 @@ Keyboard shortcuts:
                 resp_str = resp_str[:300] + "..."
             print(f"  📥 RESULT: {name} → {resp_str}")
 
+        # Inline data (images, etc.)
+        elif hasattr(part, 'inline_data') and part.inline_data:
+            mime_type = part.inline_data.get('mime_type', 'unknown')
+            data = part.inline_data.get('data')
+            size = len(data) if data else 0
+            print(f"  📎 INLINE DATA: {mime_type} ({size} bytes)")
+
+        # Thought/reasoning part (Gemini thinking mode)
+        elif hasattr(part, 'thought') and part.thought:
+            thought = part.thought
+            if len(thought) > 500:
+                thought = thought[:500] + f"... [{len(part.thought)} chars total]"
+            print(f"  💭 THOUGHT: {thought}")
+
+        # Executable code part
+        elif hasattr(part, 'executable_code') and part.executable_code:
+            code = part.executable_code
+            if len(code) > 300:
+                code = code[:300] + "..."
+            print(f"  💻 CODE: {code}")
+
+        # Code execution result part
+        elif hasattr(part, 'code_execution_result') and part.code_execution_result:
+            output = part.code_execution_result
+            if len(output) > 300:
+                output = output[:300] + "..."
+            print(f"  📋 EXEC RESULT: {output}")
+
         else:
             print(f"  (unknown part: {type(part).__name__})")
 
