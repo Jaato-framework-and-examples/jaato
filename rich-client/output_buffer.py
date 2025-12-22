@@ -59,11 +59,12 @@ class OutputBuffer:
     # Spinner animation frames
     SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
-    def __init__(self, max_lines: int = 1000):
+    def __init__(self, max_lines: int = 1000, agent_type: str = "main"):
         """Initialize the output buffer.
 
         Args:
             max_lines: Maximum number of lines to retain.
+            agent_type: Type of agent ("main" or "subagent") for label display.
         """
         self._lines: deque[OutputLine] = deque(maxlen=max_lines)
         self._current_block: Optional[Tuple[str, List[str], bool]] = None
@@ -77,6 +78,7 @@ class OutputBuffer:
         self._active_tools: List[ActiveToolCall] = []  # Currently executing tools
         self._tools_expanded: bool = False  # Toggle between collapsed/expanded tool view
         self._rendering: bool = False  # Guard against flushes during render
+        self._agent_type: str = agent_type  # "main" or "subagent" for user label
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -856,8 +858,9 @@ class OutputBuffer:
                     # Add blank line before header for visual separation (if not first line)
                     if i > 0:
                         output.append("\n")
-                    # Render header line: ── You ───────────────────
-                    header_prefix = "── You "
+                    # Render header line: ── User/Parent ───────────────────
+                    user_label = "Parent" if self._agent_type == "subagent" else "User"
+                    header_prefix = f"── {user_label} "
                     remaining = max(0, wrap_width - len(header_prefix))
                     output.append(header_prefix, style="bold green")
                     output.append("─" * remaining, style="dim green")
