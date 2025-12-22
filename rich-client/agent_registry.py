@@ -102,7 +102,7 @@ class AgentRegistry:
                 parent_agent_id=parent_agent_id,
                 status="active",
                 icon_lines=icon_lines,
-                output_buffer=OutputBuffer(),  # Dedicated buffer
+                output_buffer=OutputBuffer(agent_type=agent_type),  # Dedicated buffer
                 history=[],  # Isolated history
                 turn_accounting=[],  # Isolated accounting
                 context_usage={},  # Isolated context metrics

@@ -802,7 +802,12 @@ class PTDisplay:
             if getattr(self, '_waiting_for_channel_input', False):
                 # 'v' hint is already shown in the output panel truncation indicator
                 return [("class:prompt.permission", "Answer> ")]
-            return [("class:prompt", "You> ")]
+            # Show "User>" for main agent, "Parent>" for subagent
+            if self._agent_registry:
+                agent = self._agent_registry.get_selected_agent()
+                if agent and agent.agent_type == "subagent":
+                    return [("class:prompt", "Parent> ")]
+            return [("class:prompt", "User> ")]
 
         prompt_label = Window(
             FormattedTextControl(get_prompt_text),
