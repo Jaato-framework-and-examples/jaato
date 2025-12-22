@@ -438,6 +438,12 @@ def serialize_message(message: Message) -> Dict[str, Any]:
                 'data': base64.b64encode(part.inline_data.get('data', b'')).decode('utf-8')
                         if part.inline_data.get('data') else None,
             })
+        elif part.thought is not None:
+            parts.append({'type': 'thought', 'thought': part.thought})
+        elif part.executable_code is not None:
+            parts.append({'type': 'executable_code', 'code': part.executable_code})
+        elif part.code_execution_result is not None:
+            parts.append({'type': 'code_execution_result', 'output': part.code_execution_result})
 
     return {
         'role': message.role.value,
@@ -473,6 +479,12 @@ def deserialize_message(data: Dict[str, Any]) -> Message:
                 'mime_type': p.get('mime_type'),
                 'data': raw_data,
             }))
+        elif ptype == 'thought':
+            parts.append(Part(thought=p.get('thought', '')))
+        elif ptype == 'executable_code':
+            parts.append(Part(executable_code=p.get('code', '')))
+        elif ptype == 'code_execution_result':
+            parts.append(Part(code_execution_result=p.get('output', '')))
 
     return Message(
         role=Role(data['role']),
