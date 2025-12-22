@@ -48,6 +48,7 @@ from input_handler import InputHandler
 from pt_display import PTDisplay
 from plan_reporter import create_live_reporter
 from agent_registry import AgentRegistry
+from keybindings import load_keybindings
 
 
 class RichClient:
@@ -1138,6 +1139,10 @@ class RichClient:
             self._display.clear_output()
             return
 
+        if user_input.lower().startswith('keybindings'):
+            self._handle_keybindings_command(user_input)
+            return
+
         if user_input.lower() == 'history':
             self._show_history()
             return
@@ -1187,10 +1192,12 @@ class RichClient:
         Args:
             initial_prompt: Optional prompt to run before entering interactive mode.
         """
-        # Create the display with input handler and agent registry
+        # Create the display with input handler, agent registry, and keybindings
+        keybinding_config = load_keybindings()
         self._display = PTDisplay(
             input_handler=self._input_handler,
-            agent_registry=self._agent_registry
+            agent_registry=self._agent_registry,
+            keybinding_config=keybinding_config
         )
 
         # Set model info in status bar
@@ -1319,6 +1326,102 @@ class RichClient:
             ("    tools enable <n>   - Enable a tool (or 'all')", "dim"),
             ("    tools disable <n>  - Disable a tool (or 'all')", "dim"),
         ])
+
+    def _handle_keybindings_command(self, user_input: str) -> None:
+        """Handle the keybindings command with subcommands.
+
+        Subcommands:
+            keybindings           - Show current keybindings
+            keybindings list      - Show current keybindings
+            keybindings reload    - Reload keybindings from config files
+
+        Args:
+            user_input: The full user input string starting with 'keybindings'.
+        """
+        if not self._display:
+            return
+
+        parts = user_input.strip().split()
+        subcommand = parts[1].lower() if len(parts) > 1 else "list"
+
+        if subcommand == "list" or subcommand == "keybindings":
+            self._show_keybindings()
+            return
+
+        if subcommand == "reload":
+            self._reload_keybindings()
+            return
+
+        # Unknown subcommand - show help
+        self._display.show_lines([
+            (f"[Unknown subcommand: {subcommand}]", "yellow"),
+            ("  Available subcommands:", ""),
+            ("    keybindings list   - Show current keybindings", "dim"),
+            ("    keybindings reload - Reload keybindings from config", "dim"),
+        ])
+
+    def _show_keybindings(self) -> None:
+        """Show current keybinding configuration."""
+        if not self._display:
+            return
+
+        config = self._display._keybinding_config
+        bindings = config.to_dict()
+
+        lines = [
+            ("Current Keybindings:", "bold"),
+            ("", ""),
+        ]
+
+        # Group by category
+        categories = {
+            "Input": ["submit", "newline", "clear_input"],
+            "Exit/Cancel": ["cancel", "exit"],
+            "Scrolling": ["scroll_up", "scroll_down", "scroll_top", "scroll_bottom"],
+            "Navigation": ["nav_up", "nav_down"],
+            "Pager": ["pager_quit", "pager_next"],
+            "Features": ["toggle_plan", "toggle_tools", "cycle_agents", "yank", "view_full"],
+        }
+
+        for category, keys in categories.items():
+            lines.append((f"  {category}:", "cyan"))
+            for key in keys:
+                if key in bindings:
+                    value = bindings[key]
+                    if isinstance(value, list):
+                        value_str = " ".join(value)
+                    else:
+                        value_str = value
+                    padding = max(2, 16 - len(key))
+                    lines.append((f"    {key}{' ' * padding}{value_str}", "dim"))
+            lines.append(("", ""))
+
+        lines.extend([
+            ("Config files checked (in order):", "bold"),
+            ("  .jaato/keybindings.json (project)", "dim"),
+            ("  ~/.jaato/keybindings.json (user)", "dim"),
+            ("  Environment: JAATO_KEY_<ACTION>=<key>", "dim"),
+            ("", ""),
+            ("Use 'keybindings reload' to reload from config files.", "italic"),
+        ])
+
+        self._display.show_lines(lines)
+
+    def _reload_keybindings(self) -> None:
+        """Reload keybindings from configuration files."""
+        if not self._display:
+            return
+
+        try:
+            self._display.reload_keybindings()
+            self._display.show_lines([
+                ("[Keybindings reloaded successfully]", "green"),
+                ("New keybindings are now active.", "dim"),
+            ])
+        except Exception as e:
+            self._display.show_lines([
+                (f"[Error reloading keybindings: {e}]", "red"),
+            ])
 
     def _get_tool_status(self) -> list:
         """Get status of all tools including enabled/disabled state."""
@@ -1835,6 +1938,9 @@ class RichClient:
             ("                        tools list          - List all tools with status", "dim"),
             ("                        tools enable <n>    - Enable a tool (or 'all')", "dim"),
             ("                        tools disable <n>   - Disable a tool (or 'all')", "dim"),
+            ("  keybindings [sub] - Manage keyboard shortcuts", "dim"),
+            ("                        keybindings list    - Show current keybindings", "dim"),
+            ("                        keybindings reload  - Reload from config files", "dim"),
             ("  plugins           - List available plugins with status", "dim"),
             ("  reset             - Clear conversation history", "dim"),
             ("  history           - Show full conversation history", "dim"),

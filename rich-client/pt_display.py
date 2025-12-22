@@ -36,6 +36,7 @@ from plan_panel import PlanPanel
 from output_buffer import OutputBuffer
 from agent_panel import AgentPanel
 from clipboard import ClipboardConfig, ClipboardProvider, create_provider
+from keybindings import KeybindingConfig, load_keybindings
 
 
 class RichRenderer:
@@ -89,6 +90,7 @@ class PTDisplay:
         input_handler: Optional["InputHandler"] = None,
         agent_registry: Optional["AgentRegistry"] = None,
         clipboard_config: Optional[ClipboardConfig] = None,
+        keybinding_config: Optional[KeybindingConfig] = None,
     ):
         """Initialize the display.
 
@@ -99,6 +101,8 @@ class PTDisplay:
                           If provided, enables the agent panel (AGENT_PANEL_WIDTH_RATIO width).
             clipboard_config: Optional ClipboardConfig for copy/paste operations.
                              If not provided, uses config from environment.
+            keybinding_config: Optional KeybindingConfig for custom keybindings.
+                              If not provided, loads from config files or uses defaults.
         """
         self._width, self._height = shutil.get_terminal_size()
 
@@ -150,6 +154,9 @@ class PTDisplay:
         self._clipboard_config = clipboard_config or ClipboardConfig.from_env()
         self._clipboard: ClipboardProvider = create_provider(self._clipboard_config)
 
+        # Keybinding configuration
+        self._keybinding_config = keybinding_config or load_keybindings()
+
         # Mouse selection tracking (for preemptive copy)
         self._mouse_selection_start: Optional[int] = None  # Start Y coordinate
         self._mouse_selecting: bool = False
@@ -166,6 +173,25 @@ class PTDisplay:
         # Build prompt_toolkit application
         self._app: Optional[Application] = None
         self._build_app()
+
+    def reload_keybindings(self, config: Optional[KeybindingConfig] = None) -> bool:
+        """Reload keybindings from configuration.
+
+        This rebuilds the prompt_toolkit application with new keybindings.
+
+        Args:
+            config: Optional new KeybindingConfig. If None, reloads from
+                   config files and environment variables.
+
+        Returns:
+            True if keybindings were reloaded successfully.
+        """
+        if config is None:
+            config = load_keybindings()
+
+        self._keybinding_config = config
+        self._build_app()
+        return True
 
     def _update_dimensions(self) -> bool:
         """Check if terminal size changed and update components if so.
@@ -532,10 +558,11 @@ class PTDisplay:
 
     def _build_app(self) -> None:
         """Build the prompt_toolkit application."""
-        # Key bindings
+        # Key bindings - use configuration for customizable keys
         kb = KeyBindings()
+        keys = self._keybinding_config
 
-        @kb.add("enter", eager=True)
+        @kb.add(*keys.get_key_args("submit"), eager=True)
         def handle_enter(event):
             """Handle enter key - submit input or advance pager."""
             if getattr(self, '_pager_active', False):
@@ -552,19 +579,19 @@ class PTDisplay:
                 if self._input_callback:
                     self._input_callback(text)
 
-        @kb.add("escape", "enter")
+        @kb.add(*keys.get_key_args("newline"))
         def handle_alt_enter(event):
             """Handle Alt+Enter / Escape+Enter - insert newline for multi-line input."""
             if not getattr(self, '_pager_active', False):
                 event.current_buffer.insert_text('\n')
 
-        @kb.add("escape", "escape")
+        @kb.add(*keys.get_key_args("clear_input"))
         def handle_escape(event):
             """Handle Escape+Escape - clear input buffer contents."""
             if not getattr(self, '_pager_active', False):
                 event.current_buffer.reset()
 
-        @kb.add("q", eager=True)
+        @kb.add(*keys.get_key_args("pager_quit"), eager=True)
         def handle_q(event):
             """Handle 'q' key - quit pager if active, otherwise type 'q'."""
             if getattr(self, '_pager_active', False):
@@ -575,7 +602,7 @@ class PTDisplay:
                 # Normal mode - insert 'q' character
                 event.current_buffer.insert_text("q")
 
-        @kb.add("v")
+        @kb.add(*keys.get_key_args("view_full"))
         def handle_v(event):
             """Handle 'v' key - view full prompt if truncated, otherwise type 'v'."""
             # Check if waiting for channel input with TRUNCATED pending prompt
@@ -591,7 +618,7 @@ class PTDisplay:
             # Normal mode - insert 'v' character
             event.current_buffer.insert_text("v")
 
-        @kb.add(" ", eager=True)
+        @kb.add(*keys.get_key_args("pager_next"), eager=True)
         def handle_space(event):
             """Handle space key - advance pager if active, otherwise insert space."""
             if getattr(self, '_pager_active', False):
@@ -602,7 +629,7 @@ class PTDisplay:
                 # Normal mode - insert space character
                 event.current_buffer.insert_text(" ")
 
-        @kb.add("c-c")
+        @kb.add(*keys.get_key_args("cancel"))
         def handle_ctrl_c(event):
             """Handle Ctrl-C - stop if running, exit if not."""
             # If model is running, stop it instead of exiting
@@ -616,12 +643,12 @@ class PTDisplay:
             # Otherwise exit the application
             event.app.exit(exception=KeyboardInterrupt())
 
-        @kb.add("c-d")
+        @kb.add(*keys.get_key_args("exit"))
         def handle_ctrl_d(event):
             """Handle Ctrl-D - EOF."""
             event.app.exit(exception=EOFError())
 
-        @kb.add("pageup")
+        @kb.add(*keys.get_key_args("scroll_up"))
         def handle_page_up(event):
             """Handle Page-Up - scroll output up."""
             # Use selected agent's buffer if registry present
@@ -635,7 +662,7 @@ class PTDisplay:
                 self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
             self._app.invalidate()
 
-        @kb.add("pagedown")
+        @kb.add(*keys.get_key_args("scroll_down"))
         def handle_page_down(event):
             """Handle Page-Down - scroll output down."""
             # Use selected agent's buffer if registry present
@@ -649,7 +676,7 @@ class PTDisplay:
                 self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
             self._app.invalidate()
 
-        @kb.add("home")
+        @kb.add(*keys.get_key_args("scroll_top"))
         def handle_home(event):
             """Handle Home - scroll to top of output."""
             # Use selected agent's buffer if registry present
@@ -666,7 +693,7 @@ class PTDisplay:
                 self._output_buffer.scroll_up(lines=total_lines)
             self._app.invalidate()
 
-        @kb.add("end")
+        @kb.add(*keys.get_key_args("scroll_bottom"))
         def handle_end(event):
             """Handle End - scroll to bottom of output."""
             # Use selected agent's buffer if registry present
@@ -680,7 +707,7 @@ class PTDisplay:
                 self._output_buffer.scroll_to_bottom()
             self._app.invalidate()
 
-        @kb.add("up")
+        @kb.add(*keys.get_key_args("nav_up"))
         def handle_up(event):
             """Handle Up arrow - scroll popup if visible, otherwise history/completion."""
             # If plan popup is visible, scroll it up
@@ -692,7 +719,7 @@ class PTDisplay:
             # Normal mode - history/completion navigation
             event.current_buffer.auto_up()
 
-        @kb.add("down")
+        @kb.add(*keys.get_key_args("nav_down"))
         def handle_down(event):
             """Handle Down arrow - scroll popup if visible, otherwise history/completion."""
             # If plan popup is visible, scroll it down
@@ -704,7 +731,7 @@ class PTDisplay:
             # Normal mode - history/completion navigation
             event.current_buffer.auto_down()
 
-        @kb.add("c-p")
+        @kb.add(*keys.get_key_args("toggle_plan"))
         def handle_ctrl_p(event):
             """Handle Ctrl+P - toggle plan popup visibility."""
             # Check if current agent has a plan (registry or fallback)
@@ -712,14 +739,14 @@ class PTDisplay:
                 self._plan_panel.toggle_popup()
                 self._app.invalidate()
 
-        @kb.add("f2")
+        @kb.add(*keys.get_key_args("cycle_agents"))
         def handle_f2(event):
             """Handle F2 - cycle through agents."""
             if self._agent_registry:
                 self._agent_registry.cycle_selection()
                 self._app.invalidate()
 
-        @kb.add("c-t")
+        @kb.add(*keys.get_key_args("toggle_tools"))
         def handle_ctrl_t(event):
             """Handle Ctrl+T - toggle tool view between collapsed/expanded."""
             # Use selected agent's buffer if registry present
@@ -733,7 +760,7 @@ class PTDisplay:
                 self._output_buffer.toggle_tools_expanded()
             self._app.invalidate()
 
-        @kb.add("c-y")
+        @kb.add(*keys.get_key_args("yank"))
         def handle_ctrl_y(event):
             """Handle Ctrl+Y - yank (copy) last response to clipboard."""
             self._yank_last_response()
