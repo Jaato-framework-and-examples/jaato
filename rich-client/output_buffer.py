@@ -66,7 +66,7 @@ class OutputBuffer:
             max_lines: Maximum number of lines to retain.
         """
         self._lines: deque[OutputLine] = deque(maxlen=max_lines)
-        self._current_block: Optional[Tuple[str, List[str]]] = None
+        self._current_block: Optional[Tuple[str, List[str], bool]] = None
         self._measure_console: Optional[Console] = None
         self._console_width: int = 80
         self._last_source: Optional[str] = None  # Track source for turn detection
@@ -76,6 +76,7 @@ class OutputBuffer:
         self._spinner_index: int = 0
         self._active_tools: List[ActiveToolCall] = []  # Currently executing tools
         self._tools_expanded: bool = False  # Toggle between collapsed/expanded tool view
+        self._rendering: bool = False  # Guard against flushes during render
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -147,6 +148,7 @@ class OutputBuffer:
             text: The output text.
             mode: "write" for new block, "append" to continue.
         """
+
         # Skip plan messages - they're shown in the sticky plan panel
         if source == "plan":
             return
@@ -180,11 +182,25 @@ class OutputBuffer:
                 is_new_turn = (self._last_turn_source != source)
                 self._last_turn_source = source
             self._current_block = (source, [text], is_new_turn)
-        elif mode == "append" and self._current_block:
-            # Append to current block
-            self._current_block[1].append(text)
+        elif mode == "append":
+            # Append mode (streaming)
+            if self._current_block and self._current_block[0] == source:
+                # Append to existing block from same source
+                self._current_block[1].append(text)
+            else:
+                # First streaming chunk or source changed - create new block
+                self._flush_current_block()
+                is_new_turn = False
+                if source in ("user", "model"):
+                    is_new_turn = (self._last_turn_source != source)
+                    self._last_turn_source = source
+                self._current_block = (source, [text], is_new_turn)
+        elif mode == "flush":
+            # Flush mode: process pending output but don't add any content
+            # Used to synchronize output before UI events like tool tree rendering
+            self._flush_current_block()
         else:
-            # Standalone line
+            # Standalone line (unknown mode)
             self._flush_current_block()
             is_new_turn = self._last_source != source
             for i, line in enumerate(text.split('\n')):
@@ -193,16 +209,47 @@ class OutputBuffer:
 
     def _flush_current_block(self) -> None:
         """Flush the current block to lines."""
+        # Guard: don't flush during render cycles (prompt_toolkit calls render frequently)
+        if self._rendering:
+            return
         if self._current_block:
             source, parts, is_new_turn = self._current_block
-            # Join parts with newlines - each append is a separate line
-            full_text = '\n'.join(parts)
+            # Concatenate streaming chunks directly (no separator)
+            # Then split by newlines for display
+            full_text = ''.join(parts)
             lines = full_text.split('\n')
             for i, line in enumerate(lines):
                 # Only first line of a new turn gets the prefix
                 self._add_line(source, line, "line", is_turn_start=(i == 0 and is_new_turn))
             self._last_source = source
             self._current_block = None
+
+    def _get_current_block_lines(self) -> List[OutputLine]:
+        """Get lines from current block without flushing it.
+
+        This allows render() to display streaming content without
+        breaking the append chain.
+        """
+        if not self._current_block:
+            return []
+
+        source, parts, is_new_turn = self._current_block
+        # Concatenate streaming chunks directly (no separator)
+        full_text = ''.join(parts)
+        lines_text = full_text.split('\n')
+
+        result = []
+        for i, line_text in enumerate(lines_text):
+            is_turn_start_line = (i == 0 and is_new_turn)
+            display_lines = self._measure_display_lines(source, line_text, is_turn_start_line)
+            result.append(OutputLine(
+                source=source,
+                text=line_text,
+                style="line",
+                display_lines=display_lines,
+                is_turn_start=is_turn_start_line
+            ))
+        return result
 
     def add_system_message(self, message: str, style: str = "dim") -> None:
         """Add a system message to the buffer.
@@ -707,10 +754,20 @@ class OutputBuffer:
         Returns:
             Rich renderable for the output panel.
         """
-        self._flush_current_block()
+        # Set rendering guard to prevent flush during render cycle
+        self._rendering = True
+        try:
+            return self._render_impl(height, width)
+        finally:
+            self._rendering = False
+
+    def _render_impl(self, height: Optional[int] = None, width: Optional[int] = None) -> RenderableType:
+        """Internal render implementation (called within rendering guard)."""
+        # Get current block lines without flushing (preserves streaming state)
+        current_block_lines = self._get_current_block_lines()
 
         # If buffer is empty but spinner is active, show only spinner
-        if not self._lines:
+        if not self._lines and not current_block_lines:
             if self._spinner_active:
                 output = Text()
                 frame = self.SPINNER_FRAMES[self._spinner_index]
@@ -725,7 +782,8 @@ class OutputBuffer:
 
         # Work backwards from the end, using stored display line counts
         # First skip _scroll_offset lines, then collect 'height' lines
-        all_lines = list(self._lines)
+        # Include current block lines (streaming content) at the end
+        all_lines = list(self._lines) + current_block_lines
         lines_to_show: List[OutputLine] = []
 
         if height:
@@ -1226,3 +1284,164 @@ class OutputBuffer:
             height=height,  # Constrain panel to exact height
             width=width,  # Constrain panel to exact width (preserves right border)
         )
+
+    # -------------------------------------------------------------------------
+    # Chrome-free text extraction (for clipboard operations)
+    # -------------------------------------------------------------------------
+
+    def _should_include_source(self, source: str, sources: Optional[set] = None) -> bool:
+        """Check if a source should be included based on filter.
+
+        Args:
+            source: The source type to check.
+            sources: Set of sources to include. If None, includes all.
+
+        Returns:
+            True if the source should be included.
+        """
+        if sources is None:
+            return True
+        if source in sources:
+            return True
+        # Handle prefix matching (e.g., "tool" matches "tool:grep")
+        if ":" in source:
+            prefix = source.split(":")[0]
+            if prefix in sources:
+                return True
+        return False
+
+    def get_last_response_text(self, sources: Optional[set] = None) -> Optional[str]:
+        """Get text from the last model response (chrome-free).
+
+        Extracts text from the most recent contiguous block of model output,
+        excluding turn headers and other UI chrome.
+
+        Args:
+            sources: Set of sources to include (default: {"model"}).
+
+        Returns:
+            The extracted text, or None if no matching content.
+        """
+        if sources is None:
+            sources = {"model"}
+
+        # Get all lines including current streaming block
+        all_lines = list(self._lines) + self._get_current_block_lines()
+
+        if not all_lines:
+            return None
+
+        # Find the last contiguous block of matching source lines
+        result_lines: List[str] = []
+        in_block = False
+
+        # Walk backwards to find the last matching block
+        for line in reversed(all_lines):
+            if self._should_include_source(line.source, sources):
+                result_lines.append(line.text)
+                in_block = True
+            elif in_block:
+                # We've exited the block, stop
+                break
+
+        if not result_lines:
+            return None
+
+        # Reverse since we walked backwards
+        result_lines.reverse()
+
+        # Join and clean up
+        text = "\n".join(result_lines)
+        return text.strip() if text.strip() else None
+
+    def get_text_in_line_range(
+        self,
+        start_line: int,
+        end_line: int,
+        sources: Optional[set] = None
+    ) -> Optional[str]:
+        """Get text from a range of display lines (chrome-free).
+
+        Used for mouse selection - maps screen coordinates to content.
+
+        Args:
+            start_line: Start display line (0-indexed from top of buffer).
+            end_line: End display line (inclusive).
+            sources: Set of sources to include. If None, includes all.
+
+        Returns:
+            The extracted text, or None if no matching content.
+        """
+        all_lines = list(self._lines) + self._get_current_block_lines()
+
+        if not all_lines:
+            return None
+
+        result_lines: List[str] = []
+        current_display_line = 0
+
+        for line in all_lines:
+            line_end = current_display_line + line.display_lines
+
+            # Check if this line overlaps with the selection range
+            if line_end > start_line and current_display_line <= end_line:
+                if self._should_include_source(line.source, sources):
+                    result_lines.append(line.text)
+
+            current_display_line = line_end
+
+            # Stop if we've passed the selection range
+            if current_display_line > end_line:
+                break
+
+        if not result_lines:
+            return None
+
+        text = "\n".join(result_lines)
+        return text.strip() if text.strip() else None
+
+    def get_all_text(self, sources: Optional[set] = None) -> Optional[str]:
+        """Get all text from the buffer (chrome-free).
+
+        Args:
+            sources: Set of sources to include. If None, includes all.
+
+        Returns:
+            The extracted text, or None if no matching content.
+        """
+        all_lines = list(self._lines) + self._get_current_block_lines()
+
+        if not all_lines:
+            return None
+
+        result_lines: List[str] = []
+
+        for line in all_lines:
+            if self._should_include_source(line.source, sources):
+                result_lines.append(line.text)
+
+        if not result_lines:
+            return None
+
+        text = "\n".join(result_lines)
+        return text.strip() if text.strip() else None
+
+    def get_visible_line_range(self, visible_height: int) -> Tuple[int, int]:
+        """Get the display line range currently visible on screen.
+
+        Used for mouse selection to map screen Y coordinates to buffer lines.
+
+        Args:
+            visible_height: Height of the visible area in display lines.
+
+        Returns:
+            Tuple of (start_line, end_line) display line indices.
+        """
+        all_lines = list(self._lines) + self._get_current_block_lines()
+        total_display_lines = sum(line.display_lines for line in all_lines)
+
+        # Calculate visible range based on scroll offset
+        end_line = total_display_lines - self._scroll_offset
+        start_line = max(0, end_line - visible_height)
+
+        return (start_line, end_line)

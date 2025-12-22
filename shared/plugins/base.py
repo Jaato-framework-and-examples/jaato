@@ -15,6 +15,10 @@ from .model_provider.types import ToolSchema
 #   mode: How to handle the output:
 #         - "write": Start a new output block
 #         - "append": Add to the current block from the same source
+#         - "flush": Process any pending/buffered output before continuing.
+#                    Sent with source="system" and empty text before UI events
+#                    like tool tree rendering. Clients with async/buffered output
+#                    should ensure all pending text is displayed when receiving this.
 #
 # The frontend/client decides how to render (terminal, web UI, logging).
 # Interleaving of outputs from different sources is a frontend concern.

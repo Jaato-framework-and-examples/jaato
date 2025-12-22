@@ -247,6 +247,26 @@ print(f"Loaded: {provider.name}")</code></pre>
               <div class="param-desc">Get conversation history</div>
             </li>
           </ul>
+
+          <h3>Streaming & Cancellation Methods</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">supports_streaming()</span>
+              <div class="param-desc">Check if provider supports streaming</div>
+            </li>
+            <li>
+              <span class="param-name">supports_stop()</span>
+              <div class="param-desc">Check if provider supports mid-turn cancellation</div>
+            </li>
+            <li>
+              <span class="param-name">send_message_streaming(...)</span>
+              <div class="param-desc">Stream response with cancellation support</div>
+            </li>
+            <li>
+              <span class="param-name">send_tool_results_streaming(...)</span>
+              <div class="param-desc">Stream tool result response</div>
+            </li>
+          </ul>
         </div>
         <div class="panel-code">
           <div class="code-label">Provider protocol</div>
@@ -295,7 +315,117 @@ class ModelProviderPlugin(Protocol):
 
     def get_history(self) -> List[Message]:
         """Get conversation history."""
+        ...
+
+    # Streaming & cancellation methods
+    def supports_streaming(self) -> bool:
+        """Check if streaming is supported."""
+        ...
+
+    def supports_stop(self) -> bool:
+        """Check if mid-turn cancellation is supported."""
+        ...
+
+    def send_message_streaming(
+        self,
+        msg: str,
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None
+    ) -> ProviderResponse:
+        """Stream response tokens."""
+        ...
+
+    def send_tool_results_streaming(
+        self,
+        results: List[ToolResult],
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None
+    ) -> ProviderResponse:
+        """Stream tool result response."""
         ...</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Streaming & Cancellation -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="streaming">Streaming & Cancellation</h2>
+          <p>
+            Providers support streaming responses with cancellation for graceful
+            interruption of long-running generation.
+          </p>
+
+          <h3>StreamingCallback</h3>
+          <p>Callback type for receiving streamed tokens:</p>
+          <div class="method-signature">
+            <span class="type">Callable</span>[[<span class="type">str</span>], <span class="type">None</span>]
+          </div>
+
+          <h3>CancelToken</h3>
+          <p>
+            Thread-safe cancellation signal. Pass to streaming methods to
+            enable mid-generation cancellation.
+          </p>
+
+          <h3>Key Features</h3>
+          <ul>
+            <li><strong>Real-time output</strong> — Tokens delivered as generated</li>
+            <li><strong>Graceful cancellation</strong> — Stop between chunks</li>
+            <li><strong>Cooperative design</strong> — Provider checks token between chunks</li>
+            <li><strong>Partial results</strong> — Get accumulated text even if cancelled</li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Provider Support</div>
+            Both Google GenAI and GitHub Models providers support streaming.
+            Use <code>supports_streaming()</code> to check at runtime.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Streaming with cancellation</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import CancelToken, CancelledException
+
+# Create cancellation token
+token = CancelToken()
+
+# Callback for streamed chunks
+def on_chunk(text: str):
+    print(text, end="", flush=True)
+
+# Check streaming support
+if provider.supports_streaming():
+    try:
+        response = provider.send_message_streaming(
+            "Generate a story...",
+            on_chunk=on_chunk,
+            cancel_token=token
+        )
+    except CancelledException:
+        print("\nGeneration cancelled")
+else:
+    # Fallback to non-streaming
+    response = provider.send_message("Generate...")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Cancel from another thread</div>
+          <div class="code-block">
+            <pre><code class="language-python">import threading
+
+token = CancelToken()
+
+# Cancel after timeout
+def cancel_later():
+    time.sleep(30)
+    token.cancel()
+
+threading.Thread(target=cancel_later).start()
+
+# This will stop after ~30 seconds
+response = provider.send_message_streaming(
+    msg, on_chunk, cancel_token=token
+)</code></pre>
           </div>
         </div>
       </section>

@@ -1,6 +1,6 @@
 # Subagent Plugin
 
-The Subagent plugin (`spawn_subagent`, `list_subagent_profiles`) enables the parent model to delegate tasks to specialized subagents with their own tool configurations, system instructions, and model selection.
+The Subagent plugin enables the parent model to delegate tasks to specialized subagents with their own tool configurations, system instructions, and model selection. Supports multi-turn conversations, parallel execution, cancellation propagation, and shared state for inter-agent communication.
 
 ## Demo
 
@@ -54,14 +54,25 @@ The subagent plugin uses the shared `JaatoRuntime` to create lightweight session
 - **Predefined Profiles**: Configure named profiles for common subagent configurations
 - **Profile Auto-Discovery**: Automatically discover profiles from `.jaato/profiles/` directory (JSON/YAML files)
 - **Connection Inheritance**: Subagents automatically inherit parent's GCP project, location, and model
-- **Auto-Approved Listing**: `list_subagent_profiles` is auto-whitelisted for permission checks
+- **Multi-Turn Conversations**: Send follow-up messages to active subagent sessions
+- **Parallel Execution**: Spawn subagents in background for concurrent task execution
+- **Cancellation Propagation**: Parent cancellation automatically propagates to child subagents
+- **Shared State**: Thread-safe shared state for inter-agent communication
 
 ## Tools Exposed
 
 | Tool | Description | Auto-Approved |
 |------|-------------|---------------|
-| `spawn_subagent` | Spawn a subagent to handle a task | ✗ (requires permission) |
+| `spawn_subagent` | Spawn a subagent to handle a task (supports `background=true` for parallel) | ✗ |
+| `continue_subagent` | Send follow-up message to an active subagent session | ✗ |
+| `close_subagent` | Close an active subagent session | ✗ |
+| `cancel_subagent` | Cancel a running subagent operation | ✗ |
+| `get_subagent_result` | Get result of a background subagent | ✗ |
+| `list_active_subagents` | List active sessions and background agents | ✓ |
 | `list_subagent_profiles` | List available predefined profiles | ✓ |
+| `set_shared_state` | Store a value in shared state | ✗ |
+| `get_shared_state` | Retrieve a value from shared state | ✗ |
+| `list_shared_state` | List all keys in shared state | ✓ |
 
 ## User Commands
 
@@ -167,6 +178,35 @@ The subagent plugin automatically discovers profile definitions from `.jaato/pro
 }
 ```
 
+**Profile with garbage collection configuration:**
+```json
+{
+  "name": "long-running-agent",
+  "description": "Agent for extended tasks requiring context management",
+  "plugins": ["cli", "file_edit"],
+  "gc": {
+    "type": "hybrid",
+    "threshold_percent": 80.0,
+    "preserve_recent_turns": 5,
+    "notify_on_gc": true,
+    "summarize_middle_turns": 10
+  },
+  "max_turns": 50
+}
+```
+
+The `gc` field configures context garbage collection for the subagent:
+
+| GC Option | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `type` | string | `"truncate"` | GC strategy: `"truncate"`, `"summarize"`, or `"hybrid"` |
+| `threshold_percent` | float | 80.0 | Trigger GC when context usage exceeds this % |
+| `preserve_recent_turns` | int | 5 | Number of recent turns to always preserve |
+| `notify_on_gc` | bool | true | Inject notification into history after GC |
+| `summarize_middle_turns` | int | null | For hybrid: turns to summarize (not truncate) |
+| `max_turns` | int | null | Trigger GC when turn count exceeds this |
+| `plugin_config` | object | {} | Additional plugin-specific configuration |
+
 The `plugin_configs` field allows per-plugin configuration overrides:
 
 | Plugin | Config Option | Description |
@@ -258,6 +298,110 @@ plugin.add_profile(SubagentProfile(
 | `spawn_subagent(task="...", inline_config={max_turns: 5})` | Inherited from parent | max_turns=5 |
 | `spawn_subagent(task="...", inline_config={plugins: ['cli']})` | ['cli'] | Defaults |
 | `spawn_subagent(task="...", profile="x")` | From profile | From profile |
+
+## Parallel Execution
+
+Spawn subagents in the background for concurrent task execution:
+
+```python
+# Spawn a background agent (returns immediately)
+spawn_subagent(
+    task="Analyze the API module",
+    background=True
+)
+# Returns: {'success': True, 'background': True, 'agent_id': 'subagent_abc123', ...}
+
+# Spawn multiple agents in parallel
+spawn_subagent(task="Review authentication code", background=True)  # agent_1
+spawn_subagent(task="Check database queries", background=True)       # agent_2
+spawn_subagent(task="Analyze error handling", background=True)       # agent_3
+
+# Check status of all agents
+list_active_subagents()
+# Returns list of active sessions and background agents with their status
+
+# Get result when ready
+get_subagent_result(agent_id="subagent_abc123")
+# Returns: {'success': True, 'response': '...', 'status': 'completed'}
+# Or: {'success': True, 'status': 'running'} if still in progress
+```
+
+Background agents run in daemon threads and store their results for later retrieval. Use `list_active_subagents` to monitor progress and `get_subagent_result` to collect responses.
+
+## Cancellation Propagation
+
+Parent cancellation automatically propagates to child subagents:
+
+```python
+# When the parent agent is cancelled (e.g., user presses Ctrl+C),
+# all running subagents are automatically cancelled too.
+
+# Manual cancellation of a specific subagent:
+cancel_subagent(agent_id="subagent_abc123")
+# Returns: {'success': True, 'message': 'Cancellation requested for subagent_abc123'}
+```
+
+The cancellation mechanism works through shared `CancelToken` objects:
+- Each session has its own cancel token
+- Subagents receive a reference to their parent's cancel token
+- Subagents check both their own and parent's token before each operation
+- When parent is cancelled, all children see it and stop gracefully
+
+## Callback Propagation
+
+Subagents automatically inherit callbacks from the parent to ensure consistent behavior across all agents:
+
+### Retry Callback
+
+Rate limit retry messages are routed through the same channel as the parent:
+
+```python
+# Rich client sets up retry callback on subagent plugin
+subagent_plugin.set_retry_callback(on_retry)
+
+# When subagents are spawned, they inherit this callback
+# Retry messages appear in the output panel, not console
+```
+
+The retry callback ensures that API rate limit retries from subagents are displayed consistently with the parent's output (e.g., in the rich client's output panel rather than raw console output).
+
+### UI Hooks
+
+UI hooks are similarly propagated to subagent sessions for consistent agent lifecycle tracking:
+
+```python
+subagent_plugin.set_ui_hooks(hooks)
+# All spawned subagents emit lifecycle events through these hooks
+```
+
+## Shared State
+
+Thread-safe shared state for inter-agent communication:
+
+```python
+# Store a value (accessible by all agents)
+set_shared_state(key="analysis_results", value={"files_checked": 42, "issues": []})
+
+# Retrieve a value
+get_shared_state(key="analysis_results")
+# Returns: {'success': True, 'value': {"files_checked": 42, "issues": []}}
+
+# List all keys
+list_shared_state()
+# Returns: {'success': True, 'keys': ['analysis_results', 'other_key']}
+
+# Missing key returns null
+get_shared_state(key="nonexistent")
+# Returns: {'success': True, 'value': None}
+```
+
+Use cases for shared state:
+- **Coordination**: One agent sets a flag when ready, others wait for it
+- **Result aggregation**: Multiple agents contribute to a shared collection
+- **Configuration sharing**: Store computed values for other agents to use
+- **Progress tracking**: Update shared counters or status indicators
+
+All shared state operations are thread-safe and can be used safely with parallel execution.
 
 ## Integration with JaatoClient
 

@@ -9,8 +9,9 @@ prompt_toolkit's ANSI() for display in FormattedTextControl windows.
 
 import shutil
 import sys
+import time
 from io import StringIO
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 from plan_panel import PlanPanel
 from output_buffer import OutputBuffer
 from agent_panel import AgentPanel
+from clipboard import ClipboardConfig, ClipboardProvider, create_provider
 
 
 class RichRenderer:
@@ -82,7 +84,12 @@ class PTDisplay:
     INPUT_MIN_HEIGHT = 1   # Minimum input height (single line)
     INPUT_MAX_HEIGHT = 10  # Maximum input height before scrolling
 
-    def __init__(self, input_handler: Optional["InputHandler"] = None, agent_registry: Optional["AgentRegistry"] = None):
+    def __init__(
+        self,
+        input_handler: Optional["InputHandler"] = None,
+        agent_registry: Optional["AgentRegistry"] = None,
+        clipboard_config: Optional[ClipboardConfig] = None,
+    ):
         """Initialize the display.
 
         Args:
@@ -90,6 +97,8 @@ class PTDisplay:
                           If provided, enables tab completion for commands and files.
             agent_registry: Optional AgentRegistry for agent visibility panel.
                           If provided, enables the agent panel (AGENT_PANEL_WIDTH_RATIO width).
+            clipboard_config: Optional ClipboardConfig for copy/paste operations.
+                             If not provided, uses config from environment.
         """
         self._width, self._height = shutil.get_terminal_size()
 
@@ -114,9 +123,6 @@ class PTDisplay:
         # Rich renderer
         self._renderer = RichRenderer(self._width)
 
-        # Layout configuration
-        self._plan_height = 12
-
         # Input handling with optional completion
         self._input_handler = input_handler
         self._input_buffer = Buffer(
@@ -136,10 +142,26 @@ class PTDisplay:
         self._model_name: str = ""
         self._context_usage: Dict[str, Any] = {}
 
+        # Temporary status message (for copy feedback, etc.)
+        self._status_message: Optional[str] = None
+        self._status_message_expires: float = 0.0
+
+        # Clipboard support
+        self._clipboard_config = clipboard_config or ClipboardConfig.from_env()
+        self._clipboard: ClipboardProvider = create_provider(self._clipboard_config)
+
+        # Mouse selection tracking (for preemptive copy)
+        self._mouse_selection_start: Optional[int] = None  # Start Y coordinate
+        self._mouse_selecting: bool = False
+
         # Permission input filtering state
         self._waiting_for_channel_input: bool = False
         self._valid_input_prefixes: set = set()  # All valid prefixes for permission responses
         self._last_valid_permission_input: str = ""  # Track last valid input for reverting
+
+        # Stop callback for interrupting model generation
+        self._stop_callback: Optional[Callable[[], bool]] = None
+        self._is_running_callback: Optional[Callable[[], bool]] = None
 
         # Build prompt_toolkit application
         self._app: Optional[Application] = None
@@ -225,12 +247,74 @@ class PTDisplay:
         # Clamp to configured limits
         return max(self.INPUT_MIN_HEIGHT, min(height, self.INPUT_MAX_HEIGHT))
 
-    def _has_plan(self) -> bool:
-        """Check if plan panel should be visible."""
-        return self._plan_panel.is_visible
+    def _get_current_plan_data(self) -> Optional[Dict[str, Any]]:
+        """Get plan data for the currently selected agent.
+
+        Uses agent registry if available (per-agent plans), otherwise
+        falls back to the global PlanPanel.
+        """
+        if self._agent_registry:
+            return self._agent_registry.get_selected_plan_data()
+        return self._plan_panel._plan_data
+
+    def _get_current_plan_symbols(self) -> List[tuple]:
+        """Get plan symbols for the currently selected agent.
+
+        Returns formatted text tuples for prompt_toolkit status bar.
+        """
+        plan_data = self._get_current_plan_data()
+        if not plan_data:
+            return []
+
+        steps = plan_data.get("steps", [])
+        if not steps:
+            return []
+
+        # Map status to prompt_toolkit style classes
+        style_map = {
+            "pending": "class:plan.pending",
+            "in_progress": "class:plan.in-progress",
+            "completed": "class:plan.completed",
+            "failed": "class:plan.failed",
+            "skipped": "class:plan.skipped",
+        }
+
+        symbol_map = {
+            "pending": "○",
+            "in_progress": "◐",
+            "completed": "●",
+            "failed": "✗",
+            "skipped": "⊘",
+        }
+
+        # Sort by sequence and build formatted tuples
+        sorted_steps = sorted(steps, key=lambda s: s.get("sequence", 0))
+        result = []
+        for step in sorted_steps:
+            status = step.get("status", "pending")
+            symbol = symbol_map.get(status, "○")
+            style = style_map.get(status, "class:plan.pending")
+            result.append((style, symbol))
+
+        return result
+
+    def _current_plan_has_data(self) -> bool:
+        """Check if there's plan data for the current agent."""
+        return self._get_current_plan_data() is not None
 
     def _get_status_bar_content(self):
         """Get status bar content as formatted text."""
+        # Check for temporary status message (e.g., copy feedback)
+        if self._status_message and time.time() < self._status_message_expires:
+            return [
+                ("class:status-bar.label", " "),
+                ("class:status-bar.value bold", self._status_message),
+                ("class:status-bar", " "),
+            ]
+        elif self._status_message:
+            # Message expired, clear it
+            self._status_message = None
+
         # Agent name (FIRST field, from selected agent if registry present)
         if self._agent_registry:
             agent_name = self._agent_registry.get_selected_agent_name()
@@ -260,10 +344,22 @@ class PTDisplay:
             context_str = "100% available"
 
         # Build formatted text with columns
-        # Agent | Provider | Model | Context
-        return [
+        # Agent | Plan symbols | Provider | Model | Context
+        result = [
             ("class:status-bar.label", " Agent: "),
             ("class:status-bar.value", agent_name),
+        ]
+
+        # Add plan symbols if there's an active plan (use selected agent's plan if registry present)
+        plan_symbols = self._get_current_plan_symbols()
+        if plan_symbols:
+            result.append(("class:status-bar.separator", "  │  "))
+            result.extend(plan_symbols)
+            # Add hint to show popup (only when popup is not visible)
+            if not self._plan_panel.is_popup_visible:
+                result.append(("class:status-bar.label", " [Ctrl+P to expand]"))
+
+        result.extend([
             ("class:status-bar.separator", "  │  "),
             ("class:status-bar.label", "Provider: "),
             ("class:status-bar.value", provider),
@@ -274,7 +370,9 @@ class PTDisplay:
             ("class:status-bar.label", "Context: "),
             ("class:status-bar.value", context_str),
             ("class:status-bar", " "),
-        ]
+        ])
+
+        return result
 
     def _get_scroll_page_size(self) -> int:
         """Get the number of lines to scroll per page (half the visible height)."""
@@ -282,17 +380,29 @@ class PTDisplay:
         self._update_dimensions()
         input_height = self._get_input_height()
         available_height = self._height - 1 - input_height  # minus status bar and input area
-        if self._plan_panel.has_plan:
-            available_height -= self._plan_height
         # Scroll by half the visible content area
         return max(3, (available_height - 4) // 2)
 
-    def _get_plan_content(self):
-        """Get rendered plan content as ANSI for prompt_toolkit."""
-        if self._plan_panel.has_plan:
-            rendered = self._plan_panel.render()
-            return to_formatted_text(ANSI(self._renderer.render(rendered)))
-        return to_formatted_text(ANSI(""))
+    def _get_plan_popup_content(self):
+        """Get rendered plan popup content as ANSI for prompt_toolkit."""
+        # Calculate popup width (about 60% of terminal, min 40, max 80)
+        popup_width = max(40, min(80, int(self._width * 0.6)))
+
+        # Calculate max visible steps based on terminal height
+        # Reserve space for: status bar (1), input area (3), popup borders (3), progress bar (2)
+        available_height = self._height - 9
+        # Each step takes at least 1 line, results/errors take 1 more
+        # Aim for reasonable step visibility (at least 3, at most 15)
+        max_steps = max(3, min(15, available_height // 2))
+        self._plan_panel.set_popup_max_visible_steps(max_steps)
+
+        # Use current agent's plan data (from registry if available)
+        plan_data = self._get_current_plan_data()
+
+        # Pass plan_data directly to avoid thread-unsafe state modification
+        rendered = self._plan_panel.render_popup(width=popup_width, plan_data=plan_data)
+
+        return to_formatted_text(ANSI(self._renderer.render(rendered)))
 
     def _get_output_content(self):
         """Get rendered output content as ANSI for prompt_toolkit."""
@@ -309,13 +419,12 @@ class PTDisplay:
         else:
             output_buffer = self._output_buffer
 
-        output_buffer._flush_current_block()
+        # NOTE: Do NOT flush here - render() uses _get_current_block_lines()
+        # which reads streaming content without flushing, preserving chunk accumulation
 
         # Calculate available height for output (account for dynamic input height)
         input_height = self._get_input_height()
         available_height = self._height - 1 - input_height  # minus status bar and input area
-        if self._plan_panel.has_plan:
-            available_height -= self._plan_height
 
         # Calculate width (OUTPUT_PANEL_WIDTH_RATIO if agent panel present)
         output_width_ratio = self.OUTPUT_PANEL_WIDTH_RATIO if self._agent_panel else 1.0
@@ -337,13 +446,89 @@ class PTDisplay:
         # Calculate available height for agent panel (account for dynamic input height)
         input_height = self._get_input_height()
         available_height = self._height - 1 - input_height  # minus status bar and input area
-        if self._plan_panel.has_plan:
-            available_height -= self._plan_height
 
         # Render agent panel (width is set on AgentPanel instance)
         panel = self._agent_panel.render(available_height)
         # Use full-width renderer - Panel's width parameter handles sizing
         return to_formatted_text(ANSI(self._renderer.render(panel)))
+
+    def set_status_message(self, message: str, timeout: float = 2.0) -> None:
+        """Set a temporary status bar message.
+
+        Args:
+            message: The message to display.
+            timeout: How long to show the message (seconds).
+        """
+        self._status_message = message
+        self._status_message_expires = time.time() + timeout
+        if self._app:
+            self._app.invalidate()
+
+    def _yank_last_response(self) -> None:
+        """Copy the last model response to clipboard (chrome-free)."""
+        # Get the appropriate buffer (selected agent if registry present)
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if not buffer:
+                buffer = self._output_buffer
+        else:
+            buffer = self._output_buffer
+
+        # Extract chrome-free text using configured sources
+        text = buffer.get_last_response_text(sources=self._clipboard_config.sources)
+
+        if text:
+            self._clipboard.copy(text)
+            # Count lines for feedback
+            line_count = text.count('\n') + 1
+            self.set_status_message(f"Yanked {line_count} line{'s' if line_count != 1 else ''}")
+        else:
+            self.set_status_message("Nothing to yank")
+
+    def _yank_selection(self, start_y: int, end_y: int) -> None:
+        """Copy selected screen region to clipboard (chrome-free).
+
+        Args:
+            start_y: Start Y coordinate (screen row).
+            end_y: End Y coordinate (screen row).
+        """
+        # Get the appropriate buffer
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if not buffer:
+                buffer = self._output_buffer
+        else:
+            buffer = self._output_buffer
+
+        # Calculate visible area height (account for status bar and input)
+        input_height = self._get_input_height()
+        visible_height = self._height - 1 - input_height  # minus status bar and input
+
+        # Get visible line range in buffer coordinates
+        visible_start, visible_end = buffer.get_visible_line_range(visible_height)
+
+        # Map screen Y coordinates to buffer line indices
+        # Screen Y is relative to output panel (after status bar)
+        # Ensure start <= end
+        if start_y > end_y:
+            start_y, end_y = end_y, start_y
+
+        # Convert screen coordinates to buffer coordinates
+        buffer_start = visible_start + start_y
+        buffer_end = visible_start + end_y
+
+        # Extract chrome-free text
+        text = buffer.get_text_in_line_range(
+            buffer_start, buffer_end,
+            sources=self._clipboard_config.sources
+        )
+
+        if text:
+            self._clipboard.copy(text)
+            line_count = text.count('\n') + 1
+            self.set_status_message(f"Yanked {line_count} line{'s' if line_count != 1 else ''}")
+        else:
+            self.set_status_message("Nothing to yank (no matching content)")
 
     def _build_app(self) -> None:
         """Build the prompt_toolkit application."""
@@ -419,7 +604,16 @@ class PTDisplay:
 
         @kb.add("c-c")
         def handle_ctrl_c(event):
-            """Handle Ctrl-C - exit."""
+            """Handle Ctrl-C - stop if running, exit if not."""
+            # If model is running, stop it instead of exiting
+            if self._is_running_callback and self._is_running_callback():
+                if self._stop_callback:
+                    self._stop_callback()
+                    # Flush pending streaming content (cancellation message comes from session)
+                    self._output_buffer._flush_current_block()
+                    self._app.invalidate()
+                return
+            # Otherwise exit the application
             event.app.exit(exception=KeyboardInterrupt())
 
         @kb.add("c-d")
@@ -488,26 +682,34 @@ class PTDisplay:
 
         @kb.add("up")
         def handle_up(event):
-            """Handle Up arrow - history/completion navigation."""
+            """Handle Up arrow - scroll popup if visible, otherwise history/completion."""
+            # If plan popup is visible, scroll it up
+            if self._plan_panel.is_popup_visible and self._current_plan_has_data():
+                plan_data = self._get_current_plan_data()
+                if self._plan_panel.scroll_popup_up(plan_data):
+                    self._app.invalidate()
+                return
+            # Normal mode - history/completion navigation
             event.current_buffer.auto_up()
 
         @kb.add("down")
         def handle_down(event):
-            """Handle Down arrow - history/completion navigation."""
+            """Handle Down arrow - scroll popup if visible, otherwise history/completion."""
+            # If plan popup is visible, scroll it down
+            if self._plan_panel.is_popup_visible and self._current_plan_has_data():
+                plan_data = self._get_current_plan_data()
+                if self._plan_panel.scroll_popup_down(plan_data):
+                    self._app.invalidate()
+                return
+            # Normal mode - history/completion navigation
             event.current_buffer.auto_down()
 
-        @kb.add("f1")
-        def handle_f1(event):
-            """Handle F1 - toggle plan panel collapse/expand."""
-            if self._plan_panel.has_plan:
-                self._plan_panel.toggle_collapsed()
-                self._app.invalidate()
-
-        @kb.add("c-f1")
-        def handle_ctrl_f1(event):
-            """Handle Ctrl+F1 - toggle plan panel visibility."""
-            if self._plan_panel.has_plan:
-                self._plan_panel.toggle_hidden()
+        @kb.add("c-p")
+        def handle_ctrl_p(event):
+            """Handle Ctrl+P - toggle plan popup visibility."""
+            # Check if current agent has a plan (registry or fallback)
+            if self._current_plan_has_data():
+                self._plan_panel.toggle_popup()
                 self._app.invalidate()
 
         @kb.add("f2")
@@ -531,26 +733,16 @@ class PTDisplay:
                 self._output_buffer.toggle_tools_expanded()
             self._app.invalidate()
 
+        @kb.add("c-y")
+        def handle_ctrl_y(event):
+            """Handle Ctrl+Y - yank (copy) last response to clipboard."""
+            self._yank_last_response()
+
         # Status bar at top (always visible, 1 line)
         status_bar = Window(
             FormattedTextControl(self._get_status_bar_content),
             height=1,
             style="class:status-bar",
-        )
-
-        # Plan panel (conditional - hidden when no plan)
-        # Height is dynamic: smaller when collapsed
-        def get_plan_height():
-            if self._plan_panel.is_collapsed:
-                return 7  # Compact: title + progress bar + prev step + current step + borders
-            return self._plan_height
-
-        plan_window = ConditionalContainer(
-            Window(
-                FormattedTextControl(self._get_plan_content),
-                height=get_plan_height,
-            ),
-            filter=Condition(self._has_plan),
         )
 
         # Output panel (fills remaining space)
@@ -604,12 +796,38 @@ class PTDisplay:
         # Input row (label + optional input area)
         input_row = VSplit([prompt_label, input_window])
 
-        # Root layout with completions menu
+        # Plan popup (floating overlay, shown with Ctrl+P)
+        def get_popup_height():
+            """Calculate popup height by rendering content and counting lines."""
+            plan_data = self._get_current_plan_data()
+            if not plan_data:
+                return 6
+
+            # Render the popup to get actual line count
+            # Pass plan_data directly to avoid thread-unsafe state modification
+            popup_width = max(40, min(80, int(self._width * 0.6)))
+            rendered = self._plan_panel.render_popup(width=popup_width, plan_data=plan_data)
+
+            # Render to string and count lines
+            rendered_str = self._renderer.render(rendered)
+            line_count = rendered_str.count('\n') + 1
+
+            # Cap at available screen height
+            return min(line_count, self._height - 4)
+
+        plan_popup_window = ConditionalContainer(
+            Window(
+                FormattedTextControl(self._get_plan_popup_content),
+                height=get_popup_height,
+            ),
+            filter=Condition(lambda: self._plan_panel.is_popup_visible and self._current_plan_has_data()),
+        )
+
+        # Root layout with completions menu and plan popup
         from prompt_toolkit.layout.containers import FloatContainer, Float
         root = FloatContainer(
             content=HSplit([
                 status_bar,
-                plan_window,
                 content_area,  # Output panel (or VSplit with output + agent panel)
                 input_row,
             ]),
@@ -618,6 +836,11 @@ class PTDisplay:
                     xcursor=True,
                     ycursor=True,
                     content=CompletionsMenu(max_height=8),
+                ),
+                Float(
+                    top=1,  # Below status bar
+                    left=2,
+                    content=plan_popup_window,
                 ),
             ],
         )
@@ -706,6 +929,22 @@ class PTDisplay:
         self._model_name = model
         self.refresh()
 
+    def set_stop_callbacks(
+        self,
+        stop_callback: Callable[[], bool],
+        is_running_callback: Callable[[], bool]
+    ) -> None:
+        """Set callbacks for model stop functionality.
+
+        These callbacks enable Ctrl-C to stop model generation when running.
+
+        Args:
+            stop_callback: Called to request stop. Returns True if stop was requested.
+            is_running_callback: Called to check if model is running.
+        """
+        self._stop_callback = stop_callback
+        self._is_running_callback = is_running_callback
+
     def update_context_usage(self, usage: Dict[str, Any]) -> None:
         """Update context usage display in status bar.
 
@@ -717,20 +956,41 @@ class PTDisplay:
 
     # Plan panel methods
 
-    def update_plan(self, plan_data: Dict[str, Any]) -> None:
-        """Update the plan panel."""
-        self._plan_panel.update_plan(plan_data)
+    def update_plan(self, plan_data: Dict[str, Any], agent_id: Optional[str] = None) -> None:
+        """Update the plan for an agent.
+
+        Args:
+            plan_data: Plan status dict with title, status, steps, progress.
+            agent_id: Which agent's plan to update. If None, updates the global
+                     plan panel (backwards compatibility) or "main" in registry.
+        """
+        if self._agent_registry:
+            # Route through registry for per-agent plan tracking
+            target_id = agent_id or "main"
+            self._agent_registry.update_plan(target_id, plan_data)
+        else:
+            # Fallback to global plan panel
+            self._plan_panel.update_plan(plan_data)
         self.refresh()
 
-    def clear_plan(self) -> None:
-        """Clear the plan panel."""
-        self._plan_panel.clear()
+    def clear_plan(self, agent_id: Optional[str] = None) -> None:
+        """Clear the plan for an agent.
+
+        Args:
+            agent_id: Which agent's plan to clear. If None, clears the global
+                     plan panel (backwards compatibility) or "main" in registry.
+        """
+        if self._agent_registry:
+            target_id = agent_id or "main"
+            self._agent_registry.clear_plan(target_id)
+        else:
+            self._plan_panel.clear()
         self.refresh()
 
     @property
     def has_plan(self) -> bool:
-        """Check if there's an active plan."""
-        return self._plan_panel.has_plan
+        """Check if there's an active plan for the current agent."""
+        return self._current_plan_has_data()
 
     # Output buffer methods
 
@@ -822,8 +1082,6 @@ class PTDisplay:
         # Calculate page size based on available height
         if page_size is None:
             available = self._height - 2  # minus input row and status bar
-            if self._plan_panel.has_plan:
-                available -= self._plan_height
             # Account for panel borders
             page_size = max(5, available - 4)
 

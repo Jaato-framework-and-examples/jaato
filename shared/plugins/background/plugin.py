@@ -4,6 +4,9 @@ This plugin provides tools for the model to manage background task execution
 across all BackgroundCapable plugins in the registry.
 """
 
+import os
+import tempfile
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from ..model_provider.types import ToolSchema
@@ -36,6 +39,23 @@ class BackgroundPlugin:
         self._registry: Optional['PluginRegistry'] = None
         self._capable_plugins: Dict[str, BackgroundCapable] = {}
         self._initialized = False
+        self._agent_name: Optional[str] = None
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [BACKGROUND{agent_prefix}] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
 
     @property
     def name(self) -> str:
@@ -74,10 +94,14 @@ class BackgroundPlugin:
         Args:
             config: Optional configuration dict (currently unused).
         """
+        config = config or {}
+        self._agent_name = config.get("agent_name")
         self._initialized = True
+        self._trace("initialize")
 
     def shutdown(self) -> None:
         """Shutdown the background plugin."""
+        self._trace("shutdown")
         # Clean up all tasks across all capable plugins
         for plugin in self._capable_plugins.values():
             try:
@@ -215,6 +239,7 @@ Use this to discover which tools can be run in background mode.""",
         tool_name = args.get("tool_name")
         arguments = args.get("arguments", {})
         timeout = args.get("timeout_seconds")
+        self._trace(f"startBackgroundTask: tool={tool_name}, timeout={timeout}")
 
         if not tool_name:
             return {
@@ -268,6 +293,7 @@ Use this to discover which tools can be run in background mode.""",
             Dict with task status or error.
         """
         task_id = args.get("task_id")
+        self._trace(f"getBackgroundTaskStatus: task_id={task_id}")
         if not task_id:
             return {"error": "task_id is required"}
 
@@ -296,6 +322,7 @@ Use this to discover which tools can be run in background mode.""",
         """
         task_id = args.get("task_id")
         wait = args.get("wait", False)
+        self._trace(f"getBackgroundTaskResult: task_id={task_id}, wait={wait}")
 
         if not task_id:
             return {"error": "task_id is required"}
@@ -326,6 +353,7 @@ Use this to discover which tools can be run in background mode.""",
             Dict with cancellation result.
         """
         task_id = args.get("task_id")
+        self._trace(f"cancelBackgroundTask: task_id={task_id}")
         if not task_id:
             return {"error": "task_id is required"}
 
@@ -353,6 +381,7 @@ Use this to discover which tools can be run in background mode.""",
             Dict with list of active tasks.
         """
         filter_plugin = args.get("plugin_name")
+        self._trace(f"listBackgroundTasks: filter={filter_plugin}")
 
         all_tasks = []
         for plugin_name, plugin in self._capable_plugins.items():
@@ -385,6 +414,7 @@ Use this to discover which tools can be run in background mode.""",
         Returns:
             Dict with list of background-capable tools.
         """
+        self._trace("listBackgroundCapableTools")
         # Refresh capable plugins list
         self._discover_capable_plugins()
 

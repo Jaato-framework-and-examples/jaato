@@ -12,6 +12,7 @@ Progress is reported through configurable transport protocols
 
 import os
 import tempfile
+import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -21,6 +22,11 @@ from .storage import TodoStorage, create_storage, InMemoryStorage
 from .channels import TodoReporter, ConsoleReporter, create_reporter
 from .config_loader import load_config, TodoConfig
 from ..base import UserCommand
+
+
+# Thread-local storage for per-agent context
+# This allows each agent (running in its own thread) to have its own agent_name
+_thread_local = threading.local()
 
 
 class TodoPlugin:
@@ -41,9 +47,24 @@ class TodoPlugin:
         self._storage: Optional[TodoStorage] = None
         self._reporter: Optional[TodoReporter] = None
         self._initialized = False
-        self._current_plan_id: Optional[str] = None
-        # Agent context for trace logging
-        self._agent_name: Optional[str] = None
+        # Track current plan per agent (agent_name -> plan_id)
+        # This allows multiple agents to have their own active plans
+        self._current_plan_ids: Dict[Optional[str], str] = {}
+        # Note: agent_name is stored in thread-local storage, not instance
+
+    @property
+    def _agent_name(self) -> Optional[str]:
+        """Get the agent name for the current thread.
+
+        Uses thread-local storage so each agent session (running in its
+        own thread) has its own agent_name context.
+        """
+        return getattr(_thread_local, 'agent_name', None)
+
+    @_agent_name.setter
+    def _agent_name(self, value: Optional[str]) -> None:
+        """Set the agent name for the current thread."""
+        _thread_local.agent_name = value
 
     @property
     def name(self) -> str:
@@ -92,45 +113,73 @@ class TodoPlugin:
             # Use defaults
             self._config = TodoConfig()
 
-        # Initialize storage
-        storage_type = config.get("storage_type") or self._config.storage_type
-        storage_path = config.get("storage_path") or self._config.storage_path
-        use_directory = config.get("storage_use_directory", self._config.storage_use_directory)
+        # Initialize storage (preserve existing if not explicitly overridden)
+        # This allows plans from other agents to persist when a new agent
+        # re-initializes the shared plugin
+        storage_type_explicit = config.get("storage_type")
+        if storage_type_explicit or not self._storage:
+            storage_type = storage_type_explicit or self._config.storage_type
+            storage_path = config.get("storage_path") or self._config.storage_path
+            use_directory = config.get("storage_use_directory", self._config.storage_use_directory)
 
-        try:
-            self._storage = create_storage(
-                storage_type=storage_type,
-                path=storage_path,
-                use_directory=use_directory,
-            )
-        except (ValueError, OSError) as e:
-            print(f"Warning: Failed to initialize storage: {e}")
-            print("Falling back to in-memory storage")
-            self._storage = InMemoryStorage()
+            try:
+                self._storage = create_storage(
+                    storage_type=storage_type,
+                    path=storage_path,
+                    use_directory=use_directory,
+                )
+            except (ValueError, OSError) as e:
+                print(f"Warning: Failed to initialize storage: {e}")
+                print("Falling back to in-memory storage")
+                self._storage = InMemoryStorage()
+        else:
+            storage_type = "preserved"
 
-        # Initialize reporter
-        reporter_type = config.get("reporter_type") or self._config.reporter_type
-        reporter_config = config.get("reporter_config") or self._config.to_reporter_config()
+        # Initialize reporter (preserve existing if not explicitly overridden)
+        # This allows the LivePlanReporter set by rich_client to survive
+        # re-initialization when subagents configure their agent_name
+        #
+        # Priority:
+        # 1. Injected reporter from parent (for subagents inheriting UI)
+        # 2. Explicit reporter_type in config
+        # 3. Existing reporter (preserve)
+        # 4. Create from config/defaults
+        injected_reporter = config.get("_injected_reporter")
+        reporter_type = config.get("reporter_type")
 
-        try:
-            self._reporter = create_reporter(reporter_type, reporter_config)
-        except (ValueError, RuntimeError) as e:
-            print(f"Warning: Failed to initialize {reporter_type} reporter: {e}")
-            print("Falling back to console reporter")
-            self._reporter = ConsoleReporter()
+        if injected_reporter:
+            # Use reporter injected by parent (e.g., subagent inheriting LivePlanReporter)
+            self._reporter = injected_reporter
+            self._trace(f"initialize: using injected reporter {type(injected_reporter).__name__}")
+        elif reporter_type or not self._reporter:
+            # Only create new reporter if explicitly requested or none exists
+            reporter_type = reporter_type or self._config.reporter_type
+            reporter_config = config.get("reporter_config") or self._config.to_reporter_config()
+
+            try:
+                self._reporter = create_reporter(reporter_type, reporter_config)
+            except (ValueError, RuntimeError) as e:
+                print(f"Warning: Failed to initialize {reporter_type} reporter: {e}")
+                print("Falling back to console reporter")
+                self._reporter = ConsoleReporter()
 
         self._initialized = True
         self._trace(f"initialize: storage={storage_type}, reporter={reporter_type}")
 
     def shutdown(self) -> None:
-        """Shutdown the TODO plugin."""
-        self._trace("shutdown: cleaning up")
-        if self._reporter:
-            self._reporter.shutdown()
-        self._storage = None
-        self._reporter = None
+        """Shutdown the TODO plugin.
+
+        Note: We preserve _current_plan_ids and _storage across shutdown/
+        re-initialization because this plugin is shared between multiple
+        agents. Each agent's plan data and tracking should persist even
+        when another agent re-initializes the plugin with different config.
+        """
+        self._trace("shutdown: cleaning up (preserving plan tracking and storage)")
+        # Don't shutdown reporter - it's shared and may still be in use
+        # self._reporter will be replaced in initialize() if needed
         self._initialized = False
-        self._current_plan_id = None
+        # Do NOT clear _current_plan_ids - it tracks plans per agent
+        # Do NOT clear _storage - it contains plans that should persist
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for TODO tools."""
@@ -380,12 +429,12 @@ class TodoPlugin:
         if self._storage:
             self._storage.save_plan(plan)
 
-        # Set as current plan
-        self._current_plan_id = plan.plan_id
+        # Set as current plan for this agent
+        self._current_plan_ids[self._agent_name] = plan.plan_id
 
         # Report creation
         if self._reporter:
-            self._reporter.report_plan_created(plan)
+            self._reporter.report_plan_created(plan, agent_id=self._agent_name)
 
         return {
             "plan_id": plan.plan_id,
@@ -493,7 +542,7 @@ class TodoPlugin:
 
         # Report update
         if self._reporter:
-            self._reporter.report_step_update(plan, step)
+            self._reporter.report_step_update(plan, step, agent_id=self._agent_name)
 
         return {
             "step_id": step.step_id,
@@ -585,10 +634,10 @@ class TodoPlugin:
 
         # Report completion
         if self._reporter:
-            self._reporter.report_plan_completed(plan)
+            self._reporter.report_plan_completed(plan, agent_id=self._agent_name)
 
-        # Clear current plan
-        self._current_plan_id = None
+        # Clear current plan for this agent
+        self._current_plan_ids.pop(self._agent_name, None)
 
         return {
             "plan_id": plan.plan_id,
@@ -625,7 +674,7 @@ class TodoPlugin:
 
         # Report the addition
         if self._reporter:
-            self._reporter.report_step_update(plan, new_step)
+            self._reporter.report_step_update(plan, new_step, agent_id=self._agent_name)
 
         return {
             "step_id": new_step.step_id,
@@ -637,10 +686,11 @@ class TodoPlugin:
         }
 
     def _get_current_plan(self) -> Optional[TodoPlan]:
-        """Get the current active plan."""
-        if not self._current_plan_id or not self._storage:
+        """Get the current active plan for this agent."""
+        plan_id = self._current_plan_ids.get(self._agent_name)
+        if not plan_id or not self._storage:
             return None
-        return self._storage.get_plan(self._current_plan_id)
+        return self._storage.get_plan(plan_id)
 
     def _get_most_recent_plan(self) -> Optional[TodoPlan]:
         """Get the most recently created plan from storage."""
@@ -675,10 +725,10 @@ class TodoPlugin:
         if self._storage:
             self._storage.save_plan(plan)
 
-        self._current_plan_id = plan.plan_id
+        self._current_plan_ids[self._agent_name] = plan.plan_id
 
         if self._reporter:
-            self._reporter.report_plan_created(plan)
+            self._reporter.report_plan_created(plan, agent_id=self._agent_name)
 
         return plan
 
@@ -722,7 +772,7 @@ class TodoPlugin:
             self._storage.save_plan(plan)
 
         if self._reporter:
-            self._reporter.report_step_update(plan, step)
+            self._reporter.report_step_update(plan, step, agent_id=self._agent_name)
 
         return step
 

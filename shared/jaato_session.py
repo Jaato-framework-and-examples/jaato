@@ -4,7 +4,9 @@ Provides isolated conversation state for an agent (main or subagent),
 while sharing resources from the parent JaatoRuntime.
 """
 
+import os
 import re
+import tempfile
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
@@ -14,13 +16,18 @@ from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
+from .plugins.model_provider.base import UsageUpdateCallback, GCThresholdCallback
 from .plugins.model_provider.types import (
     Attachment,
+    CancelledException,
+    CancelToken,
+    FinishReason,
     FunctionCall,
     Message,
     Part,
     ProviderResponse,
     Role,
+    TokenUsage,
     ToolResult,
     ToolSchema,
 )
@@ -111,6 +118,35 @@ class JaatoSession:
         # Reads AI_REQUEST_INTERVAL from env (default: 0 = disabled)
         self._pacer = RequestPacer()
 
+        # Cancellation support
+        self._cancel_token: Optional[CancelToken] = None
+        self._parent_cancel_token: Optional[CancelToken] = None  # For parent→child propagation
+        self._is_running: bool = False
+        self._use_streaming: bool = True  # Enable streaming by default if provider supports it
+
+        # Proactive GC tracking
+        self._gc_threshold_crossed: bool = False  # Set when threshold crossed during streaming
+        self._gc_threshold_callback: Optional[GCThresholdCallback] = None
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get("JAATO_TRACE_LOG")
+        if not trace_path:
+            trace_path = os.environ.get(
+                "JAATO_PROVIDER_TRACE",
+                os.path.join(tempfile.gettempdir(), "provider_trace.log")
+            )
+        # Empty string means disabled
+        if trace_path == "":
+            return
+        try:
+            with open(trace_path, "a") as f:
+                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                f.write(f"[{ts}] [session] {msg}\n")
+                f.flush()
+        except (IOError, OSError):
+            pass
+
     @property
     def model_name(self) -> Optional[str]:
         """Get the model name for this session."""
@@ -187,6 +223,91 @@ class JaatoSession:
         """
         self._on_retry = callback
 
+    # ==================== Cancellation Support ====================
+
+    @property
+    def is_running(self) -> bool:
+        """Check if a message is currently being processed.
+
+        Returns:
+            True if send_message() is in progress, False otherwise.
+        """
+        return self._is_running
+
+    def request_stop(self) -> bool:
+        """Request cancellation of the current message processing.
+
+        If a message is being processed, signals the cancel token to stop.
+        The message loop will check this token and exit gracefully.
+
+        Returns:
+            True if a cancellation was requested (message was running),
+            False if no message was running.
+
+        Note:
+            Cancellation is cooperative - it may not be immediate.
+            The current streaming chunk will complete before stopping.
+        """
+        if self._cancel_token and self._is_running:
+            self._cancel_token.cancel()
+            return True
+        return False
+
+    def set_streaming_enabled(self, enabled: bool) -> None:
+        """Enable or disable streaming mode.
+
+        When enabled (default), the session uses streaming APIs for
+        real-time output and better cancellation support.
+
+        Args:
+            enabled: True to use streaming, False for batched responses.
+        """
+        self._use_streaming = enabled
+
+    def set_parent_cancel_token(self, token: CancelToken) -> None:
+        """Set a parent cancel token for cancellation propagation.
+
+        When set, this session will check both its own cancel token
+        and the parent token. If the parent is cancelled, this session
+        will also stop - enabling automatic parent→child propagation.
+
+        Args:
+            token: The parent session's cancel token.
+        """
+        self._parent_cancel_token = token
+
+    def _is_cancelled(self) -> bool:
+        """Check if this session or its parent has been cancelled.
+
+        Returns:
+            True if either this session's token or parent token is cancelled.
+        """
+        if self._cancel_token and self._cancel_token.is_cancelled:
+            return True
+        if self._parent_cancel_token and self._parent_cancel_token.is_cancelled:
+            return True
+        return False
+
+    @property
+    def supports_stop(self) -> bool:
+        """Check if the current provider supports mid-turn cancellation.
+
+        Stop capability requires both streaming support and provider
+        implementation of cancellation handling.
+
+        Returns:
+            True if stop is supported, False otherwise.
+        """
+        if not self._provider:
+            return False
+        # Check if provider has supports_stop method and it returns True
+        if hasattr(self._provider, 'supports_stop'):
+            return self._provider.supports_stop()
+        # Fallback: if streaming is supported, stop is supported
+        if hasattr(self._provider, 'supports_streaming'):
+            return self._provider.supports_streaming()
+        return False
+
     def configure(
         self,
         tools: Optional[List[str]] = None,
@@ -245,6 +366,12 @@ class JaatoSession:
                 self._runtime.permission_plugin,
                 context=context
             )
+
+        # Set this session as parent for subagent plugin (for cancellation propagation)
+        if self._runtime.registry:
+            subagent_plugin = self._runtime.registry.get_plugin("subagent")
+            if subagent_plugin and hasattr(subagent_plugin, 'set_parent_session'):
+                subagent_plugin.set_parent_session(self)
 
         # Build system instructions
         self._system_instruction = self._runtime.get_system_instructions(
@@ -478,7 +605,9 @@ class JaatoSession:
     def send_message(
         self,
         message: str,
-        on_output: Optional[OutputCallback] = None
+        on_output: Optional[OutputCallback] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_gc_threshold: Optional[GCThresholdCallback] = None
     ) -> str:
         """Send a message to the model.
 
@@ -486,6 +615,10 @@ class JaatoSession:
             message: The user's message text.
             on_output: Optional callback for real-time output.
                 Signature: (source: str, text: str, mode: str) -> None
+            on_usage_update: Optional callback for real-time token usage.
+                Signature: (usage: TokenUsage) -> None
+            on_gc_threshold: Optional callback when GC threshold is crossed.
+                Signature: (percent_used: float, threshold: float) -> None
 
         Returns:
             The final model response text.
@@ -496,19 +629,83 @@ class JaatoSession:
         if not self._provider:
             raise RuntimeError("Session not configured. Call configure() first.")
 
-        # Check and perform GC if needed
+        self._trace(f"SESSION_SEND_MESSAGE len={len(message)} streaming={self._use_streaming}")
+
+        # Check and perform GC if needed (pre-send)
         if self._gc_plugin and self._gc_config and self._gc_config.check_before_send:
             self._maybe_collect_before_send()
+
+        # Reset proactive GC tracking for this turn
+        self._gc_threshold_crossed = False
+        self._gc_threshold_callback = on_gc_threshold
+
+        # Wrap usage callback to check GC threshold
+        wrapped_usage_callback = self._wrap_usage_callback_with_gc_check(on_usage_update)
 
         # Run prompt enrichment if registry is available
         processed_message = self._enrich_and_clean_prompt(message)
 
-        response = self._run_chat_loop(processed_message, on_output)
+        response = self._run_chat_loop(processed_message, on_output, wrapped_usage_callback)
+
+        # Proactive GC: if threshold was crossed during streaming, trigger GC now
+        if self._gc_threshold_crossed and self._gc_plugin and self._gc_config:
+            self._trace("PROACTIVE_GC: Threshold crossed during streaming, triggering post-turn GC")
+            self._maybe_collect_after_turn()
 
         # Notify session plugin
         self._notify_session_turn_complete()
 
         return response
+
+    def _wrap_usage_callback_with_gc_check(
+        self,
+        on_usage_update: Optional[UsageUpdateCallback]
+    ) -> Optional[UsageUpdateCallback]:
+        """Wrap usage callback to check GC threshold during streaming."""
+        if not self._gc_plugin or not self._gc_config:
+            return on_usage_update
+
+        def wrapped_callback(usage: TokenUsage) -> None:
+            # Check if threshold crossed
+            if not self._gc_threshold_crossed and usage.total_tokens > 0:
+                context_limit = self.get_context_limit()
+                if context_limit > 0:
+                    percent_used = (usage.total_tokens / context_limit) * 100
+                    threshold = self._gc_config.threshold_percent if self._gc_config else 80.0
+
+                    if percent_used >= threshold:
+                        self._gc_threshold_crossed = True
+                        self._trace(f"PROACTIVE_GC: Threshold crossed ({percent_used:.1f}% >= {threshold}%)")
+
+                        # Notify via callback if provided
+                        if self._gc_threshold_callback:
+                            self._gc_threshold_callback(percent_used, threshold)
+
+            # Call original callback if provided
+            if on_usage_update:
+                on_usage_update(usage)
+
+        return wrapped_callback
+
+    def _maybe_collect_after_turn(self) -> Optional[GCResult]:
+        """Perform GC after turn if threshold was crossed during streaming."""
+        if not self._gc_plugin or not self._gc_config:
+            return None
+
+        context_usage = self.get_context_usage()
+        history = self.get_history()
+
+        # Use THRESHOLD as the reason since it was triggered by threshold crossing
+        new_history, result = self._gc_plugin.collect(
+            history, context_usage, self._gc_config, GCTriggerReason.THRESHOLD
+        )
+
+        if result.success:
+            self._trace(f"PROACTIVE_GC: Collected {result.items_collected} items, freed {result.tokens_freed} tokens")
+            self.reset_session(new_history)
+            self._gc_history.append(result)
+
+        return result
 
     def _enrich_and_clean_prompt(self, prompt: str) -> str:
         """Run prompt through enrichment pipeline and strip @references."""
@@ -525,13 +722,15 @@ class JaatoSession:
     def _run_chat_loop(
         self,
         message: str,
-        on_output: Optional[OutputCallback]
+        on_output: Optional[OutputCallback],
+        on_usage_update: Optional[UsageUpdateCallback] = None
     ) -> str:
-        """Internal function calling loop.
+        """Internal function calling loop with streaming and cancellation support.
 
         Args:
             message: The user's message text.
             on_output: Optional callback for real-time output.
+            on_usage_update: Optional callback for real-time token usage updates.
 
         Returns:
             The final response text.
@@ -539,6 +738,11 @@ class JaatoSession:
         # Set output callback on executor
         if self._executor:
             self._executor.set_output_callback(on_output)
+
+        # Initialize cancellation support
+        self._cancel_token = CancelToken()
+        self._is_running = True
+        cancellation_notified = False  # Track if we've already shown cancellation message
 
         # Track tokens and timing
         turn_start = datetime.now()
@@ -553,107 +757,216 @@ class JaatoSession:
         }
         response: Optional[ProviderResponse] = None
 
+        # Wrap usage callback to also update turn_data during streaming
+        # This ensures we capture token values even if streaming is cancelled
+        # Always enabled for internal turn tracking, regardless of external callback
+        def usage_callback_with_turn_tracking(usage: TokenUsage) -> None:
+            if usage.total_tokens > 0:
+                turn_data['prompt'] = usage.prompt_tokens
+                turn_data['output'] = usage.output_tokens
+                turn_data['total'] = usage.total_tokens
+            if on_usage_update:
+                on_usage_update(usage)
+
+        wrapped_usage_callback = usage_callback_with_turn_tracking
+
+        # Determine if we should use streaming
+        use_streaming = (
+            self._use_streaming and
+            self._provider and
+            hasattr(self._provider, 'supports_streaming') and
+            self._provider.supports_streaming()
+        )
+
         try:
+            # Check for cancellation before starting (including parent)
+            if self._is_cancelled():
+                msg = "[Cancelled before start]"
+                if on_output:
+                    on_output("system", msg, "write")
+                return msg
+
             # Proactive rate limiting: wait if needed before request
             self._pacer.pace()
 
-            response, _retry_stats = with_retry(
-                lambda: self._provider.send_message(message),
-                context="send_message",
-                on_retry=self._on_retry
-            )
+            # Send message (streaming or batched)
+            if use_streaming:
+                # Track whether we've sent the first chunk (to use "write" vs "append")
+                first_chunk_sent = False
+
+                # Streaming callback that routes to on_output
+                def streaming_callback(chunk: str) -> None:
+                    nonlocal first_chunk_sent
+                    if on_output:
+                        # First chunk uses "write" to start block, subsequent use "append"
+                        mode = "append" if first_chunk_sent else "write"
+                        self._trace(f"SESSION_OUTPUT mode={mode} len={len(chunk)} preview={repr(chunk[:50])}")
+                        on_output("model", chunk, mode)
+                        first_chunk_sent = True
+
+                self._trace(f"STREAMING on_usage_update={'set' if wrapped_usage_callback else 'None'}")
+                response, _retry_stats = with_retry(
+                    lambda: self._provider.send_message_streaming(
+                        message,
+                        on_chunk=streaming_callback,
+                        cancel_token=self._cancel_token,
+                        on_usage_update=wrapped_usage_callback
+                        # Note: on_function_call is intentionally NOT used here.
+                        # The SDK may deliver function calls before preceding text,
+                        # which would cause tool trees to appear in wrong positions.
+                        # Tool trees are displayed during parts processing instead.
+                    ),
+                    context="send_message_streaming",
+                    on_retry=self._on_retry,
+                    cancel_token=self._cancel_token
+                )
+            else:
+                response, _retry_stats = with_retry(
+                    lambda: self._provider.send_message(message),
+                    context="send_message",
+                    on_retry=self._on_retry,
+                    cancel_token=self._cancel_token
+                )
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
+            self._trace(f"SESSION_STREAMING_COMPLETE parts_count={len(response.parts)} finish={response.finish_reason}")
 
-            # Handle function calling loop
-            function_calls = list(response.function_calls) if response.function_calls else []
-            while function_calls:
-                # Emit any text produced alongside function calls
-                if response.text and on_output:
-                    on_output("model", response.text, "write")
+            # Check for cancellation after initial message (including parent)
+            if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
+                partial_text = response.get_text()
+                cancel_msg = "[Generation cancelled]"
+                if on_output and not cancellation_notified:
+                    self._trace(f"CANCEL_NOTIFY: {cancel_msg} (after initial message)")
+                    on_output("system", cancel_msg, "write")
+                    cancellation_notified = True
+                elif cancellation_notified:
+                    self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (after initial message) - already notified!")
+                # Notify model of cancellation for context on next turn
+                self._notify_model_of_cancellation(cancel_msg, partial_text)
+                if partial_text:
+                    return f"{partial_text}\n\n{cancel_msg}"
+                return cancel_msg
 
-                tool_results: List[ToolResult] = []
+            # Handle function calling loop - process parts in order to support interleaved text/tools
+            accumulated_text: List[str] = []
+            self._trace(f"SESSION_PARTS_PROCESSING parts_count={len(response.parts)}")
 
-                for fc in function_calls:
-                    name = fc.name
-                    args = fc.args
+            def get_pending_function_calls() -> List[FunctionCall]:
+                """Extract function calls from response.parts."""
+                return [p.function_call for p in response.parts if p.function_call]
 
-                    # Emit hook: tool starting
-                    if self._ui_hooks:
-                        self._ui_hooks.on_tool_call_start(
-                            agent_id=self._agent_id,
-                            tool_name=name,
-                            tool_args=args,
-                            call_id=fc.id
-                        )
+            def get_all_text() -> str:
+                """Concatenate all text from response.parts."""
+                texts = [p.text for p in response.parts if p.text]
+                return ''.join(texts) if texts else ''
 
-                    fc_start = datetime.now()
-                    if self._executor:
-                        executor_result = self._executor.execute(name, args)
-                    else:
-                        executor_result = (False, {"error": f"No executor registered for {name}"})
-                    fc_end = datetime.now()
+            pending_calls = get_pending_function_calls()
+            while pending_calls:
+                # Check for cancellation before processing tools (including parent)
+                if self._is_cancelled():
+                    cancel_msg = "[Cancelled during tool execution]"
+                    if on_output and not cancellation_notified:
+                        self._trace(f"CANCEL_NOTIFY: {cancel_msg} (before processing tools)")
+                        on_output("system", cancel_msg, "write")
+                        cancellation_notified = True
+                    elif cancellation_notified:
+                        self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (before processing tools) - already notified!")
+                    # Notify model of cancellation for context on next turn
+                    all_text = get_all_text()
+                    self._notify_model_of_cancellation(cancel_msg, all_text)
+                    if all_text:
+                        return f"{all_text}\n\n{cancel_msg}"
+                    return cancel_msg
 
-                    # Determine success and error message from executor result
-                    fc_success = True
-                    fc_error_message = None
-                    if isinstance(executor_result, tuple) and len(executor_result) == 2:
-                        fc_success = executor_result[0]
-                        # Extract error message if tool failed
-                        if not fc_success and isinstance(executor_result[1], dict):
-                            fc_error_message = executor_result[1].get('error')
+                # Process parts in order - emit text, collect function calls into groups
+                current_fc_group: List[FunctionCall] = []
+                for idx, part in enumerate(response.parts):
+                    # Enhanced trace: show empty text parts (which indicate unknown SDK parts)
+                    text_info = "empty" if part.text == "" else bool(part.text) if part.text else None
+                    fc_info = part.function_call.name if part.function_call else None
+                    self._trace(f"SESSION_PART[{idx}] text={text_info} fc={fc_info}")
+                    if part.text:
+                        # Before emitting text, execute any pending function calls
+                        if current_fc_group:
+                            tool_results = self._execute_function_call_group(
+                                current_fc_group, turn_data, on_output, cancellation_notified
+                            )
+                            if self._is_cancelled():
+                                cancel_msg = "[Cancelled after tool execution]"
+                                if on_output and not cancellation_notified:
+                                    on_output("system", cancel_msg, "write")
+                                self._notify_model_of_cancellation(cancel_msg)
+                                return cancel_msg
+                            # Send tool results and get continuation
+                            response = self._send_tool_results_and_continue(
+                                tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
+                            )
+                            if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
+                                partial = get_all_text()
+                                cancel_msg = "[Generation cancelled]"
+                                if on_output and not cancellation_notified:
+                                    on_output("system", cancel_msg, "write")
+                                self._notify_model_of_cancellation(cancel_msg, partial)
+                                return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
+                            current_fc_group = []
 
-                    # Emit hook: tool ended
-                    fc_duration = (fc_end - fc_start).total_seconds()
-                    if self._ui_hooks:
-                        self._ui_hooks.on_tool_call_end(
-                            agent_id=self._agent_id,
-                            tool_name=name,
-                            success=fc_success,
-                            duration_seconds=fc_duration,
-                            error_message=fc_error_message,
-                            call_id=fc.id
-                        )
+                        # Emit text (only in non-streaming mode)
+                        if not use_streaming and on_output:
+                            on_output("model", part.text, "write")
+                        accumulated_text.append(part.text)
 
-                    # Record function call timing
-                    turn_data['function_calls'].append({
-                        'name': name,
-                        'start_time': fc_start.isoformat(),
-                        'end_time': fc_end.isoformat(),
-                        'duration_seconds': fc_duration,
-                    })
+                    elif part.function_call:
+                        current_fc_group.append(part.function_call)
 
-                    # Build ToolResult
-                    tool_result = self._build_tool_result(fc, executor_result)
-                    tool_results.append(tool_result)
+                # Execute remaining function calls at end of parts
+                if current_fc_group:
+                    tool_results = self._execute_function_call_group(
+                        current_fc_group, turn_data, on_output, cancellation_notified
+                    )
+                    if self._is_cancelled():
+                        cancel_msg = "[Cancelled after tool execution]"
+                        if on_output and not cancellation_notified:
+                            on_output("system", cancel_msg, "write")
+                        self._notify_model_of_cancellation(cancel_msg)
+                        return cancel_msg
 
-                # Send tool results back (with retry for rate limits)
-                self._pacer.pace()  # Proactive rate limiting
-                response, _retry_stats = with_retry(
-                    lambda: self._provider.send_tool_results(tool_results),
-                    context="send_tool_results",
-                    on_retry=self._on_retry
-                )
-                self._record_token_usage(response)
-                self._accumulate_turn_tokens(response, turn_data)
+                    # Send tool results and get next response
+                    response = self._send_tool_results_and_continue(
+                        tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
+                    )
+                    if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
+                        partial = get_all_text()
+                        cancel_msg = "[Generation cancelled]"
+                        if on_output and not cancellation_notified:
+                            on_output("system", cancel_msg, "write")
+                        self._notify_model_of_cancellation(cancel_msg, partial)
+                        return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
 
-                # Check finish_reason for abnormal termination
-                from .plugins.model_provider.types import FinishReason
-                if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE):
-                    import sys
-                    print(f"[warning] Model stopped with finish_reason={response.finish_reason}", file=sys.stderr)
-                    if response.text:
-                        return f"{response.text}\n\n[Model stopped: {response.finish_reason}]"
-                    else:
-                        return f"[Model stopped unexpectedly: {response.finish_reason}]"
+                    if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE, FinishReason.CANCELLED):
+                        import sys
+                        print(f"[warning] Model stopped with finish_reason={response.finish_reason}", file=sys.stderr)
+                        final_text = get_all_text()
+                        if final_text:
+                            return f"{final_text}\n\n[Model stopped: {response.finish_reason}]"
+                        else:
+                            return f"[Model stopped unexpectedly: {response.finish_reason}]"
 
-                function_calls = list(response.function_calls) if response.function_calls else []
+                # Check for more function calls in the new response
+                pending_calls = get_pending_function_calls()
 
-            # Emit final response text
-            if response.text and on_output:
-                on_output("model", response.text, "write")
+            # Collect any remaining text from the final response
+            for part in response.parts:
+                if part.text:
+                    if not use_streaming and on_output:
+                        on_output("model", part.text, "write")
+                    accumulated_text.append(part.text)
 
-            return response.text or ''
+            return ''.join(accumulated_text) if accumulated_text else ''
+
+        except CancelledException:
+            # Handle explicit cancellation exception
+            # Note: Don't send on_output here - the explicit checks above already do
+            return "[Generation cancelled]"
 
         finally:
             # Record turn end time
@@ -663,6 +976,136 @@ class JaatoSession:
 
             if turn_data['total'] > 0:
                 self._turn_accounting.append(turn_data)
+
+            # Clean up cancellation state
+            self._is_running = False
+            self._cancel_token = None
+
+    def _execute_function_call_group(
+        self,
+        function_calls: List[FunctionCall],
+        turn_data: Dict[str, Any],
+        on_output: Optional[OutputCallback],
+        cancellation_notified: bool
+    ) -> List[ToolResult]:
+        """Execute a group of function calls and return their results."""
+        tool_results: List[ToolResult] = []
+
+        for fc in function_calls:
+            # Check for cancellation before each tool (including parent)
+            if self._is_cancelled():
+                break
+
+            name = fc.name
+            args = fc.args
+
+            # Emit hook: tool starting
+            if self._ui_hooks:
+                # Signal UI to flush any pending output before displaying tool tree
+                # This ensures text appears before tool trees in async/buffered UIs
+                if on_output:
+                    self._trace(f"SESSION_OUTPUT_FLUSH before tool {name}")
+                    on_output("system", "", "flush")
+                self._trace(f"SESSION_TOOL_START name={name} call_id={fc.id}")
+                self._ui_hooks.on_tool_call_start(
+                    agent_id=self._agent_id,
+                    tool_name=name,
+                    tool_args=args,
+                    call_id=fc.id
+                )
+
+            fc_start = datetime.now()
+            if self._executor:
+                executor_result = self._executor.execute(name, args)
+            else:
+                executor_result = (False, {"error": f"No executor registered for {name}"})
+            fc_end = datetime.now()
+
+            # Determine success and error message from executor result
+            fc_success = True
+            fc_error_message = None
+            if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                fc_success = executor_result[0]
+                if not fc_success and isinstance(executor_result[1], dict):
+                    fc_error_message = executor_result[1].get('error')
+
+            # Emit hook: tool ended
+            fc_duration = (fc_end - fc_start).total_seconds()
+            if self._ui_hooks:
+                self._ui_hooks.on_tool_call_end(
+                    agent_id=self._agent_id,
+                    tool_name=name,
+                    success=fc_success,
+                    duration_seconds=fc_duration,
+                    error_message=fc_error_message,
+                    call_id=fc.id
+                )
+
+            # Record function call timing
+            turn_data['function_calls'].append({
+                'name': name,
+                'start_time': fc_start.isoformat(),
+                'end_time': fc_end.isoformat(),
+                'duration_seconds': fc_duration,
+            })
+
+            # Build ToolResult
+            tool_result = self._build_tool_result(fc, executor_result)
+            tool_results.append(tool_result)
+
+        return tool_results
+
+    def _send_tool_results_and_continue(
+        self,
+        tool_results: List[ToolResult],
+        use_streaming: bool,
+        on_output: Optional[OutputCallback],
+        wrapped_usage_callback: Optional[UsageUpdateCallback],
+        turn_data: Dict[str, Any]
+    ) -> ProviderResponse:
+        """Send tool results back to the model and get the continuation response."""
+        # with_retry is already imported at module level from .retry_utils
+
+        # Proactive rate limiting
+        self._pacer.pace()
+
+        if use_streaming:
+            # Track first chunk to use "write" for new block, "append" for continuation
+            first_chunk_after_tools = [False]  # Use list to allow mutation in closure
+
+            def streaming_callback(chunk: str) -> None:
+                if on_output:
+                    # First chunk after tool results starts a new block
+                    mode = "append" if first_chunk_after_tools[0] else "write"
+                    self._trace(f"SESSION_TOOL_RESULT_OUTPUT mode={mode} len={len(chunk)} preview={repr(chunk[:50])}")
+                    on_output("model", chunk, mode)
+                    first_chunk_after_tools[0] = True
+
+            response, _retry_stats = with_retry(
+                lambda: self._provider.send_tool_results_streaming(
+                    tool_results,
+                    on_chunk=streaming_callback,
+                    cancel_token=self._cancel_token,
+                    on_usage_update=wrapped_usage_callback
+                    # Note: on_function_call is intentionally NOT used here.
+                    # See comment in send_message for explanation.
+                ),
+                context="send_tool_results_streaming",
+                on_retry=self._on_retry,
+                cancel_token=self._cancel_token
+            )
+        else:
+            response, _retry_stats = with_retry(
+                lambda: self._provider.send_tool_results(tool_results),
+                context="send_tool_results",
+                on_retry=self._on_retry,
+                cancel_token=self._cancel_token
+            )
+
+        self._record_token_usage(response)
+        self._accumulate_turn_tokens(response, turn_data)
+
+        return response
 
     def _build_tool_result(
         self,
@@ -726,10 +1169,19 @@ class JaatoSession:
         response: ProviderResponse,
         turn_tokens: Dict[str, int]
     ) -> None:
-        """Accumulate token counts from provider response."""
-        turn_tokens['prompt'] += response.usage.prompt_tokens
-        turn_tokens['output'] += response.usage.output_tokens
-        turn_tokens['total'] += response.usage.total_tokens
+        """Update token counts from provider response.
+
+        Note: We REPLACE (not sum) because each API response's prompt_tokens
+        already includes ALL previous history. The final API call in a turn
+        has the complete context usage.
+
+        However, we only replace if values are non-zero, to preserve good values
+        when streaming is cancelled mid-turn (which may return zero tokens).
+        """
+        if response.usage.total_tokens > 0:
+            turn_tokens['prompt'] = response.usage.prompt_tokens
+            turn_tokens['output'] = response.usage.output_tokens
+            turn_tokens['total'] = response.usage.total_tokens
 
     def _record_token_usage(self, response: ProviderResponse) -> None:
         """Record token usage to ledger if available."""
@@ -759,12 +1211,25 @@ class JaatoSession:
         return self._provider.get_context_limit()
 
     def get_context_usage(self) -> Dict[str, Any]:
-        """Get context window usage statistics."""
+        """Get context window usage statistics.
+
+        Note: Each turn's prompt_tokens includes ALL previous history,
+        so we use the LAST turn's values (not sum) for context usage.
+        """
         turn_accounting = self.get_turn_accounting()
 
-        total_prompt = sum(t['prompt'] for t in turn_accounting)
-        total_output = sum(t['output'] for t in turn_accounting)
-        total_tokens = sum(t['total'] for t in turn_accounting)
+        if turn_accounting:
+            # Use the last turn's values - prompt includes full history
+            last_turn = turn_accounting[-1]
+            # The current context is the last turn's prompt + its output
+            # (which will become part of the next turn's prompt)
+            total_prompt = last_turn.get('prompt', 0)
+            total_output = last_turn.get('output', 0)
+            total_tokens = last_turn.get('total', 0)
+        else:
+            total_prompt = 0
+            total_output = 0
+            total_tokens = 0
 
         context_limit = self.get_context_limit()
         percent_used = (total_tokens / context_limit * 100) if context_limit > 0 else 0
@@ -898,13 +1363,42 @@ class JaatoSession:
         new_history = list(current_history) + [user_message, model_message]
         self._create_provider_session(new_history)
 
+    def _notify_model_of_cancellation(self, cancel_msg: str, partial_text: str = '') -> None:
+        """Inject cancellation notice into history so model has context.
+
+        This adds a user message noting the cancellation, so on the next turn
+        the model understands why the previous response was cut short.
+
+        Args:
+            cancel_msg: The cancellation message shown to user.
+            partial_text: Any partial response text before cancellation.
+        """
+        if not self._provider:
+            return
+
+        current_history = self.get_history()
+
+        # Create a note for the model about what happened
+        if partial_text:
+            note = f"[System: Your previous response was cancelled by the user after: \"{partial_text[:100]}{'...' if len(partial_text) > 100 else ''}\"]"
+        else:
+            note = "[System: Your previous response was cancelled by the user before any output was generated.]"
+
+        user_message = Message(
+            role=Role.USER,
+            parts=[Part.from_text(note)]
+        )
+
+        new_history = list(current_history) + [user_message]
+        self._create_provider_session(new_history)
+
     def generate(self, prompt: str) -> str:
         """Simple generation without tools."""
         if not self._provider:
             raise RuntimeError("Session not configured.")
 
         response = self._provider.generate(prompt)
-        return response.text or ''
+        return response.get_text() or ''
 
     def send_message_with_parts(
         self,

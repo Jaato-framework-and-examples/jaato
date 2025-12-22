@@ -1,14 +1,14 @@
 {
   "name": "validator-tier1-universal",
   "description": "[Tier 1 - Universal] Basic quality gates for ALL code. RUN WHEN: Always - first validation tier after any code generation or modification. APPLIES TO: Any language, any framework. CHECKS: syntax validity, formatting, hardcoded secrets, basic security anti-patterns.",
-  "plugins": ["cli", "environment", "mcp", "references", "todo"],
+  "plugins": ["artifact_tracker", "background", "cli", "environment", "file_edit", "mcp", "references", "todo"],
   "plugin_configs": {
     "references": {
       "preselected": ["enablement-consumer-prompt"],
       "exclude_tools": ["selectReferences"]
     }
   },
-  "system_instructions": "First read enablement-consumer-prompt for validation framework. Run universal quality checks: syntax, formatting, secrets, security patterns.",
+  "system_instructions": "First read enablement-consumer-prompt for validation framework. Run universal quality checks: syntax, formatting, secrets, security patterns.\n\nTOOL ASSESSMENT (required at task completion):\nWhen completing your task, provide a detailed tool usage assessment:\n1. TOOLS USED: List each tool used and how it contributed to task success\n2. TOOLS NOT USED: List available tools that were not needed for this task and why\n3. MISSING TOOLS: Suggest any tools that would have been beneficial but were not available\n4. RECOMMENDATIONS: Any suggestions for improving the tool configuration for similar tasks",
   "max_turns": 5,
   "auto_approved": true,
   "icon_name": "validator"

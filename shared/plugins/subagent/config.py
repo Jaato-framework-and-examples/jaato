@@ -3,11 +3,161 @@
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
+
+
+def expand_variables(
+    value: Any,
+    context: Optional[Dict[str, str]] = None
+) -> Any:
+    """Expand ${variable} references in a value.
+
+    Supports:
+    - Environment variables: ${HOME}, ${USER}, ${PATH}
+    - Context variables: ${projectPath}, ${workspaceRoot}, ${cwd}
+    - Nested expansion in dicts and lists
+
+    Args:
+        value: Value to expand (string, dict, list, or other)
+        context: Optional dict of context variables to expand
+
+    Returns:
+        Value with variables expanded
+
+    Examples:
+        >>> expand_variables("${HOME}/projects", {})
+        '/home/user/projects'
+
+        >>> expand_variables({"path": "${projectPath}/.lsp.json"}, {"projectPath": "/app"})
+        {'path': '/app/.lsp.json'}
+    """
+    if context is None:
+        context = {}
+
+    # Add default context variables
+    default_context = {
+        'cwd': os.getcwd(),
+        'workspaceRoot': _find_workspace_root(),
+        'HOME': os.environ.get('HOME', ''),
+        'USER': os.environ.get('USER', ''),
+    }
+    # Merge with provided context (provided takes precedence)
+    effective_context = {**default_context, **context}
+
+    if isinstance(value, str):
+        return _expand_string(value, effective_context)
+    elif isinstance(value, dict):
+        return {k: expand_variables(v, context) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [expand_variables(item, context) for item in value]
+    else:
+        return value
+
+
+def _expand_string(s: str, context: Dict[str, str]) -> str:
+    """Expand ${variable} references in a string.
+
+    Args:
+        s: String containing ${variable} references
+        context: Dict of variable names to values
+
+    Returns:
+        String with variables expanded
+    """
+    if '${' not in s:
+        return s
+
+    def replace_var(match: re.Match) -> str:
+        var_name = match.group(1)
+        # First check context, then environment
+        if var_name in context:
+            return context[var_name]
+        return os.environ.get(var_name, match.group(0))  # Keep original if not found
+
+    # Match ${VAR_NAME} pattern
+    pattern = r'\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}'
+    return re.sub(pattern, replace_var, s)
+
+
+def _find_workspace_root() -> str:
+    """Find the workspace root by looking for .git directory.
+
+    Returns:
+        Path to workspace root, or cwd if not found
+    """
+    current = Path.cwd()
+    for parent in [current] + list(current.parents):
+        if (parent / '.git').exists():
+            return str(parent)
+        if (parent / '.jaato').exists():
+            return str(parent)
+    return str(current)
+
+
+def expand_plugin_configs(
+    plugin_configs: Dict[str, Dict[str, Any]],
+    context: Optional[Dict[str, str]] = None
+) -> Dict[str, Dict[str, Any]]:
+    """Expand variables in all plugin configurations.
+
+    Args:
+        plugin_configs: Dict of plugin name -> config dict
+        context: Optional context variables (e.g., projectPath)
+
+    Returns:
+        Plugin configs with all variables expanded
+
+    Example:
+        >>> configs = {
+        ...     "lsp": {"config_path": "${projectPath}/.lsp.json"},
+        ...     "mcp": {"config_path": "${projectPath}/.mcp.json"}
+        ... }
+        >>> expand_plugin_configs(configs, {"projectPath": "/app"})
+        {'lsp': {'config_path': '/app/.lsp.json'}, 'mcp': {'config_path': '/app/.mcp.json'}}
+    """
+    return expand_variables(plugin_configs, context)
+
+
+@dataclass
+class GCProfileConfig:
+    """Garbage collection configuration for a profile.
+
+    Defines the GC strategy and its configuration for a subagent or main agent.
+
+    Attributes:
+        type: GC strategy type ('truncate', 'summarize', 'hybrid').
+        threshold_percent: Trigger GC when context usage exceeds this percentage.
+        preserve_recent_turns: Number of recent turns to always preserve.
+        notify_on_gc: Whether to inject a notification into history after GC.
+        summarize_middle_turns: For hybrid strategy, number of middle turns to summarize.
+        max_turns: Trigger GC when turn count exceeds this limit.
+        plugin_config: Additional plugin-specific configuration.
+    """
+    type: str = "truncate"
+    threshold_percent: float = 80.0
+    preserve_recent_turns: int = 5
+    notify_on_gc: bool = True
+    summarize_middle_turns: Optional[int] = None  # For hybrid strategy
+    max_turns: Optional[int] = None
+    plugin_config: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'GCProfileConfig':
+        """Create GCProfileConfig from a dictionary."""
+        return cls(
+            type=data.get('type', 'truncate'),
+            threshold_percent=data.get('threshold_percent', 80.0),
+            preserve_recent_turns=data.get('preserve_recent_turns', 5),
+            notify_on_gc=data.get('notify_on_gc', True),
+            summarize_middle_turns=data.get('summarize_middle_turns'),
+            max_turns=data.get('max_turns'),
+            plugin_config=data.get('plugin_config', {}),
+        )
 
 
 @dataclass
@@ -28,6 +178,7 @@ class SubagentProfile:
         auto_approved: Whether this subagent can be spawned without permission.
         icon: Optional custom ASCII art icon (3 lines) for UI visualization.
         icon_name: Optional name of predefined icon (e.g., "code_assistant").
+        gc: Optional garbage collection configuration for this subagent.
     """
     name: str
     description: str
@@ -39,6 +190,7 @@ class SubagentProfile:
     auto_approved: bool = False
     icon: Optional[List[str]] = None
     icon_name: Optional[str] = None
+    gc: Optional[GCProfileConfig] = None
 
 
 def _parse_profile_file(file_path: Path) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
@@ -133,6 +285,11 @@ def discover_profiles(
         if name is None or data is None:
             continue
 
+        # Parse GC configuration if present
+        gc_config = None
+        if 'gc' in data and data['gc']:
+            gc_config = GCProfileConfig.from_dict(data['gc'])
+
         # Create SubagentProfile from parsed data
         profile = SubagentProfile(
             name=name,
@@ -145,6 +302,7 @@ def discover_profiles(
             auto_approved=data.get('auto_approved', False),
             icon=data.get('icon'),
             icon_name=data.get('icon_name'),
+            gc=gc_config,
         )
 
         profiles[name] = profile
@@ -220,6 +378,11 @@ class SubagentConfig:
         """
         profiles = {}
         for name, profile_data in data.get('profiles', {}).items():
+            # Parse GC configuration if present
+            gc_config = None
+            if 'gc' in profile_data and profile_data['gc']:
+                gc_config = GCProfileConfig.from_dict(profile_data['gc'])
+
             profiles[name] = SubagentProfile(
                 name=name,
                 description=profile_data.get('description', ''),
@@ -231,6 +394,7 @@ class SubagentConfig:
                 auto_approved=profile_data.get('auto_approved', False),
                 icon=profile_data.get('icon'),
                 icon_name=profile_data.get('icon_name'),
+                gc=gc_config,
             )
 
         return cls(

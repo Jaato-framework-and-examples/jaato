@@ -39,6 +39,7 @@ from shared import (
 )
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
 from shared.plugins.base import parse_command_args
+from shared.plugins.gc import load_gc_from_file
 
 # Reuse input handling from simple-client
 from input_handler import InputHandler
@@ -109,15 +110,13 @@ class RichClient:
         if self.verbose and self._display:
             self._display.add_system_message(msg, style="cyan")
 
-    def _create_output_callback(self, stop_spinner_on_first: bool = False,
+    def _create_output_callback(self,
                                   suppress_sources: Optional[set] = None) -> Callable[[str, str, str], None]:
         """Create callback for real-time output to display.
 
         Args:
-            stop_spinner_on_first: If True, stop the spinner on first output.
             suppress_sources: Set of source names to suppress (e.g., {"permission"})
         """
-        first_output_received = [False]  # Use list for mutability in closure
         suppress = suppress_sources or set()
 
         def callback(source: str, text: str, mode: str) -> None:
@@ -125,14 +124,13 @@ class RichClient:
                 # Skip suppressed sources (e.g., permission output shown in tool tree)
                 if source in suppress:
                     return
-                # Stop spinner on first output if requested
-                if stop_spinner_on_first and not first_output_received[0]:
-                    first_output_received[0] = True
-                    self._display.stop_spinner()
-                # Skip append_output for "model" source when UI hooks are active
-                # (hooks handle routing model output with agent context)
-                # But allow plugin output (references, clarification, etc.) through
-                if self._agent_registry and source == "model":
+                # Note: Spinner is NOT stopped here. It remains active during the
+                # entire turn to show "thinking..." when model pauses between chunks.
+                # The spinner is stopped when status changes to "done".
+                # Skip ALL sources when UI hooks are active - the hooks handle
+                # routing all output (model, system, plugin) to the correct buffer
+                # via on_agent_output. Without this, output gets duplicated.
+                if self._agent_registry:
                     return
                 self._display.append_output(source, text, mode)
         return callback
@@ -232,12 +230,8 @@ class RichClient:
 
     def initialize(self) -> bool:
         """Initialize the client."""
-        # Load environment
-        env_path = ROOT / self.env_file
-        if env_path.exists():
-            load_dotenv(env_path)
-        else:
-            load_dotenv(self.env_file)
+        # Load environment from CWD or explicit --env-file path
+        load_dotenv(self.env_file)
 
         # Check CA bundle
         active_bundle = active_cert_bundle(verbose=False)
@@ -315,6 +309,12 @@ class RichClient:
         # Configure tools
         self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
+        # Load GC configuration from .jaato/gc.json if present
+        gc_result = load_gc_from_file()
+        if gc_result:
+            gc_plugin, gc_config = gc_result
+            self._jaato.set_gc_plugin(gc_plugin, gc_config)
+
         # Setup session plugin
         self._setup_session_plugin()
 
@@ -328,16 +328,54 @@ class RichClient:
         if not self.todo_plugin or not self._display:
             return
 
+        # Create callbacks that map agent_name to registry agent_id
+        # The reporter passes (plan_data, agent_name) where agent_name is the
+        # TodoPlugin's _agent_name (e.g., None for main, "skill-code-020..." for subagent)
+        #
+        # Registry agent_id format:
+        #   - Main agent: "main"
+        #   - Subagents: "subagent_N" (e.g., "subagent_1", "subagent_2")
+        #
+        # We need to look up the actual agent_id by name since subagent IDs
+        # don't follow a predictable pattern from the profile name.
+        def update_callback(plan_data, agent_name):
+            if agent_name is None or agent_name == "main":
+                target_id = "main"
+            else:
+                # Look up the agent_id by profile name
+                target_id = self._agent_registry.find_agent_id_by_name(agent_name)
+                if not target_id:
+                    # Fallback: try direct match (shouldn't happen normally)
+                    self._trace(f"Plan update: agent_name '{agent_name}' not found in registry")
+                    target_id = agent_name
+            self._display.update_plan(plan_data, agent_id=target_id)
+
+        def clear_callback(agent_name):
+            if agent_name is None or agent_name == "main":
+                target_id = "main"
+            else:
+                target_id = self._agent_registry.find_agent_id_by_name(agent_name)
+                if not target_id:
+                    target_id = agent_name
+            self._display.clear_plan(agent_id=target_id)
+
         # Create live reporter with callbacks to display
         live_reporter = create_live_reporter(
-            update_callback=self._display.update_plan,
-            clear_callback=self._display.clear_plan,
+            update_callback=update_callback,
+            clear_callback=clear_callback,
             output_callback=self._create_output_callback(),
         )
 
         # Replace the todo plugin's reporter
         if hasattr(self.todo_plugin, '_reporter'):
             self.todo_plugin._reporter = live_reporter
+
+        # Also set reporter on subagent plugin so subagent TodoPlugins use it
+        if self.registry:
+            subagent_plugin = self.registry.get_plugin("subagent")
+            if subagent_plugin and hasattr(subagent_plugin, 'set_plan_reporter'):
+                subagent_plugin.set_plan_reporter(live_reporter)
+                self._trace("Plan reporter configured for subagent plugin")
 
     def _trace(self, msg: str) -> None:
         """Write trace message to file for debugging."""
@@ -375,6 +413,24 @@ class RichClient:
                     # Channel finished - start spinner while model continues
                     self._display.start_spinner()
 
+        # Create a cancel token provider that checks the session's current token
+        def get_cancel_token():
+            """Get the current cancel token from the session, if any."""
+            if self._jaato:
+                session = self._jaato.get_session()
+                if session and hasattr(session, '_cancel_token'):
+                    return session._cancel_token
+            return None
+
+        # Wrapper that acts like a CancelToken but checks the current session token
+        class CancelTokenProxy:
+            @property
+            def is_cancelled(self):
+                token = get_cancel_token()
+                return token.is_cancelled if token else False
+
+        cancel_token_proxy = CancelTokenProxy()
+
         # Set callbacks on clarification plugin channel
         if self.registry:
             clarification_plugin = self.registry.get_plugin("clarification")
@@ -385,6 +441,7 @@ class RichClient:
                         output_callback=self._create_output_callback(),
                         input_queue=self._channel_input_queue,
                         prompt_callback=on_prompt_state_change,
+                        cancel_token=cancel_token_proxy,
                     )
                     self._trace("Clarification channel callbacks set (queue)")
 
@@ -410,6 +467,7 @@ class RichClient:
                     output_callback=self._create_output_callback(suppress_sources={"permission"}),
                     input_queue=self._channel_input_queue,
                     prompt_callback=on_prompt_state_change,
+                    cancel_token=cancel_token_proxy,
                 )
                 self._trace("Permission channel callbacks set (queue)")
 
@@ -436,6 +494,13 @@ class RichClient:
 
         session.set_retry_callback(on_retry)
         self._trace("Retry callback configured for output panel")
+
+        # Also set callback on subagent plugin so subagent sessions use it
+        if self.registry:
+            subagent_plugin = self.registry.get_plugin("subagent")
+            if subagent_plugin and hasattr(subagent_plugin, 'set_retry_callback'):
+                subagent_plugin.set_retry_callback(on_retry)
+                self._trace("Retry callback configured for subagent plugin")
 
     def _setup_agent_hooks(self) -> None:
         """Set up agent lifecycle hooks for UI integration."""
@@ -467,9 +532,10 @@ class RichClient:
             def on_agent_output(self, agent_id, source, text, mode):
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
-                    # Stop spinner on first output from model
-                    if source == "model" and buffer.spinner_active:
-                        buffer.stop_spinner()
+                    # Note: We do NOT stop the spinner on model output.
+                    # The spinner should remain active during the entire turn
+                    # to show "thinking..." when the model pauses between chunks.
+                    # The spinner is stopped when status changes to "done".
                     buffer.append(source, text, mode)
                     # Auto-scroll to bottom and refresh display
                     buffer.scroll_to_bottom()
@@ -827,15 +893,123 @@ class RichClient:
         # Spinner is already started by on_agent_status_changed hook
         # (called from _handle_input before this method)
 
-        # Create callback that stops spinner on first output
-        output_callback = self._create_output_callback(stop_spinner_on_first=True)
+        # Create callback - spinner stays active during entire turn
+        # to show "thinking..." when model pauses between streaming chunks
+        output_callback = self._create_output_callback()
+
+        # Track maximum token usage seen during this turn (to avoid jumping backwards)
+        # Start at 0 - streaming prompt_tokens already includes full history,
+        # so each turn's streaming values naturally represent the current context.
+        # Don't initialize from get_context_usage() as turn_accounting values may differ
+        # from streaming values, causing updates to be incorrectly skipped.
+        max_tokens_seen = {'prompt': 0, 'output': 0, 'total': 0}
+
+        # Create usage update callback for real-time token accounting
+        def usage_update_callback(usage) -> None:
+            """Update status bar with real-time token usage during streaming."""
+            # Skip zero values (initialization chunks, not real data)
+            if usage.total_tokens == 0:
+                return
+
+            # Write to provider trace for debugging (same file as provider uses)
+            import datetime
+            trace_path = os.environ.get(
+                "JAATO_PROVIDER_TRACE",
+                os.path.join(tempfile.gettempdir(), "provider_trace.log")
+            )
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [rich_client_callback] received: prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}\n")
+                    f.flush()
+            except Exception as e:
+                pass  # Ignore trace errors
+            self._trace(f"[usage_callback] received: prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
+
+            # Only update if we see HIGHER values (prevents backwards jumping)
+            # The prompt_tokens is the most reliable indicator of context size
+            # since it includes the full conversation history
+            if usage.prompt_tokens >= max_tokens_seen['prompt']:
+                max_tokens_seen['prompt'] = usage.prompt_tokens
+                max_tokens_seen['output'] = max(max_tokens_seen['output'], usage.output_tokens)
+                max_tokens_seen['total'] = max_tokens_seen['prompt'] + max_tokens_seen['output']
+            else:
+                # Skip update if prompt_tokens dropped (new API call with different context)
+                self._trace(f"[usage_callback] skipping update: prompt {usage.prompt_tokens} < max {max_tokens_seen['prompt']}")
+                return
+
+            # Trace the condition check
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [rich_client_callback] display={self._display is not None} jaato={self._jaato is not None}\n")
+                    f.flush()
+            except Exception:
+                pass
+            if self._display and self._jaato:
+                # Get context limit for percentage calculation
+                context_limit = self._jaato.get_context_limit()
+                total_tokens = max_tokens_seen['total']
+                percent_used = (total_tokens / context_limit * 100) if context_limit > 0 else 0
+                tokens_remaining = max(0, context_limit - total_tokens)
+
+                # Build usage dict for display update
+                usage_dict = {
+                    'total_tokens': total_tokens,
+                    'prompt_tokens': max_tokens_seen['prompt'],
+                    'output_tokens': max_tokens_seen['output'],
+                    'context_limit': context_limit,
+                    'percent_used': percent_used,
+                    'tokens_remaining': tokens_remaining,
+                }
+                self._trace(f"[usage_callback] updating display: {percent_used:.1f}% used, {total_tokens} tokens")
+
+                # Update agent registry if available (status bar reads from here)
+                if self._agent_registry:
+                    agent_id = self._agent_registry.get_selected_agent_id()
+                    if agent_id:
+                        self._agent_registry.update_context_usage(
+                            agent_id=agent_id,
+                            total_tokens=total_tokens,
+                            prompt_tokens=max_tokens_seen['prompt'],
+                            output_tokens=max_tokens_seen['output'],
+                            turns=0,  # Don't know turn count during streaming
+                            percent_used=percent_used
+                        )
+
+                # Also update display directly (fallback if no registry)
+                self._display.update_context_usage(usage_dict)
+
+                # Trace after update
+                try:
+                    with open(trace_path, "a") as f:
+                        ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                        f.write(f"[{ts}] [rich_client_callback] update_context_usage called, percent={percent_used:.1f}%\n")
+                        f.flush()
+                except Exception:
+                    pass
+
+        def gc_threshold_callback(percent_used: float, threshold: float) -> None:
+            """Handle GC threshold crossing notification."""
+            self._trace(f"[gc_threshold] Context threshold crossed: {percent_used:.1f}% >= {threshold}%")
+            # Show warning in output (optional - GC will happen automatically after turn)
+            if self._display:
+                self._display.add_system_message(
+                    f"⚠ Context usage ({percent_used:.1f}%) exceeds threshold ({threshold}%). GC will run after this turn.",
+                    style="yellow"
+                )
 
         def model_thread():
             self._trace("[model_thread] started")
             self._model_running = True
             try:
                 self._trace("[model_thread] calling send_message...")
-                self._jaato.send_message(prompt, on_output=output_callback)
+                self._jaato.send_message(
+                    prompt,
+                    on_output=output_callback,
+                    on_usage_update=usage_update_callback,
+                    on_gc_threshold=gc_threshold_callback
+                )
                 self._trace(f"[model_thread] send_message returned")
 
                 # Update context usage in status bar
@@ -860,8 +1034,14 @@ class RichClient:
             finally:
                 self._model_running = False
                 self._model_thread = None
-                # Ensure spinner is stopped (in case no output was received)
-                if self._display:
+                # Signal that main agent is done - this stops the spinner
+                if self._ui_hooks:
+                    self._ui_hooks.on_agent_status_changed(
+                        agent_id="main",
+                        status="done"
+                    )
+                elif self._display:
+                    # Fallback: directly stop spinner if no hooks
                     self._display.stop_spinner()
                 self._trace("[model_thread] finished")
 
@@ -1015,6 +1195,12 @@ class RichClient:
 
         # Set model info in status bar
         self._display.set_model_info(self._model_provider, self._model_name)
+
+        # Set up stop callbacks for Ctrl-C handling
+        self._display.set_stop_callbacks(
+            stop_callback=lambda: self._jaato.stop() if self._jaato else False,
+            is_running_callback=lambda: self._jaato.is_processing if self._jaato else False
+        )
 
         # Set up the live reporter and queue channels
         self._setup_live_reporter()
@@ -1513,9 +1699,13 @@ class RichClient:
             part: A content part (text, function_call, or function_response).
             lines: List to append formatted lines to.
         """
-        # Text content
-        if hasattr(part, 'text') and part.text:
+        # Text content - use 'is not None' to properly handle empty strings
+        # (which can occur when SDK returns parts we don't fully recognize)
+        if hasattr(part, 'text') and part.text is not None:
             text = part.text
+            if not text:
+                # Empty text part - skip display (don't show as "unknown")
+                return
             if len(text) > 500:
                 text = text[:500] + f"... [{len(part.text)} chars total]"
             lines.append((f"  {text}", ""))
@@ -1695,6 +1885,7 @@ class RichClient:
             ("  ↑/↓       - Navigate prompt history (or completion menu)", "dim"),
             ("  ←/→       - Move cursor within line", "dim"),
             ("  Ctrl+A/E  - Jump to start/end of line", "dim"),
+            ("  Ctrl+Y    - Yank (copy) last response to clipboard", "dim"),
             ("  TAB/Enter - Accept selected completion", "dim"),
             ("  Escape    - Dismiss completion menu", "dim"),
             ("  Esc+Esc   - Clear input", "dim"),
