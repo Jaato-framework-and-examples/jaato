@@ -179,6 +179,37 @@ class GitHubModelsProvider:
         # Models cache: (timestamp, models_list)
         self._models_cache: Optional[Tuple[float, List[str]]] = None
 
+        # Agent context for trace identification
+        self._agent_type: str = "main"
+        self._agent_name: Optional[str] = None
+        self._agent_id: str = "main"
+
+    def set_agent_context(
+        self,
+        agent_type: str = "main",
+        agent_name: Optional[str] = None,
+        agent_id: str = "main"
+    ) -> None:
+        """Set agent context for trace identification.
+
+        Args:
+            agent_type: Type of agent ("main" or "subagent").
+            agent_name: Optional name for the agent (e.g., profile name).
+            agent_id: Unique identifier for the agent instance.
+        """
+        self._agent_type = agent_type
+        self._agent_name = agent_name
+        self._agent_id = agent_id
+
+    def _get_trace_prefix(self) -> str:
+        """Get the trace prefix including agent context."""
+        if self._agent_type == "main":
+            return "github_models:main"
+        elif self._agent_name:
+            return f"github_models:subagent:{self._agent_name}"
+        else:
+            return f"github_models:subagent:{self._agent_id}"
+
     def _trace(self, msg: str) -> None:
         """Write trace message to file for debugging streaming interactions."""
         import tempfile
@@ -190,9 +221,10 @@ class GitHubModelsProvider:
             return
         import datetime
         try:
+            prefix = self._get_trace_prefix()
             with open(trace_path, "a") as f:
                 ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] [github_models] {msg}\n")
+                f.write(f"[{ts}] [{prefix}] {msg}\n")
                 f.flush()
         except Exception:
             pass  # Don't let tracing errors break the provider
@@ -794,7 +826,8 @@ class GitHubModelsProvider:
                 accumulated_text = []
 
         try:
-            self._trace(f"STREAM_START message={repr(message[:100])}...")
+            self._trace(f"STREAM_START message_len={len(message)}")
+            self._trace(f"STREAM_INPUT>>>\n{message}\n<<<STREAM_INPUT")
             chunk_count = 0
             response_stream = self._client.complete(
                 model=self._model_name,
@@ -850,7 +883,10 @@ class GitHubModelsProvider:
                     if on_usage_update and usage.total_tokens > 0:
                         on_usage_update(usage)
 
-            self._trace(f"STREAM_END chunks={chunk_count} finish_reason={finish_reason}")
+            # Get accumulated output before flushing
+            all_text = ''.join(accumulated_text)
+            self._trace(f"STREAM_END chunks={chunk_count} finish_reason={finish_reason} output_len={len(all_text)}")
+            self._trace(f"STREAM_OUTPUT>>>\n{all_text}\n<<<STREAM_OUTPUT")
 
         except Exception as e:
             self._trace(f"STREAM_ERROR {type(e).__name__}: {e}")
@@ -947,6 +983,12 @@ class GitHubModelsProvider:
         try:
             tool_names = [r.name for r in results]
             self._trace(f"STREAM_TOOL_RESULTS_START tools={tool_names}")
+            # Log tool results as input
+            tool_results_summary = []
+            for r in results:
+                result_str = str(r.result) if r.result is not None else "None"
+                tool_results_summary.append(f"{r.name}: {result_str}")
+            self._trace(f"STREAM_TOOL_INPUT>>>\n" + "\n".join(tool_results_summary) + "\n<<<STREAM_TOOL_INPUT")
             chunk_count = 0
             response_stream = self._client.complete(
                 model=self._model_name,
@@ -1002,7 +1044,10 @@ class GitHubModelsProvider:
                     if on_usage_update and usage.total_tokens > 0:
                         on_usage_update(usage)
 
-            self._trace(f"STREAM_TOOL_RESULTS_END chunks={chunk_count} finish_reason={finish_reason}")
+            # Get accumulated output before flushing
+            all_text = ''.join(accumulated_text)
+            self._trace(f"STREAM_TOOL_RESULTS_END chunks={chunk_count} finish_reason={finish_reason} output_len={len(all_text)}")
+            self._trace(f"STREAM_TOOL_OUTPUT>>>\n{all_text}\n<<<STREAM_TOOL_OUTPUT")
 
         except Exception as e:
             self._trace(f"STREAM_TOOL_RESULTS_ERROR {type(e).__name__}: {e}")
