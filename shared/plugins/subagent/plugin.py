@@ -1449,7 +1449,7 @@ class SubagentPlugin:
 
             session = self._runtime.create_session(
                 model=model,
-                tools=profile.plugins if profile.plugins else None,
+                tools=profile.plugins,  # Pass directly: [] = no tools, ["cli"] = only cli
                 system_instructions=profile.system_instructions,
                 plugin_configs=effective_plugin_configs if effective_plugin_configs else None
             )
