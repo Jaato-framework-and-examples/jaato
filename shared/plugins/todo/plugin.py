@@ -497,7 +497,7 @@ class TodoPlugin:
         status_str = args.get("status", "")
         result = args.get("result")
         error = args.get("error")
-        self._trace(f"updateStep: step_id={step_id}, status={status_str}")
+        self._trace(f"updateStep: step_id={step_id}, status={status_str}, agent_name={self._agent_name}")
 
         if not step_id:
             return {"error": "step_id is required"}
@@ -515,7 +515,10 @@ class TodoPlugin:
         # Get current plan
         plan = self._get_current_plan()
         if not plan:
-            return {"error": "No active plan. Create a plan first with createPlan."}
+            # Enhanced debugging: show what plan IDs exist
+            known_agents = list(self._current_plan_ids.keys())
+            self._trace(f"updateStep ERROR: No plan for agent={self._agent_name}, known_agents={known_agents}")
+            return {"error": f"No active plan. Create a plan first with createPlan. (agent={self._agent_name})"}
 
         if not plan.started:
             return {"error": "Plan not started. Call startPlan first to get user approval."}
@@ -523,6 +526,9 @@ class TodoPlugin:
         # Find step
         step = plan.get_step_by_id(step_id)
         if not step:
+            # Enhanced debugging: show what steps exist in the plan
+            existing_step_ids = [s.step_id for s in plan.steps]
+            self._trace(f"updateStep ERROR: Step {step_id} not in plan {plan.plan_id}, existing={existing_step_ids}")
             return {"error": f"Step not found: {step_id}"}
 
         # Update step status
