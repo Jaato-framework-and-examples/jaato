@@ -41,6 +41,38 @@ shared/plugins/template/
 └── README.md
 ```
 
+### Prerequisite: Extract Shared Diff Utilities
+
+**Problem**: The `file_edit` plugin contains `diff_utils.py` with functions for generating
+unified diffs (`generate_unified_diff`, `generate_new_file_diff`, `summarize_diff`). The
+template plugin needs these same utilities for permission preview. Options:
+
+| Option | Trade-off |
+|--------|-----------|
+| Import from `file_edit` | Creates coupling; template depends on file_edit |
+| Duplicate code | Maintenance burden; inconsistency risk |
+| Extract to shared location | Clean; one-time refactor |
+
+**Recommendation**: Extract `diff_utils.py` to `shared/utils/` before implementing template plugin.
+
+```
+shared/
+├── plugins/
+│   ├── file_edit/
+│   │   └── plugin.py        # imports from shared/utils/diff_utils
+│   └── template/
+│       └── plugin.py        # imports from shared/utils/diff_utils
+└── utils/
+    └── diff_utils.py        # Extracted: generate_unified_diff, etc.
+```
+
+**Refactor steps**:
+1. Create `shared/utils/diff_utils.py` (move existing code)
+2. Update `file_edit` imports: `from shared.utils.diff_utils import ...`
+3. Template plugin uses same import path
+
+This is a small, low-risk refactor that enables clean code sharing without plugin coupling.
+
 ## Tool Interface
 
 ### Recommended Design: Single Unified Tool
@@ -401,12 +433,15 @@ Template rendering requires approval since it writes files."""
 | Template Storage | `.templates/` convention, any path allowed |
 | Permissions | Requires approval (shows rendered diff) |
 | Discovery Tool | Not initially; use file tools |
+| Shared Utilities | Extract `diff_utils.py` to `shared/utils/` |
 
 ## Next Steps
 
-1. Create `shared/plugins/template/` directory structure
-2. Implement `TemplatePlugin` following existing patterns
-3. Add Jinja2 dependency to requirements.txt
-4. Write tests for variable substitution, conditionals, loops
-5. Add integration test with permission system
-6. Document in CLAUDE.md
+1. **Extract shared utilities**: Move `diff_utils.py` from `file_edit` to `shared/utils/`
+2. Update `file_edit` imports to use new location
+3. Create `shared/plugins/template/` directory structure
+4. Implement `TemplatePlugin` following existing patterns
+5. Add Jinja2 dependency to requirements.txt
+6. Write tests for variable substitution, conditionals, loops
+7. Add integration test with permission system
+8. Document in CLAUDE.md
