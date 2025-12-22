@@ -159,7 +159,20 @@ def part_from_sdk(part: types.Part) -> Part:
             "data": inline.data
         })
 
-    # Unknown - return empty text
+    # Unknown part type - log a warning and return empty text
+    # This helps diagnose when the SDK returns new/unexpected part types
+    import sys
+    part_attrs = []
+    for attr in ['text', 'function_call', 'function_response', 'inline_data',
+                 'executable_code', 'code_execution_result', 'thought']:
+        if hasattr(part, attr):
+            val = getattr(part, attr)
+            if val is not None:
+                part_attrs.append(f"{attr}={type(val).__name__}")
+    if part_attrs:
+        print(f"[google_genai/converters] Warning: Unknown SDK part type with attrs: {part_attrs}",
+              file=sys.stderr)
+
     return Part(text="")
 
 
@@ -273,6 +286,85 @@ def tool_results_to_sdk_parts(results: List[ToolResult]) -> List[types.Part]:
     return [tool_result_to_sdk_part(r) for r in (results or [])]
 
 
+# ==================== Streaming Helpers ====================
+
+def extract_text_from_chunk(chunk) -> Optional[str]:
+    """Extract text from a streaming chunk without triggering SDK warnings.
+
+    The SDK's chunk.text accessor prints warnings when there are non-text
+    parts (like function calls). This function safely extracts text by
+    iterating through parts directly.
+
+    Args:
+        chunk: A streaming chunk from send_message_stream.
+
+    Returns:
+        Text content if present, None otherwise.
+    """
+    if not chunk or not hasattr(chunk, 'candidates') or not chunk.candidates:
+        return None
+
+    texts = []
+    for candidate in chunk.candidates:
+        if hasattr(candidate, 'content') and candidate.content:
+            for part in (candidate.content.parts or []):
+                # Check for text attribute directly, avoid using chunk.text
+                if hasattr(part, 'text') and part.text:
+                    texts.append(part.text)
+
+    return ''.join(texts) if texts else None
+
+
+def function_call_from_sdk(fc) -> Optional[FunctionCall]:
+    """Convert SDK FunctionCall to internal FunctionCall.
+
+    Used during streaming to convert function calls from chunks.
+
+    Args:
+        fc: SDK FunctionCall object.
+
+    Returns:
+        Internal FunctionCall or None if invalid.
+    """
+    if not fc or not hasattr(fc, 'name'):
+        return None
+
+    call_id = str(uuid.uuid4())[:8]
+    return FunctionCall(
+        id=call_id,
+        name=fc.name,
+        args=dict(fc.args) if hasattr(fc, 'args') and fc.args else {}
+    )
+
+
+def finish_reason_from_sdk(reason) -> FinishReason:
+    """Convert SDK finish reason to internal FinishReason.
+
+    Used during streaming to convert finish reasons from chunks.
+
+    Args:
+        reason: SDK finish reason (enum or string).
+
+    Returns:
+        Internal FinishReason.
+    """
+    if not reason:
+        return FinishReason.UNKNOWN
+
+    reason_str = str(reason).upper()
+
+    if 'STOP' in reason_str:
+        return FinishReason.STOP
+    elif 'MAX' in reason_str or 'LENGTH' in reason_str:
+        return FinishReason.MAX_TOKENS
+    elif 'SAFETY' in reason_str:
+        return FinishReason.SAFETY
+    elif 'TOOL' in reason_str or 'FUNCTION' in reason_str:
+        return FinishReason.TOOL_USE
+
+    return FinishReason.UNKNOWN
+
+
 # ==================== Response Conversion ====================
 
 def extract_text_from_response(response) -> Optional[str]:
@@ -308,6 +400,28 @@ def extract_function_calls_from_response(response) -> List[FunctionCall]:
             ))
 
     return calls
+
+
+def extract_parts_from_response(response) -> List[Part]:
+    """Extract parts from SDK response, preserving order of text and function calls."""
+    parts = []
+
+    if not response or not hasattr(response, 'candidates') or not response.candidates:
+        return parts
+
+    for candidate in response.candidates:
+        if not hasattr(candidate, 'content') or not candidate.content:
+            continue
+
+        for sdk_part in (candidate.content.parts or []):
+            if hasattr(sdk_part, 'text') and sdk_part.text:
+                parts.append(Part.from_text(sdk_part.text))
+            elif hasattr(sdk_part, 'function_call') and sdk_part.function_call:
+                fc = function_call_from_sdk(sdk_part.function_call)
+                if fc:
+                    parts.append(Part.from_function_call(fc))
+
+    return parts
 
 
 def extract_finish_reason_from_response(response) -> FinishReason:
@@ -349,8 +463,7 @@ def extract_usage_from_response(response) -> TokenUsage:
 def response_from_sdk(response) -> ProviderResponse:
     """Convert SDK response to internal ProviderResponse."""
     return ProviderResponse(
-        text=extract_text_from_response(response),
-        function_calls=extract_function_calls_from_response(response),
+        parts=extract_parts_from_response(response),
         usage=extract_usage_from_response(response),
         finish_reason=extract_finish_reason_from_response(response),
         raw=response

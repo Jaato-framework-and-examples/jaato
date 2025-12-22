@@ -40,6 +40,7 @@ class AgentInfo:
     history: List[Any] = field(default_factory=list)  # List[Message]
     turn_accounting: List[Dict[str, Any]] = field(default_factory=list)
     context_usage: Dict[str, Any] = field(default_factory=dict)
+    plan_data: Optional[Dict[str, Any]] = None  # Plan state for this agent
 
     # Timestamps
     created_at: datetime = field(default_factory=datetime.now)
@@ -331,6 +332,36 @@ class AgentRegistry:
             agent = self.get_selected_agent()
             return agent.name if agent else "main"
 
+    def get_selected_plan_data(self) -> Optional[Dict[str, Any]]:
+        """Get selected agent's plan data."""
+        with self._lock:
+            agent = self.get_selected_agent()
+            return agent.plan_data if agent else None
+
+    def update_plan(self, agent_id: str, plan_data: Optional[Dict[str, Any]]) -> None:
+        """Update agent's plan data.
+
+        Args:
+            agent_id: Which agent's plan to update.
+            plan_data: Plan status dict, or None to clear.
+        """
+        with self._lock:
+            agent = self._agents.get(agent_id)
+            if not agent:
+                return
+            agent.plan_data = plan_data
+
+    def clear_plan(self, agent_id: str) -> None:
+        """Clear agent's plan data.
+
+        Args:
+            agent_id: Which agent's plan to clear.
+        """
+        with self._lock:
+            agent = self._agents.get(agent_id)
+            if agent:
+                agent.plan_data = None
+
     def get_all_agent_ids(self) -> List[str]:
         """Get all agent IDs in display order.
 
@@ -339,3 +370,21 @@ class AgentRegistry:
         """
         with self._lock:
             return list(self._agent_order)
+
+    def find_agent_id_by_name(self, name: str) -> Optional[str]:
+        """Find agent_id by profile/agent name.
+
+        This is useful for mapping from TodoPlugin's agent_name (profile name)
+        to the actual agent_id in the registry.
+
+        Args:
+            name: Agent/profile name to search for.
+
+        Returns:
+            agent_id if found, None otherwise.
+        """
+        with self._lock:
+            for agent_id, agent in self._agents.items():
+                if agent.name == name:
+                    return agent_id
+            return None

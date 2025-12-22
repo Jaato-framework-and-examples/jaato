@@ -25,6 +25,8 @@ Example:
 import mimetypes
 import os
 import re
+import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Callable, Optional
 
@@ -69,6 +71,23 @@ class MultimodalPlugin:
         self._initialized = False
         # Track detected images from last prompt enrichment
         self._detected_images: Dict[str, Path] = {}
+        self._agent_name: Optional[str] = None
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [MULTIMODAL{agent_prefix}] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
 
     @property
     def name(self) -> str:
@@ -86,15 +105,18 @@ class MultimodalPlugin:
                 - base_path: Base directory for resolving relative paths
                 - max_image_size_mb: Maximum image file size in MB
         """
-        if config:
-            if 'base_path' in config:
-                self._base_path = Path(config['base_path'])
-            if 'max_image_size_mb' in config:
-                self._max_image_size_mb = float(config['max_image_size_mb'])
+        config = config or {}
+        self._agent_name = config.get("agent_name")
+        if 'base_path' in config:
+            self._base_path = Path(config['base_path'])
+        if 'max_image_size_mb' in config:
+            self._max_image_size_mb = float(config['max_image_size_mb'])
         self._initialized = True
+        self._trace(f"initialize: base_path={self._base_path}, max_size={self._max_image_size_mb}MB")
 
     def shutdown(self) -> None:
         """Shutdown the multimodal plugin."""
+        self._trace("shutdown")
         self._detected_images.clear()
         self._initialized = False
 
@@ -226,8 +248,9 @@ class MultimodalPlugin:
             - Success: {'_multimodal': True, 'image_data': bytes, 'mime_type': str, ...}
             - Error: {'error': str}
         """
+        path_str = args.get('path')
+        self._trace(f"viewImage: path={path_str}")
         try:
-            path_str = args.get('path')
             if not path_str:
                 return {'error': 'viewImage: path is required'}
 

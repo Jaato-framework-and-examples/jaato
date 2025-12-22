@@ -19,6 +19,7 @@ from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
+from .plugins.model_provider.base import UsageUpdateCallback, GCThresholdCallback
 from .plugins.model_provider.types import (
     Message,
     Part,
@@ -147,6 +148,75 @@ class JaatoClient:
         if not self._session:
             raise RuntimeError("Client not configured. Call configure_tools() first.")
         return self._session
+
+    # ==================== Stop/Cancellation Support ====================
+
+    def stop(self) -> bool:
+        """Stop the current message processing.
+
+        If a message is being processed, signals the session to stop.
+        The session will exit gracefully at the next cancellation point.
+
+        Returns:
+            True if a stop was requested (message was running),
+            False if no message was running or session not configured.
+
+        Note:
+            Cancellation is cooperative - it may not be immediate.
+            The current streaming chunk will complete before stopping.
+
+        Example:
+            import threading
+
+            # Start message in thread
+            def run():
+                response = client.send_message("Tell me a long story")
+
+            thread = threading.Thread(target=run)
+            thread.start()
+
+            # Later, stop the message
+            time.sleep(2)
+            client.stop()
+            thread.join()
+        """
+        if self._session:
+            return self._session.request_stop()
+        return False
+
+    @property
+    def is_processing(self) -> bool:
+        """Check if a message is currently being processed.
+
+        Returns:
+            True if send_message() is in progress, False otherwise.
+        """
+        if self._session:
+            return self._session.is_running
+        return False
+
+    @property
+    def supports_stop(self) -> bool:
+        """Check if the current provider supports mid-turn cancellation.
+
+        Returns:
+            True if stop() will be effective, False otherwise.
+        """
+        if self._session:
+            return self._session.supports_stop
+        return False
+
+    def set_streaming_enabled(self, enabled: bool) -> None:
+        """Enable or disable streaming mode.
+
+        When enabled (default), the client uses streaming APIs for
+        real-time output and better cancellation support.
+
+        Args:
+            enabled: True to use streaming, False for batched responses.
+        """
+        if self._session:
+            self._session.set_streaming_enabled(enabled)
 
     def set_ui_hooks(self, hooks: 'AgentUIHooks') -> None:
         """Set UI hooks for agent lifecycle events.
@@ -309,7 +379,9 @@ class JaatoClient:
     def send_message(
         self,
         message: str,
-        on_output: Optional[OutputCallback] = None
+        on_output: Optional[OutputCallback] = None,
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_gc_threshold: Optional[GCThresholdCallback] = None
     ) -> str:
         """Send a message to the model.
 
@@ -317,6 +389,12 @@ class JaatoClient:
             message: The user's message text.
             on_output: Optional callback for real-time output.
                 Signature: (source: str, text: str, mode: str) -> None
+            on_usage_update: Optional callback for real-time token usage.
+                Signature: (usage: TokenUsage) -> None
+            on_gc_threshold: Optional callback when GC threshold is crossed.
+                Signature: (percent_used: float, threshold: float) -> None
+                Called during streaming when context usage exceeds the configured
+                threshold, enabling proactive GC notifications.
 
         Returns:
             The final model response text.
@@ -341,7 +419,9 @@ class JaatoClient:
             if on_output:
                 on_output(source, text, mode)
 
-        response = self._session.send_message(message, wrapped_output_callback)
+        response = self._session.send_message(
+            message, wrapped_output_callback, on_usage_update, on_gc_threshold
+        )
 
         # After turn completes, update UI hooks with accounting data
         if self._ui_hooks:

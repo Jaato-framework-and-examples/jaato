@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LSP Plugin - Jaato Documentation</title>
+    <style>
+        :root {
+            --bg-color: #1a1a2e;
+            --bg-secondary: #16213e;
+            --bg-tertiary: #0f3460;
+            --text-color: #e8e8e8;
+            --text-muted: #a0a0a0;
+            --accent-color: #e94560;
+            --accent-secondary: #0f9b0f;
+            --border-color: #2a2a4a;
+            --code-bg: #0d1117;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            background: linear-gradient(135deg, var(--bg-secondary), var(--bg-tertiary));
+            padding: 3rem 2rem;
+            border-bottom: 3px solid var(--accent-color);
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        header .subtitle {
+            color: var(--text-muted);
+            font-size: 1.2rem;
+        }
+
+        nav {
+            background: var(--bg-secondary);
+            padding: 1rem 2rem;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        nav ul {
+            list-style: none;
+            display: flex;
+            gap: 2rem;
+            flex-wrap: wrap;
+        }
+
+        nav a {
+            color: var(--text-color);
+            text-decoration: none;
+            padding: 0.5rem 0;
+            border-bottom: 2px solid transparent;
+            transition: border-color 0.2s;
+        }
+
+        nav a:hover {
+            border-bottom-color: var(--accent-color);
+        }
+
+        section {
+            padding: 3rem 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        h2 {
+            color: var(--accent-color);
+            font-size: 1.8rem;
+            margin-bottom: 1.5rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid var(--border-color);
+        }
+
+        h3 {
+            color: var(--text-color);
+            font-size: 1.3rem;
+            margin: 1.5rem 0 1rem;
+        }
+
+        p {
+            margin-bottom: 1rem;
+        }
+
+        pre {
+            background: var(--code-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.5rem;
+            overflow-x: auto;
+            margin: 1rem 0;
+        }
+
+        code {
+            font-family: 'Fira Code', 'Monaco', 'Consolas', monospace;
+            font-size: 0.9rem;
+        }
+
+        :not(pre) > code {
+            background: var(--code-bg);
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            color: var(--accent-color);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+
+        th, td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border: 1px solid var(--border-color);
+        }
+
+        th {
+            background: var(--bg-secondary);
+            color: var(--accent-color);
+        }
+
+        tr:nth-child(even) {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .diagram {
+            background: var(--code-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 2rem;
+            margin: 1.5rem 0;
+            overflow-x: auto;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.85rem;
+            line-height: 1.4;
+        }
+
+        .tool-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1rem 0;
+        }
+
+        .tool-card h4 {
+            color: var(--accent-color);
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+            font-family: 'Fira Code', monospace;
+        }
+
+        .tool-card p {
+            color: var(--text-muted);
+            margin-bottom: 1rem;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .badge-read {
+            background: var(--accent-secondary);
+            color: white;
+        }
+
+        .badge-write {
+            background: var(--accent-color);
+            color: white;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .note {
+            background: rgba(233, 69, 96, 0.1);
+            border-left: 4px solid var(--accent-color);
+            padding: 1rem 1.5rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+
+        .note-title {
+            color: var(--accent-color);
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+        }
+
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            background: var(--bg-secondary);
+        }
+
+        @media (max-width: 768px) {
+            header h1 {
+                font-size: 1.8rem;
+            }
+
+            nav ul {
+                gap: 1rem;
+            }
+
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>LSP Plugin</h1>
+            <p class="subtitle">Semantic Code Intelligence for AI Agents</p>
+        </div>
+    </header>
+
+    <nav>
+        <div class="container">
+            <ul>
+                <li><a href="#overview">Overview</a></li>
+                <li><a href="#architecture">Architecture</a></li>
+                <li><a href="#configuration">Configuration</a></li>
+                <li><a href="#tools">Tools</a></li>
+                <li><a href="#commands">Commands</a></li>
+                <li><a href="#servers">Language Servers</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main class="container">
+        <section id="overview">
+            <h2>Overview</h2>
+            <p>
+                The LSP plugin integrates the <strong>Language Server Protocol</strong> into Jaato,
+                providing AI agents with semantic code intelligence capabilities. Instead of pattern
+                matching with grep, agents can use proper symbol resolution, type information, and
+                cross-file navigation.
+            </p>
+
+            <h3>Key Benefits</h3>
+            <table>
+                <tr>
+                    <th>Capability</th>
+                    <th>Without LSP</th>
+                    <th>With LSP</th>
+                </tr>
+                <tr>
+                    <td>Find definition</td>
+                    <td>Grep for "def function_name"</td>
+                    <td>Exact location, works across files</td>
+                </tr>
+                <tr>
+                    <td>Find references</td>
+                    <td>Grep for "function_name" (many false positives)</td>
+                    <td>All actual usages, semantically correct</td>
+                </tr>
+                <tr>
+                    <td>Type information</td>
+                    <td>Not available</td>
+                    <td>Full type info from language server</td>
+                </tr>
+                <tr>
+                    <td>Diagnostics</td>
+                    <td>Run compiler/linter separately</td>
+                    <td>Real-time errors and warnings</td>
+                </tr>
+            </table>
+        </section>
+
+        <section id="architecture">
+            <h2>Architecture</h2>
+
+            <div class="diagram">
+<pre>
+┌─────────────────────────────────────────────────────────────┐
+│                     AI Model / Agent                        │
+│   Uses tools: lsp_goto_definition, lsp_find_references...  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      LSPToolPlugin                          │
+│  • Tool schemas for model consumption                       │
+│  • User commands (lsp status, lsp connect, etc.)           │
+│  • Executor methods bridging sync→async                     │
+└─────────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              │      Background Thread        │
+              │   (asyncio event loop)        │
+              └───────────────┬───────────────┘
+                              │
+         ┌────────────────────┼────────────────────┐
+         ▼                    ▼                    ▼
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│   LSPClient     │  │   LSPClient     │  │   LSPClient     │
+│   (Python)      │  │   (TypeScript)  │  │   (Go)          │
+└────────┬────────┘  └────────┬────────┘  └────────┬────────┘
+         │                    │                    │
+         ▼                    ▼                    ▼
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│  pyright-       │  │  typescript-    │  │    gopls        │
+│  langserver     │  │  language-      │  │                 │
+│  (subprocess)   │  │  server         │  │  (subprocess)   │
+└─────────────────┘  └─────────────────┘  └─────────────────┘
+</pre>
+            </div>
+
+            <h3>Components</h3>
+            <table>
+                <tr>
+                    <th>Component</th>
+                    <th>File</th>
+                    <th>Purpose</th>
+                </tr>
+                <tr>
+                    <td><code>LSPToolPlugin</code></td>
+                    <td>plugin.py</td>
+                    <td>Main plugin class implementing ToolPlugin protocol</td>
+                </tr>
+                <tr>
+                    <td><code>LSPClient</code></td>
+                    <td>lsp_client.py</td>
+                    <td>Async JSON-RPC client for LSP communication</td>
+                </tr>
+                <tr>
+                    <td>Data Types</td>
+                    <td>lsp_client.py</td>
+                    <td>Position, Range, Location, Diagnostic, etc.</td>
+                </tr>
+            </table>
+
+            <h3>Threading Model</h3>
+            <p>
+                The plugin uses a background thread with an asyncio event loop to handle
+                the inherently async LSP protocol while exposing synchronous tool executors:
+            </p>
+            <div class="diagram">
+<pre>
+Main Thread (sync)          Background Thread (async)
+─────────────────          ──────────────────────────
+
+executor() called
+    │
+    ├──→ request_queue ──→ await client.method()
+    │                           │
+    │                           ▼
+    │                      LSP Server (subprocess)
+    │                           │
+    │                           ▼
+    ◄── response_queue ◄── result
+    │
+    ▼
+return result
+</pre>
+            </div>
+        </section>
+
+        <section id="configuration">
+            <h2>Configuration</h2>
+            <p>Create <code>.lsp.json</code> in your project root or home directory:</p>
+
+            <pre><code>{
+  "languageServers": {
+    "python": {
+      "command": "pyright-langserver",
+      "args": ["--stdio"],
+      "languageId": "python",
+      "autoConnect": true
+    },
+    "typescript": {
+      "command": "typescript-language-server",
+      "args": ["--stdio"],
+      "languageId": "typescript",
+      "env": {
+        "NODE_OPTIONS": "--max-old-space-size=4096"
+      }
+    },
+    "java": {
+      "command": "jdtls",
+      "args": ["-data", "/tmp/jdtls-workspace"],
+      "languageId": "java"
+    }
+  }
+}</code></pre>
+
+            <h3>Configuration Options</h3>
+            <table>
+                <tr>
+                    <th>Field</th>
+                    <th>Type</th>
+                    <th>Description</th>
+                </tr>
+                <tr>
+                    <td><code>command</code></td>
+                    <td>string</td>
+                    <td>Executable path or command name</td>
+                </tr>
+                <tr>
+                    <td><code>args</code></td>
+                    <td>string[]</td>
+                    <td>Command-line arguments</td>
+                </tr>
+                <tr>
+                    <td><code>languageId</code></td>
+                    <td>string</td>
+                    <td>Language identifier (python, typescript, etc.)</td>
+                </tr>
+                <tr>
+                    <td><code>env</code></td>
+                    <td>object</td>
+                    <td>Additional environment variables</td>
+                </tr>
+                <tr>
+                    <td><code>rootUri</code></td>
+                    <td>string</td>
+                    <td>Workspace root URI (defaults to cwd)</td>
+                </tr>
+                <tr>
+                    <td><code>autoConnect</code></td>
+                    <td>boolean</td>
+                    <td>Connect on plugin initialization (default: true)</td>
+                </tr>
+            </table>
+        </section>
+
+        <section id="tools">
+            <h2>Tools</h2>
+            <p>
+                The LSP tools use a <strong>symbol-based API</strong> - just provide the symbol name instead of
+                line/character positions. This is more natural for AI agents who understand code semantically.
+            </p>
+
+            <h3>Symbol-Based Tools</h3>
+            <div class="grid">
+                <div class="tool-card">
+                    <h4>lsp_goto_definition</h4>
+                    <span class="badge badge-read">Read-only</span>
+                    <p>Find where a symbol is defined.</p>
+                    <pre><code>{
+  "symbol": "UserService",
+  "file_path": "/path/to/file.py"  // optional
+}</code></pre>
+                </div>
+
+                <div class="tool-card">
+                    <h4>lsp_find_references</h4>
+                    <span class="badge badge-read">Read-only</span>
+                    <p>Find all usages of a symbol across the workspace.</p>
+                    <pre><code>{
+  "symbol": "processOrder",
+  "include_declaration": true
+}</code></pre>
+                </div>
+
+                <div class="tool-card">
+                    <h4>lsp_hover</h4>
+                    <span class="badge badge-read">Read-only</span>
+                    <p>Get type information and documentation for a symbol.</p>
+                    <pre><code>{
+  "symbol": "calculate_total"
+}</code></pre>
+                </div>
+
+                <div class="tool-card">
+                    <h4>lsp_rename_symbol</h4>
+                    <span class="badge badge-write">Write</span>
+                    <p>Preview workspace edits for renaming a symbol.</p>
+                    <pre><code>{
+  "symbol": "old_name",
+  "new_name": "better_name"
+}</code></pre>
+                </div>
+            </div>
+
+            <h3>File-Based Tools</h3>
+            <div class="grid">
+                <div class="tool-card">
+                    <h4>lsp_get_diagnostics</h4>
+                    <span class="badge badge-read">Read-only</span>
+                    <p>Get errors and warnings for a file. <strong>RECOMMENDED:</strong> Use BEFORE builds for instant feedback.</p>
+                    <pre><code>{
+  "file_path": "/path/to/file.py"
+}</code></pre>
+                </div>
+
+                <div class="tool-card">
+                    <h4>lsp_document_symbols</h4>
+                    <span class="badge badge-read">Read-only</span>
+                    <p>List all symbols defined in a file.</p>
+                    <pre><code>{
+  "file_path": "/path/to/file.py"
+}</code></pre>
+                </div>
+            </div>
+
+            <h3>Query-Based Tools</h3>
+            <div class="grid">
+                <div class="tool-card">
+                    <h4>lsp_workspace_symbols</h4>
+                    <span class="badge badge-read">Read-only</span>
+                    <p>Search for symbols across the entire workspace.</p>
+                    <pre><code>{
+  "query": "MyClass"
+}</code></pre>
+                </div>
+            </div>
+
+            <div class="note">
+                <div class="note-title">Symbol Lookup</div>
+                <p>
+                    Symbol-based tools automatically locate symbols in your codebase. If a symbol appears
+                    in multiple files, provide the optional <code>file_path</code> parameter to disambiguate.
+                </p>
+            </div>
+        </section>
+
+        <section id="commands">
+            <h2>User Commands</h2>
+            <table>
+                <tr>
+                    <th>Command</th>
+                    <th>Description</th>
+                </tr>
+                <tr>
+                    <td><code>lsp list</code></td>
+                    <td>List configured language servers</td>
+                </tr>
+                <tr>
+                    <td><code>lsp status</code></td>
+                    <td>Show connection status and capabilities</td>
+                </tr>
+                <tr>
+                    <td><code>lsp connect &lt;name&gt;</code></td>
+                    <td>Connect to a configured server</td>
+                </tr>
+                <tr>
+                    <td><code>lsp disconnect &lt;name&gt;</code></td>
+                    <td>Disconnect from a running server</td>
+                </tr>
+                <tr>
+                    <td><code>lsp reload</code></td>
+                    <td>Reload configuration and reconnect all</td>
+                </tr>
+                <tr>
+                    <td><code>lsp logs [server|clear]</code></td>
+                    <td>Show or clear interaction logs</td>
+                </tr>
+            </table>
+        </section>
+
+        <section id="servers">
+            <h2>Popular Language Servers</h2>
+            <table>
+                <tr>
+                    <th>Language</th>
+                    <th>Server</th>
+                    <th>Install Command</th>
+                </tr>
+                <tr>
+                    <td>Python</td>
+                    <td>pyright</td>
+                    <td><code>npm install -g pyright</code></td>
+                </tr>
+                <tr>
+                    <td>TypeScript/JS</td>
+                    <td>typescript-language-server</td>
+                    <td><code>npm install -g typescript-language-server typescript</code></td>
+                </tr>
+                <tr>
+                    <td>Rust</td>
+                    <td>rust-analyzer</td>
+                    <td><code>rustup component add rust-analyzer</code></td>
+                </tr>
+                <tr>
+                    <td>Go</td>
+                    <td>gopls</td>
+                    <td><code>go install golang.org/x/tools/gopls@latest</code></td>
+                </tr>
+                <tr>
+                    <td>C/C++</td>
+                    <td>clangd</td>
+                    <td><code>apt install clangd</code> or from LLVM</td>
+                </tr>
+                <tr>
+                    <td>Java</td>
+                    <td>Eclipse JDT LS</td>
+                    <td>Download from eclipse.org</td>
+                </tr>
+                <tr>
+                    <td>Spring Boot</td>
+                    <td>Spring Tools LS</td>
+                    <td>Part of Spring Tools 4</td>
+                </tr>
+            </table>
+
+            <h3>Comparison: MCP vs LSP</h3>
+            <table>
+                <tr>
+                    <th>Aspect</th>
+                    <th>MCP Plugin</th>
+                    <th>LSP Plugin</th>
+                </tr>
+                <tr>
+                    <td>Protocol</td>
+                    <td>Model Context Protocol</td>
+                    <td>Language Server Protocol</td>
+                </tr>
+                <tr>
+                    <td>Purpose</td>
+                    <td>General tool execution</td>
+                    <td>Code intelligence</td>
+                </tr>
+                <tr>
+                    <td>Servers</td>
+                    <td>Custom MCP servers</td>
+                    <td>100+ existing LSP servers</td>
+                </tr>
+                <tr>
+                    <td>Config</td>
+                    <td><code>.mcp.json</code></td>
+                    <td><code>.lsp.json</code></td>
+                </tr>
+            </table>
+        </section>
+    </main>
+
+    <footer>
+        <p>Jaato LSP Plugin Documentation &bull; Language Server Protocol Integration</p>
+    </footer>
+</body>
+</html>

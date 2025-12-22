@@ -9,6 +9,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Literal, Optional, Protocol, runtime_checkable
 
 from .types import (
+    CancelledException,
+    CancelToken,
+    FunctionCall,
     Message,
     Part,
     ProviderResponse,
@@ -24,6 +27,26 @@ from .types import (
 #   text: The output text
 #   mode: "write" for new block, "append" to continue
 OutputCallback = Callable[[str, str, str], None]
+
+# Streaming callback type for token-level streaming
+# Parameters: (chunk: str) - the text chunk received from the model
+StreamingCallback = Callable[[str], None]
+
+# Usage update callback for real-time token accounting
+# Parameters: (usage: TokenUsage) - current token usage from streaming
+UsageUpdateCallback = Callable[[TokenUsage], None]
+
+# GC threshold callback for proactive garbage collection notifications
+# Parameters: (percent_used: float, threshold: float) - current and threshold percentages
+# Called when context usage crosses configured threshold during streaming
+GCThresholdCallback = Callable[[float, float], None]
+
+# Function call detected callback for streaming
+# Parameters: (function_call: FunctionCall) - the function call detected mid-stream
+# Called when a function call is detected during streaming, BEFORE any subsequent
+# text chunks are emitted. This allows the caller to insert tool tree markers
+# at the correct position between text blocks.
+FunctionCallDetectedCallback = Callable[[FunctionCall], None]
 
 
 # Authentication method type for Google GenAI provider
@@ -328,29 +351,108 @@ class ModelProviderPlugin(Protocol):
         """
         ...
 
-    # ==================== Optional Extensions ====================
-    # These methods have sensible defaults but can be overridden
+    # ==================== Streaming & Cancellation ====================
+    # Optional streaming and cancellation support
 
-    # def supports_streaming(self) -> bool:
-    #     """Check if this provider supports streaming responses.
-    #
-    #     Returns:
-    #         True if streaming is supported.
-    #     """
-    #     ...
-    #
-    # def send_message_streaming(
-    #     self,
-    #     message: str,
-    #     on_token: Callable[[str], None]
-    # ) -> ProviderResponse:
-    #     """Send a message with streaming response.
-    #
-    #     Args:
-    #         message: The user's message.
-    #         on_token: Callback for each token as it arrives.
-    #
-    #     Returns:
-    #         Final ProviderResponse after streaming completes.
-    #     """
-    #     ...
+    def supports_streaming(self) -> bool:
+        """Check if this provider supports streaming responses.
+
+        When True, the provider can use send_message_streaming() for
+        real-time token delivery with optional cancellation support.
+
+        Returns:
+            True if streaming is supported, False otherwise.
+        """
+        ...
+
+    def send_message_streaming(
+        self,
+        message: str,
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+        on_usage_update: Optional['UsageUpdateCallback'] = None,
+        on_function_call: Optional['FunctionCallDetectedCallback'] = None
+    ) -> ProviderResponse:
+        """Send a message with streaming response and optional cancellation.
+
+        Streams the response token-by-token, calling on_chunk for each
+        piece of text as it arrives. Supports cancellation via CancelToken.
+
+        Args:
+            message: The user's message text.
+            on_chunk: Callback invoked for each text chunk as it streams.
+            cancel_token: Optional token to request cancellation mid-stream.
+                If cancelled, streaming stops and partial response is returned.
+            response_schema: Optional JSON Schema to constrain the response.
+            on_usage_update: Optional callback invoked when token usage is
+                updated during streaming (for real-time accounting).
+            on_function_call: Optional callback invoked when a function call
+                is detected mid-stream. Called BEFORE any subsequent text
+                chunks are emitted, allowing the caller to insert tool tree
+                markers at the correct position between text blocks.
+
+        Returns:
+            ProviderResponse with accumulated text and/or function calls.
+            If cancelled mid-stream, contains partial text accumulated so far.
+
+        Raises:
+            CancelledException: If cancel_token was triggered (optional -
+                implementations may also return partial response instead).
+            RuntimeError: If no chat session exists.
+
+        Example:
+            token = CancelToken()
+            chunks = []
+
+            def on_chunk(text):
+                chunks.append(text)
+                print(text, end='', flush=True)
+
+            # In another thread, can call token.cancel() to stop
+            response = provider.send_message_streaming(
+                "Tell me a story",
+                on_chunk=on_chunk,
+                cancel_token=token
+            )
+        """
+        ...
+
+    def send_tool_results_streaming(
+        self,
+        results: List[ToolResult],
+        on_chunk: StreamingCallback,
+        cancel_token: Optional[CancelToken] = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+        on_usage_update: Optional['UsageUpdateCallback'] = None,
+        on_function_call: Optional['FunctionCallDetectedCallback'] = None
+    ) -> ProviderResponse:
+        """Send tool results with streaming response and optional cancellation.
+
+        Like send_tool_results() but with streaming output.
+
+        Args:
+            results: List of tool execution results.
+            on_chunk: Callback invoked for each text chunk as it streams.
+            cancel_token: Optional token to request cancellation mid-stream.
+            response_schema: Optional JSON Schema to constrain the response.
+            on_usage_update: Optional callback invoked when token usage is
+                updated during streaming (for real-time accounting).
+            on_function_call: Optional callback invoked when a function call
+                is detected mid-stream. See send_message_streaming() for details.
+
+        Returns:
+            ProviderResponse with accumulated text and/or function calls.
+        """
+        ...
+
+    def supports_stop(self) -> bool:
+        """Check if this provider supports mid-turn cancellation (stop).
+
+        Stop capability requires streaming support since cancellation is
+        implemented by breaking out of the streaming loop.
+
+        Returns:
+            True if stop/cancel is supported, False otherwise.
+        """
+        ...

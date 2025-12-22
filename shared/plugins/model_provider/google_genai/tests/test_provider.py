@@ -166,17 +166,19 @@ class TestStructuredOutput:
 
     def test_provider_response_has_structured_output_field(self):
         """ProviderResponse should have structured_output field."""
-        response = ProviderResponse(text='{"key": "value"}')
+        from ...types import Part
+        response = ProviderResponse(parts=[Part.from_text('{"key": "value"}')])
         assert response.structured_output is None  # Not set by default
 
         response.structured_output = {"key": "value"}
         assert response.structured_output == {"key": "value"}
-        assert response.has_structured_output is True
+        assert response.has_structured_output() is True
 
     def test_provider_response_has_structured_output_false_when_none(self):
         """has_structured_output should be False when not set."""
-        response = ProviderResponse(text="plain text")
-        assert response.has_structured_output is False
+        from ...types import Part
+        response = ProviderResponse(parts=[Part.from_text("plain text")])
+        assert response.has_structured_output() is False
 
     @patch('google.genai.Client')
     def test_send_message_with_response_schema(self, mock_client_class):
@@ -233,7 +235,7 @@ class TestStructuredOutput:
 
         # Verify structured output was parsed
         assert response.structured_output == {"name": "Alice", "age": 30}
-        assert response.has_structured_output is True
+        assert response.has_structured_output() is True
 
     @patch('google.genai.Client')
     def test_send_message_without_response_schema(self, mock_client_class):
@@ -278,7 +280,7 @@ class TestStructuredOutput:
 
         # Verify no structured output
         assert response.structured_output is None
-        assert response.has_structured_output is False
+        assert response.has_structured_output() is False
 
     @patch('google.genai.Client')
     def test_send_message_handles_invalid_json(self, mock_client_class):
@@ -319,7 +321,7 @@ class TestStructuredOutput:
 
         # Should not raise, structured_output should be None
         assert response.structured_output is None
-        assert response.text == "not valid json {"
+        assert response.get_text() == "not valid json {"
 
     @patch('google.genai.Client')
     def test_send_tool_results_with_response_schema(self, mock_client_class):
@@ -385,26 +387,29 @@ class TestProviderResponseProperties:
 
     def test_has_function_calls_true(self):
         """has_function_calls should be True when function_calls exist."""
-        from ...types import FunctionCall
+        from ...types import FunctionCall, Part
         response = ProviderResponse(
-            function_calls=[FunctionCall(id="1", name="test", args={})]
+            parts=[Part.from_function_call(FunctionCall(id="1", name="test", args={}))]
         )
-        assert response.has_function_calls is True
+        assert response.has_function_calls() is True
 
     def test_has_function_calls_false(self):
         """has_function_calls should be False when empty."""
-        response = ProviderResponse(text="Hello")
-        assert response.has_function_calls is False
+        from ...types import Part
+        response = ProviderResponse(parts=[Part.from_text("Hello")])
+        assert response.has_function_calls() is False
 
     def test_has_structured_output_true(self):
         """has_structured_output should be True when set."""
+        from ...types import Part
         response = ProviderResponse(
-            text='{"key": "value"}',
+            parts=[Part.from_text('{"key": "value"}')],
             structured_output={"key": "value"}
         )
-        assert response.has_structured_output is True
+        assert response.has_structured_output() is True
 
     def test_has_structured_output_false(self):
         """has_structured_output should be False when None."""
-        response = ProviderResponse(text="plain text")
-        assert response.has_structured_output is False
+        from ...types import Part
+        response = ProviderResponse(parts=[Part.from_text("plain text")])
+        assert response.has_structured_output() is False

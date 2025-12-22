@@ -7,7 +7,7 @@ A clean architecture for managing multiple simultaneous MCP server connections.
 import asyncio
 import sys
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TextIO
 from contextlib import asynccontextmanager
 import os
 
@@ -56,24 +56,30 @@ class ServerConnection:
 class MCPClientManager:
     """
     Manages multiple persistent MCP server connections.
-    
+
     Usage:
         async with MCPClientManager() as manager:
             await manager.connect("atlassian", "mcp-atlassian")
             await manager.connect("github", "mcp-github")
-            
+
             # Call tools
             result = await manager.call_tool("atlassian", "search_issues", {"query": "..."})
-            
+
             # Or get session directly
             session = manager.get_session("github")
             await session.call_tool(...)
+
+    Args:
+        errlog: File-like object to receive server stderr output.
+                Defaults to sys.stderr. Pass a custom TextIO to capture
+                server initialization messages.
     """
-    
-    def __init__(self):
+
+    def __init__(self, errlog: TextIO | None = None):
         self._connections: dict[str, ServerConnection] = {}
         self._contexts: list[Any] = [] # Track context managers for cleanup
         self._task_group = None
+        self._errlog = errlog if errlog is not None else sys.stderr
     
     @property
     def servers(self) -> list[str]:
@@ -116,8 +122,8 @@ class MCPClientManager:
             env=env,
         )
         
-        # Enter the stdio_client context
-        stdio_ctx = stdio_client(config.to_stdio_params())
+        # Enter the stdio_client context with custom errlog
+        stdio_ctx = stdio_client(config.to_stdio_params(), errlog=self._errlog)
         read, write = await stdio_ctx.__aenter__()
         self._contexts.append(stdio_ctx)
         

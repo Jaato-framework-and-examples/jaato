@@ -194,6 +194,10 @@
                 <td>Error occurred</td>
               </tr>
               <tr>
+                <td><code>FinishReason.CANCELLED</code></td>
+                <td>Cancelled via CancelToken</td>
+              </tr>
+              <tr>
                 <td><code>FinishReason.UNKNOWN</code></td>
                 <td>Unknown reason</td>
               </tr>
@@ -739,6 +743,171 @@ if response.usage:
     print(f"Prompt: {response.usage.prompt_tokens}")
     print(f"Output: {response.usage.output_tokens}")
     print(f"Total: {response.usage.total_tokens}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- CancelToken -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="cancel-token">CancelToken</h2>
+          <p>
+            Thread-safe cancellation signaling for stopping long-running operations.
+            Used to gracefully interrupt message processing, streaming, or tool execution.
+          </p>
+
+          <h3>Methods</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">cancel()</span>
+              <span class="param-type">None</span>
+              <div class="param-desc">Signal cancellation. Idempotent (safe to call multiple times).</div>
+            </li>
+            <li>
+              <span class="param-name">wait(timeout)</span>
+              <span class="param-type">bool</span>
+              <div class="param-desc">Block until cancelled or timeout. Returns True if cancelled.</div>
+            </li>
+            <li>
+              <span class="param-name">raise_if_cancelled()</span>
+              <span class="param-type">None</span>
+              <div class="param-desc">Raises <code>CancelledException</code> if cancelled.</div>
+            </li>
+            <li>
+              <span class="param-name">on_cancel(callback)</span>
+              <span class="param-type">None</span>
+              <div class="param-desc">Register callback to run when cancelled.</div>
+            </li>
+            <li>
+              <span class="param-name">reset()</span>
+              <span class="param-type">None</span>
+              <div class="param-desc">Clear cancelled state (for reuse).</div>
+            </li>
+          </ul>
+
+          <h3>Properties</h3>
+          <ul class="param-list">
+            <li>
+              <span class="param-name">is_cancelled</span>
+              <span class="param-type">bool</span>
+              <span class="badge badge-property">property</span>
+              <div class="param-desc">Check if cancellation was requested.</div>
+            </li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Using CancelToken</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato import CancelToken, CancelledException
+
+# Create token
+token = CancelToken()
+
+# Check state
+if not token.is_cancelled:
+    print("Still running")
+
+# Signal cancellation (from another thread)
+token.cancel()
+
+# Check for cancellation
+token.raise_if_cancelled()  # Raises CancelledException
+
+# Register callback
+def on_cancel():
+    print("Cleanup...")
+token.on_cancel(on_cancel)
+
+# Wait for cancellation (with timeout)
+was_cancelled = token.wait(timeout=5.0)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">With JaatoClient</div>
+          <div class="code-block">
+            <pre><code class="language-python">import threading
+
+client = JaatoClient()
+# ... connect and configure ...
+
+# Cancel from another thread
+def cancel_after_delay():
+    time.sleep(5)
+    client.stop()
+
+threading.Thread(target=cancel_after_delay).start()
+
+try:
+    response = client.send_message(
+        "Long task...",
+        on_output=handler
+    )
+except CancelledException:
+    print("Request was cancelled")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- CancelledException -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="cancelled-exception">CancelledException</h2>
+          <p>
+            Exception raised when an operation is cancelled via <code>CancelToken</code>.
+            Inherits from <code>Exception</code>.
+          </p>
+
+          <h3>Constructor</h3>
+          <div class="method-signature">
+            <span class="method-name">CancelledException</span>(<span class="param">message</span>: <span class="type">str</span> = <span class="token-string">"Operation was cancelled"</span>)
+          </div>
+
+          <h3>When Raised</h3>
+          <ul>
+            <li>During streaming when <code>CancelToken.cancel()</code> is called</li>
+            <li>During retry backoff sleep</li>
+            <li>When <code>raise_if_cancelled()</code> is called on a cancelled token</li>
+            <li>Before each retry attempt if token is cancelled</li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Finish Reason</div>
+            When a request is cancelled, the response will have
+            <code>finish_reason == FinishReason.CANCELLED</code>.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Handling CancelledException</div>
+          <div class="code-block">
+            <pre><code class="language-python">from jaato import CancelledException, FinishReason
+
+try:
+    response = client.send_message(
+        "Generate a long document...",
+        on_output=handler
+    )
+    if response.finish_reason == FinishReason.CANCELLED:
+        print("Generation was cancelled")
+except CancelledException as e:
+    print(f"Cancelled: {e}")
+    # Handle partial results if needed</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">In retry context</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.retry_utils import with_retry, RetryConfig
+from jaato import CancelToken, CancelledException
+
+token = CancelToken()
+
+try:
+    result, stats = with_retry(
+        lambda: api_call(),
+        config=RetryConfig(max_attempts=5),
+        cancel_token=token
+    )
+except CancelledException:
+    print("Retries cancelled")
+    # stats.attempts shows how many were tried</code></pre>
           </div>
         </div>
       </section>

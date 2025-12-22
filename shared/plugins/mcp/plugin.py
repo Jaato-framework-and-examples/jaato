@@ -14,6 +14,7 @@ from typing import Dict, List, Any, Callable, Optional, Tuple
 
 from ..base import UserCommand, CommandParameter, CommandCompletion
 from ..model_provider.types import ToolSchema
+from ..subagent.config import expand_variables
 
 
 # Message types for background thread communication
@@ -57,6 +58,116 @@ class LogEntry:
         return ' '.join(parts)
 
 
+class LogCapture:
+    """File-like object that captures MCP server stderr and routes to log buffer.
+
+    This class uses an OS pipe to provide a real file descriptor that can be
+    passed to subprocess stderr. A background thread reads from the pipe and
+    routes messages to the MCP plugin's internal log buffer via a callback.
+
+    The MCP library's stdio_client requires a file-like object with a valid
+    fileno() for subprocess stderr redirection. Pure Python wrappers don't work
+    because subprocess needs a real file descriptor.
+    """
+
+    def __init__(self, log_callback: Callable[[str, str, Optional[str], Optional[str]], None]):
+        """Initialize the log capture with an OS pipe.
+
+        Args:
+            log_callback: Function to call with (level, event, server, details).
+                         Should match the signature of MCPToolPlugin._log_event.
+        """
+        self._log_callback = log_callback
+        # Create a pipe - write end for subprocess, read end for our thread
+        self._read_fd, self._write_fd = os.pipe()
+        # Wrap write end as a file object (this is what fileno() returns)
+        self._write_file = os.fdopen(self._write_fd, 'w', encoding='utf-8')
+        self._closed = False
+        self._reader_thread: Optional[threading.Thread] = None
+        # Start background thread to read from pipe
+        self._start_reader()
+
+    def _start_reader(self) -> None:
+        """Start background thread to read from the pipe."""
+        def reader():
+            try:
+                # Wrap read end as file for line-by-line reading
+                with os.fdopen(self._read_fd, 'r', encoding='utf-8', errors='replace') as read_file:
+                    for line in read_file:
+                        line = line.rstrip('\n\r')
+                        if line:
+                            self._log_callback(LOG_DEBUG, "Server output", None, line)
+            except (OSError, ValueError):
+                # Pipe closed or other error during shutdown
+                pass
+
+        self._reader_thread = threading.Thread(target=reader, daemon=True)
+        self._reader_thread.start()
+
+    def write(self, text: str) -> int:
+        """Write text to the pipe (called by MCP library for compatibility)."""
+        if self._closed:
+            return 0
+        try:
+            self._write_file.write(text)
+            self._write_file.flush()
+            return len(text)
+        except (OSError, ValueError):
+            return 0
+
+    def flush(self) -> None:
+        """Flush the write buffer."""
+        if not self._closed:
+            try:
+                self._write_file.flush()
+            except (OSError, ValueError):
+                pass
+
+    def close(self) -> None:
+        """Close the log capture and stop the reader thread."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._write_file.close()
+        except (OSError, ValueError):
+            pass
+        # Reader thread will exit when it sees the pipe closed
+
+    def fileno(self) -> int:
+        """Return the write end file descriptor for subprocess redirection."""
+        return self._write_fd
+
+    # Required for TextIO compatibility
+    @property
+    def encoding(self) -> str:
+        return 'utf-8'
+
+    @property
+    def errors(self) -> str | None:
+        return None
+
+    @property
+    def mode(self) -> str:
+        return 'w'
+
+    @property
+    def name(self) -> str:
+        return '<mcp_log_capture>'
+
+    def isatty(self) -> bool:
+        return False
+
+    def readable(self) -> bool:
+        return False
+
+    def seekable(self) -> bool:
+        return False
+
+    def writable(self) -> bool:
+        return True
+
+
 class MCPToolPlugin:
     """Plugin that provides MCP (Model Context Protocol) tool execution.
 
@@ -76,7 +187,8 @@ class MCPToolPlugin:
         self._initialized = False
         self._mcp_patch_applied = False
         # Configuration state
-        self._config_path: Optional[str] = None
+        self._config_path: Optional[str] = None  # Path config was loaded from
+        self._custom_config_path: Optional[str] = None  # User-specified path via plugin_configs
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}  # server -> error message
@@ -133,12 +245,20 @@ class MCPToolPlugin:
                 pass
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """Initialize the MCP plugin by starting the background thread."""
+        """Initialize the MCP plugin by starting the background thread.
+
+        Args:
+            config: Optional configuration dict. Supports:
+                - config_path: Path to .mcp.json file (overrides default search)
+                - agent_name: Name for trace logging
+        """
         if self._initialized:
             return
-        # Extract agent name for trace logging
-        if config:
-            self._agent_name = config.get("agent_name")
+        # Expand variables in config values (e.g., ${projectPath}, ${workspaceRoot})
+        config = expand_variables(config) if config else {}
+        # Extract config from plugin_configs
+        self._agent_name = config.get("agent_name")
+        self._custom_config_path = config.get("config_path")
         self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True
@@ -569,10 +689,11 @@ Examples:
         # Send connect request to background thread
         try:
             spec = servers[server_name]
+            # Expand variables in command and args (e.g., ${workspaceRoot})
             self._request_queue.put((MSG_CONNECT_SERVER, {
                 'name': server_name,
-                'command': spec.get('command'),
-                'args': spec.get('args', []),
+                'command': expand_variables(spec.get('command')),
+                'args': expand_variables(spec.get('args', [])),
                 'env': spec.get('env', {}),
             }))
 
@@ -773,11 +894,14 @@ Examples:
         return '\n'.join(lines)
 
     def _load_config_cache(self) -> None:
-        """Load configuration into cache if not already loaded."""
+        """Load configuration into cache if not already loaded.
+
+        Uses custom config path if specified via plugin_configs.
+        """
         if self._config_cache:
             return
 
-        registry = self._load_mcp_registry()
+        registry = self._load_mcp_registry(self._custom_config_path)
         self._config_cache = registry
 
     def _save_config(self) -> Optional[str]:
@@ -903,7 +1027,13 @@ Examples:
         self._mcp_patch_applied = True
 
     def _load_mcp_registry(self, registry_path: Optional[str] = None) -> Dict[str, Any]:
-        """Load MCP registry from specified path or default locations."""
+        """Load MCP registry from specified path or default locations.
+
+        Search order:
+        1. registry_path (if specified via plugin_configs.config_path)
+        2. .mcp.json in current working directory
+        3. ~/.mcp.json in home directory
+        """
         default_paths = [
             os.path.join(os.getcwd(), '.mcp.json'),
             os.path.expanduser('~/.mcp.json')
@@ -920,8 +1050,10 @@ Examples:
                         data = json.load(f)
                     # Track which path we loaded from
                     self._config_path = path
+                    self._log_event(LOG_INFO, f"Loaded config from {path}")
                     return data
-                except Exception:
+                except Exception as e:
+                    self._log_event(LOG_WARN, f"Failed to load {path}: {e}")
                     continue
         return {}
 
@@ -950,7 +1082,7 @@ Examples:
 
             self._log_event(LOG_INFO, "MCP plugin initializing")
 
-            registry = self._load_mcp_registry()
+            registry = self._load_mcp_registry(self._custom_config_path)
             servers = registry.get('mcpServers', {})
 
             if servers:
@@ -972,8 +1104,9 @@ Examples:
             # Helper to connect a single server
             async def connect_server(mgr: MCPClientManager, name: str, spec: dict) -> Tuple[bool, str]:
                 """Connect to a server and return (success, error_message)."""
-                cmd = spec.get('command', 'unknown')
-                args = spec.get('args', [])
+                # Expand variables in command and args (e.g., ${workspaceRoot})
+                cmd = expand_variables(spec.get('command', 'unknown'))
+                args = expand_variables(spec.get('args', []))
                 args_str = ' '.join(str(a) for a in args) if args else ''
                 self._log_event(LOG_INFO, "Connecting to server", server=name,
                               details=f"command: {cmd} {args_str}".strip())
@@ -1018,7 +1151,9 @@ Examples:
                     for name, conn in mgr._connections.items()
                 }
 
-            manager = MCPClientManager()
+            # Create stderr capture that routes to internal log buffer
+            errlog = LogCapture(self._log_event)
+            manager = MCPClientManager(errlog=errlog)
             async with manager:
                 # Initial connection to all configured servers
                 server_list = list(servers.items())
