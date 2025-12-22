@@ -1,7 +1,7 @@
 {
   "name": "validator-tier2-java-spring",
   "description": "[Tier 2 - Technology] Java/Spring specific quality checks. RUN WHEN: Code is Java/Spring. RUN AFTER: Tier 1 passes. CHECKS: Maven/Gradle build, Checkstyle, SpotBugs, OWASP dependency-check.",
-  "plugins": ["cli", "environment", "mcp", "references"],
+  "plugins": ["cli", "environment", "mcp", "references", "todo"],
   "plugin_configs": {
     "references": {
       "preselected": ["enablement-consumer-prompt"],
