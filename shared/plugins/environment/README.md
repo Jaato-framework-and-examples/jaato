@@ -24,7 +24,7 @@ The plugin exposes a single tool:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `aspect` | string | No | `"all"` | Which aspect to query: `os`, `shell`, `arch`, `cwd`, `context`, or `all` |
+| `aspect` | string | No | `"all"` | Which aspect to query: `os`, `shell`, `arch`, `cwd`, `terminal`, `context`, or `all` |
 
 ### Response
 
@@ -50,6 +50,14 @@ When `aspect="all"` (default):
     "normalized": "x86_64"
   },
   "cwd": "/home/user/project",
+  "terminal": {
+    "term": "xterm-256color",
+    "term_program": "iTerm.app",
+    "colorterm": "truecolor",
+    "multiplexer": null,
+    "color_depth": "24bit",
+    "emulator": "iTerm.app"
+  },
   "context": {
     "model": "gemini-2.5-flash",
     "context_limit": 1048576,
@@ -137,6 +145,9 @@ get_environment(aspect="arch")
 # Get only working directory
 get_environment(aspect="cwd")
 
+# Get terminal emulation info
+get_environment(aspect="terminal")
+
 # Get token usage and GC thresholds
 get_environment(aspect="context")
 
@@ -180,6 +191,17 @@ get_environment(aspect="all")
 
 Returns a string (not an object) with the absolute path to the current working directory.
 
+### Terminal (`aspect="terminal"`)
+
+| Field | Description | Example Values |
+|-------|-------------|----------------|
+| `term` | TERM environment variable | `"xterm-256color"`, `"screen"`, `"dumb"` |
+| `term_program` | Terminal application | `"iTerm.app"`, `"Apple_Terminal"`, `"vscode"` |
+| `colorterm` | Color capability hint | `"truecolor"`, `"24bit"`, `null` |
+| `multiplexer` | Terminal multiplexer in use | `"tmux"`, `"screen"`, `null` |
+| `color_depth` | Detected color support | `"24bit"`, `"256"`, `"basic"`, `"none"` |
+| `emulator` | Terminal emulator type | `"iTerm.app"`, `"xterm-compatible"`, `"linux-console"` |
+
 ### Context (`aspect="context"`)
 
 Returns token usage and garbage collection settings. Requires session injection via `set_session()`.
@@ -222,7 +244,12 @@ Returns token usage and garbage collection settings. Requires session injection 
 4. **Architecture-specific decisions**: Query arch for binary selection
    - Download correct binaries for x86_64 vs arm64
 
-5. **Context management**: Query context aspect to monitor token usage
+5. **Terminal capabilities**: Query terminal aspect for output formatting
+   - Use colors/formatting only if supported
+   - Detect tmux/screen for session awareness
+   - Adjust output width based on terminal type
+
+6. **Context management**: Query context aspect to monitor token usage
    - Proactively summarize or trim context before hitting GC threshold
    - Track cost/usage during long conversations
 

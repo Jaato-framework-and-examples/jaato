@@ -18,7 +18,7 @@ class EnvironmentPlugin:
     and internal context (token usage, GC thresholds) when a session is set.
     """
 
-    VALID_ASPECTS = ["os", "shell", "arch", "cwd", "context", "all"]
+    VALID_ASPECTS = ["os", "shell", "arch", "cwd", "terminal", "context", "all"]
 
     @property
     def name(self) -> str:
@@ -68,6 +68,7 @@ class EnvironmentPlugin:
                                 "'shell' = shell type, "
                                 "'arch' = CPU architecture, "
                                 "'cwd' = current working directory, "
+                                "'terminal' = terminal emulation and capabilities, "
                                 "'context' = token usage and GC thresholds, "
                                 "'all' = everything (default)"
                             )
@@ -114,6 +115,9 @@ class EnvironmentPlugin:
 
         if aspect in ("cwd", "all"):
             result["cwd"] = os.getcwd()
+
+        if aspect in ("terminal", "all"):
+            result["terminal"] = self._get_terminal_info()
 
         if aspect in ("context", "all"):
             result["context"] = self._get_context_info()
@@ -199,6 +203,49 @@ class EnvironmentPlugin:
             info["normalized"] = "x86"
         else:
             info["normalized"] = machine_lower
+
+        return info
+
+    def _get_terminal_info(self) -> Dict[str, Any]:
+        """Get terminal emulation and capability information."""
+        info: Dict[str, Any] = {
+            "term": os.environ.get("TERM"),
+            "term_program": os.environ.get("TERM_PROGRAM"),
+            "colorterm": os.environ.get("COLORTERM"),
+        }
+
+        # Detect terminal multiplexers
+        multiplexer = None
+        if os.environ.get("TMUX"):
+            multiplexer = "tmux"
+        elif os.environ.get("STY"):
+            multiplexer = "screen"
+        elif "screen" in (info["term"] or ""):
+            multiplexer = "screen"
+        info["multiplexer"] = multiplexer
+
+        # Detect color capability
+        term = (info["term"] or "").lower()
+        colorterm = (info["colorterm"] or "").lower()
+        if colorterm in ("truecolor", "24bit") or "truecolor" in colorterm:
+            info["color_depth"] = "24bit"
+        elif "256color" in term or "256" in colorterm:
+            info["color_depth"] = "256"
+        elif term and term != "dumb":
+            info["color_depth"] = "basic"
+        else:
+            info["color_depth"] = "none"
+
+        # Detect if running in common terminal emulators
+        term_program = info["term_program"] or ""
+        if term_program:
+            info["emulator"] = term_program
+        elif "xterm" in term:
+            info["emulator"] = "xterm-compatible"
+        elif "linux" in term:
+            info["emulator"] = "linux-console"
+        else:
+            info["emulator"] = None
 
         return info
 
