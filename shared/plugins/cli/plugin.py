@@ -394,6 +394,8 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                     command,
                     capture_output=True,
                     text=True,
+                    encoding='utf-8',
+                    errors='replace',
                     check=False,
                     env=env,
                     shell=True
@@ -427,6 +429,8 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                     argv,
                     capture_output=True,
                     text=True,
+                    encoding='utf-8',
+                    errors='replace',
                     check=False,
                     env=env,
                     shell=False
