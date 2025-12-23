@@ -168,29 +168,29 @@ You have admin privileges.
 
 | Syntax | Complexity | Power | Familiarity |
 |--------|------------|-------|-------------|
-| `{{var}}` only | Very Low | Low | High |
+| {% raw %}`{{var}}`{% endraw %} only | Very Low | Low | High |
 | Python `string.Template` (`$var`) | Low | Low | Medium |
 | Mustache/Handlebars | Medium | Medium | Medium |
 | Jinja2 | Medium | High | High |
 
 ### Rationale for Jinja2
 
-1. **Code Generation Needs Loops**: Generating service classes, API endpoints, or configuration files almost always requires iteration. `{% for field in fields %}` is essential.
+1. **Code Generation Needs Loops**: Generating service classes, API endpoints, or configuration files almost always requires iteration. {% raw %}`{% for field in fields %}`{% endraw %} is essential.
 
-2. **Conditionals are Common**: Different code for different environments, optional features, platform-specific sections. `{% if %}` blocks are frequently needed.
+2. **Conditionals are Common**: Different code for different environments, optional features, platform-specific sections. {% raw %}`{% if %}`{% endraw %} blocks are frequently needed.
 
 3. **Industry Standard**: Jinja2 is widely used (Ansible, Flask, dbt, Airflow). LLM agents already understand its syntax from training data.
 
 4. **Python Native**: We're in a Python codebase. Jinja2 is the natural choice. It's a single pip dependency (`Jinja2`).
 
-5. **Graceful Degradation**: Simple templates (`Hello {{name}}!`) work without needing any Jinja2 features. Complexity is opt-in.
+5. **Graceful Degradation**: Simple templates ({% raw %}`Hello {{name}}!`{% endraw %}) work without needing any Jinja2 features. Complexity is opt-in.
 
 ### Subset for Safety
 
 Consider a restricted Jinja2 configuration:
-- **Enabled**: Variables, if/elif/else, for loops, filters (e.g., `{{ name | upper }}`)
-- **Disabled**: `{% include %}`, `{% import %}`, `{% macro %}` (potential security concerns with arbitrary file access)
-- **Consider Later**: Template inheritance (`{% extends %}`) if patterns emerge
+- **Enabled**: Variables, if/elif/else, for loops, filters (e.g., {% raw %}`{{ name | upper }}`{% endraw %})
+- **Disabled**: {% raw %}`{% include %}`, `{% import %}`, `{% macro %}`{% endraw %} (potential security concerns with arbitrary file access)
+- **Consider Later**: Template inheritance ({% raw %}`{% extends %}`{% endraw %}) if patterns emerge
 
 ### Example Templates
 
@@ -390,9 +390,9 @@ Template rendering requires approval since it writes files."""
 **Concern**: Jinja2 is powerful. Sandbox mode prevents arbitrary Python execution, but we should still restrict file access.
 
 **Mitigation**:
-- Disable `{% include %}` and `{% import %}` to prevent arbitrary file reads
+- Disable {% raw %}`{% include %}`{% endraw %} and {% raw %}`{% import %}`{% endraw %} to prevent arbitrary file reads
 - Use `SandboxedEnvironment` from `jinja2.sandbox`
-- Review: Do we need `{% extends %}`? (Template inheritance adds complexity)
+- Review: Do we need {% raw %}`{% extends %}`{% endraw %}? (Template inheritance adds complexity)
 
 ### 2. Dependency Addition
 
