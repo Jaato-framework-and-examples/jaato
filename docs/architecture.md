@@ -649,6 +649,7 @@ Plugins can subscribe to enrich user prompts before they are sent to the model. 
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+{% raw %}
 ```mermaid
 sequenceDiagram
     participant User
@@ -673,6 +674,7 @@ sequenceDiagram
     PR-->>JC: enriched prompt + metadata
     JC->>Model: send to model
 ```
+{% endraw %}
 
 This enables:
 - **Content injection** - References plugin injects documentation content
@@ -683,6 +685,7 @@ This enables:
 
 Example plugin implementing enrichment with priority:
 
+{% raw %}
 ```python
 class TemplatePlugin:
     def get_enrichment_priority(self) -> int:
@@ -698,6 +701,7 @@ class TemplatePlugin:
         # Annotate prompt with extraction info
         return PromptEnrichmentResult(prompt=enriched, metadata={...})
 ```
+{% endraw %}
 
 ### Manual Plugin Registration
 
