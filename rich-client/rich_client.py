@@ -2222,6 +2222,10 @@ class RichClient:
 def main():
     import argparse
 
+    # Configure UTF-8 encoding for Windows console (before any output)
+    from shared.console_encoding import configure_utf8_output
+    configure_utf8_output()
+
     parser = argparse.ArgumentParser(
         description="Rich TUI client with sticky plan display"
     )
