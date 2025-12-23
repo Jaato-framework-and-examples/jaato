@@ -741,7 +741,7 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("cycle_agents"))
         def handle_f2(event):
-            """Handle F2 - cycle through agents."""
+            """Handle Ctrl+A - cycle through agents."""
             if self._agent_registry:
                 self._agent_registry.cycle_selection()
                 self._app.invalidate()

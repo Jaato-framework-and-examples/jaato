@@ -148,7 +148,7 @@ class AgentRegistry:
             return self._agents.get(self._selected_agent_id)
 
     def cycle_selection(self) -> Optional[str]:
-        """Cycle to next agent in list (for F2 key).
+        """Cycle to next agent in list (for Ctrl+A key).
 
         Cycles: main → subagent1 → subagent2 → ... → main
 

@@ -84,7 +84,7 @@ DEFAULT_KEYBINDINGS = {
     # Features
     "toggle_plan": "c-p",
     "toggle_tools": "c-t",
-    "cycle_agents": "f2",
+    "cycle_agents": "c-a",
     "yank": "c-y",
     "view_full": "v",
 }
@@ -592,7 +592,7 @@ def generate_example_config() -> str:
 
         "toggle_plan": "c-p",
         "toggle_tools": "c-t",
-        "cycle_agents": "f2",
+        "cycle_agents": "c-a",
         "yank": "c-y",
         "view_full": "v",
     }
