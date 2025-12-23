@@ -601,19 +601,11 @@ All plugins use internal types defined in `shared/plugins/model_provider/types.p
 - **google_genai** - Google GenAI SDK (Vertex AI, Gemini models)
 - **anthropic** - (Future) Anthropic SDK (Claude models)
 
-### Enrichment Pipelines
+### Prompt Enrichment Pipeline
 
-The framework provides three enrichment pipelines that allow plugins to process content at different stages:
+Plugins can subscribe to enrich user prompts before they are sent to the model. Plugins are called in **priority order** (lower values first), enabling pipelines where later plugins process content injected by earlier plugins.
 
-| Pipeline | When Called | Use Cases |
-|----------|-------------|-----------|
-| **Prompt Enrichment** | Before user message sent to model | Expand @references, detect image refs |
-| **System Instruction Enrichment** | After collecting system instructions | Extract templates from MODULE.md |
-| **Tool Result Enrichment** | After tool execution, before result sent to model | Extract templates from file reads |
-
-#### Prompt Enrichment Pipeline
-
-Plugins can subscribe to enrich user prompts before they are sent to the model.
+#### Enrichment Priority Order
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -624,7 +616,14 @@ Plugins can subscribe to enrich user prompts before they are sent to the model.
 │       ▼                                                                     │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │ Priority 20: references                                              │   │
-│  │ Detects @reference-id mentions, expands with reference content      │   │
+│  │ Injects MODULE.md, SKILL.md content into prompt                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│       │                                                                     │
+│       ▼                                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ Priority 40: template                                                │   │
+│  │ Detects embedded templates in injected content, extracts to         │   │
+│  │ .jaato/templates/, annotates prompt with extraction info            │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │       │                                                                     │
 │       ▼                                                                     │
@@ -650,55 +649,6 @@ Plugins can subscribe to enrich user prompts before they are sent to the model.
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### System Instruction Enrichment Pipeline
-
-Plugins can subscribe to enrich the combined system instructions after they are collected from all plugins.
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    System Instruction Enrichment Pipeline                    │
-│                                                                             │
-│  Combined system instructions (from all plugins)                            │
-│       │                                                                     │
-│       ▼                                                                     │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Priority 40: template                                                │   │
-│  │ Detects embedded Jinja2 templates in MODULE.md content,             │   │
-│  │ extracts to .jaato/templates/, annotates with extraction info       │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│       │                                                                     │
-│       ▼                                                                     │
-│  Enriched system instructions sent to model                                │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-#### Tool Result Enrichment Pipeline
-
-Plugins can subscribe to enrich tool execution results before they are sent back to the model.
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       Tool Result Enrichment Pipeline                        │
-│                                                                             │
-│  Tool execution result (e.g., cat MODULE.md output)                         │
-│       │                                                                     │
-│       ▼                                                                     │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Priority 20: references                                              │   │
-│  │ Detects @reference-id mentions in output, expands them              │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│       │                                                                     │
-│       ▼                                                                     │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ Priority 40: template                                                │   │
-│  │ Detects embedded templates in file content, extracts them           │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│       │                                                                     │
-│       ▼                                                                     │
-│  Enriched result sent back to model                                        │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
 ```mermaid
 sequenceDiagram
     participant User
@@ -706,61 +656,47 @@ sequenceDiagram
     participant PR as PluginRegistry
     participant Ref as references (20)
     participant Tmpl as template (40)
+    participant Multi as multimodal (60)
     participant Model
-    participant Tool as CLI Tool
 
-    Note over PR: System Instruction Enrichment
-    PR->>PR: get_system_instructions()
-    PR->>Tmpl: enrich_system_instructions(combined)
-    Note over Tmpl: Detect {{var}} in MODULE.md<br/>Extract to .jaato/templates/
-
-    Note over PR: Prompt Enrichment
-    User->>JC: send_message("Use @mod-code-015")
+    User->>JC: send_message("Implement circuit breaker using MODULE.md")
     JC->>PR: enrich_prompt(message)
     PR->>Ref: enrich_prompt(message)
-    Note over Ref: Expand @mod-code-015<br/>reference mention
-    Ref-->>PR: prompt with reference info
-    PR-->>JC: enriched prompt
+    Note over Ref: Inject MODULE.md content<br/>with embedded templates
+    Ref-->>PR: prompt with MODULE.md
+    PR->>Tmpl: enrich_prompt(enriched)
+    Note over Tmpl: Detect {{var}} syntax<br/>Extract to .jaato/templates/
+    Tmpl-->>PR: prompt + template annotations
+    PR->>Multi: enrich_prompt(enriched)
+    Note over Multi: Check for @image refs
+    Multi-->>PR: final enriched prompt
+    PR-->>JC: enriched prompt + metadata
     JC->>Model: send to model
-
-    Note over PR: Tool Result Enrichment
-    Model->>Tool: cat MODULE.md
-    Tool-->>Model: file content
-    PR->>Tmpl: enrich_tool_result("cli", result)
-    Note over Tmpl: Detect templates in output<br/>Extract to .jaato/templates/
-    Tmpl-->>PR: enriched result
 ```
 
 This enables:
-- **@reference expansion** - References plugin expands @reference-id mentions in prompts
-- **Template extraction** - Template plugin extracts embedded templates from system instructions and tool results
-- **@image references** - Multimodal plugin detects and processes image references
-- **Memory hints** - Memory plugin adds relevant context based on prompt content
+- **Content injection** - References plugin injects documentation content
+- **Template extraction** - Template plugin extracts embedded templates for later use
+- **@file references** - Detect and process file references
+- **Lazy loading** - Model decides when to load heavy content (images, documents)
+- **Context injection** - Add relevant information based on prompt content
 
-Example plugin implementing system instruction enrichment:
+Example plugin implementing enrichment with priority:
 
 ```python
 class TemplatePlugin:
-    def get_system_instruction_enrichment_priority(self) -> int:
+    def get_enrichment_priority(self) -> int:
         """Return priority (lower = earlier). Default is 50."""
-        return 40
+        return 40  # Run after references (20), before multimodal (60)
 
-    def subscribes_to_system_instruction_enrichment(self) -> bool:
+    def subscribes_to_prompt_enrichment(self) -> bool:
         return True
 
-    def enrich_system_instructions(self, instructions: str) -> SystemInstructionEnrichmentResult:
+    def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
         # Detect code blocks with {{ }} or {% %} syntax
         # Extract to .jaato/templates/
-        # Annotate instructions with extraction info
-        return SystemInstructionEnrichmentResult(instructions=enriched, metadata={...})
-
-    # Also subscribe to tool result enrichment
-    def subscribes_to_tool_result_enrichment(self) -> bool:
-        return True
-
-    def enrich_tool_result(self, tool_name: str, result: str) -> ToolResultEnrichmentResult:
-        # Same logic as system instruction enrichment
-        return ToolResultEnrichmentResult(result=enriched, metadata={...})
+        # Annotate prompt with extraction info
+        return PromptEnrichmentResult(prompt=enriched, metadata={...})
 ```
 
 ### Manual Plugin Registration
