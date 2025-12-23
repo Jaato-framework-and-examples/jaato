@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ..base import UserCommand, SystemInstructionEnrichmentResult, ToolResultEnrichmentResult
+from ..base import UserCommand, SystemInstructionEnrichmentResult, ToolResultEnrichmentResult, PermissionDisplayInfo
 from ..model_provider.types import ToolSchema
 
 
@@ -167,6 +167,42 @@ class TemplatePlugin:
                     "required": []
                 }
             ),
+            ToolSchema(
+                name="renderTemplateToFile",
+                description=(
+                    "Render a template with variable substitution and write the result directly to a file. "
+                    "This is a convenience tool that combines template rendering and file writing in one operation. "
+                    "Use simple {{variable_name}} syntax for variable substitution. "
+                    "Provide either 'template' for inline content or 'template_path' for a template file."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "output_path": {
+                            "type": "string",
+                            "description": "Path where rendered content will be written."
+                        },
+                        "template_path": {
+                            "type": "string",
+                            "description": "Path to template file. Mutually exclusive with 'template'."
+                        },
+                        "template": {
+                            "type": "string",
+                            "description": "Inline template string. Mutually exclusive with 'template_path'."
+                        },
+                        "variables": {
+                            "type": "object",
+                            "description": "Key-value pairs for {{variable}} substitution.",
+                            "additionalProperties": True
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "Allow overwriting existing file. Default is false."
+                        }
+                    },
+                    "required": ["output_path", "variables"]
+                }
+            ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
@@ -174,19 +210,35 @@ class TemplatePlugin:
         return {
             "renderTemplate": self._execute_render_template,
             "listExtractedTemplates": self._execute_list_extracted,
+            "renderTemplateToFile": self._execute_render_template_to_file,
         }
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for template tools."""
         return """## Template Rendering (MANDATORY USAGE)
 
-**CRITICAL**: When templates exist for a task, you MUST use `renderTemplate` instead of
+**CRITICAL**: When templates exist for a task, you MUST use template tools instead of
 manually writing code. Templates ensure consistency, reduce errors, and follow established
 patterns. Manual coding when a template exists is NOT acceptable.
 
+### TEMPLATE TOOLS:
+
+**renderTemplate(template_path, variables, output_path)** - Render with full Jinja2 syntax
+  - Supports Jinja2 features: variables, conditionals, loops, filters
+  - Returns: {"success": true, "output_path": "...", "size": 1234, "lines": 42}
+
+**renderTemplateToFile(output_path, template_path, variables)** - Simple render and write
+  - Uses simple {{variable}} substitution only
+  - Checks if file exists (use overwrite=true to replace)
+  - Returns: {"success": true, "output_path": "...", "bytes_written": 1234}
+
+**listExtractedTemplates()** - List templates extracted from documentation
+  - Shows all templates extracted in this session
+  - Auto-approved (no permission required)
+
 ### Template Priority Rule
 1. ALWAYS check if a template exists before writing code
-2. If a template matches your task, USE IT via `renderTemplate`
+2. If a template matches your task, USE IT via template tools
 3. ONLY write code manually if NO suitable template exists
 4. When in doubt, use `listExtractedTemplates` to see available templates
 
@@ -195,16 +247,30 @@ Templates are stored in `.jaato/templates/`. When you read documentation files
 (like MODULE.md) containing embedded templates, they are automatically extracted
 to this directory. Watch for "[Template extracted: ...]" annotations.
 
-### Usage Example
+### Example - Generate a Java service from template:
 ```
-renderTemplate(
-  template_path=".jaato/templates/circuit-breaker.java.tmpl",
-  variables={"circuitBreakerName": "orderService", "timeout": 5000},
-  output_path="src/main/java/.../OrderService.java"
+renderTemplateToFile(
+    output_path="/src/main/java/com/bank/CustomerService.java",
+    template_path="/templates/service.java.tmpl",
+    variables={"class_name": "CustomerService", "package": "com.bank.customer"}
 )
 ```
 
-### Template Syntax (Jinja2)
+### Example - Using inline template:
+```
+renderTemplateToFile(
+    output_path="/src/CustomerService.java",
+    template="package {{package}};\\n\\npublic class {{class_name}} {}",
+    variables={"class_name": "CustomerService", "package": "com.bank"}
+)
+```
+
+### Template Syntax
+**For renderTemplateToFile (simple):**
+- Variables: {{variable_name}} - replaced with value
+- Escape literal {{: \\{{
+
+**For renderTemplate (full Jinja2):**
 - Variables: {{ variable_name }}
 - Conditionals: {% if condition %}...{% endif %}
 - Loops: {% for item in items %}...{% endfor %}
@@ -215,6 +281,78 @@ Template rendering requires approval since it writes files."""
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved."""
         return ["listExtractedTemplates"]
+
+    def format_permission_request(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        channel_type: str
+    ) -> Optional[PermissionDisplayInfo]:
+        """Format permission request for file writing tools.
+
+        Provides custom display formatting for renderTemplateToFile to show
+        the user what file will be created and with what content.
+
+        Args:
+            tool_name: Name of the tool being executed
+            arguments: Arguments passed to the tool
+            channel_type: Type of channel requesting approval
+
+        Returns:
+            PermissionDisplayInfo with formatted content, or None to use default.
+        """
+        if tool_name != "renderTemplateToFile":
+            return None
+
+        output_path = arguments.get("output_path", "")
+        template = arguments.get("template")
+        template_path = arguments.get("template_path")
+        variables = arguments.get("variables", {})
+        overwrite = arguments.get("overwrite", False)
+
+        # Build summary
+        action = "Overwrite" if overwrite else "Create"
+        source = template_path if template_path else "(inline template)"
+        summary = f"{action} file: {output_path} from {source}"
+
+        # Build details showing the template and variables
+        details_lines = []
+
+        if template_path:
+            details_lines.append(f"Template: {template_path}")
+        else:
+            details_lines.append("Template: (inline)")
+
+        details_lines.append(f"Output: {output_path}")
+
+        if variables:
+            details_lines.append("")
+            details_lines.append("Variables:")
+            for key, value in variables.items():
+                val_str = str(value)
+                if len(val_str) > 50:
+                    val_str = val_str[:47] + "..."
+                details_lines.append(f"  {key}: {val_str}")
+
+        # Show template content preview if inline
+        if template:
+            details_lines.append("")
+            details_lines.append("Template content:")
+            template_preview = template
+            truncated = False
+            if len(template) > 500:
+                template_preview = template[:500]
+                truncated = True
+            for line in template_preview.split('\n'):
+                details_lines.append(f"  {line}")
+            if truncated:
+                details_lines.append("  ... (truncated)")
+
+        return PermissionDisplayInfo(
+            summary=summary,
+            details="\n".join(details_lines),
+            format_hint="text"
+        )
 
     def get_user_commands(self) -> List[UserCommand]:
         """Template plugin provides model tools only."""
@@ -709,6 +847,128 @@ Template rendering requires approval since it writes files."""
         return {
             "templates": templates,
             "count": len(templates)
+        }
+
+    def _execute_render_template_to_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute renderTemplateToFile tool.
+
+        Renders a template using simple {{variable}} substitution and writes
+        the result to a file.
+        """
+        output_path = args.get("output_path", "")
+        template = args.get("template")
+        template_path = args.get("template_path")
+        variables = args.get("variables", {})
+        overwrite = args.get("overwrite", False)
+
+        # Validation
+        if not output_path:
+            return {"error": "output_path is required"}
+
+        if not template and not template_path:
+            return {
+                "error": "Exactly one of 'template' or 'template_path' must be provided"
+            }
+
+        if template and template_path:
+            return {
+                "error": "Provide either 'template' or 'template_path', not both"
+            }
+
+        # Determine template source
+        template_source = "inline" if template else "file"
+
+        # Load template from file if template_path provided
+        if template_path:
+            try:
+                path = Path(template_path)
+                if not path.is_absolute():
+                    path = self._base_path / path
+                if not path.exists():
+                    return {
+                        "error": f"Template file not found: {template_path}",
+                        "template_path": template_path
+                    }
+                template = path.read_text()
+            except IOError as e:
+                return {
+                    "error": f"Failed to read template: {e}",
+                    "template_path": template_path
+                }
+
+        # Check if output path already exists
+        out_path = Path(output_path)
+        if not out_path.is_absolute():
+            out_path = self._base_path / out_path
+
+        if out_path.exists() and not overwrite:
+            return {
+                "error": f"Output file already exists: {output_path}. Set overwrite=true to replace.",
+                "output_path": str(out_path)
+            }
+
+        # Perform simple {{variable}} substitution
+        rendered = template
+        variables_used = []
+        undefined_vars = []
+
+        # Find all {{variable}} patterns
+        var_pattern = re.compile(r'\{\{(\w+)\}\}')
+        matches = var_pattern.findall(template)
+        unique_vars = set(matches)
+
+        for var_name in unique_vars:
+            if var_name in variables:
+                # Replace all occurrences of {{var_name}} with the value
+                pattern = r'\{\{' + re.escape(var_name) + r'\}\}'
+                rendered = re.sub(pattern, str(variables[var_name]), rendered)
+                variables_used.append(var_name)
+            else:
+                undefined_vars.append(var_name)
+
+        # Handle escaped {{ (literal \{{)
+        rendered = rendered.replace(r'\{{', '{{')
+
+        # Check for undefined variables
+        if undefined_vars:
+            return {
+                "error": f"Undefined variable: {undefined_vars[0]}",
+                "template_path": template_path if template_path else None,
+                "variables_provided": list(variables.keys())
+            }
+
+        # Create parent directories if needed
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return {
+                "error": f"Failed to create parent directories: {e}",
+                "output_path": str(out_path)
+            }
+
+        # Write rendered content to file
+        try:
+            out_path.write_text(rendered)
+            bytes_written = len(rendered.encode('utf-8'))
+        except IOError as e:
+            return {
+                "error": f"Failed to write output file: {e}",
+                "output_path": str(out_path)
+            }
+        except PermissionError as e:
+            return {
+                "error": f"Permission denied: {e}",
+                "output_path": str(out_path)
+            }
+
+        self._trace(f"renderTemplateToFile: wrote {bytes_written} bytes to {out_path}")
+
+        return {
+            "success": True,
+            "output_path": str(out_path),
+            "bytes_written": bytes_written,
+            "variables_used": sorted(variables_used),
+            "template_source": template_source
         }
 
 
