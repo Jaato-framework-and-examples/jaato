@@ -255,6 +255,10 @@ Template rendering requires approval since it writes files."""
         ]
 
         if not template_blocks:
+            # Log each code block for debugging
+            for i, (lang, content, start, end) in enumerate(code_blocks):
+                preview = content[:80].replace('\n', '\\n') + ('...' if len(content) > 80 else '')
+                self._trace(f"  code block {i+1}: lang={lang!r}, {len(content)} chars: {preview}")
             self._trace(f"  found {len(code_blocks)} code blocks but none with template syntax")
             return PromptEnrichmentResult(prompt=prompt)
 
