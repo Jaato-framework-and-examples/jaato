@@ -123,6 +123,9 @@ class JaatoSession:
         self._parent_cancel_token: Optional[CancelToken] = None  # For parent→child propagation
         self._is_running: bool = False
         self._use_streaming: bool = True  # Enable streaming by default if provider supports it
+        # Disable model notifications about cancellation by default - they cause
+        # the model to hallucinate "interruptions" on subsequent turns
+        self._notify_model_on_cancel: bool = False
 
         # Proactive GC tracking
         self._gc_threshold_crossed: bool = False  # Set when threshold crossed during streaming
@@ -1444,10 +1447,19 @@ class JaatoSession:
         This adds a user message noting the cancellation, so on the next turn
         the model understands why the previous response was cut short.
 
+        NOTE: This feature is disabled by default (_notify_model_on_cancel=False)
+        because it causes the model to hallucinate "interruptions" on subsequent
+        turns, even when the cancellation was internal or expected.
+
         Args:
             cancel_msg: The cancellation message shown to user.
             partial_text: Any partial response text before cancellation.
         """
+        # Skip notification if disabled (default) - prevents model hallucinations
+        if not self._notify_model_on_cancel:
+            self._trace(f"CANCEL_NOTIFY_SKIP: notifications disabled")
+            return
+
         if not self._provider:
             return
 
