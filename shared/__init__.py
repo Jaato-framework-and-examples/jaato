@@ -49,6 +49,7 @@ from .plugins.model_provider.types import (
 
 # Utilities
 from .ssl_helper import active_cert_bundle, normalize_ca_env_vars
+from .console_encoding import configure_utf8_output
 
 __all__ = [
     # Token accounting
@@ -83,4 +84,5 @@ __all__ = [
     # Utilities
     "active_cert_bundle",
     "normalize_ca_env_vars",
+    "configure_utf8_output",
 ]
