@@ -42,7 +42,7 @@ DEFAULT_COMMANDS = [
     ("keybindings set pager_next", "Set pager next key (default: space)"),
     ("keybindings set toggle_plan", "Set toggle plan key (default: c-p)"),
     ("keybindings set toggle_tools", "Set toggle tools key (default: c-t)"),
-    ("keybindings set cycle_agents", "Set cycle agents key (default: f2)"),
+    ("keybindings set cycle_agents", "Set cycle agents key (default: c-a)"),
     ("keybindings set yank", "Set yank/copy key (default: c-y)"),
     ("keybindings set view_full", "Set view full key (default: v)"),
     ("keybindings profile", "Show/switch terminal-specific profiles"),

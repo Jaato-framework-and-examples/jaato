@@ -56,6 +56,62 @@ def key_to_args(key: KeyBinding) -> tuple:
     return (key,)
 
 
+def format_key_for_display(key: KeyBinding) -> str:
+    """Format a keybinding for human-readable display.
+
+    Converts prompt_toolkit key syntax to user-friendly format:
+    - "c-a" -> "Ctrl+A"
+    - "f2" -> "F2"
+    - "escape" -> "Esc"
+    - ["escape", "enter"] -> "Esc Enter"
+
+    Args:
+        key: The keybinding in prompt_toolkit format.
+
+    Returns:
+        Human-readable string representation.
+    """
+    if isinstance(key, list):
+        return " ".join(format_key_for_display(k) for k in key)
+
+    key_str = str(key).lower()
+
+    # Control keys: c-x -> Ctrl+X
+    if key_str.startswith("c-"):
+        char = key_str[2:].upper()
+        return f"Ctrl+{char}"
+
+    # Function keys: f1 -> F1
+    if key_str.startswith("f") and key_str[1:].isdigit():
+        return key_str.upper()
+
+    # Special keys
+    special_keys = {
+        "escape": "Esc",
+        "enter": "Enter",
+        "space": "Space",
+        "tab": "Tab",
+        "pageup": "PgUp",
+        "pagedown": "PgDn",
+        "home": "Home",
+        "end": "End",
+        "up": "Up",
+        "down": "Down",
+        "left": "Left",
+        "right": "Right",
+    }
+
+    if key_str in special_keys:
+        return special_keys[key_str]
+
+    # Single character keys
+    if len(key_str) == 1:
+        return key_str.upper()
+
+    # Default: capitalize
+    return key_str.capitalize()
+
+
 # Default keybindings matching current pt_display.py behavior
 DEFAULT_KEYBINDINGS = {
     # Input submission
