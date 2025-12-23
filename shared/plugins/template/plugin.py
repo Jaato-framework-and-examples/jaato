@@ -237,10 +237,14 @@ Template rendering requires approval since it writes files."""
         Returns:
             PromptEnrichmentResult with annotated prompt and extraction metadata.
         """
+        prompt_preview = prompt[:100].replace('\n', '\\n') + ('...' if len(prompt) > 100 else '')
+        self._trace(f"enrich_prompt called: {len(prompt)} chars, preview: {prompt_preview}")
+
         # Find all code blocks in the prompt
         code_blocks = self._find_code_blocks(prompt)
 
         if not code_blocks:
+            self._trace("  no code blocks found in prompt")
             return PromptEnrichmentResult(prompt=prompt)
 
         # Filter to blocks that contain template syntax
@@ -251,6 +255,7 @@ Template rendering requires approval since it writes files."""
         ]
 
         if not template_blocks:
+            self._trace(f"  found {len(code_blocks)} code blocks but none with template syntax")
             return PromptEnrichmentResult(prompt=prompt)
 
         self._trace(f"enrich_prompt: found {len(template_blocks)} template blocks")
