@@ -122,6 +122,14 @@ class MultimodalPlugin:
 
     # ==================== Prompt Enrichment ====================
 
+    def get_enrichment_priority(self) -> int:
+        """Return enrichment priority (lower = earlier).
+
+        Multimodal runs at priority 60 - after template extraction (40)
+        but before memory hints (80).
+        """
+        return 60
+
     def subscribes_to_prompt_enrichment(self) -> bool:
         """This plugin subscribes to prompt enrichment."""
         return True
