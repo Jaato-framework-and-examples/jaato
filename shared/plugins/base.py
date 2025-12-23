@@ -40,6 +40,23 @@ class PromptEnrichmentResult:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class SystemInstructionEnrichmentResult:
+    """Result of system instruction enrichment by a plugin.
+
+    Plugins that subscribe to system instruction enrichment can inspect and
+    optionally modify the combined system instructions before they are sent
+    to the model. This is useful for extracting embedded content (like templates)
+    that should be made available to tools.
+
+    Attributes:
+        instructions: The (possibly modified) system instructions text.
+        metadata: Optional metadata about the enrichment.
+    """
+    instructions: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
 def model_matches_requirements(model_name: str, patterns: List[str]) -> bool:
     """Check if a model name matches any of the required patterns.
 
@@ -341,6 +358,52 @@ class ToolPlugin(Protocol):
     #
     #     Returns:
     #         PromptEnrichmentResult with the enriched prompt and metadata.
+    #     """
+    #     ...
+    #
+    # System Instruction Enrichment:
+    #
+    # def subscribes_to_system_instruction_enrichment(self) -> bool:
+    #     """Return True if this plugin wants to enrich system instructions.
+    #
+    #     Plugins that subscribe will have their enrich_system_instructions()
+    #     method called with the combined system instructions from all plugins
+    #     (including content from references plugin like MODULE.md). This allows
+    #     plugins to:
+    #     - Extract embedded templates for later use by tools
+    #     - Add annotations or summaries based on instruction content
+    #     - Process references or links found in system instructions
+    #
+    #     Returns:
+    #         True to subscribe, False otherwise (default).
+    #     """
+    #     ...
+    #
+    # def get_system_instruction_enrichment_priority(self) -> int:
+    #     """Return the priority for system instruction enrichment.
+    #
+    #     Lower values run first. Default is 50.
+    #
+    #     Returns:
+    #         Integer priority (lower = earlier).
+    #     """
+    #     ...
+    #
+    # def enrich_system_instructions(
+    #     self,
+    #     instructions: str
+    # ) -> SystemInstructionEnrichmentResult:
+    #     """Enrich combined system instructions before sending to the model.
+    #
+    #     Called only if subscribes_to_system_instruction_enrichment() returns True.
+    #     The plugin receives the combined system instructions from all plugins
+    #     and can inspect/modify them.
+    #
+    #     Args:
+    #         instructions: Combined system instructions text from all plugins.
+    #
+    #     Returns:
+    #         SystemInstructionEnrichmentResult with enriched instructions.
     #     """
     #     ...
 
