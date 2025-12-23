@@ -1,9 +1,26 @@
 # Template Rendering Tool Design
 
+> **Status: Implemented** - See `shared/plugins/template/` for the implementation.
+> The plugin includes both the `renderTemplate` tool and automatic template extraction
+> via prompt enrichment.
+
 ## Overview
 
 This document proposes a template rendering capability for code generation tasks within jaato.
 The goal is to replace error-prone manual string substitution with reliable, reusable templates.
+
+## Implementation Status
+
+The template plugin has been implemented with two key features:
+
+1. **Template Rendering (`renderTemplate`)**: Jinja2-based template rendering with variable
+   substitution, writing results to files.
+
+2. **Automatic Template Extraction (Prompt Enrichment)**: The plugin subscribes to the prompt
+   enrichment pipeline (priority 40) to detect embedded templates in documentation (MODULE.md,
+   SKILL.md, etc.) and automatically extract them to `.jaato/templates/` for later use.
+
+See `shared/plugins/template/README.md` for usage documentation.
 
 ## Where Should It Live?
 

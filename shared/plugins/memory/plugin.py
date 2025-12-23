@@ -220,6 +220,14 @@ class MemoryPlugin:
 
     # ===== Prompt Enrichment Protocol =====
 
+    def get_enrichment_priority(self) -> int:
+        """Return enrichment priority (lower = earlier).
+
+        Memory runs at priority 80 - late in the pipeline so it can
+        analyze the fully enriched prompt for memory matching.
+        """
+        return 80
+
     def subscribes_to_prompt_enrichment(self) -> bool:
         """Subscribe to enrich prompts with memory hints.
 

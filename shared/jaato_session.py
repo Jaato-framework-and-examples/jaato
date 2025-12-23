@@ -1167,6 +1167,10 @@ class JaatoSession:
         else:
             result_dict = {"result": result_data}
 
+        # Run tool result enrichment (e.g., template extraction)
+        if ok and self._runtime.registry:
+            result_dict = self._enrich_tool_result_dict(fc.name, result_dict)
+
         return ToolResult(
             call_id=fc.id,
             name=fc.name,
@@ -1174,6 +1178,43 @@ class JaatoSession:
             is_error=not ok,
             attachments=attachments
         )
+
+    def _enrich_tool_result_dict(
+        self,
+        tool_name: str,
+        result_dict: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Run tool result enrichment on text fields in result dict.
+
+        Looks for common text fields (result, content, stdout, output) and
+        runs them through the registry's tool result enrichment pipeline.
+
+        Args:
+            tool_name: Name of the tool that produced the result.
+            result_dict: The result dictionary to enrich.
+
+        Returns:
+            Enriched result dictionary.
+        """
+        # Fields that commonly contain text content to enrich
+        text_fields = ('result', 'content', 'stdout', 'output', 'text', 'data')
+
+        # Minimum length to consider for enrichment (avoid enriching short strings)
+        min_length = 100
+
+        enriched_dict = result_dict.copy()
+
+        for field in text_fields:
+            if field in enriched_dict:
+                value = enriched_dict[field]
+                if isinstance(value, str) and len(value) >= min_length:
+                    enrichment = self._runtime.registry.enrich_tool_result(
+                        tool_name, value
+                    )
+                    if enrichment.result != value:
+                        enriched_dict[field] = enrichment.result
+
+        return enriched_dict
 
     def _extract_multimodal_attachments(
         self,

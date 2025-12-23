@@ -10,7 +10,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Set, Callable, Any, Optional, Protocol, runtime_checkable
 
-from .base import ToolPlugin, UserCommand, PromptEnrichmentResult, model_matches_requirements
+from .base import (
+    ToolPlugin,
+    UserCommand,
+    PromptEnrichmentResult,
+    SystemInstructionEnrichmentResult,
+    ToolResultEnrichmentResult,
+    model_matches_requirements,
+)
 from .model_provider.types import ToolSchema
 
 # Entry point group names by plugin kind
@@ -522,12 +529,20 @@ class PluginRegistry:
         """
         return list(self._disabled_tools)
 
-    def get_system_instructions(self) -> Optional[str]:
+    def get_system_instructions(self, run_enrichment: bool = True) -> Optional[str]:
         """Combine system instructions from all exposed plugins.
 
+        Collects raw system instructions from all exposed plugins, then
+        optionally runs them through the system instruction enrichment
+        pipeline (e.g., template extraction).
+
+        Args:
+            run_enrichment: If True (default), run system instruction
+                enrichment plugins after combining raw instructions.
+
         Returns:
-            Combined system instructions string, or None if no plugins
-            have instructions.
+            Combined (and optionally enriched) system instructions string,
+            or None if no plugins have instructions.
         """
         instructions = []
         for name in self._exposed:
@@ -541,7 +556,14 @@ class PluginRegistry:
         if not instructions:
             return None
 
-        return "\n\n".join(instructions)
+        combined = "\n\n".join(instructions)
+
+        # Run through enrichment pipeline if enabled
+        if run_enrichment:
+            result = self.enrich_system_instructions(combined)
+            return result.instructions
+
+        return combined
 
     def get_auto_approved_tools(self) -> List[str]:
         """Collect auto-approved tool names from all exposed plugins.
@@ -616,13 +638,36 @@ class PluginRegistry:
 
     # ==================== Prompt Enrichment ====================
 
-    def get_prompt_enrichment_subscribers(self) -> List[ToolPlugin]:
-        """Get plugins that subscribe to prompt enrichment.
+    def _get_enrichment_priority(self, plugin: ToolPlugin) -> int:
+        """Get the enrichment priority for a plugin.
 
-        Includes both exposed plugins and enrichment-only plugins.
+        Lower values run first. Default is 50.
+
+        Standard priorities:
+        - 20: references (injects content first)
+        - 40: template (scans injected content for templates)
+        - 60: multimodal (handles @image references)
+        - 80: memory (adds memory hints last)
+
+        Args:
+            plugin: The plugin to get priority for.
 
         Returns:
-            List of plugins that have subscribed to prompt enrichment.
+            The enrichment priority (lower = earlier).
+        """
+        if hasattr(plugin, 'get_enrichment_priority'):
+            return plugin.get_enrichment_priority()
+        return 50  # Default priority
+
+    def get_prompt_enrichment_subscribers(self) -> List[ToolPlugin]:
+        """Get plugins that subscribe to prompt enrichment, sorted by priority.
+
+        Includes both exposed plugins and enrichment-only plugins.
+        Plugins are sorted by enrichment priority (lower values run first).
+
+        Returns:
+            List of plugins that have subscribed to prompt enrichment,
+            sorted by priority.
         """
         subscribers = []
         # Include both exposed and enrichment-only plugins
@@ -635,13 +680,16 @@ class PluginRegistry:
                     subscribers.append(plugin)
             except Exception as exc:
                 _trace(f" Error checking enrichment subscription for '{name}': {exc}")
+
+        # Sort by priority (lower values first)
+        subscribers.sort(key=self._get_enrichment_priority)
         return subscribers
 
     def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
         """Run prompt through all subscribed enrichment plugins.
 
         Each subscribed plugin gets to inspect and optionally modify the prompt.
-        Plugins are called in exposure order.
+        Plugins are called in priority order (lower priority values first).
 
         Args:
             prompt: The user's original prompt text.
@@ -664,3 +712,150 @@ class PluginRegistry:
                 _trace(f" Error in prompt enrichment for '{plugin.name}': {exc}")
 
         return PromptEnrichmentResult(prompt=current_prompt, metadata=combined_metadata)
+
+    def _get_system_instruction_enrichment_priority(self, plugin: ToolPlugin) -> int:
+        """Get the system instruction enrichment priority for a plugin.
+
+        Lower values run first. Default is 50.
+
+        Args:
+            plugin: The plugin to get priority for.
+
+        Returns:
+            The enrichment priority (lower = earlier).
+        """
+        if hasattr(plugin, 'get_system_instruction_enrichment_priority'):
+            return plugin.get_system_instruction_enrichment_priority()
+        return 50  # Default priority
+
+    def get_system_instruction_enrichment_subscribers(self) -> List[ToolPlugin]:
+        """Get plugins that subscribe to system instruction enrichment.
+
+        Includes both exposed plugins and enrichment-only plugins.
+        Plugins are sorted by priority (lower values run first).
+
+        Returns:
+            List of plugins that subscribe to system instruction enrichment,
+            sorted by priority.
+        """
+        subscribers = []
+        all_enrichment_names = self._exposed | self._enrichment_only
+        for name in all_enrichment_names:
+            try:
+                plugin = self._plugins[name]
+                if (hasattr(plugin, 'subscribes_to_system_instruction_enrichment') and
+                        plugin.subscribes_to_system_instruction_enrichment()):
+                    subscribers.append(plugin)
+            except Exception as exc:
+                _trace(f" Error checking system instruction enrichment for '{name}': {exc}")
+
+        subscribers.sort(key=self._get_system_instruction_enrichment_priority)
+        return subscribers
+
+    def enrich_system_instructions(
+        self,
+        instructions: str
+    ) -> SystemInstructionEnrichmentResult:
+        """Run system instructions through all subscribed enrichment plugins.
+
+        Each subscribed plugin gets to inspect and optionally modify the
+        combined system instructions. This is called after collecting raw
+        instructions from all plugins.
+
+        Args:
+            instructions: Combined system instructions text.
+
+        Returns:
+            SystemInstructionEnrichmentResult with enriched instructions.
+        """
+        current_instructions = instructions
+        combined_metadata: Dict[str, Any] = {}
+
+        for plugin in self.get_system_instruction_enrichment_subscribers():
+            try:
+                if hasattr(plugin, 'enrich_system_instructions'):
+                    result = plugin.enrich_system_instructions(current_instructions)
+                    current_instructions = result.instructions
+                    if result.metadata:
+                        combined_metadata[plugin.name] = result.metadata
+            except Exception as exc:
+                _trace(f" Error in system instruction enrichment for '{plugin.name}': {exc}")
+
+        return SystemInstructionEnrichmentResult(
+            instructions=current_instructions,
+            metadata=combined_metadata
+        )
+
+    def _get_tool_result_enrichment_priority(self, plugin: ToolPlugin) -> int:
+        """Get the tool result enrichment priority for a plugin.
+
+        Lower values run first. Default is 50.
+
+        Args:
+            plugin: The plugin to get priority for.
+
+        Returns:
+            The enrichment priority (lower = earlier).
+        """
+        if hasattr(plugin, 'get_tool_result_enrichment_priority'):
+            return plugin.get_tool_result_enrichment_priority()
+        return 50  # Default priority
+
+    def get_tool_result_enrichment_subscribers(self) -> List[ToolPlugin]:
+        """Get plugins that subscribe to tool result enrichment.
+
+        Includes both exposed plugins and enrichment-only plugins.
+        Plugins are sorted by priority (lower values run first).
+
+        Returns:
+            List of plugins that subscribe to tool result enrichment,
+            sorted by priority.
+        """
+        subscribers = []
+        all_enrichment_names = self._exposed | self._enrichment_only
+        for name in all_enrichment_names:
+            try:
+                plugin = self._plugins[name]
+                if (hasattr(plugin, 'subscribes_to_tool_result_enrichment') and
+                        plugin.subscribes_to_tool_result_enrichment()):
+                    subscribers.append(plugin)
+            except Exception as exc:
+                _trace(f" Error checking tool result enrichment for '{name}': {exc}")
+
+        subscribers.sort(key=self._get_tool_result_enrichment_priority)
+        return subscribers
+
+    def enrich_tool_result(
+        self,
+        tool_name: str,
+        result: str
+    ) -> ToolResultEnrichmentResult:
+        """Run a tool result through all subscribed enrichment plugins.
+
+        Each subscribed plugin gets to inspect and optionally modify the
+        tool result before it is sent back to the model.
+
+        Args:
+            tool_name: Name of the tool that produced the result.
+            result: The tool's output as a string.
+
+        Returns:
+            ToolResultEnrichmentResult with enriched result.
+        """
+        current_result = result
+        combined_metadata: Dict[str, Any] = {}
+
+        for plugin in self.get_tool_result_enrichment_subscribers():
+            try:
+                if hasattr(plugin, 'enrich_tool_result'):
+                    enrichment = plugin.enrich_tool_result(tool_name, current_result)
+                    current_result = enrichment.result
+                    if enrichment.metadata:
+                        combined_metadata[plugin.name] = enrichment.metadata
+            except Exception as exc:
+                _trace(f" Error in tool result enrichment for '{plugin.name}': {exc}")
+
+        return ToolResultEnrichmentResult(
+            result=current_result,
+            metadata=combined_metadata
+        )
