@@ -295,26 +295,31 @@ Template rendering requires approval since it writes files."""
 
             # Determine template filename
             template_name = self._generate_template_name(instructions, content, lang, start)
-            template_path = self._extract_template(template_name, content, lang)
+            template_path, is_new = self._extract_template(template_name, content, lang)
 
             if template_path:
                 self._extracted_templates[content_hash] = template_path
-                variables = self._extract_variables(content)
-                extracted.append((content_hash, template_path, variables))
 
-                # Build annotation
-                rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
-                var_list = ", ".join(variables[:5])
-                if len(variables) > 5:
-                    var_list += f", ... ({len(variables)} total)"
+                # Only add annotation for newly created templates
+                if is_new:
+                    variables = self._extract_variables(content)
+                    extracted.append((content_hash, template_path, variables))
 
-                annotations.append(
-                    f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
-                    f"  Variables: {var_list or '(none detected)'}\n"
-                    f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                    f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
-                )
-                self._trace(f"  extracted: {template_path.name} with {len(variables)} variables")
+                    # Build annotation
+                    rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
+                    var_list = ", ".join(variables[:5])
+                    if len(variables) > 5:
+                        var_list += f", ... ({len(variables)} total)"
+
+                    annotations.append(
+                        f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
+                        f"  Variables: {var_list or '(none detected)'}\n"
+                        f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
+                        f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
+                    )
+                    self._trace(f"  extracted: {template_path.name} with {len(variables)} variables")
+                else:
+                    self._trace(f"  reusing existing: {template_path.name}")
 
         if not annotations:
             return SystemInstructionEnrichmentResult(instructions=instructions)
@@ -398,25 +403,30 @@ Template rendering requires approval since it writes files."""
                 continue
 
             template_name = self._generate_template_name(result, content, lang, start)
-            template_path = self._extract_template(template_name, content, lang)
+            template_path, is_new = self._extract_template(template_name, content, lang)
 
             if template_path:
                 self._extracted_templates[content_hash] = template_path
-                variables = self._extract_variables(content)
-                extracted.append((content_hash, template_path, variables))
 
-                rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
-                var_list = ", ".join(variables[:5])
-                if len(variables) > 5:
-                    var_list += f", ... ({len(variables)} total)"
+                # Only add annotation for newly created templates
+                if is_new:
+                    variables = self._extract_variables(content)
+                    extracted.append((content_hash, template_path, variables))
 
-                annotations.append(
-                    f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
-                    f"  Variables: {var_list or '(none detected)'}\n"
-                    f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                    f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
-                )
-                self._trace(f"  extracted: {template_path.name} with {len(variables)} variables")
+                    rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
+                    var_list = ", ".join(variables[:5])
+                    if len(variables) > 5:
+                        var_list += f", ... ({len(variables)} total)"
+
+                    annotations.append(
+                        f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
+                        f"  Variables: {var_list or '(none detected)'}\n"
+                        f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
+                        f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
+                    )
+                    self._trace(f"  extracted: {template_path.name} with {len(variables)} variables")
+                else:
+                    self._trace(f"  reusing existing: {template_path.name}")
 
         if not annotations:
             return ToolResultEnrichmentResult(result=result)
@@ -535,7 +545,7 @@ Template rendering requires approval since it writes files."""
         }
         return extensions.get(lang_lower, ".tmpl")
 
-    def _extract_template(self, name: str, content: str, lang: str) -> Optional[Path]:
+    def _extract_template(self, name: str, content: str, lang: str) -> Tuple[Optional[Path], bool]:
         """Extract template content to .jaato/templates/ directory.
 
         Args:
@@ -544,7 +554,9 @@ Template rendering requires approval since it writes files."""
             lang: Source language (for header comment).
 
         Returns:
-            Path to extracted template, or None on failure.
+            Tuple of (path, is_new) where:
+            - path: Path to extracted template, or None on failure
+            - is_new: True if newly created, False if reusing existing file
         """
         try:
             # Ensure templates directory exists
@@ -559,18 +571,18 @@ Template rendering requires approval since it writes files."""
             while template_path.exists():
                 # Check if existing file has same content
                 if template_path.read_text() == content:
-                    return template_path  # Reuse existing
+                    return template_path, False  # Reuse existing (not new)
                 template_path = self._templates_dir / f"{base_name}-{counter}{suffix}"
                 counter += 1
 
             # Write template
             template_path.write_text(content)
             self._trace(f"wrote template: {template_path}")
-            return template_path
+            return template_path, True  # Newly created
 
         except (IOError, OSError) as e:
             self._trace(f"error extracting template {name}: {e}")
-            return None
+            return None, False
 
     def _extract_variables(self, content: str) -> List[str]:
         """Extract variable names from template content."""
