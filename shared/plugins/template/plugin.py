@@ -7,7 +7,9 @@ Key features:
 1. System instruction enrichment: Detects embedded templates in system
    instructions (from MODULE.md injected by references plugin) and extracts
    them to .jaato/templates/ for later use via renderTemplate tool.
-2. Template rendering: Renders Jinja2 templates with variable substitution.
+2. Tool result enrichment: Detects embedded templates in tool outputs
+   (e.g., from cat, readFile) and extracts them similarly.
+3. Template rendering: Renders Jinja2 templates with variable substitution.
 
 See docs/template-tool-design.md for the design specification.
 """
@@ -20,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ..base import UserCommand, SystemInstructionEnrichmentResult
+from ..base import UserCommand, SystemInstructionEnrichmentResult, ToolResultEnrichmentResult
 from ..model_provider.types import ToolSchema
 
 
@@ -315,6 +317,106 @@ Template rendering requires approval since it writes files."""
 
         return SystemInstructionEnrichmentResult(
             instructions=enriched_instructions,
+            metadata={
+                "extracted_count": len(extracted),
+                "templates": [
+                    {"hash": h, "path": str(p), "variables": v}
+                    for h, p, v in extracted
+                ]
+            }
+        )
+
+    # ==================== Tool Result Enrichment ====================
+
+    def get_tool_result_enrichment_priority(self) -> int:
+        """Return tool result enrichment priority (lower = earlier)."""
+        return 40
+
+    def subscribes_to_tool_result_enrichment(self) -> bool:
+        """Subscribe to tool result enrichment for template extraction."""
+        return True
+
+    def enrich_tool_result(
+        self,
+        tool_name: str,
+        result: str
+    ) -> ToolResultEnrichmentResult:
+        """Detect embedded templates in tool results and extract them.
+
+        Scans tool output for fenced code blocks containing Jinja2 template
+        syntax. When found, extracts them to .jaato/templates/ and annotates
+        the result.
+
+        Args:
+            tool_name: Name of the tool that produced the result.
+            result: The tool's output as a string.
+
+        Returns:
+            ToolResultEnrichmentResult with annotated result and extraction metadata.
+        """
+        result_preview = result[:100].replace('\n', '\\n') + ('...' if len(result) > 100 else '')
+        self._trace(f"enrich_tool_result [{tool_name}]: {len(result)} chars, preview: {result_preview}")
+
+        # Find all code blocks in the result
+        code_blocks = self._find_code_blocks(result)
+
+        if not code_blocks:
+            self._trace("  no code blocks found in tool result")
+            return ToolResultEnrichmentResult(result=result)
+
+        # Filter to blocks that contain template syntax
+        template_blocks = [
+            (lang, content, start, end)
+            for lang, content, start, end in code_blocks
+            if self._is_template(content)
+        ]
+
+        if not template_blocks:
+            self._trace(f"  found {len(code_blocks)} code blocks but none with template syntax")
+            return ToolResultEnrichmentResult(result=result)
+
+        self._trace(f"enrich_tool_result: found {len(template_blocks)} template blocks")
+
+        # Extract each template and collect annotations
+        extracted: List[Tuple[str, Path, List[str]]] = []
+        annotations: List[str] = []
+
+        for lang, content, start, end in template_blocks:
+            content_hash = self._hash_content(content)
+
+            if content_hash in self._extracted_templates:
+                template_path = self._extracted_templates[content_hash]
+                self._trace(f"  skipping already-extracted: {template_path.name}")
+                continue
+
+            template_name = self._generate_template_name(result, content, lang, start)
+            template_path = self._extract_template(template_name, content, lang)
+
+            if template_path:
+                self._extracted_templates[content_hash] = template_path
+                variables = self._extract_variables(content)
+                extracted.append((content_hash, template_path, variables))
+
+                rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
+                var_list = ", ".join(variables[:5])
+                if len(variables) > 5:
+                    var_list += f", ... ({len(variables)} total)"
+
+                annotations.append(
+                    f"[Template extracted: {rel_path}]\n"
+                    f"  Variables: {var_list or '(none detected)'}\n"
+                    f"  Use: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
+                )
+                self._trace(f"  extracted: {template_path.name} with {len(variables)} variables")
+
+        if not annotations:
+            return ToolResultEnrichmentResult(result=result)
+
+        annotation_block = "\n\n---\n**Extracted Templates:**\n" + "\n\n".join(annotations) + "\n---"
+        enriched_result = result + annotation_block
+
+        return ToolResultEnrichmentResult(
+            result=enriched_result,
             metadata={
                 "extracted_count": len(extracted),
                 "templates": [

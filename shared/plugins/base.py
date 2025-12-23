@@ -57,6 +57,23 @@ class SystemInstructionEnrichmentResult:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class ToolResultEnrichmentResult:
+    """Result of tool result enrichment by a plugin.
+
+    Plugins that subscribe to tool result enrichment can inspect and optionally
+    modify tool execution results before they are sent back to the model. This
+    is useful for extracting embedded content (like templates) from file reads
+    or command outputs.
+
+    Attributes:
+        result: The (possibly modified) tool result text.
+        metadata: Optional metadata about the enrichment.
+    """
+    result: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
 def model_matches_requirements(model_name: str, patterns: List[str]) -> bool:
     """Check if a model name matches any of the required patterns.
 
@@ -404,6 +421,52 @@ class ToolPlugin(Protocol):
     #
     #     Returns:
     #         SystemInstructionEnrichmentResult with enriched instructions.
+    #     """
+    #     ...
+    #
+    # Tool Result Enrichment:
+    #
+    # def subscribes_to_tool_result_enrichment(self) -> bool:
+    #     """Return True if this plugin wants to enrich tool results.
+    #
+    #     Plugins that subscribe will have their enrich_tool_result() method
+    #     called with each tool execution result before it is sent back to the
+    #     model. This allows plugins to:
+    #     - Extract embedded templates from file contents or command output
+    #     - Add annotations based on result content
+    #     - Process or transform tool outputs
+    #
+    #     Returns:
+    #         True to subscribe, False otherwise (default).
+    #     """
+    #     ...
+    #
+    # def get_tool_result_enrichment_priority(self) -> int:
+    #     """Return the priority for tool result enrichment.
+    #
+    #     Lower values run first. Default is 50.
+    #
+    #     Returns:
+    #         Integer priority (lower = earlier).
+    #     """
+    #     ...
+    #
+    # def enrich_tool_result(
+    #     self,
+    #     tool_name: str,
+    #     result: str
+    # ) -> ToolResultEnrichmentResult:
+    #     """Enrich a tool execution result before sending to the model.
+    #
+    #     Called only if subscribes_to_tool_result_enrichment() returns True.
+    #     The plugin receives the tool name and its result string.
+    #
+    #     Args:
+    #         tool_name: Name of the tool that produced the result.
+    #         result: The tool's output as a string.
+    #
+    #     Returns:
+    #         ToolResultEnrichmentResult with enriched result.
     #     """
     #     ...
 

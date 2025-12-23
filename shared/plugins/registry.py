@@ -15,6 +15,7 @@ from .base import (
     UserCommand,
     PromptEnrichmentResult,
     SystemInstructionEnrichmentResult,
+    ToolResultEnrichmentResult,
     model_matches_requirements,
 )
 from .model_provider.types import ToolSchema
@@ -782,5 +783,79 @@ class PluginRegistry:
 
         return SystemInstructionEnrichmentResult(
             instructions=current_instructions,
+            metadata=combined_metadata
+        )
+
+    def _get_tool_result_enrichment_priority(self, plugin: ToolPlugin) -> int:
+        """Get the tool result enrichment priority for a plugin.
+
+        Lower values run first. Default is 50.
+
+        Args:
+            plugin: The plugin to get priority for.
+
+        Returns:
+            The enrichment priority (lower = earlier).
+        """
+        if hasattr(plugin, 'get_tool_result_enrichment_priority'):
+            return plugin.get_tool_result_enrichment_priority()
+        return 50  # Default priority
+
+    def get_tool_result_enrichment_subscribers(self) -> List[ToolPlugin]:
+        """Get plugins that subscribe to tool result enrichment.
+
+        Includes both exposed plugins and enrichment-only plugins.
+        Plugins are sorted by priority (lower values run first).
+
+        Returns:
+            List of plugins that subscribe to tool result enrichment,
+            sorted by priority.
+        """
+        subscribers = []
+        all_enrichment_names = self._exposed | self._enrichment_only
+        for name in all_enrichment_names:
+            try:
+                plugin = self._plugins[name]
+                if (hasattr(plugin, 'subscribes_to_tool_result_enrichment') and
+                        plugin.subscribes_to_tool_result_enrichment()):
+                    subscribers.append(plugin)
+            except Exception as exc:
+                _trace(f" Error checking tool result enrichment for '{name}': {exc}")
+
+        subscribers.sort(key=self._get_tool_result_enrichment_priority)
+        return subscribers
+
+    def enrich_tool_result(
+        self,
+        tool_name: str,
+        result: str
+    ) -> ToolResultEnrichmentResult:
+        """Run a tool result through all subscribed enrichment plugins.
+
+        Each subscribed plugin gets to inspect and optionally modify the
+        tool result before it is sent back to the model.
+
+        Args:
+            tool_name: Name of the tool that produced the result.
+            result: The tool's output as a string.
+
+        Returns:
+            ToolResultEnrichmentResult with enriched result.
+        """
+        current_result = result
+        combined_metadata: Dict[str, Any] = {}
+
+        for plugin in self.get_tool_result_enrichment_subscribers():
+            try:
+                if hasattr(plugin, 'enrich_tool_result'):
+                    enrichment = plugin.enrich_tool_result(tool_name, current_result)
+                    current_result = enrichment.result
+                    if enrichment.metadata:
+                        combined_metadata[plugin.name] = enrichment.metadata
+            except Exception as exc:
+                _trace(f" Error in tool result enrichment for '{plugin.name}': {exc}")
+
+        return ToolResultEnrichmentResult(
+            result=current_result,
             metadata=combined_metadata
         )
