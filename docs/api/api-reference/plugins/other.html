@@ -172,7 +172,7 @@ askClarification(
             <tbody>
               <tr><td><strong>Name</strong></td><td><code>memory</code></td></tr>
               <tr><td><strong>Tools</strong></td><td><code>store_memory</code>, <code>retrieve_memories</code>, <code>list_memory_tags</code></td></tr>
-              <tr><td><strong>Subscribes to</strong></td><td>Prompt enrichment</td></tr>
+              <tr><td><strong>Subscribes to</strong></td><td>Prompt enrichment (priority: 80)</td></tr>
               <tr><td><strong>Auto-approved</strong></td><td>Yes</td></tr>
             </tbody>
           </table>
@@ -474,6 +474,7 @@ retrieve_memories(
             <tbody>
               <tr><td><strong>Name</strong></td><td><code>multimodal</code></td></tr>
               <tr><td><strong>Tools</strong></td><td><code>loadImage</code></td></tr>
+              <tr><td><strong>Subscribes to</strong></td><td>Prompt enrichment (priority: 60)</td></tr>
               <tr><td><strong>Model Requirements</strong></td><td><code>gemini-3-*</code>, <code>gemini-3.5-*</code></td></tr>
             </tbody>
           </table>
@@ -507,6 +508,108 @@ loadImage(path="./diagram.png")
   "mime_type": "image/png",
   "_multimodal": true,
   "image_data": "base64..."
+}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Template Plugin -->
+      <section class="two-panel" id="template">
+        <div class="panel-explanation">
+          <h2>Template Plugin</h2>
+          <p>
+            Jinja2-based template rendering with automatic extraction from documentation.
+            When prompts contain code blocks with template syntax (like MODULE.md content),
+            the plugin extracts them to <code>.jaato/templates/</code> for later use.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Name</strong></td><td><code>template</code></td></tr>
+              <tr><td><strong>Tools</strong></td><td><code>renderTemplate</code>, <code>listExtractedTemplates</code></td></tr>
+              <tr><td><strong>Subscribes to</strong></td><td>Prompt enrichment (priority: 40)</td></tr>
+              <tr><td><strong>Auto-approved</strong></td><td><code>listExtractedTemplates</code> only</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Automatic Template Extraction</h3>
+          <p>
+            The plugin scans prompts for code blocks containing Jinja2 syntax
+            (<code>{% raw %}{{ }}{% endraw %}</code> or <code>{% raw %}{% %}{% endraw %}</code>).
+            Detected templates are:
+          </p>
+          <ol>
+            <li>Extracted to <code>.jaato/templates/</code></li>
+            <li>Named based on frontmatter ID + heading</li>
+            <li>Annotated in the prompt with usage instructions</li>
+          </ol>
+
+          <h3>Enrichment Pipeline Position</h3>
+          <p>
+            Runs at priority 40, <strong>after</strong> the references plugin (20)
+            injects MODULE.md content, and <strong>before</strong> multimodal (60)
+            and memory (80) plugins.
+          </p>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Template Syntax</div>
+            Templates use Jinja2 syntax: variables (<code>{% raw %}{{ name }}{% endraw %}</code>),
+            conditionals (<code>{% raw %}{% if %}...{% endif %}{% endraw %}</code>),
+            loops (<code>{% raw %}{% for %}...{% endfor %}{% endraw %}</code>).
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Template extraction flow</div>
+          <div class="code-block">
+            <pre><code class="language-text"># Prompt contains MODULE.md with embedded template:
+```java
+@CircuitBreaker(name = "{{ circuitBreakerName }}")
+public {{ returnType }} {{ methodName }}() { ... }
+```
+
+# After enrichment, agent sees:
+---
+**Extracted Templates:**
+[Template extracted: .jaato/templates/mod-code-001-basic.java.tmpl]
+  Variables: circuitBreakerName, methodName, returnType
+  Use: renderTemplate(template_path="...", variables={...})
+---</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Render template</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Use extracted template
+renderTemplate(
+    template_path=".jaato/templates/mod-code-001-basic.java.tmpl",
+    variables={
+        "circuitBreakerName": "orderService",
+        "returnType": "Order",
+        "methodName": "getOrder"
+    },
+    output_path="src/main/java/OrderService.java"
+)
+
+# Or use inline template
+renderTemplate(
+    template="Hello {{ name }}!",
+    variables={"name": "Alice"},
+    output_path="greeting.txt"
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">List extracted templates</div>
+          <div class="code-block">
+            <pre><code class="language-python">listExtractedTemplates()
+# Returns:
+{
+  "templates": [
+    {
+      "path": ".jaato/templates/mod-code-001-basic.java.tmpl",
+      "variables": ["circuitBreakerName", "methodName", "returnType"],
+      "exists": true
+    }
+  ],
+  "count": 1
 }</code></pre>
           </div>
         </div>

@@ -503,69 +503,89 @@ for cmd in commands:
 
           <p>
             Plugins can subscribe to prompt enrichment to modify user prompts
-            before they're sent to the model. Useful for context injection.
+            before they're sent to the model. Useful for context injection,
+            template extraction, and reference handling.
           </p>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Enrichment Priority</div>
+            <p>
+              Plugins are called in <strong>priority order</strong> (lower values first).
+              This enables pipelines where later plugins process content injected by earlier ones.
+            </p>
+            <table style="width: 100%; font-size: 0.85em; margin-top: 8px;">
+              <tr><th>Priority</th><th>Plugin</th><th>Purpose</th></tr>
+              <tr><td>20</td><td>references</td><td>Injects MODULE.md content</td></tr>
+              <tr><td>40</td><td>template</td><td>Extracts embedded templates</td></tr>
+              <tr><td>60</td><td>multimodal</td><td>Handles @image references</td></tr>
+              <tr><td>80</td><td>memory</td><td>Adds memory hints</td></tr>
+              <tr><td>90</td><td>session</td><td>Session description hints</td></tr>
+            </table>
+          </div>
 
           <h3>get_prompt_enrichment_subscribers</h3>
           <div class="method-signature">
             <span class="method-name">get_prompt_enrichment_subscribers</span>() -> <span class="type">List[ToolPlugin]</span>
           </div>
-          <p>Returns plugins that have subscribed to prompt enrichment.</p>
+          <p>Returns plugins that have subscribed to prompt enrichment, sorted by priority.</p>
 
           <h3>enrich_prompt</h3>
           <div class="method-signature">
             <span class="method-name">enrich_prompt</span>(<span class="param">prompt</span>: <span class="type">str</span>) -> <span class="type">PromptEnrichmentResult</span>
           </div>
           <p>
-            Runs the prompt through all enrichment subscribers and returns
-            the modified prompt with metadata.
+            Runs the prompt through all enrichment subscribers <strong>in priority order</strong>
+            and returns the modified prompt with metadata.
           </p>
 
           <div class="callout callout-info">
             <div class="callout-title">PromptEnrichmentResult</div>
-            Contains: <code>prompt</code> (modified), <code>original_prompt</code>,
-            <code>enrichments</code> (list of applied enrichments)
+            Contains: <code>prompt</code> (modified), <code>metadata</code> (dict of plugin enrichment data)
           </div>
         </div>
         <div class="panel-code">
           <div class="code-label">Prompt enrichment</div>
           <div class="code-block">
-            <pre><code class="language-python"># Check subscribers
+            <pre><code class="language-python"># Check subscribers (sorted by priority)
 subscribers = registry.get_prompt_enrichment_subscribers()
-print(f"Enrichment plugins: {len(subscribers)}")
+for plugin in subscribers:
+    priority = getattr(plugin, 'get_enrichment_priority', lambda: 50)()
+    print(f"{plugin.name}: priority {priority}")
 
 # Enrich a prompt
 result = registry.enrich_prompt(
     "What files are in this directory?"
 )
 
-print(f"Original: {result.original_prompt}")
 print(f"Enriched: {result.prompt}")
-print(f"Applied: {result.enrichments}")</code></pre>
+print(f"Metadata: {result.metadata}")</code></pre>
           </div>
 
-          <div class="code-label" style="margin-top: 24px;">Enrichment plugin example</div>
+          <div class="code-label" style="margin-top: 24px;">Enrichment plugin with priority</div>
           <div class="code-block">
-            <pre><code class="language-python">class ContextPlugin:
-    name = "context"
+            <pre><code class="language-python">class TemplatePlugin:
+    name = "template"
+
+    def get_enrichment_priority(self):
+        """Lower = earlier. Default is 50."""
+        return 40  # Run after references (20)
 
     def subscribes_to_prompt_enrichment(self):
         return True
 
     def enrich_prompt(self, prompt):
-        # Add current directory context
-        cwd = os.getcwd()
-        enriched = f"[CWD: {cwd}]\n{prompt}"
+        # Detect code blocks with {{ }} syntax
+        # Extract templates to .jaato/templates/
+        # Annotate prompt with extraction info
         return PromptEnrichmentResult(
             prompt=enriched,
-            original_prompt=prompt,
-            enrichments=["added_cwd"]
+            metadata={"extracted_count": 2}
         )
 
-# Register for enrichment only
+# Register for enrichment
 registry.register_plugin(
-    ContextPlugin(),
-    enrichment_only=True
+    TemplatePlugin(),
+    expose=True
 )</code></pre>
           </div>
         </div>
