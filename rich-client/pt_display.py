@@ -106,11 +106,17 @@ class PTDisplay:
         """
         self._width, self._height = shutil.get_terminal_size()
 
+        # Keybinding configuration (needed early for panels)
+        self._keybinding_config = keybinding_config or load_keybindings()
+
         # Agent registry and panel
         self._agent_registry = agent_registry
         self._agent_panel: Optional[AgentPanel] = None
         if agent_registry:
-            self._agent_panel = AgentPanel(agent_registry)
+            self._agent_panel = AgentPanel(
+                agent_registry,
+                cycle_key=self._keybinding_config.cycle_agents
+            )
             # Set initial agent panel width
             agent_width = int(self._width * self.AGENT_PANEL_WIDTH_RATIO) - 2
             self._agent_panel.set_width(agent_width)
@@ -120,7 +126,7 @@ class PTDisplay:
         output_width = int(self._width * output_width_ratio) - 4
 
         # Rich components
-        self._plan_panel = PlanPanel()
+        self._plan_panel = PlanPanel(toggle_key=self._keybinding_config.toggle_plan)
         self._output_buffer = OutputBuffer()
         self._output_buffer.set_width(output_width)
 
@@ -153,9 +159,6 @@ class PTDisplay:
         # Clipboard support
         self._clipboard_config = clipboard_config or ClipboardConfig.from_env()
         self._clipboard: ClipboardProvider = create_provider(self._clipboard_config)
-
-        # Keybinding configuration
-        self._keybinding_config = keybinding_config or load_keybindings()
 
         # Mouse selection tracking (for preemptive copy)
         self._mouse_selection_start: Optional[int] = None  # Start Y coordinate
@@ -741,7 +744,7 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("cycle_agents"))
         def handle_f2(event):
-            """Handle Ctrl+A - cycle through agents."""
+            """Handle cycle_agents keybinding - cycle through agents."""
             if self._agent_registry:
                 self._agent_registry.cycle_selection()
                 self._app.invalidate()

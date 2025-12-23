@@ -1,14 +1,16 @@
 """Plan panel rendering for status bar symbols and popup overlay.
 
 Provides compact plan progress display in the status bar (symbols only)
-with a detailed popup overlay accessible via Ctrl+P.
+with a detailed popup overlay accessible via the configured toggle key.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from rich.panel import Panel
 from rich.text import Text
 from rich.console import Group
+
+from keybindings import KeyBinding, format_key_for_display
 
 
 class PlanPanel:
@@ -23,11 +25,12 @@ class PlanPanel:
         "skipped": ("⊘", "yellow"),
     }
 
-    def __init__(self):
+    def __init__(self, toggle_key: Optional[KeyBinding] = None):
         self._plan_data: Optional[Dict[str, Any]] = None
         self._popup_visible: bool = False
         self._popup_scroll_offset: int = 0  # Scroll position in popup
         self._popup_max_visible_steps: int = 10  # Max steps visible at once
+        self._toggle_key = toggle_key or "c-p"
 
     def update_plan(self, plan_data: Dict[str, Any]) -> None:
         """Update the plan data to render.
@@ -54,7 +57,7 @@ class PlanPanel:
         return self._popup_visible
 
     def toggle_popup(self) -> None:
-        """Toggle popup visibility (Ctrl+P)."""
+        """Toggle popup visibility."""
         self._popup_visible = not self._popup_visible
         if not self._popup_visible:
             self._popup_scroll_offset = 0  # Reset scroll when closing
@@ -258,7 +261,7 @@ class PlanPanel:
         progress_text.append(f"({completed}/{total})", style="dim")
         # Calculate padding to right-align hint
         left_content = f" {percent:.0f}% ({completed}/{total})"
-        right_content = "[Ctrl+P to close]"
+        right_content = f"[{format_key_for_display(self._toggle_key)} to close]"
         padding = max(1, width - 4 - len(left_content) - len(right_content))
         progress_text.append(" " * padding)
         progress_text.append(right_content, style="dim")
