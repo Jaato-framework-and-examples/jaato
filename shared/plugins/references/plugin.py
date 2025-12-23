@@ -128,6 +128,7 @@ class ReferencesPlugin:
                     '.md', '.txt', '.json', '.yaml', '.yml',
                     '.html', '.htm', '.rst', '.adoc'
                 )
+                doc_files_found = 0
                 try:
                     for item in sorted(path_obj.rglob("*")):
                         if item.is_file():
@@ -137,11 +138,18 @@ class ReferencesPlugin:
                             if is_doc_ext or is_readme:
                                 try:
                                     contents.append(item.read_text(encoding='utf-8'))
+                                    doc_files_found += 1
                                 except (IOError, OSError, UnicodeDecodeError):
                                     pass  # Skip unreadable files
-                except (PermissionError, OSError):
-                    pass
-                return "\n".join(contents) if contents else None
+                except (PermissionError, OSError) as e:
+                    self._trace(f"transitive:   '{source.id}' dir scan error: {e}")
+
+                if contents:
+                    self._trace(f"transitive:   '{source.id}' dir -> {doc_files_found} doc files, {sum(len(c) for c in contents)} chars")
+                    return "\n".join(contents)
+                else:
+                    self._trace(f"transitive:   '{source.id}' dir -> no doc files found in {file_path}")
+                    return None
 
             # Handle regular file
             if path_obj.is_file():
