@@ -100,10 +100,12 @@ def discover_references(
                 else:
                     # Check if path is project-relative (starts with .jaato/)
                     # These should be resolved against project_root, not file_path.parent
-                    path_str = str(source_path)
-                    if path_str.startswith('.jaato/') or path_str.startswith('./.jaato/'):
+                    # Use original string to avoid Windows path normalization issues
+                    # (Path() on Windows converts ./.jaato/foo to .jaato\foo, breaking prefix check)
+                    original_path = source.path
+                    if original_path.startswith('.jaato/') or original_path.startswith('./.jaato/'):
                         # Strip leading ./ if present for clean join
-                        clean_path = path_str[2:] if path_str.startswith('./') else path_str
+                        clean_path = original_path[2:] if original_path.startswith('./') else original_path
                         absolute_path = (Path(project_root) / clean_path).resolve()
                     else:
                         # Regular relative path - resolve against reference file's directory
@@ -209,10 +211,12 @@ def resolve_source_paths(
         else:
             # Check if path is project-relative (starts with .jaato/)
             # These should be resolved against cwd (project root), not base_path
-            path_str = str(source_path)
-            if cwd and (path_str.startswith('.jaato/') or path_str.startswith('./.jaato/')):
+            # Use original string to avoid Windows path normalization issues
+            # (Path() on Windows converts ./.jaato/foo to .jaato\foo, breaking prefix check)
+            original_path = source.path
+            if cwd and (original_path.startswith('.jaato/') or original_path.startswith('./.jaato/')):
                 # Strip leading ./ if present for clean join
-                clean_path = path_str[2:] if path_str.startswith('./') else path_str
+                clean_path = original_path[2:] if original_path.startswith('./') else original_path
                 absolute_path = (cwd / clean_path).resolve()
             else:
                 absolute_path = (base / source_path).resolve()
