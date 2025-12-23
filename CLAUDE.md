@@ -372,7 +372,7 @@ Priority: Environment variables > Project config > User config > Defaults
   "pager_next": "space",
   "toggle_plan": "c-p",
   "toggle_tools": "c-t",
-  "cycle_agents": "f2",
+  "cycle_agents": "c-a",
   "yank": "c-y",
   "view_full": "v"
 }
