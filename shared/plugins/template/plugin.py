@@ -309,7 +309,7 @@ Template rendering requires approval since it writes files."""
                     var_list += f", ... ({len(variables)} total)"
 
                 annotations.append(
-                    f"⚠️ **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
+                    f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
                     f"  Variables: {var_list or '(none detected)'}\n"
                     f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
                     f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
@@ -320,7 +320,7 @@ Template rendering requires approval since it writes files."""
             return SystemInstructionEnrichmentResult(instructions=instructions)
 
         # Append annotations to instructions
-        annotation_block = "\n\n---\n⚠️ **MANDATORY TEMPLATES EXTRACTED - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
+        annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES EXTRACTED - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
         enriched_instructions = instructions + annotation_block
 
         return SystemInstructionEnrichmentResult(
@@ -411,7 +411,7 @@ Template rendering requires approval since it writes files."""
                     var_list += f", ... ({len(variables)} total)"
 
                 annotations.append(
-                    f"⚠️ **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
+                    f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
                     f"  Variables: {var_list or '(none detected)'}\n"
                     f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
                     f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
@@ -421,7 +421,7 @@ Template rendering requires approval since it writes files."""
         if not annotations:
             return ToolResultEnrichmentResult(result=result)
 
-        annotation_block = "\n\n---\n**Extracted Templates:**\n" + "\n\n".join(annotations) + "\n---"
+        annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES EXTRACTED - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
         enriched_result = result + annotation_block
 
         return ToolResultEnrichmentResult(
