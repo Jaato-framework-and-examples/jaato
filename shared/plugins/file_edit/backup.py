@@ -32,8 +32,13 @@ class BackupManager:
 
         Args:
             base_dir: Directory for storing backups. Defaults to .jaato/backups
+                     resolved as an absolute path from the current working directory.
         """
-        self._base_dir = base_dir or Path(".jaato/backups")
+        # Always resolve to absolute path to avoid issues with CWD changes
+        if base_dir is not None:
+            self._base_dir = Path(base_dir).resolve()
+        else:
+            self._base_dir = Path(".jaato/backups").resolve()
         self._max_backups = int(
             os.environ.get(BACKUP_COUNT_ENV_VAR, DEFAULT_BACKUP_COUNT)
         )
