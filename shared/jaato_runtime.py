@@ -401,9 +401,13 @@ class JaatoRuntime:
             Combined system instructions string, or None.
         """
         if plugin_names is None:
-            base = self._system_instructions
+            # Use registry's method which runs enrichment pipeline
+            if self._registry:
+                base = self._registry.get_system_instructions(run_enrichment=True)
+            else:
+                base = self._system_instructions
         else:
-            # Build from specific plugins
+            # Build from specific plugins, then run enrichment
             parts = []
             if self._registry:
                 for name in plugin_names:
@@ -420,6 +424,11 @@ class JaatoRuntime:
                     parts.append(perm_instr)
 
             base = "\n\n".join(parts) if parts else None
+
+            # Run enrichment pipeline on combined instructions
+            if base and self._registry:
+                result = self._registry.enrich_system_instructions(base)
+                base = result.instructions
 
         # Combine with additional instructions
         if additional:
