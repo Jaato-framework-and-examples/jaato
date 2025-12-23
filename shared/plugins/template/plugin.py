@@ -4,8 +4,9 @@ Provides tools for rendering Jinja2 templates with variable substitution
 and writing the results to files.
 
 Key features:
-1. Prompt enrichment: Detects embedded templates in prompts (from MODULE.md, etc.)
-   and extracts them to .jaato/templates/ for later use via renderTemplate tool.
+1. System instruction enrichment: Detects embedded templates in system
+   instructions (from MODULE.md injected by references plugin) and extracts
+   them to .jaato/templates/ for later use via renderTemplate tool.
 2. Template rendering: Renders Jinja2 templates with variable substitution.
 
 See docs/template-tool-design.md for the design specification.
@@ -19,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ..base import UserCommand, PromptEnrichmentResult
+from ..base import UserCommand, SystemInstructionEnrichmentResult
 from ..model_provider.types import ToolSchema
 
 
@@ -210,42 +211,47 @@ Template rendering requires approval since it writes files."""
         """Template plugin provides model tools only."""
         return []
 
-    # ==================== Prompt Enrichment ====================
+    # ==================== System Instruction Enrichment ====================
 
-    def get_enrichment_priority(self) -> int:
-        """Return enrichment priority (lower = earlier).
+    def get_system_instruction_enrichment_priority(self) -> int:
+        """Return system instruction enrichment priority (lower = earlier).
 
-        Template extraction runs at priority 40 - after references plugin (20)
-        injects content, but before multimodal (60) and memory (80).
+        Template extraction runs at priority 40 - after references plugin
+        has already contributed its content to system instructions.
         """
         return 40
 
-    def subscribes_to_prompt_enrichment(self) -> bool:
-        """Subscribe to prompt enrichment for template extraction."""
+    def subscribes_to_system_instruction_enrichment(self) -> bool:
+        """Subscribe to system instruction enrichment for template extraction."""
         return True
 
-    def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
-        """Detect embedded templates in prompts and extract them.
+    def enrich_system_instructions(
+        self,
+        instructions: str
+    ) -> SystemInstructionEnrichmentResult:
+        """Detect embedded templates in system instructions and extract them.
 
-        Scans the prompt for fenced code blocks containing Jinja2 template
-        syntax ({{ }}, {% %}, {# #}). When found, extracts them to
-        .jaato/templates/ and annotates the prompt with the extracted paths.
+        Scans the system instructions for fenced code blocks containing Jinja2
+        template syntax ({{ }}, {% %}, {# #}). When found, extracts them to
+        .jaato/templates/ and annotates the instructions with the extracted paths.
 
         Args:
-            prompt: The user's prompt (may contain injected MODULE.md content).
+            instructions: Combined system instructions (includes MODULE.md content
+                from references plugin).
 
         Returns:
-            PromptEnrichmentResult with annotated prompt and extraction metadata.
+            SystemInstructionEnrichmentResult with annotated instructions and
+            extraction metadata.
         """
-        prompt_preview = prompt[:100].replace('\n', '\\n') + ('...' if len(prompt) > 100 else '')
-        self._trace(f"enrich_prompt called: {len(prompt)} chars, preview: {prompt_preview}")
+        instructions_preview = instructions[:100].replace('\n', '\\n') + ('...' if len(instructions) > 100 else '')
+        self._trace(f"enrich_system_instructions called: {len(instructions)} chars, preview: {instructions_preview}")
 
-        # Find all code blocks in the prompt
-        code_blocks = self._find_code_blocks(prompt)
+        # Find all code blocks in the instructions
+        code_blocks = self._find_code_blocks(instructions)
 
         if not code_blocks:
-            self._trace("  no code blocks found in prompt")
-            return PromptEnrichmentResult(prompt=prompt)
+            self._trace("  no code blocks found in instructions")
+            return SystemInstructionEnrichmentResult(instructions=instructions)
 
         # Filter to blocks that contain template syntax
         template_blocks = [
@@ -260,9 +266,9 @@ Template rendering requires approval since it writes files."""
                 preview = content[:80].replace('\n', '\\n') + ('...' if len(content) > 80 else '')
                 self._trace(f"  code block {i+1}: lang={lang!r}, {len(content)} chars: {preview}")
             self._trace(f"  found {len(code_blocks)} code blocks but none with template syntax")
-            return PromptEnrichmentResult(prompt=prompt)
+            return SystemInstructionEnrichmentResult(instructions=instructions)
 
-        self._trace(f"enrich_prompt: found {len(template_blocks)} template blocks")
+        self._trace(f"enrich_system_instructions: found {len(template_blocks)} template blocks")
 
         # Extract each template and collect annotations
         extracted: List[Tuple[str, Path, List[str]]] = []  # (content_hash, path, variables)
@@ -279,7 +285,7 @@ Template rendering requires approval since it writes files."""
                 continue
 
             # Determine template filename
-            template_name = self._generate_template_name(prompt, content, lang, start)
+            template_name = self._generate_template_name(instructions, content, lang, start)
             template_path = self._extract_template(template_name, content, lang)
 
             if template_path:
@@ -301,14 +307,14 @@ Template rendering requires approval since it writes files."""
                 self._trace(f"  extracted: {template_path.name} with {len(variables)} variables")
 
         if not annotations:
-            return PromptEnrichmentResult(prompt=prompt)
+            return SystemInstructionEnrichmentResult(instructions=instructions)
 
-        # Append annotations to prompt
+        # Append annotations to instructions
         annotation_block = "\n\n---\n**Extracted Templates:**\n" + "\n\n".join(annotations) + "\n---"
-        enriched_prompt = prompt + annotation_block
+        enriched_instructions = instructions + annotation_block
 
-        return PromptEnrichmentResult(
-            prompt=enriched_prompt,
+        return SystemInstructionEnrichmentResult(
+            instructions=enriched_instructions,
             metadata={
                 "extracted_count": len(extracted),
                 "templates": [
