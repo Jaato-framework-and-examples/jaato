@@ -147,7 +147,7 @@ A 3D rendered stylized eye icon with a small image/picture frame reflected in th
 **Visual Concept:** Forward slash with template variables
 
 ```
-A 3D rendered large forward slash (/) symbol in bold indigo (#635bff) with small template placeholder brackets {{ }} floating nearby in cyan (#00d4ff). Represents slash command templating. Modern minimalist design, soft shadows, dark slate background (#1e1e2e), 512x512 pixels, professional software icon style, slight glossy finish.
+A 3D rendered large forward slash (/) symbol in bold indigo (#635bff) with small template placeholder brackets {% raw %}{{ }}{% endraw %} floating nearby in cyan (#00d4ff). Represents slash command templating. Modern minimalist design, soft shadows, dark slate background (#1e1e2e), 512x512 pixels, professional software icon style, slight glossy finish.
 ```
 
 ---
