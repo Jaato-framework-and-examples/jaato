@@ -384,7 +384,7 @@ def _generic_executor(name: str, args: Dict[str, Any], debug: bool = False) -> T
         if debug:
             print(f"[ai_tool_runner] generic_executor running: {' '.join(cmd)}")
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            proc = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', check=False)
             out = proc.stdout or proc.stderr or ''
             return True, {'raw': out}
         except Exception as exc:
