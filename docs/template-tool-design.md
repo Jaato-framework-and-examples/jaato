@@ -78,11 +78,13 @@ This is a small, low-risk refactor that enables clean code sharing without plugi
 ### Recommended Design: Single Unified Tool
 
 ```python
+{% raw %}
 ToolSchema(
     name="renderTemplate",
     description="Render a template with variable substitution and write the result to a file. "
                 "Templates support variable substitution ({{name}}), conditionals "
                 "({% if condition %}...{% endif %}), and loops ({% for item in items %}...{% endfor %}).",
+{% endraw %}
     parameters={
         "type": "object",
         "properties": {
@@ -148,6 +150,7 @@ ToolSchema(
 
 ### Recommendation: Jinja2-style
 
+{% raw %}
 ```
 Hello {{ name }}!
 
@@ -159,6 +162,7 @@ You have admin privileges.
 - {{ service.name }}: {{ service.port }}
 {% endfor %}
 ```
+{% endraw %}
 
 ### Syntax Options Analyzed
 
@@ -191,6 +195,7 @@ Consider a restricted Jinja2 configuration:
 ### Example Templates
 
 **Simple service class:**
+{% raw %}
 ```java
 // {{ output_path }}
 package {{ package }};
@@ -207,8 +212,10 @@ public class {{ class_name }} {
 {% endfor %}
 }
 ```
+{% endraw %}
 
 **Configuration file:**
+{% raw %}
 ```yaml
 # Generated configuration for {{ environment }}
 server:
@@ -222,6 +229,7 @@ server:
 logging:
   level: {{ log_level | default('INFO') }}
 ```
+{% endraw %}
 
 ## Template Storage and Discovery
 
@@ -344,6 +352,7 @@ All template operations write files, so none should be auto-approved. This match
 
 ## System Instructions
 
+{% raw %}
 ```python
 def get_system_instructions(self) -> Optional[str]:
     return """You have access to template rendering tools.
@@ -372,6 +381,7 @@ For reusable templates, check .templates/ directory:
 
 Template rendering requires approval since it writes files."""
 ```
+{% endraw %}
 
 ## Concerns and Trade-offs
 
