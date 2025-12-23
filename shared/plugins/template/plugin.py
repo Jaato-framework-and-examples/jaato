@@ -121,10 +121,13 @@ class TemplatePlugin:
             ToolSchema(
                 name="renderTemplate",
                 description=(
-                    "Render a template with variable substitution and write the result to a file. "
+                    "**PREFERRED OVER MANUAL CODING**: Render a template with variable substitution "
+                    "and write the result to a file. When a template exists for your task (check "
+                    ".jaato/templates/ or use listExtractedTemplates), you MUST use this tool instead "
+                    "of writing code manually. Templates ensure consistency and reduce errors. "
                     "Templates support Jinja2 syntax: variables ({{name}}), conditionals "
                     "({% if condition %}...{% endif %}), and loops ({% for item in items %}...{% endfor %}). "
-                    "Provide either 'template' for inline content or 'template_path' for a file."
+                    "Provide either 'template' for inline content or 'template_path' for extracted templates."
                 ),
                 parameters={
                     "type": "object",
@@ -153,9 +156,10 @@ class TemplatePlugin:
             ToolSchema(
                 name="listExtractedTemplates",
                 description=(
-                    "List templates that have been extracted from documentation in this session. "
-                    "These templates were detected in code blocks with Jinja2 syntax and "
-                    "extracted to .jaato/templates/ for use with renderTemplate."
+                    "**CHECK THIS BEFORE WRITING CODE**: List templates extracted from documentation "
+                    "in this session. If a template exists for your task, you MUST use renderTemplate "
+                    "instead of writing code manually. These templates were detected in code blocks "
+                    "with Jinja2 syntax and extracted to .jaato/templates/."
                 ),
                 parameters={
                     "type": "object",
@@ -174,34 +178,37 @@ class TemplatePlugin:
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for template tools."""
-        return """You have access to template rendering tools.
+        return """## Template Rendering (MANDATORY USAGE)
 
-Use `renderTemplate` to generate files from templates with variable substitution.
+**CRITICAL**: When templates exist for a task, you MUST use `renderTemplate` instead of
+manually writing code. Templates ensure consistency, reduce errors, and follow established
+patterns. Manual coding when a template exists is NOT acceptable.
 
-Templates use Jinja2 syntax:
+### Template Priority Rule
+1. ALWAYS check if a template exists before writing code
+2. If a template matches your task, USE IT via `renderTemplate`
+3. ONLY write code manually if NO suitable template exists
+4. When in doubt, use `listExtractedTemplates` to see available templates
+
+### Templates Location
+Templates are stored in `.jaato/templates/`. When you read documentation files
+(like MODULE.md) containing embedded templates, they are automatically extracted
+to this directory. Watch for "[Template extracted: ...]" annotations.
+
+### Usage Example
+```
+renderTemplate(
+  template_path=".jaato/templates/circuit-breaker.java.tmpl",
+  variables={"circuitBreakerName": "orderService", "timeout": 5000},
+  output_path="src/main/java/.../OrderService.java"
+)
+```
+
+### Template Syntax (Jinja2)
 - Variables: {{ variable_name }}
 - Conditionals: {% if condition %}...{% endif %}
 - Loops: {% for item in items %}...{% endfor %}
 - Filters: {{ name | upper }}, {{ value | default('fallback') }}
-
-Example:
-  renderTemplate(
-    template="Hello {{ name }}, welcome to {{ project }}!",
-    variables={"name": "Alice", "project": "jaato"},
-    output_path="greeting.txt"
-  )
-
-For reusable templates, check .jaato/templates/ directory:
-  renderTemplate(
-    template_path=".jaato/templates/circuit-breaker.java.tmpl",
-    variables={"circuitBreakerName": "orderService", ...},
-    output_path="src/main/java/.../OrderService.java"
-  )
-
-When you read documentation files (like MODULE.md) containing embedded templates,
-they are automatically extracted to .jaato/templates/ and you'll see annotations
-indicating the extracted paths. Use `listExtractedTemplates` to see all extracted
-templates in this session.
 
 Template rendering requires approval since it writes files."""
 
@@ -302,9 +309,10 @@ Template rendering requires approval since it writes files."""
                     var_list += f", ... ({len(variables)} total)"
 
                 annotations.append(
-                    f"[Template extracted: {rel_path}]\n"
+                    f"⚠️ **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
                     f"  Variables: {var_list or '(none detected)'}\n"
-                    f"  Use: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
+                    f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
+                    f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
                 )
                 self._trace(f"  extracted: {template_path.name} with {len(variables)} variables")
 
@@ -312,7 +320,7 @@ Template rendering requires approval since it writes files."""
             return SystemInstructionEnrichmentResult(instructions=instructions)
 
         # Append annotations to instructions
-        annotation_block = "\n\n---\n**Extracted Templates:**\n" + "\n\n".join(annotations) + "\n---"
+        annotation_block = "\n\n---\n⚠️ **MANDATORY TEMPLATES EXTRACTED - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
         enriched_instructions = instructions + annotation_block
 
         return SystemInstructionEnrichmentResult(
@@ -403,9 +411,10 @@ Template rendering requires approval since it writes files."""
                     var_list += f", ... ({len(variables)} total)"
 
                 annotations.append(
-                    f"[Template extracted: {rel_path}]\n"
+                    f"⚠️ **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
                     f"  Variables: {var_list or '(none detected)'}\n"
-                    f"  Use: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
+                    f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
+                    f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
                 )
                 self._trace(f"  extracted: {template_path.name} with {len(variables)} variables")
 
