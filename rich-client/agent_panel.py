@@ -4,13 +4,14 @@ This module provides the AgentPanel class for rendering the agent list
 in the rich client's side panel (20% width).
 """
 
-from typing import List, Optional
+from typing import List, Optional, Union
 from rich.panel import Panel
 from rich.console import Group
 from rich.text import Text
 from rich.style import Style
 
 from agent_registry import AgentRegistry, AgentInfo
+from keybindings import KeyBinding, format_key_for_display
 
 
 class AgentPanel:
@@ -20,14 +21,16 @@ class AgentPanel:
     The selected agent is highlighted.
     """
 
-    def __init__(self, agent_registry: AgentRegistry):
+    def __init__(self, agent_registry: AgentRegistry, cycle_key: Optional[KeyBinding] = None):
         """Initialize the agent panel.
 
         Args:
             agent_registry: Registry managing all agents.
+            cycle_key: Keybinding for cycling agents (for display hint).
         """
         self._registry = agent_registry
         self._panel_width = 24  # Default width, updated dynamically
+        self._cycle_key = cycle_key or "c-a"
 
     def set_width(self, width: int) -> None:
         """Set panel width.
@@ -72,7 +75,7 @@ class AgentPanel:
         # Create panel
         panel = Panel(
             agent_group,
-            title="[bold]Agents[/bold] [dim](F2: cycle)[/dim]",
+            title=f"[bold]Agents[/bold] [dim]({format_key_for_display(self._cycle_key)}: cycle)[/dim]",
             border_style="cyan",
             width=self._panel_width,
             padding=(0, 1)
