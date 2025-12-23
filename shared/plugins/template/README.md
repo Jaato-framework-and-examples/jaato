@@ -64,7 +64,55 @@ The plugin subscribes to prompt enrichment to automatically detect and extract t
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 3. List Extracted Templates (`listExtractedTemplates`)
+### 3. Simple Template Rendering (`renderTemplateToFile`)
+
+A convenience tool for simple `{{variable}}` substitution that writes directly to a file:
+
+```python
+renderTemplateToFile(
+    output_path="/src/main/java/com/bank/CustomerService.java",
+    template_path="/templates/service.java.tmpl",
+    variables={"class_name": "CustomerService", "package": "com.bank.customer"}
+)
+```
+
+Or with an inline template:
+
+```python
+renderTemplateToFile(
+    output_path="/src/CustomerService.java",
+    template="package {{package}};\n\npublic class {{class_name}} {}",
+    variables={"class_name": "CustomerService", "package": "com.bank"}
+)
+```
+
+**Key differences from `renderTemplate`:**
+- Uses simple `{{variable}}` substitution only (no Jinja2 conditionals/loops)
+- Has `overwrite` parameter (default: `false`) - errors if file exists
+- Returns `bytes_written` instead of `size`/`lines`
+- Creates parent directories automatically
+
+**Return format:**
+```json
+{
+  "success": true,
+  "output_path": "/src/CustomerService.java",
+  "bytes_written": 1234,
+  "variables_used": ["class_name", "package"],
+  "template_source": "file"
+}
+```
+
+**Error handling:**
+```json
+{
+  "error": "Undefined variable: author",
+  "template_path": "/templates/service.java.tmpl",
+  "variables_provided": ["class_name", "package"]
+}
+```
+
+### 4. List Extracted Templates (`listExtractedTemplates`)
 
 View all templates that have been extracted in the current session:
 
@@ -82,7 +130,7 @@ listExtractedTemplates()
 
 ## Template Syntax
 
-Templates use Jinja2 syntax:
+### For `renderTemplate` (Full Jinja2)
 
 | Syntax | Description | Example |
 |--------|-------------|---------|
@@ -90,6 +138,15 @@ Templates use Jinja2 syntax:
 | `{% if %}` | Conditional | `{% if admin %}...{% endif %}` |
 | `{% for %}` | Loop | `{% for item in items %}...{% endfor %}` |
 | `{{ x \| filter }}` | Filters | `{{ name \| upper }}` |
+
+### For `renderTemplateToFile` (Simple)
+
+| Syntax | Description | Example |
+|--------|-------------|---------|
+| `{{var}}` | Variable substitution | `{{className}}` |
+| `\{{` | Escape literal `{{` | `\{{not_a_var}}` → `{{not_a_var}}` |
+
+The simple syntax only supports variable substitution—no conditionals, loops, or filters.
 
 ## Enrichment Priority
 
@@ -140,17 +197,28 @@ This directory can be gitignored as templates are extracted on-demand.
 
 ## Security
 
+**For `renderTemplate` (Jinja2):**
 - Uses Jinja2's `SandboxedEnvironment` to prevent arbitrary code execution
 - `{% include %}` and `{% import %}` are disabled
 - `StrictUndefined` mode catches typos in variable names
-- Template rendering requires user approval (writes files)
+
+**For `renderTemplateToFile` (simple):**
+- Uses regex-based substitution (no code execution risk)
+- Validates all template variables are provided
+- Prevents accidental file overwrite (requires explicit `overwrite=true`)
+
+**Both tools:**
+- Require user approval (file writes need permission)
+- Create parent directories safely
 
 ## Dependencies
 
-Requires Jinja2:
+Jinja2 is required for `renderTemplate` only:
 
 ```bash
 pip install Jinja2
 ```
 
 The plugin gracefully reports if Jinja2 is not installed when `renderTemplate` is called.
+
+**Note:** `renderTemplateToFile` does not require Jinja2—it uses built-in regex substitution.
