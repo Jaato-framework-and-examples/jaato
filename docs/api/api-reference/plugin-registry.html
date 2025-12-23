@@ -499,94 +499,104 @@ for cmd in commands:
       <!-- Prompt Enrichment -->
       <section class="two-panel">
         <div class="panel-explanation">
-          <h2 id="enrichment">Prompt Enrichment</h2>
+          <h2 id="enrichment">Enrichment Pipelines</h2>
 
           <p>
-            Plugins can subscribe to prompt enrichment to modify user prompts
-            before they're sent to the model. Useful for context injection,
-            template extraction, and reference handling.
+            The framework provides three enrichment pipelines that allow plugins to
+            process content at different stages:
           </p>
 
-          <div class="callout callout-info">
-            <div class="callout-title">Enrichment Priority</div>
-            <p>
-              Plugins are called in <strong>priority order</strong> (lower values first).
-              This enables pipelines where later plugins process content injected by earlier ones.
-            </p>
-            <table style="width: 100%; font-size: 0.85em; margin-top: 8px;">
-              <tr><th>Priority</th><th>Plugin</th><th>Purpose</th></tr>
-              <tr><td>20</td><td>references</td><td>Injects MODULE.md content</td></tr>
-              <tr><td>40</td><td>template</td><td>Extracts embedded templates</td></tr>
-              <tr><td>60</td><td>multimodal</td><td>Handles @image references</td></tr>
-              <tr><td>80</td><td>memory</td><td>Adds memory hints</td></tr>
-              <tr><td>90</td><td>session</td><td>Session description hints</td></tr>
-            </table>
-          </div>
+          <table style="width: 100%; font-size: 0.85em; margin-top: 8px;">
+            <tr><th>Pipeline</th><th>When Called</th><th>Use Cases</th></tr>
+            <tr><td>Prompt</td><td>Before user message sent</td><td>Expand @references</td></tr>
+            <tr><td>System Instruction</td><td>After collecting instructions</td><td>Extract templates</td></tr>
+            <tr><td>Tool Result</td><td>After tool execution</td><td>Extract from file reads</td></tr>
+          </table>
 
-          <h3>get_prompt_enrichment_subscribers</h3>
-          <div class="method-signature">
-            <span class="method-name">get_prompt_enrichment_subscribers</span>() -> <span class="type">List[ToolPlugin]</span>
-          </div>
-          <p>Returns plugins that have subscribed to prompt enrichment, sorted by priority.</p>
+          <h3>Prompt Enrichment</h3>
+          <p>Plugins subscribe to modify user prompts before they're sent to the model.</p>
 
-          <h3>enrich_prompt</h3>
           <div class="method-signature">
             <span class="method-name">enrich_prompt</span>(<span class="param">prompt</span>: <span class="type">str</span>) -> <span class="type">PromptEnrichmentResult</span>
           </div>
-          <p>
-            Runs the prompt through all enrichment subscribers <strong>in priority order</strong>
-            and returns the modified prompt with metadata.
-          </p>
+
+          <h3>System Instruction Enrichment</h3>
+          <p>Plugins subscribe to modify combined system instructions (including MODULE.md content).</p>
+
+          <div class="method-signature">
+            <span class="method-name">enrich_system_instructions</span>(<span class="param">instructions</span>: <span class="type">str</span>) -> <span class="type">SystemInstructionEnrichmentResult</span>
+          </div>
+
+          <h3>Tool Result Enrichment</h3>
+          <p>Plugins subscribe to modify tool execution results before they're sent to the model.</p>
+
+          <div class="method-signature">
+            <span class="method-name">enrich_tool_result</span>(<span class="param">tool_name</span>: <span class="type">str</span>, <span class="param">result</span>: <span class="type">str</span>) -> <span class="type">ToolResultEnrichmentResult</span>
+          </div>
 
           <div class="callout callout-info">
-            <div class="callout-title">PromptEnrichmentResult</div>
-            Contains: <code>prompt</code> (modified), <code>metadata</code> (dict of plugin enrichment data)
+            <div class="callout-title">Enrichment Priorities</div>
+            <p>Plugins are called in priority order (lower = earlier):</p>
+            <table style="width: 100%; font-size: 0.85em; margin-top: 8px;">
+              <tr><th>Priority</th><th>Plugin</th><th>Pipelines</th></tr>
+              <tr><td>20</td><td>references</td><td>Prompt, Tool Result</td></tr>
+              <tr><td>40</td><td>template</td><td>System Instructions, Tool Result</td></tr>
+              <tr><td>60</td><td>multimodal</td><td>Prompt</td></tr>
+              <tr><td>80</td><td>memory</td><td>Prompt</td></tr>
+              <tr><td>90</td><td>session</td><td>Prompt</td></tr>
+            </table>
           </div>
         </div>
         <div class="panel-code">
-          <div class="code-label">Prompt enrichment</div>
-          <div class="code-block">
-            <pre><code class="language-python"># Check subscribers (sorted by priority)
-subscribers = registry.get_prompt_enrichment_subscribers()
-for plugin in subscribers:
-    priority = getattr(plugin, 'get_enrichment_priority', lambda: 50)()
-    print(f"{plugin.name}: priority {priority}")
-
-# Enrich a prompt
-result = registry.enrich_prompt(
-    "What files are in this directory?"
-)
-
-print(f"Enriched: {result.prompt}")
-print(f"Metadata: {result.metadata}")</code></pre>
-          </div>
-
-          <div class="code-label" style="margin-top: 24px;">Enrichment plugin with priority</div>
+          <div class="code-label">System instruction enrichment (template extraction)</div>
           <div class="code-block">
             <pre><code class="language-python">class TemplatePlugin:
     name = "template"
 
+    def get_system_instruction_enrichment_priority(self):
+        return 40
+
+    def subscribes_to_system_instruction_enrichment(self):
+        return True
+
+    def enrich_system_instructions(self, instructions):
+        # Detect Jinja2 templates in MODULE.md content
+        # Extract to .jaato/templates/
+        return SystemInstructionEnrichmentResult(
+            instructions=enriched,
+            metadata={"extracted_count": 2}
+        )
+
+    # Also subscribe to tool result enrichment
+    def subscribes_to_tool_result_enrichment(self):
+        return True
+
+    def enrich_tool_result(self, tool_name, result):
+        # Same logic for file reads
+        return ToolResultEnrichmentResult(
+            result=enriched,
+            metadata={"extracted_count": 1}
+        )</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Prompt enrichment (@reference expansion)</div>
+          <div class="code-block">
+            <pre><code class="language-python">class ReferencesPlugin:
+    name = "references"
+
     def get_enrichment_priority(self):
-        """Lower = earlier. Default is 50."""
-        return 40  # Run after references (20)
+        return 20  # Run first
 
     def subscribes_to_prompt_enrichment(self):
         return True
 
     def enrich_prompt(self, prompt):
-        # Detect code blocks with {{ }} syntax
-        # Extract templates to .jaato/templates/
-        # Annotate prompt with extraction info
+        # Detect @mod-code-015 mentions
+        # Expand with reference content
         return PromptEnrichmentResult(
-            prompt=enriched,
-            metadata={"extracted_count": 2}
-        )
-
-# Register for enrichment
-registry.register_plugin(
-    TemplatePlugin(),
-    expose=True
-)</code></pre>
+            prompt=expanded,
+            metadata={"mentioned_references": ["mod-code-015"]}
+        )</code></pre>
           </div>
         </div>
       </section>
