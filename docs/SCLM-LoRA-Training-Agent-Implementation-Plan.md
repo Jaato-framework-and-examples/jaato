@@ -165,12 +165,12 @@ class SCLMExtractionAgent:
         4. Any non-standard patterns
         
         Return JSON with:
-        {{
+        {% raw %}{{
             "history_format": "description of format",
             "marker_pattern": "regex pattern",
             "extraction_strategy": "standard|custom|hybrid",
             "special_notes": ["any unusual patterns found"]
-        }}
+        }}{% endraw %}
         """
         
         response = self.model.generate_content(prompt)
@@ -213,12 +213,12 @@ class SCLMExtractionAgent:
         4. What percentage of examples are high quality?
         
         Return JSON:
-        {{
+        {% raw %}{{
             "quality_score": 0.0-1.0,
             "should_retry": true|false,
             "recommended_strategy": "if retry needed",
             "issues": ["list of issues found"]
-        }}
+        }}{% endraw %}
         """
         
         response = self.model.generate_content(prompt)
@@ -318,12 +318,12 @@ class ZOSMFCollectionAgent:
         3. Exclude test, backup, or temporary datasets
         
         Return JSON array of dataset names to process, ordered by priority:
-        {{
+        {% raw %}{{
             "datasets": [
                 {{"name": "PROD.COBOL.SOURCE", "priority": "high", "reason": "..."}},
                 ...
             ]
-        }}
+        }}{% endraw %}
         """
         
         response = self.gemini.generate_content(prompt)
@@ -379,13 +379,13 @@ class ZOSMFCollectionAgent:
         3. Avoid obvious test/temporary programs
         
         Return JSON:
-        {{
+        {% raw %}{{
             "strategy": "description",
             "sample_size": 500,
             "selection_criteria": ["list of criteria"],
             "sampled_members": ["member1", "member2", ...]
-        }}
-        
+        }}{% endraw %}
+
         If you can't determine selection from names alone, return a random sample.
         """
         
@@ -554,7 +554,7 @@ class SCLMParserAgent:
         - Description of change
         
         Return JSON array:
-        [
+        {% raw %}[
             {{
                 "date": "YYYY-MM-DD",
                 "programmer": "name or initials",
@@ -562,8 +562,8 @@ class SCLMParserAgent:
                 "confidence": 0.0-1.0
             }},
             ...
-        ]
-        
+        ]{% endraw %}
+
         Only include entries you're confident about (confidence > 0.7).
         """
         
@@ -652,13 +652,13 @@ class SCLMParserAgent:
         - Any other systematic way developers marked changes
         
         Return JSON:
-        {{
+        {% raw %}{{
             "marker_pattern_found": true|false,
             "pattern_type": "description",
             "start_marker_regex": "regex pattern",
             "end_marker_regex": "regex pattern",
             "examples": ["example markers from code"]
-        }}
+        }}{% endraw %}
         """
         
         response = self.gemini.generate_content(prompt)
@@ -795,7 +795,7 @@ class SCLMParserAgent:
         3. Description keywords matching change ID
         
         Return JSON array of matches:
-        [
+        {% raw %}[
             {{
                 "change_id": "FIXBUG-001",
                 "history_index": 0,
@@ -803,7 +803,7 @@ class SCLMParserAgent:
                 "reasoning": "why matched"
             }},
             ...
-        ]
+        ]{% endraw %}
         """
         
         response = self.gemini.generate_content(prompt)
@@ -904,7 +904,7 @@ class TrainingDataGenerator:
         or unexpected behavior.
         
         Return JSON:
-        {{
+        {% raw %}{{
             "instruction": "User's problem description and code context",
             "response": "Fixed code with clear explanation",
             "quality_indicators": {{
@@ -912,7 +912,7 @@ class TrainingDataGenerator:
                 "has_context": true|false,
                 "fix_is_clear": true|false
             }}
-        }}
+        }}{% endraw %}
         """
         
         try:
@@ -960,11 +960,11 @@ class TrainingDataGenerator:
         2. Assistant explains: the purpose, how it works, and why it was needed
         
         Return JSON:
-        {{
+        {% raw %}{{
             "instruction": "User asking for explanation",
             "response": "Clear, technical explanation",
             "quality_score": 0.0-1.0
-        }}
+        }}{% endraw %}
         """
         
         try:
@@ -1061,7 +1061,7 @@ class TrainingDataGenerator:
         - Is the split point natural (not mid-statement)?
         - Does it demonstrate useful COBOL patterns?
         
-        Return JSON: {{"quality_score": 0.0-1.0, "reasoning": "..."}}
+        Return JSON: {% raw %}{{"quality_score": 0.0-1.0, "reasoning": "..."}}{% endraw %}
         """
         
         try:
@@ -1106,12 +1106,12 @@ class TrainingDataGenerator:
         Identify violations and suggest improvements. Create a training example:
         
         Return JSON:
-        {{
+        {% raw %}{{
             "instruction": "Review this code against our standards: [code]",
             "response": "Issues found: [...] Recommendations: [...]",
             "has_violations": true|false,
             "quality_score": 0.0-1.0
-        }}
+        }}{% endraw %}
         """
         
         try:
