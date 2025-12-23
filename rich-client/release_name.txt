@@ -1,1 +1,1 @@
-Jaato Rich TUI Client - Local Enviroment Awareness version 2025-12-18
+Jaato Rich TUI Client - Extract code templates from documentation version 2025-12-23

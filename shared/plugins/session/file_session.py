@@ -684,6 +684,14 @@ class FileSessionPlugin:
 
     # ==================== ToolPlugin: Prompt Enrichment ====================
 
+    def get_enrichment_priority(self) -> int:
+        """Return enrichment priority (lower = earlier).
+
+        Session runs at priority 90 - very late in the pipeline,
+        only adding session description hints after all other enrichment.
+        """
+        return 90
+
     def subscribes_to_prompt_enrichment(self) -> bool:
         """Subscribe to prompt enrichment for session description requests."""
         return True

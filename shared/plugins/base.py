@@ -40,6 +40,40 @@ class PromptEnrichmentResult:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class SystemInstructionEnrichmentResult:
+    """Result of system instruction enrichment by a plugin.
+
+    Plugins that subscribe to system instruction enrichment can inspect and
+    optionally modify the combined system instructions before they are sent
+    to the model. This is useful for extracting embedded content (like templates)
+    that should be made available to tools.
+
+    Attributes:
+        instructions: The (possibly modified) system instructions text.
+        metadata: Optional metadata about the enrichment.
+    """
+    instructions: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolResultEnrichmentResult:
+    """Result of tool result enrichment by a plugin.
+
+    Plugins that subscribe to tool result enrichment can inspect and optionally
+    modify tool execution results before they are sent back to the model. This
+    is useful for extracting embedded content (like templates) from file reads
+    or command outputs.
+
+    Attributes:
+        result: The (possibly modified) tool result text.
+        metadata: Optional metadata about the enrichment.
+    """
+    result: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
 def model_matches_requirements(model_name: str, patterns: List[str]) -> bool:
     """Check if a model name matches any of the required patterns.
 
@@ -341,6 +375,98 @@ class ToolPlugin(Protocol):
     #
     #     Returns:
     #         PromptEnrichmentResult with the enriched prompt and metadata.
+    #     """
+    #     ...
+    #
+    # System Instruction Enrichment:
+    #
+    # def subscribes_to_system_instruction_enrichment(self) -> bool:
+    #     """Return True if this plugin wants to enrich system instructions.
+    #
+    #     Plugins that subscribe will have their enrich_system_instructions()
+    #     method called with the combined system instructions from all plugins
+    #     (including content from references plugin like MODULE.md). This allows
+    #     plugins to:
+    #     - Extract embedded templates for later use by tools
+    #     - Add annotations or summaries based on instruction content
+    #     - Process references or links found in system instructions
+    #
+    #     Returns:
+    #         True to subscribe, False otherwise (default).
+    #     """
+    #     ...
+    #
+    # def get_system_instruction_enrichment_priority(self) -> int:
+    #     """Return the priority for system instruction enrichment.
+    #
+    #     Lower values run first. Default is 50.
+    #
+    #     Returns:
+    #         Integer priority (lower = earlier).
+    #     """
+    #     ...
+    #
+    # def enrich_system_instructions(
+    #     self,
+    #     instructions: str
+    # ) -> SystemInstructionEnrichmentResult:
+    #     """Enrich combined system instructions before sending to the model.
+    #
+    #     Called only if subscribes_to_system_instruction_enrichment() returns True.
+    #     The plugin receives the combined system instructions from all plugins
+    #     and can inspect/modify them.
+    #
+    #     Args:
+    #         instructions: Combined system instructions text from all plugins.
+    #
+    #     Returns:
+    #         SystemInstructionEnrichmentResult with enriched instructions.
+    #     """
+    #     ...
+    #
+    # Tool Result Enrichment:
+    #
+    # def subscribes_to_tool_result_enrichment(self) -> bool:
+    #     """Return True if this plugin wants to enrich tool results.
+    #
+    #     Plugins that subscribe will have their enrich_tool_result() method
+    #     called with each tool execution result before it is sent back to the
+    #     model. This allows plugins to:
+    #     - Extract embedded templates from file contents or command output
+    #     - Add annotations based on result content
+    #     - Process or transform tool outputs
+    #
+    #     Returns:
+    #         True to subscribe, False otherwise (default).
+    #     """
+    #     ...
+    #
+    # def get_tool_result_enrichment_priority(self) -> int:
+    #     """Return the priority for tool result enrichment.
+    #
+    #     Lower values run first. Default is 50.
+    #
+    #     Returns:
+    #         Integer priority (lower = earlier).
+    #     """
+    #     ...
+    #
+    # def enrich_tool_result(
+    #     self,
+    #     tool_name: str,
+    #     result: str
+    # ) -> ToolResultEnrichmentResult:
+    #     """Enrich a tool execution result before sending to the model.
+    #
+    #     Called only if subscribes_to_tool_result_enrichment() returns True.
+    #     The plugin receives the tool name and its result string.
+    #
+    #     Args:
+    #         tool_name: Name of the tool that produced the result.
+    #         result: The tool's output as a string.
+    #
+    #     Returns:
+    #         ToolResultEnrichmentResult with enriched result.
     #     """
     #     ...
 

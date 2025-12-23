@@ -7,6 +7,10 @@ guides, etc.) and handles:
 
 The model is responsible for fetching content using appropriate tools (CLI, MCP, etc.).
 This plugin only manages the catalog and user interaction.
+
+Enrichment Support:
+- Prompt enrichment: Detects @reference-id mentions in user prompts
+- Tool result enrichment: Detects @reference-id mentions in tool outputs
 """
 
 import os
@@ -22,7 +26,12 @@ from ..subagent.config import expand_variables
 from .models import ReferenceSource, InjectionMode, SourceType
 from .channels import SelectionChannel, ConsoleSelectionChannel, QueueSelectionChannel, create_channel
 from .config_loader import load_config, ReferencesConfig, resolve_source_paths
-from ..base import UserCommand, CommandCompletion
+from ..base import (
+    UserCommand,
+    CommandCompletion,
+    PromptEnrichmentResult,
+    ToolResultEnrichmentResult,
+)
 
 
 # Maximum depth for transitive reference resolution to prevent runaway recursion
@@ -810,6 +819,122 @@ class ReferencesPlugin:
         These commands take no arguments, so no completions needed.
         """
         return []
+
+    # ==================== Prompt Enrichment ====================
+
+    def get_enrichment_priority(self) -> int:
+        """Return enrichment priority (lower = earlier).
+
+        References plugin runs first (priority 20) to inject content that
+        other plugins (like template) can then process.
+        """
+        return 20
+
+    def subscribes_to_prompt_enrichment(self) -> bool:
+        """Subscribe to prompt enrichment for @reference detection."""
+        return True
+
+    def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
+        """Detect @reference-id mentions in user prompts and expand them.
+
+        Looks for @reference-id patterns in the prompt and adds the
+        reference instruction/content for mentioned sources.
+
+        Args:
+            prompt: The user's prompt text.
+
+        Returns:
+            PromptEnrichmentResult with expanded references.
+        """
+        return self._enrich_content(prompt, "prompt")
+
+    # ==================== Tool Result Enrichment ====================
+
+    def get_tool_result_enrichment_priority(self) -> int:
+        """Return tool result enrichment priority (lower = earlier)."""
+        return 20
+
+    def subscribes_to_tool_result_enrichment(self) -> bool:
+        """Subscribe to tool result enrichment for @reference detection."""
+        return True
+
+    def enrich_tool_result(
+        self,
+        tool_name: str,
+        result: str
+    ) -> ToolResultEnrichmentResult:
+        """Detect @reference-id mentions in tool results and expand them.
+
+        Args:
+            tool_name: Name of the tool that produced the result.
+            result: The tool's output as a string.
+
+        Returns:
+            ToolResultEnrichmentResult with expanded references.
+        """
+        enrichment = self._enrich_content(result, f"tool:{tool_name}")
+        return ToolResultEnrichmentResult(
+            result=enrichment.prompt,
+            metadata=enrichment.metadata
+        )
+
+    def _enrich_content(self, content: str, source_type: str) -> PromptEnrichmentResult:
+        """Common enrichment logic for prompts and tool results.
+
+        Detects @reference-id patterns and expands them with reference content.
+
+        Args:
+            content: The content to enrich.
+            source_type: Type of content for logging ("prompt" or "tool:name").
+
+        Returns:
+            PromptEnrichmentResult with expanded content.
+        """
+        if not self._sources:
+            return PromptEnrichmentResult(prompt=content)
+
+        # Build set of reference IDs for matching
+        source_ids = {s.id for s in self._sources}
+
+        # Find @reference mentions (e.g., @mod-code-015, @skill-001)
+        # Pattern: @ followed by reference ID (word chars and hyphens)
+        at_reference_pattern = re.compile(r'@([\w-]+)')
+        matches = at_reference_pattern.findall(content)
+
+        # Filter to actual reference IDs
+        mentioned_ids = [m for m in matches if m in source_ids]
+
+        if not mentioned_ids:
+            return PromptEnrichmentResult(prompt=content)
+
+        self._trace(f"enrich [{source_type}]: found references: {mentioned_ids}")
+
+        # Get the sources for mentioned IDs
+        mentioned_sources = [s for s in self._sources if s.id in mentioned_ids]
+
+        # Build instruction block for each mentioned source
+        instructions = []
+        for source in mentioned_sources:
+            instructions.append(source.to_instruction())
+
+        # Append reference instructions to content
+        if instructions:
+            reference_block = (
+                "\n\n---\n**Referenced Sources:**\n\n" +
+                "\n\n".join(instructions) +
+                "\n---"
+            )
+            enriched_content = content + reference_block
+
+            return PromptEnrichmentResult(
+                prompt=enriched_content,
+                metadata={
+                    "mentioned_references": mentioned_ids,
+                    "source_type": source_type
+                }
+            )
+
+        return PromptEnrichmentResult(prompt=content)
 
     # Public API for programmatic access
 
