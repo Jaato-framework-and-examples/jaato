@@ -107,9 +107,18 @@ class ReferencesPlugin:
             # Use resolved_path if available, otherwise original path
             file_path = source.resolved_path or source.path
             if not file_path:
+                self._trace(f"transitive:   '{source.id}' has no path")
                 return None
 
             path_obj = Path(file_path)
+
+            # Diagnostic: check path existence
+            if not path_obj.exists():
+                self._trace(
+                    f"transitive:   '{source.id}' path not found: {file_path} "
+                    f"(resolved={source.resolved_path}, original={source.path}, cwd={Path.cwd()})"
+                )
+                return None
 
             # Handle directory sources - concatenate all file contents
             if path_obj.is_dir():
