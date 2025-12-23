@@ -14,12 +14,17 @@ class TestBackupManagerInitialization:
 
     def test_default_base_dir(self):
         manager = BackupManager()
-        assert manager.base_dir == Path(".jaato/backups")
+        # Should resolve to absolute path
+        assert manager.base_dir.is_absolute()
+        assert manager.base_dir.name == "backups"
+        assert manager.base_dir.parent.name == ".jaato"
 
     def test_custom_base_dir(self, tmp_path):
         custom_dir = tmp_path / "custom_backups"
         manager = BackupManager(custom_dir)
-        assert manager.base_dir == custom_dir
+        # Should resolve to absolute path
+        assert manager.base_dir.is_absolute()
+        assert manager.base_dir == custom_dir.resolve()
 
     def test_default_max_backups(self):
         manager = BackupManager()
@@ -294,3 +299,35 @@ class TestBackupPathSanitization:
         # Path separators should be replaced with underscores
         assert "/" not in backup_path.name.replace(".bak", "")
         assert "\\" not in backup_path.name.replace(".bak", "")
+
+
+class TestBackupCwdIndependence:
+    """Tests that backups work correctly regardless of CWD changes."""
+
+    def test_backup_after_cwd_change(self, tmp_path, monkeypatch):
+        """Backups should go to original directory even after CWD changes."""
+        # Create backup dir and manager while in tmp_path
+        backup_dir = tmp_path / "project" / ".jaato" / "backups"
+        manager = BackupManager(backup_dir)
+
+        # Create a test file
+        test_file = tmp_path / "project" / "src" / "file.txt"
+        test_file.parent.mkdir(parents=True)
+        test_file.write_text("Original content")
+
+        # Change working directory to somewhere else
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+        monkeypatch.chdir(other_dir)
+
+        # Create backup - should still go to original backup_dir
+        backup_path = manager.create_backup(test_file)
+
+        assert backup_path is not None
+        assert backup_path.exists()
+        assert backup_path.parent == backup_dir
+        assert backup_path.read_text() == "Original content"
+
+        # Verify backup is NOT in the new CWD
+        other_backups = list(other_dir.glob("**/*.bak"))
+        assert len(other_backups) == 0
