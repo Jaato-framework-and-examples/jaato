@@ -940,9 +940,22 @@ The session plugin's `enrich_prompt()` is called by the registry's prompt enrich
 Plugins can subscribe to enrich user prompts before they are sent to the model. This enables features like:
 
 - **@file references**: Detect and process `@filename.png` patterns
+- **Template extraction**: Detect and extract embedded templates from documentation
 - **Lazy loading**: Model decides when to load heavy content
 - **Context injection**: Add relevant information based on prompt content
 - **Session descriptions**: Request model-generated descriptions after N turns
+
+#### Enrichment Priority
+
+Plugins are called in **priority order** (lower values run first). This ensures proper sequencing when plugins depend on each other's output:
+
+| Priority | Plugin | Purpose |
+|----------|--------|---------|
+| 20 | references | Injects MODULE.md and other reference content |
+| 40 | template | Extracts embedded templates from injected content |
+| 60 | multimodal | Handles @image references |
+| 80 | memory | Adds memory hints based on prompt content |
+| 90 | session | Adds session description hints |
 
 To participate in prompt enrichment, implement these methods:
 
@@ -950,6 +963,21 @@ To participate in prompt enrichment, implement these methods:
 from shared.plugins.base import PromptEnrichmentResult
 
 class MyPlugin:
+    def get_enrichment_priority(self) -> int:
+        """Return enrichment priority (lower = earlier).
+
+        Standard priorities:
+        - 20: references (injects content first)
+        - 40: template (extracts from injected content)
+        - 60: multimodal (handles @image references)
+        - 80: memory (adds memory hints)
+        - 90: session (adds session description hints)
+
+        Returns:
+            Priority value (default: 50 if not implemented).
+        """
+        return 50  # Default priority
+
     def subscribes_to_prompt_enrichment(self) -> bool:
         """Return True to receive prompts for enrichment."""
         return True
@@ -970,4 +998,4 @@ class MyPlugin:
         )
 ```
 
-The registry calls `enrich_prompt()` on all subscribed plugins in order, passing the result of each to the next.
+The registry calls `enrich_prompt()` on all subscribed plugins **sorted by priority**, passing the result of each to the next. This enables pipelines where later plugins can process content injected by earlier plugins.

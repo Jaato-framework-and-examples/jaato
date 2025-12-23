@@ -616,13 +616,36 @@ class PluginRegistry:
 
     # ==================== Prompt Enrichment ====================
 
-    def get_prompt_enrichment_subscribers(self) -> List[ToolPlugin]:
-        """Get plugins that subscribe to prompt enrichment.
+    def _get_enrichment_priority(self, plugin: ToolPlugin) -> int:
+        """Get the enrichment priority for a plugin.
 
-        Includes both exposed plugins and enrichment-only plugins.
+        Lower values run first. Default is 50.
+
+        Standard priorities:
+        - 20: references (injects content first)
+        - 40: template (scans injected content for templates)
+        - 60: multimodal (handles @image references)
+        - 80: memory (adds memory hints last)
+
+        Args:
+            plugin: The plugin to get priority for.
 
         Returns:
-            List of plugins that have subscribed to prompt enrichment.
+            The enrichment priority (lower = earlier).
+        """
+        if hasattr(plugin, 'get_enrichment_priority'):
+            return plugin.get_enrichment_priority()
+        return 50  # Default priority
+
+    def get_prompt_enrichment_subscribers(self) -> List[ToolPlugin]:
+        """Get plugins that subscribe to prompt enrichment, sorted by priority.
+
+        Includes both exposed plugins and enrichment-only plugins.
+        Plugins are sorted by enrichment priority (lower values run first).
+
+        Returns:
+            List of plugins that have subscribed to prompt enrichment,
+            sorted by priority.
         """
         subscribers = []
         # Include both exposed and enrichment-only plugins
@@ -635,13 +658,16 @@ class PluginRegistry:
                     subscribers.append(plugin)
             except Exception as exc:
                 _trace(f" Error checking enrichment subscription for '{name}': {exc}")
+
+        # Sort by priority (lower values first)
+        subscribers.sort(key=self._get_enrichment_priority)
         return subscribers
 
     def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
         """Run prompt through all subscribed enrichment plugins.
 
         Each subscribed plugin gets to inspect and optionally modify the prompt.
-        Plugins are called in exposure order.
+        Plugins are called in priority order (lower priority values first).
 
         Args:
             prompt: The user's original prompt text.

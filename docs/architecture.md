@@ -107,6 +107,7 @@ flowchart TB
                 SLASH[SlashCommandPlugin<br/>plugins/slash_command/]
                 CLAR[ClarificationPlugin<br/>plugins/clarification/]
                 SESS[SessionPlugin<br/>plugins/session/]
+                TMPL[TemplatePlugin<br/>plugins/template/]
             end
         end
 
@@ -602,41 +603,99 @@ All plugins use internal types defined in `shared/plugins/model_provider/types.p
 
 ### Prompt Enrichment Pipeline
 
-Plugins can subscribe to enrich user prompts before they are sent to the model:
+Plugins can subscribe to enrich user prompts before they are sent to the model. Plugins are called in **priority order** (lower values first), enabling pipelines where later plugins process content injected by earlier plugins.
+
+#### Enrichment Priority Order
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Prompt Enrichment Pipeline                           │
+│                                                                             │
+│  User prompt                                                                │
+│       │                                                                     │
+│       ▼                                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ Priority 20: references                                              │   │
+│  │ Injects MODULE.md, SKILL.md content into prompt                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│       │                                                                     │
+│       ▼                                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ Priority 40: template                                                │   │
+│  │ Detects embedded templates in injected content, extracts to         │   │
+│  │ .jaato/templates/, annotates prompt with extraction info            │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│       │                                                                     │
+│       ▼                                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ Priority 60: multimodal                                              │   │
+│  │ Detects @image.jpg references, adds viewImage tool info             │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│       │                                                                     │
+│       ▼                                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ Priority 80: memory                                                  │   │
+│  │ Analyzes enriched prompt, adds hints about relevant memories        │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│       │                                                                     │
+│       ▼                                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ Priority 90: session                                                 │   │
+│  │ Adds session description hints after N turns                        │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│       │                                                                     │
+│       ▼                                                                     │
+│  Enriched prompt sent to model                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ```mermaid
 sequenceDiagram
     participant User
     participant JC as JaatoClient
     participant PR as PluginRegistry
-    participant Plugin as EnrichmentPlugin
+    participant Ref as references (20)
+    participant Tmpl as template (40)
+    participant Multi as multimodal (60)
     participant Model
 
-    User->>JC: send_message("What's in @photo.jpg?")
+    User->>JC: send_message("Implement circuit breaker using MODULE.md")
     JC->>PR: enrich_prompt(message)
-    PR->>Plugin: enrich_prompt(message)
-    Note over Plugin: Detect @photo.jpg<br/>Add viewImage tool info
-    Plugin-->>PR: enriched prompt + metadata
-    PR-->>JC: final enriched prompt
-    JC->>JC: strip @references
-    JC->>Model: "What's in photo.jpg? [System: viewImage available]"
+    PR->>Ref: enrich_prompt(message)
+    Note over Ref: Inject MODULE.md content<br/>with embedded templates
+    Ref-->>PR: prompt with MODULE.md
+    PR->>Tmpl: enrich_prompt(enriched)
+    Note over Tmpl: Detect {{var}} syntax<br/>Extract to .jaato/templates/
+    Tmpl-->>PR: prompt + template annotations
+    PR->>Multi: enrich_prompt(enriched)
+    Note over Multi: Check for @image refs
+    Multi-->>PR: final enriched prompt
+    PR-->>JC: enriched prompt + metadata
+    JC->>Model: send to model
 ```
 
 This enables:
+- **Content injection** - References plugin injects documentation content
+- **Template extraction** - Template plugin extracts embedded templates for later use
 - **@file references** - Detect and process file references
 - **Lazy loading** - Model decides when to load heavy content (images, documents)
 - **Context injection** - Add relevant information based on prompt content
 
-Example plugin implementing enrichment:
+Example plugin implementing enrichment with priority:
 
 ```python
-class MultimodalPlugin:
+class TemplatePlugin:
+    def get_enrichment_priority(self) -> int:
+        """Return priority (lower = earlier). Default is 50."""
+        return 40  # Run after references (20), before multimodal (60)
+
     def subscribes_to_prompt_enrichment(self) -> bool:
         return True
 
     def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
-        # Detect @image.png references
-        # Add "viewImage(path) tool available" instructions
+        # Detect code blocks with {{ }} or {% %} syntax
+        # Extract to .jaato/templates/
+        # Annotate prompt with extraction info
         return PromptEnrichmentResult(prompt=enriched, metadata={...})
 ```
 
@@ -897,6 +956,16 @@ classDiagram
         +subscribes_to_prompt_enrichment() bool
         +enrich_prompt(prompt) PromptEnrichmentResult
         +get_model_requirements() List~str~
+        +get_enrichment_priority() int
+    }
+
+    class TemplatePlugin {
+        +name = "template"
+        +renderTemplate(template, variables, output_path)
+        +listExtractedTemplates()
+        +subscribes_to_prompt_enrichment() bool
+        +enrich_prompt(prompt) PromptEnrichmentResult
+        +get_enrichment_priority() int
     }
 
     class ClarificationPlugin {
@@ -931,6 +1000,7 @@ classDiagram
     ToolPlugin <|.. FileEditPlugin
     ToolPlugin <|.. SlashCommandPlugin
     ToolPlugin <|.. MultimodalPlugin
+    ToolPlugin <|.. TemplatePlugin
     ToolPlugin <|.. ClarificationPlugin
     SessionPlugin <|.. FileSessionPlugin
     PluginRegistry o-- ToolPlugin
@@ -1051,6 +1121,7 @@ shared/
     ├── cli/                 # CLIToolPlugin (model tools only)
     ├── mcp/                 # MCPToolPlugin (model tools only)
     ├── multimodal/          # MultimodalPlugin (prompt enrichment + model requirements)
+    ├── template/            # TemplatePlugin (template rendering + extraction via enrichment)
     ├── permission/          # PermissionPlugin (model tools only)
     ├── todo/                # TodoPlugin (model tools + user commands)
     ├── references/          # ReferencesPlugin (model tools + user commands)
