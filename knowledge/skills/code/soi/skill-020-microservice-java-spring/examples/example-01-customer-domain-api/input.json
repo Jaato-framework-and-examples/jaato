@@ -1,0 +1,33 @@
+{
+  "serviceName": "customer-service",
+  "groupId": "com.company",
+  "artifactId": "customer-service",
+  "basePackage": "com.company.customer",
+  "javaVersion": "17",
+  "springBootVersion": "3.2.0",
+  
+  "apiType": "domain_api",
+  
+  "entities": [
+    {
+      "name": "Customer",
+      "isAggregateRoot": true,
+      "fields": [
+        { "name": "name", "type": "String", "required": true, "minLength": 2, "maxLength": 100 },
+        { "name": "email", "type": "String", "required": true, "format": "email", "unique": true },
+        { "name": "age", "type": "int", "required": true, "min": 18, "max": 120 },
+        { "name": "tier", "type": "String", "required": false }
+      ]
+    }
+  ],
+  
+  "features": {
+    "resilience": {
+      "circuit_breaker": { "enabled": true, "pattern": "basic_fallback" }
+    },
+    "persistence": { "enabled": true, "database": "postgresql" },
+    "health_checks": { "enabled": true },
+    "structured_logging": { "enabled": true, "format": "json" },
+    "docker": { "enabled": true }
+  }
+}
