@@ -1,0 +1,10 @@
+{
+  "id": "eri-code-013-api-integration-rest-java-spring",
+  "name": "ERI-013: API Integration REST (Java/Spring)",
+  "description": "Enterprise Reference Implementation for REST API integration using RestClient, RestTemplate, and Feign.",
+  "type": "local",
+  "path": "../../knowledge/ERIs/eri-code-013-api-integration-rest-java-spring/",
+  "mode": "selectable",
+  "tags": ["eri", "integration", "rest", "feign", "restclient", "java", "spring", "reference"],
+  "fetchHint": "Read ERI.md for REST client patterns and error handling"
+}

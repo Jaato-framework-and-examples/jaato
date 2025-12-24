@@ -3,7 +3,7 @@
   "name": "MOD-015: Hexagonal Base (Java/Spring)",
   "description": "Core templates for Hexagonal Light microservice architecture. Runtime dependency of skill-020.",
   "type": "local",
-  "path": "./.jaato/docs/modules/mod-code-015-hexagonal-base-java-spring/",
+  "path": "../../knowledge/modules/mod-code-015-hexagonal-base-java-spring/",
   "mode": "selectable",
   "tags": ["module", "hexagonal", "architecture", "java", "spring", "templates"],
   "fetchHint": "Read MODULE.md for directory structure and layer templates"

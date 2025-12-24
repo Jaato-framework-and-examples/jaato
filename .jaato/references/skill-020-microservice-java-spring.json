@@ -3,7 +3,7 @@
   "name": "SKILL-020: Generate Microservice (Java/Spring)",
   "description": "Generate complete Spring Boot microservice using Hexagonal Light architecture. Includes prompts for execution and references mod-code-015 for templates.",
   "type": "local",
-  "path": "./.jaato/docs/skills/code/soi/skill-020-microservice-java-spring/",
+  "path": "../../knowledge/skills/code/soi/skill-020-microservice-java-spring/",
   "mode": "auto",
   "tags": ["skill", "microservice", "hexagonal", "java", "spring", "GENERATE"],
   "fetchHint": "Read SKILL.md for full specification, OVERVIEW.md for summary"

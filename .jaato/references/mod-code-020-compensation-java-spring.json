@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-020-compensation-java-spring",
+  "name": "MOD-020: Compensation (Java/Spring)",
+  "description": "Templates for SAGA compensation patterns in Domain APIs. Runtime dependency of skill-021.",
+  "type": "local",
+  "path": "../../knowledge/modules/mod-code-020-compensation-java-spring/",
+  "mode": "selectable",
+  "tags": ["module", "saga", "compensation", "distributed-transactions", "java", "spring", "templates"],
+  "fetchHint": "Read MODULE.md for Compensable interface and TransactionLog templates"
+}

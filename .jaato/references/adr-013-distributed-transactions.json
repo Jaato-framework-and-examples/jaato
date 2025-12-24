@@ -1,0 +1,10 @@
+{
+  "id": "adr-013-distributed-transactions",
+  "name": "ADR-013: Distributed Transactions",
+  "description": "Architecture decision record defining SAGA patterns and compensation strategies for distributed transactions.",
+  "type": "local",
+  "path": "../../knowledge/ADRs/adr-013-distributed-transactions/",
+  "mode": "selectable",
+  "tags": ["adr", "saga", "compensation", "distributed-transactions", "orchestration"],
+  "fetchHint": "Read ADR.md for SAGA orchestration decisions and compensation interface requirements"
+}

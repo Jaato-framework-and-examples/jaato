@@ -1,0 +1,10 @@
+{
+  "id": "eri-code-009-retry-java-resilience4j",
+  "name": "ERI-009: Retry (Java/Resilience4j)",
+  "description": "Enterprise Reference Implementation for retry pattern using Resilience4j. Defines configuration and backoff strategies.",
+  "type": "local",
+  "path": "../../knowledge/ERIs/eri-code-009-retry-java-resilience4j/",
+  "mode": "selectable",
+  "tags": ["eri", "retry", "resilience4j", "java", "reference"],
+  "fetchHint": "Read ERI.md for retry configuration and exponential backoff patterns"
+}

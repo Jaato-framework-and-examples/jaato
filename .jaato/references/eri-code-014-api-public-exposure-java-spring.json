@@ -1,0 +1,10 @@
+{
+  "id": "eri-code-014-api-public-exposure-java-spring",
+  "name": "ERI-014: API Public Exposure (Java/Spring)",
+  "description": "Enterprise Reference Implementation for public REST API exposure with pagination, HATEOAS, and filtering.",
+  "type": "local",
+  "path": "../../knowledge/ERIs/eri-code-014-api-public-exposure-java-spring/",
+  "mode": "selectable",
+  "tags": ["eri", "api", "pagination", "hateoas", "java", "spring", "reference"],
+  "fetchHint": "Read ERI.md for pagination response structures and HATEOAS link patterns"
+}

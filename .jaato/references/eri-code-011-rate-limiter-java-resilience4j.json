@@ -1,0 +1,10 @@
+{
+  "id": "eri-code-011-rate-limiter-java-resilience4j",
+  "name": "ERI-011: Rate Limiter (Java/Resilience4j)",
+  "description": "Enterprise Reference Implementation for rate limiting pattern using Resilience4j. Defines configuration and quota strategies.",
+  "type": "local",
+  "path": "../../knowledge/ERIs/eri-code-011-rate-limiter-java-resilience4j/",
+  "mode": "selectable",
+  "tags": ["eri", "rate-limiter", "resilience4j", "java", "reference"],
+  "fetchHint": "Read ERI.md for rate limiter configuration and throttling patterns"
+}

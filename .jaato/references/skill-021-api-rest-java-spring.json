@@ -1,0 +1,10 @@
+{
+  "id": "skill-021-api-rest-java-spring",
+  "name": "SKILL-021: Generate Fusion REST API (Java/Spring)",
+  "description": "Generate REST APIs following the Fusion API Model (4-layer: Experience, Composable, Domain, System). Extends skill-020 with pagination, HATEOAS, and compensation.",
+  "type": "local",
+  "path": "../../knowledge/skills/code/soi/skill-021-api-rest-java-spring/",
+  "mode": "auto",
+  "tags": ["skill", "api", "rest", "fusion", "pagination", "hateoas", "java", "spring", "GENERATE"],
+  "fetchHint": "Read SKILL.md for full specification, check apiLayer parameter for layer-specific features"
+}

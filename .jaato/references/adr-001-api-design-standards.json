@@ -1,0 +1,10 @@
+{
+  "id": "adr-001-api-design-standards",
+  "name": "ADR-001: API Design - Fusion API Model",
+  "description": "Architecture decision record defining the Fusion API Model (4-layer), REST standards, pagination, HATEOAS, and API types.",
+  "type": "local",
+  "path": "../../knowledge/ADRs/adr-001-api-design-standards/",
+  "mode": "selectable",
+  "tags": ["adr", "api", "architecture", "fusion-api-model", "rest", "pagination", "hateoas"],
+  "fetchHint": "Read ADR.md for full decision record including context, decision, and consequences"
+}
