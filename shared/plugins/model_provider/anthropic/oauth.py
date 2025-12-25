@@ -334,17 +334,14 @@ def exchange_code_for_tokens(code: str, code_verifier: str, state: str) -> OAuth
         "client_id": OAUTH_CLIENT_ID,
         "code_verifier": code_verifier,
         "state": state,
+        "expires_in": 31536000,  # Request 1 year token (same as Claude Code)
     }
 
     headers = {
+        "Accept": "application/json, text/plain, */*",
         "Content-Type": "application/json",
+        "User-Agent": "axios/1.8.4",  # Match Claude Code's user agent
     }
-
-    # Debug: log the exact request being sent
-    import sys
-    print(f"[DEBUG] POST {OAUTH_TOKEN_URL}", file=sys.stderr)
-    print(f"[DEBUG] Headers: {headers}", file=sys.stderr)
-    print(f"[DEBUG] Body: {token_data}", file=sys.stderr)
 
     try:
         resp = requests.post(
