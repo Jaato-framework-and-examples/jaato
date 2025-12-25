@@ -1,16 +1,21 @@
-"""Jaato Server - Headless backend for multi-client support.
+"""Jaato Server - Multi-client AI assistant backend.
 
 This package provides:
-- JaatoServer: Core logic extracted from RichClient
+- JaatoServer: Core logic for AI interaction
+- SessionManager: Multi-session support
 - Event protocol: Typed events for client-server communication
-- WebSocket server: Real-time bidirectional communication
+- IPC server: Unix domain socket for local clients
+- WebSocket server: Real-time communication for remote clients
 
 Usage:
-    # Headless mode (server only)
-    python rich_client.py --headless --port 8080
+    # Start with IPC socket (local clients)
+    python -m server --ipc-socket /tmp/jaato.sock
 
-    # TUI + server mode
-    python rich_client.py --expose-server :8080
+    # Start with WebSocket (remote clients)
+    python -m server --web-socket :8080
+
+    # Start as daemon (background)
+    python -m server --ipc-socket /tmp/jaato.sock --daemon
 """
 
 from .events import (
@@ -47,10 +52,13 @@ from .events import (
 )
 
 from .core import JaatoServer
+from .session_manager import SessionManager, SessionInfo
 
 __all__ = [
     # Core
     "JaatoServer",
+    "SessionManager",
+    "SessionInfo",
     # Events
     "Event",
     "EventType",
