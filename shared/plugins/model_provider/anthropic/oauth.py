@@ -23,7 +23,7 @@ import urllib.request
 # OAuth configuration (same as Claude Code CLI)
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_AUTH_URL = "https://claude.ai/oauth/authorize"
-OAUTH_TOKEN_URL = "https://console.anthropic.com/oauth/token"
+OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 OAUTH_SCOPES = "user:inference"
 
 # Callback configuration - using Anthropic's hosted callback page
@@ -231,7 +231,7 @@ def authorize_with_params(
 def authorize_interactive(
     timeout: int = 120,
     on_message: Optional[Callable[[str], None]] = None
-) -> Tuple[str, str, str]:
+) -> Tuple[str, str, str, str]:
     """Run interactive OAuth flow in browser.
 
     Opens browser to Claude's OAuth page and waits for callback.
@@ -241,7 +241,7 @@ def authorize_interactive(
         on_message: Optional callback for emitting status messages.
 
     Returns:
-        Tuple of (authorization_code, code_verifier, auth_url)
+        Tuple of (authorization_code, code_verifier, state, auth_url)
 
     Raises:
         TimeoutError: If user doesn't complete auth in time.
@@ -306,15 +306,16 @@ def authorize_interactive(
     if server.oauth_state != state:
         raise RuntimeError("OAuth state mismatch (possible CSRF attack)")
 
-    return server.oauth_code, code_verifier, auth_url
+    return server.oauth_code, code_verifier, state, auth_url
 
 
-def exchange_code_for_tokens(code: str, code_verifier: str) -> OAuthTokens:
+def exchange_code_for_tokens(code: str, code_verifier: str, state: str) -> OAuthTokens:
     """Exchange authorization code for access/refresh tokens.
 
     Args:
         code: Authorization code from OAuth callback.
         code_verifier: PKCE code verifier.
+        state: OAuth state from the auth request.
 
     Returns:
         OAuthTokens with access and refresh tokens.
@@ -324,26 +325,25 @@ def exchange_code_for_tokens(code: str, code_verifier: str) -> OAuthTokens:
     """
     import requests
 
-    # Build token request - redirect_uri must match the one used in auth request
+    # Build token request as JSON - matching Claude Code CLI exactly
+    # Must include state and use JSON content-type
     token_data = {
         "grant_type": "authorization_code",
-        "client_id": OAUTH_CLIENT_ID,
         "code": code,
         "redirect_uri": CALLBACK_URL,
+        "client_id": OAUTH_CLIENT_ID,
         "code_verifier": code_verifier,
+        "state": state,
     }
 
     headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json",
-        "User-Agent": "claude-code/1.0.0",
-        "anthropic-beta": "oauth-2025-04-20",
+        "Content-Type": "application/json",
     }
 
     try:
         resp = requests.post(
             OAUTH_TOKEN_URL,
-            data=token_data,
+            json=token_data,  # Use json= for JSON body
             headers=headers,
             timeout=30,
         )
@@ -382,26 +382,33 @@ def refresh_tokens(refresh_token: str) -> OAuthTokens:
     Raises:
         RuntimeError: If refresh fails.
     """
+    import requests
+
+    # Build refresh request as JSON - matching Claude Code CLI
     token_data = {
         "grant_type": "refresh_token",
-        "client_id": OAUTH_CLIENT_ID,
         "refresh_token": refresh_token,
+        "client_id": OAUTH_CLIENT_ID,
+        "scope": OAUTH_SCOPES,
     }
 
-    req = urllib.request.Request(
-        OAUTH_TOKEN_URL,
-        data=urllib.parse.urlencode(token_data).encode(),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
+    headers = {
+        "Content-Type": "application/json",
+    }
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode() if e.fp else str(e)
+        resp = requests.post(
+            OAUTH_TOKEN_URL,
+            json=token_data,
+            headers=headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.exceptions.HTTPError as e:
+        error_body = e.response.text if e.response else str(e)
         raise RuntimeError(f"Token refresh failed: {error_body}")
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         raise RuntimeError(f"Token refresh failed: {e}")
 
     access_token = data.get("access_token")
@@ -503,7 +510,7 @@ def login(
         Tuple of (OAuthTokens, auth_url) after successful authentication.
         The auth_url is provided so callers can display it to users.
     """
-    code, verifier, auth_url = authorize_interactive(on_message=on_message)
-    tokens = exchange_code_for_tokens(code, verifier)
+    code, verifier, state, auth_url = authorize_interactive(on_message=on_message)
+    tokens = exchange_code_for_tokens(code, verifier, state)
     save_tokens(tokens)
     return tokens, auth_url
