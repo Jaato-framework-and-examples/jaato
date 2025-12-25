@@ -198,6 +198,24 @@ class RichClient:
         if command.name.lower() == "save":
             args["user_inputs"] = self._original_inputs.copy()
 
+        # Find the plugin that provides this command and set output callback
+        plugin = None
+        if self.registry:
+            for plugin_name in self.registry.list_exposed():
+                p = self.registry.get_plugin(plugin_name)
+                if p and hasattr(p, 'get_user_commands'):
+                    for cmd in p.get_user_commands():
+                        if cmd.name == command.name:
+                            plugin = p
+                            break
+                if plugin:
+                    break
+
+        # Set output callback on plugin if it supports it
+        if plugin and hasattr(plugin, 'set_output_callback') and self._display:
+            output_callback = self._make_output_callback()
+            plugin.set_output_callback(output_callback)
+
         try:
             result, shared = self._run_async(
                 self._backend.execute_user_command(command.name, args)
@@ -222,6 +240,11 @@ class RichClient:
             if self._display:
                 self._display.show_lines([(f"Error: {e}", "red")])
             return {"error": str(e)}
+
+        finally:
+            # Clear output callback after execution
+            if plugin and hasattr(plugin, 'set_output_callback'):
+                plugin.set_output_callback(None)
 
     def _display_command_result(
         self,
