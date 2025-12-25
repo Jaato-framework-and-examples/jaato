@@ -424,17 +424,24 @@ Key types in `shared/plugins/model_provider/types.py`:
 | Variable | Purpose |
 |----------|---------|
 | `ANTHROPIC_API_KEY` | Anthropic API key (uses API credits) |
-| `ANTHROPIC_AUTH_TOKEN` | OAuth token for Claude Pro/Max subscription |
+| `ANTHROPIC_AUTH_TOKEN` | OAuth token for Claude Pro/Max subscription (experimental) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Alternative OAuth token env var (Claude Code CLI) |
 
 **Authentication Options:**
 - **API Key** (`sk-ant-api03-...`): Uses API credits from console.anthropic.com
-- **OAuth Token** (`sk-ant-oat01-...`): Uses your Claude Pro/Max subscription
+- **OAuth Token** (`sk-ant-oat01-...`): Attempts to use Claude Pro/Max subscription (experimental)
+
+> **⚠️ OAuth Token Warning:** OAuth tokens are currently restricted by Anthropic to
+> only work with official Claude Code clients. Third-party tools may receive:
+> `"This credential is only authorized for use with Claude Code"`
+>
+> The OAuth support is included for future compatibility if Anthropic relaxes this
+> restriction, or if the correct request format is discovered.
 
 To get an OAuth token for your subscription:
 ```bash
 # Install Claude Code CLI
-npm install -g @anthropics/claude-code
+npm install -g @anthropic/claude-code
 
 # Generate OAuth token (valid for 1 year)
 claude setup-token
