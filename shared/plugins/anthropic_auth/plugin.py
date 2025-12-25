@@ -87,8 +87,9 @@ class AnthropicAuthPlugin:
                 parameters=[
                     CommandParameter(
                         name="action",
-                        description="Action: login, logout, or status",
+                        description="Action: login, logout, status, or code <auth_code>",
                         required=True,
+                        capture_rest=True,  # Capture "code ABC123" as single string
                     ),
                 ],
             ),
