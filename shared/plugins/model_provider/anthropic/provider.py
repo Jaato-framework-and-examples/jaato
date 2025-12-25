@@ -212,11 +212,26 @@ class AnthropicProvider:
         if self._oauth_token:
             # OAuth requires special beta headers to identify as Claude Code client
             # This enables subscription-based auth for Pro/Max plans
-            # See: https://github.com/sst/opencode (provider.ts)
+            # Reference: https://github.com/sst/opencode-anthropic-auth
+            #
+            # Key details from OpenCode's implementation:
+            # - Client ID: 9d1c250a-e61b-44d9-88ed-5944d1962f5e
+            # - Auth URL: https://claude.ai/oauth/authorize
+            # - Token URL: https://console.anthropic.com/v1/oauth/token
+            # - Scopes: org:create_api_key user:profile user:inference
+            # - Uses PKCE flow with Bearer token + beta headers
+            #
+            # Note: OAuth tokens may be restricted to official Claude Code clients.
+            # The beta header attempts to identify as a compatible client.
             self._client = anthropic.Anthropic(
                 auth_token=self._oauth_token,
                 default_headers={
-                    "anthropic-beta": "claude-code-20250219",
+                    # Full beta features used by OpenCode
+                    "anthropic-beta": (
+                        "claude-code-20250219,"
+                        "interleaved-thinking-2025-05-14,"
+                        "fine-grained-tool-streaming-2025-05-14"
+                    ),
                 },
             )
         else:
