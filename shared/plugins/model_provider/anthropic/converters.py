@@ -54,8 +54,19 @@ def tool_schemas_to_anthropic(schemas: Optional[List[ToolSchema]]) -> Optional[L
 
     # Deduplicate by name (last one wins)
     seen: Dict[str, Dict[str, Any]] = {}
+    duplicates: Dict[str, int] = {}  # Track duplicate counts
+
     for schema in schemas:
+        if schema.name in seen:
+            duplicates[schema.name] = duplicates.get(schema.name, 1) + 1
         seen[schema.name] = tool_schema_to_anthropic(schema)
+
+    # Log duplicates if any were found
+    if duplicates:
+        import logging
+        logger = logging.getLogger(__name__)
+        dup_info = ", ".join(f"{name} ({count}x)" for name, count in duplicates.items())
+        logger.warning(f"Deduplicated {len(duplicates)} tool(s) with duplicate names: {dup_info}")
 
     return list(seen.values())
 
