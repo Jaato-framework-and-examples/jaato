@@ -136,15 +136,26 @@ class AnthropicAuthPlugin:
 
     def _cmd_login(self) -> str:
         """Handle the login command."""
-        from ..model_provider.anthropic.oauth import login
+        from ..model_provider.anthropic.oauth import (
+            build_auth_url,
+            authorize_with_params,
+            exchange_code_for_tokens,
+            save_tokens,
+        )
 
-        def on_message(msg: str) -> None:
-            self._emit(msg + "\n")
+        # Build auth URL synchronously so we can emit it before returning
+        auth_url, code_verifier, state = build_auth_url()
+
+        # Emit messages synchronously (while callback is still set)
+        self._emit("Opening browser for authentication...\n")
+        self._emit(f"If browser doesn't open, visit:\n{auth_url}\n")
 
         def run_oauth():
             """Run OAuth flow in background thread."""
             try:
-                tokens, auth_url = login(on_message=on_message)
+                code = authorize_with_params(auth_url, code_verifier, state)
+                tokens = exchange_code_for_tokens(code, code_verifier)
+                save_tokens(tokens)
                 expires_at = datetime.fromtimestamp(tokens.expires_at)
                 self._emit(
                     "\n✓ Successfully authenticated with Claude Pro/Max subscription.\n"
