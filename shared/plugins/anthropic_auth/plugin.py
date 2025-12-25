@@ -11,7 +11,7 @@ Commands:
 """
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..base import (
     CommandCompletion,
@@ -21,9 +21,16 @@ from ..base import (
 )
 from ..model_provider.types import ToolSchema
 
+# Type alias for output callback: (source, text, mode) -> None
+OutputCallback = Callable[[str, str, str], None]
+
 
 class AnthropicAuthPlugin:
     """Plugin for Anthropic OAuth authentication."""
+
+    def __init__(self):
+        """Initialize the plugin."""
+        self._output_callback: Optional[OutputCallback] = None
 
     @property
     def name(self) -> str:
@@ -33,6 +40,15 @@ class AnthropicAuthPlugin:
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the plugin."""
         pass
+
+    def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
+        """Set the output callback for real-time output during commands."""
+        self._output_callback = callback
+
+    def _emit(self, text: str, mode: str = "write") -> None:
+        """Emit output through the callback if available."""
+        if self._output_callback:
+            self._output_callback("anthropic_auth", text, mode)
 
     def shutdown(self) -> None:
         """Clean up resources."""
@@ -122,11 +138,13 @@ class AnthropicAuthPlugin:
         try:
             from ..model_provider.anthropic.oauth import login
 
-            tokens, auth_url = login()
+            # Use callback to emit messages in real-time during OAuth flow
+            def on_message(msg: str) -> None:
+                self._emit(msg + "\n")
+
+            tokens, auth_url = login(on_message=on_message)
             expires_at = datetime.fromtimestamp(tokens.expires_at)
             return (
-                "Opening browser for authentication...\n"
-                f"If browser doesn't open, visit: {auth_url}\n\n"
                 "✓ Successfully authenticated with Claude Pro/Max subscription.\n\n"
                 f"Access token expires: {expires_at.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 "Note: You may need to restart the session for the new tokens to take effect."

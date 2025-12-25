@@ -17,7 +17,7 @@ import urllib.parse
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 import urllib.request
 
 # OAuth configuration (same as Claude Code CLI)
@@ -141,13 +141,17 @@ class _OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         self.server.oauth_complete = True
 
 
-def authorize_interactive(timeout: int = 120) -> Tuple[str, str, str]:
+def authorize_interactive(
+    timeout: int = 120,
+    on_message: Optional[Callable[[str], None]] = None
+) -> Tuple[str, str, str]:
     """Run interactive OAuth flow in browser.
 
     Opens browser to Claude's OAuth page and waits for callback.
 
     Args:
         timeout: Seconds to wait for user to complete auth.
+        on_message: Optional callback for emitting status messages.
 
     Returns:
         Tuple of (authorization_code, code_verifier, auth_url)
@@ -183,7 +187,12 @@ def authorize_interactive(timeout: int = 120) -> Tuple[str, str, str]:
     server.oauth_complete = False
     server.timeout = 1  # Check every second
 
-    # Open browser (no print - caller handles messaging)
+    # Emit status messages via callback
+    if on_message:
+        on_message("Opening browser for authentication...")
+        on_message(f"If browser doesn't open, visit: {auth_url}")
+
+    # Open browser
     webbrowser.open(auth_url)
 
     # Wait for callback
@@ -384,16 +393,21 @@ def get_valid_access_token() -> Optional[str]:
     return tokens.access_token
 
 
-def login() -> Tuple[OAuthTokens, str]:
+def login(
+    on_message: Optional[Callable[[str], None]] = None
+) -> Tuple[OAuthTokens, str]:
     """Run full OAuth login flow.
 
     Opens browser, waits for auth, exchanges code for tokens.
+
+    Args:
+        on_message: Optional callback for emitting status messages in real-time.
 
     Returns:
         Tuple of (OAuthTokens, auth_url) after successful authentication.
         The auth_url is provided so callers can display it to users.
     """
-    code, verifier, auth_url = authorize_interactive()
+    code, verifier, auth_url = authorize_interactive(on_message=on_message)
     tokens = exchange_code_for_tokens(code, verifier)
     save_tokens(tokens)
     return tokens, auth_url
