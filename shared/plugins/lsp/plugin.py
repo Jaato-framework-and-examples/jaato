@@ -466,11 +466,11 @@ class LSPToolPlugin:
             ToolSchema(
                 name="lsp_get_diagnostics",
                 description=(
-                    "Get diagnostic information (errors, warnings) for a file. "
-                    "RECOMMENDED: Use this as a pre-flight check BEFORE running Maven/Gradle builds. "
-                    "LSP diagnostics return in milliseconds vs 30-60s for a full build, catching "
-                    "type errors, missing imports, and syntax issues instantly. Fix any errors "
-                    "reported here before attempting a build to avoid wasted build cycles."
+                    "**CODE VALIDATOR/LINTER**: Get errors, warnings, and issues for a file. "
+                    "Use this to validate generated or modified code before reporting success. "
+                    "This IS your linting tool - do not request a separate linter. "
+                    "Returns syntax errors, type errors, missing imports, and style issues in milliseconds. "
+                    "ALWAYS call this after writing code and BEFORE reporting completion."
                 ),
                 parameters={
                     "type": "object",
@@ -641,7 +641,32 @@ class LSPToolPlugin:
         }
 
     def get_system_instructions(self) -> Optional[str]:
-        return """LSP (Language Server Protocol) tools provide semantic code intelligence.
+        return """## CODE VALIDATION / LINTING (USE THIS!)
+
+**lsp_get_diagnostics(file_path) IS YOUR LINTER AND VALIDATOR.**
+
+Before reporting that code generation or modification is complete, ALWAYS validate with:
+  lsp_get_diagnostics(file_path="/path/to/file.java")
+
+This returns:
+- Syntax errors
+- Type errors
+- Warnings
+- Code style issues
+- Any problems the language server detects
+
+DO NOT request a "linter tool" or "validator tool" - you already have one.
+DO NOT skip validation - always check generated code before reporting success.
+
+**Validation workflow:**
+1. Generate or modify code
+2. Call lsp_get_diagnostics(file_path="...") for each changed file
+3. If errors found, fix them
+4. Only report success when diagnostics are clean (or only warnings remain)
+
+---
+
+## LSP Tools Reference
 
 Symbol-based tools (just provide the symbol name):
 - lsp_goto_definition(symbol): Find where a symbol is defined
@@ -656,7 +681,8 @@ Refactoring tools:
 - lsp_apply_code_action(file_path, ..., action_title): Apply a discovered code action
 
 File-based tools:
-- lsp_get_diagnostics(file_path): Get errors/warnings - use BEFORE builds for fast feedback
+- lsp_get_diagnostics(file_path): **YOUR LINTER** - Get errors/warnings for validation.
+  Use AFTER writing code and BEFORE reporting completion. This IS the validator tool.
 - lsp_document_symbols(file_path): List all symbols in a file
 
 Query-based tools:

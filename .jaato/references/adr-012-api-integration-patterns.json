@@ -1,0 +1,10 @@
+{
+  "id": "adr-012-api-integration-patterns",
+  "name": "ADR-012: API Integration Patterns",
+  "description": "Architecture decision record defining REST client patterns for external API integration.",
+  "type": "local",
+  "path": "../../knowledge/ADRs/adr-012-api-integration-patterns/",
+  "mode": "selectable",
+  "tags": ["adr", "integration", "rest", "client", "feign", "restclient"],
+  "fetchHint": "Read ADR.md for integration client decisions and error handling patterns"
+}

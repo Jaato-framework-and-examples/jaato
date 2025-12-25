@@ -1,0 +1,10 @@
+{
+  "id": "adr-011-persistence-patterns",
+  "name": "ADR-011: Persistence Patterns",
+  "description": "Architecture decision record defining JPA and System API persistence patterns for data access.",
+  "type": "local",
+  "path": "../../knowledge/ADRs/adr-011-persistence-patterns/",
+  "mode": "selectable",
+  "tags": ["adr", "persistence", "jpa", "system-api", "data-access"],
+  "fetchHint": "Read ADR.md for persistence strategy decisions and adapter patterns"
+}

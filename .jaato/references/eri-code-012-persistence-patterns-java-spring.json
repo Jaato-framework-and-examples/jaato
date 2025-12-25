@@ -1,0 +1,10 @@
+{
+  "id": "eri-code-012-persistence-patterns-java-spring",
+  "name": "ERI-012: Persistence Patterns (Java/Spring)",
+  "description": "Enterprise Reference Implementation for persistence patterns including JPA and System API delegation.",
+  "type": "local",
+  "path": "../../knowledge/ERIs/eri-code-012-persistence-patterns-java-spring/",
+  "mode": "selectable",
+  "tags": ["eri", "persistence", "jpa", "system-api", "java", "spring", "reference"],
+  "fetchHint": "Read ERI.md for persistence adapter patterns and repository implementations"
+}

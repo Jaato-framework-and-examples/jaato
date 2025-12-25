@@ -3,7 +3,7 @@
   "name": "MOD-018: REST API Integration (Java/Spring)",
   "description": "Templates for REST client integration. Runtime dependency of skill-020 and mod-017.",
   "type": "local",
-  "path": "./.jaato/docs/modules/mod-code-018-api-integration-rest-java-spring/",
+  "path": "../../knowledge/modules/mod-code-018-api-integration-rest-java-spring/",
   "mode": "selectable",
   "tags": ["module", "api", "rest", "integration", "java", "spring", "templates"],
   "fetchHint": "Read MODULE.md for RestClient/Feign templates"

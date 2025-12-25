@@ -1,0 +1,10 @@
+{
+  "id": "enablement-knowledge-base",
+  "name": "Enablement 2.0 Knowledge Base",
+  "description": "Knowledge base defining ADRs (strategic decisions), ERIs (reference implementations), and the flow from knowledge to modules to skills.",
+  "type": "local",
+  "path": "../../knowledge/",
+  "mode": "auto",
+  "tags": ["enablement", "knowledge", "adr", "eri", "architecture"],
+  "fetchHint": "Read README.md for overview, then explore ADRs/ and ERIs/ directories"
+}

@@ -3,7 +3,7 @@
   "name": "MOD-003: Timeout Templates (Java/Resilience4j)",
   "description": "Reusable code templates for timeout pattern. Runtime dependency of skill-020.",
   "type": "local",
-  "path": "./.jaato/docs/modules/mod-code-003-timeout-java-resilience4j/",
+  "path": "../../knowledge/modules/mod-code-003-timeout-java-resilience4j/",
   "mode": "selectable",
   "tags": ["module", "timeout", "resilience4j", "java", "templates"],
   "fetchHint": "Read MODULE.md for templates with {{placeholder}} variables"

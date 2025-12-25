@@ -1,0 +1,10 @@
+{
+  "id": "eri-code-008-circuit-breaker-java-resilience4j",
+  "name": "ERI-008: Circuit Breaker (Java/Resilience4j)",
+  "description": "Enterprise Reference Implementation for circuit breaker pattern using Resilience4j. Defines configuration and usage patterns.",
+  "type": "local",
+  "path": "../../knowledge/ERIs/eri-code-008-circuit-breaker-java-resilience4j/",
+  "mode": "selectable",
+  "tags": ["eri", "circuit-breaker", "resilience4j", "java", "reference"],
+  "fetchHint": "Read ERI.md for circuit breaker configuration and fallback patterns"
+}

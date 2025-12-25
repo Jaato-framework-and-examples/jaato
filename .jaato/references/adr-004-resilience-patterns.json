@@ -1,0 +1,10 @@
+{
+  "id": "adr-004-resilience-patterns",
+  "name": "ADR-004: Resilience Patterns",
+  "description": "Architecture decision record defining circuit breaker, retry, timeout, and rate limiting patterns for resilient services.",
+  "type": "local",
+  "path": "../../knowledge/ADRs/adr-004-resilience-patterns/",
+  "mode": "selectable",
+  "tags": ["adr", "resilience", "circuit-breaker", "retry", "timeout", "rate-limiter"],
+  "fetchHint": "Read ADR.md for pattern decisions and when to apply each resilience pattern"
+}

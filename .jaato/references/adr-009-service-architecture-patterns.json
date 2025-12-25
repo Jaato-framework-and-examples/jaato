@@ -1,0 +1,10 @@
+{
+  "id": "adr-009-service-architecture-patterns",
+  "name": "ADR-009: Service Architecture Patterns",
+  "description": "Architecture decision record defining Hexagonal Light architecture pattern for microservices.",
+  "type": "local",
+  "path": "../../knowledge/ADRs/adr-009-service-architecture-patterns/",
+  "mode": "selectable",
+  "tags": ["adr", "architecture", "hexagonal", "microservices", "ports-adapters"],
+  "fetchHint": "Read ADR.md for hexagonal architecture decisions and layer responsibilities"
+}

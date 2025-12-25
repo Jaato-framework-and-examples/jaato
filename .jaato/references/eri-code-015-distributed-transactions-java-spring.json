@@ -1,0 +1,10 @@
+{
+  "id": "eri-code-015-distributed-transactions-java-spring",
+  "name": "ERI-015: Distributed Transactions (Java/Spring)",
+  "description": "Enterprise Reference Implementation for SAGA patterns and compensation in distributed transactions.",
+  "type": "local",
+  "path": "../../knowledge/ERIs/eri-code-015-distributed-transactions-java-spring/",
+  "mode": "selectable",
+  "tags": ["eri", "saga", "compensation", "distributed-transactions", "java", "spring", "reference"],
+  "fetchHint": "Read ERI.md for Compensable interface and transaction log patterns"
+}

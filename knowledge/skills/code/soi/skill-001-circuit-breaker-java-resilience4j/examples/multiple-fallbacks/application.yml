@@ -1,0 +1,12 @@
+# Circuit breaker configuration for multiple fallbacks pattern
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      inventoryServiceCB:
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 60000ms
+        sliding-window-size: 100
+        minimum-number-of-calls: 10
+        permitted-number-of-calls-in-half-open-state: 10
+        automatic-transition-from-open-to-half-open-enabled: true

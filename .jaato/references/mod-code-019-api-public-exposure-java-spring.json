@@ -1,0 +1,10 @@
+{
+  "id": "mod-code-019-api-public-exposure-java-spring",
+  "name": "MOD-019: API Public Exposure (Java/Spring)",
+  "description": "Templates for pagination, HATEOAS, and filtering in public REST APIs. Runtime dependency of skill-021.",
+  "type": "local",
+  "path": "../../knowledge/modules/mod-code-019-api-public-exposure-java-spring/",
+  "mode": "selectable",
+  "tags": ["module", "api", "pagination", "hateoas", "java", "spring", "templates"],
+  "fetchHint": "Read MODULE.md for PageResponse and ModelAssembler templates"
+}

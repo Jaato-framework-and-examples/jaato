@@ -3,7 +3,7 @@
   "name": "MOD-001: Circuit Breaker Templates (Java/Resilience4j)",
   "description": "Reusable code templates for circuit breaker pattern. Runtime dependency of skill-001.",
   "type": "local",
-  "path": "./.jaato/docs/modules/mod-code-001-circuit-breaker-java-resilience4j/",
+  "path": "../../knowledge/modules/mod-code-001-circuit-breaker-java-resilience4j/",
   "mode": "selectable",
   "tags": ["module", "circuit-breaker", "resilience4j", "java", "templates"],
   "fetchHint": "Read MODULE.md for templates with {{placeholder}} variables"

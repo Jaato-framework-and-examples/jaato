@@ -1,0 +1,10 @@
+# Circuit breaker configuration for fail-fast pattern
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      analyticsServiceCB:
+        failure-rate-threshold: 70
+        wait-duration-in-open-state: 30000ms  # Shorter for non-critical
+        sliding-window-size: 50
+        minimum-number-of-calls: 5
