@@ -122,29 +122,33 @@ class AnthropicAuthPlugin:
         if command != "anthropic-auth":
             return f"Unknown command: {command}"
 
-        action = args.get("action", "").lower().strip()
+        # Get raw action string (don't lowercase - auth codes are case-sensitive)
+        raw_action = args.get("action", "").strip()
+        action_lower = raw_action.lower()
 
-        # Handle "code <auth_code>" - extract code from action string
-        if action.startswith("code "):
-            auth_code = action[5:].strip()
+        # Handle "code <auth_code>" - extract code from raw string (preserve case)
+        if action_lower.startswith("code "):
+            auth_code = raw_action[5:].strip()
             return self._cmd_code(auth_code)
-        elif action == "code":
-            return "Usage: anthropic-auth code <authorization_code>"
-        elif action == "login":
+        elif action_lower == "code":
+            self._emit("Usage: anthropic-auth code <authorization_code>\n")
+            return ""
+        elif action_lower == "login":
             return self._cmd_login()
-        elif action == "logout":
+        elif action_lower == "logout":
             return self._cmd_logout()
-        elif action == "status":
+        elif action_lower == "status":
             return self._cmd_status()
         else:
-            return (
-                f"Unknown action: '{action}'\n\n"
+            self._emit(
+                f"Unknown action: '{raw_action}'\n\n"
                 "Available actions:\n"
                 "  login       - Open browser to authenticate with Claude Pro/Max\n"
                 "  code <code> - Complete login with authorization code\n"
                 "  logout      - Clear stored OAuth tokens\n"
-                "  status      - Show current authentication status"
+                "  status      - Show current authentication status\n"
             )
+            return ""
 
     def _cmd_login(self) -> str:
         """Handle the login command - step 1: open browser."""
@@ -173,10 +177,11 @@ class AnthropicAuthPlugin:
         )
 
         if not self._pending_code_verifier:
-            return (
+            self._emit(
                 "✗ No pending login found.\n\n"
-                "Please run 'anthropic-auth login' first to start the OAuth flow."
+                "Please run 'anthropic-auth login' first to start the OAuth flow.\n"
             )
+            return ""
 
         try:
             tokens = exchange_code_for_tokens(auth_code, self._pending_code_verifier)
@@ -186,13 +191,15 @@ class AnthropicAuthPlugin:
             self._pending_code_verifier = None
 
             expires_at = datetime.fromtimestamp(tokens.expires_at)
-            return (
+            self._emit(
                 "✓ Successfully authenticated with Claude Pro/Max subscription.\n\n"
                 f"Access token expires: {expires_at.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                "Note: You may need to restart the session for the new tokens to take effect."
+                "Note: You may need to restart the session for the new tokens to take effect.\n"
             )
+            return ""
         except Exception as e:
-            return f"✗ Authentication failed: {e}"
+            self._emit(f"✗ Authentication failed: {e}\n")
+            return ""
 
     def _cmd_logout(self) -> str:
         """Handle the logout command."""
@@ -201,16 +208,19 @@ class AnthropicAuthPlugin:
 
             tokens = load_tokens()
             if not tokens:
-                return "No OAuth tokens found. Already logged out."
+                self._emit("No OAuth tokens found. Already logged out.\n")
+                return ""
 
             clear_tokens()
-            return (
+            self._emit(
                 "✓ OAuth tokens cleared.\n\n"
                 "You will need to use an API key (ANTHROPIC_API_KEY) or "
-                "run 'anthropic-auth login' to re-authenticate."
+                "run 'anthropic-auth login' to re-authenticate.\n"
             )
+            return ""
         except Exception as e:
-            return f"✗ Failed to clear tokens: {e}"
+            self._emit(f"✗ Failed to clear tokens: {e}\n")
+            return ""
 
     def _cmd_status(self) -> str:
         """Handle the status command."""
@@ -259,10 +269,12 @@ class AnthropicAuthPlugin:
             lines.append("")
             lines.append("Priority: PKCE OAuth > Env OAuth Token > API Key")
 
-            return "\n".join(lines)
+            self._emit("\n".join(lines) + "\n")
+            return ""
 
         except Exception as e:
-            return f"✗ Failed to check status: {e}"
+            self._emit(f"✗ Failed to check status: {e}\n")
+            return ""
 
 
 def create_plugin() -> AnthropicAuthPlugin:
