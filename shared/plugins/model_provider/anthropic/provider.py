@@ -210,7 +210,14 @@ class AnthropicProvider:
         # OAuth token uses Authorization: Bearer header (for Pro/Max subscription)
         # API key uses X-Api-Key header (for API credits)
         if self._oauth_token:
-            self._client = anthropic.Anthropic(auth_token=self._oauth_token)
+            # OAuth requires the beta header for subscription-based auth
+            # See: https://github.com/sst/opencode/issues/417
+            self._client = anthropic.Anthropic(
+                auth_token=self._oauth_token,
+                default_headers={
+                    "anthropic-beta": "oauth-2025-04-20",
+                },
+            )
         else:
             self._client = anthropic.Anthropic(api_key=self._api_key)
 
