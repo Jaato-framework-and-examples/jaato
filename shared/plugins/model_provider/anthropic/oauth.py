@@ -187,10 +187,19 @@ def authorize_interactive(
     server.oauth_complete = False
     server.timeout = 1  # Check every second
 
-    # Emit status messages via callback
+    # Emit status messages via callback AND stderr
+    # (stderr because the UI event loop can't update while we're blocking)
+    import sys
+    msg1 = "Opening browser for authentication..."
+    msg2 = f"If browser doesn't open, visit: {auth_url}"
+
+    print(msg1, file=sys.stderr)
+    print(msg2, file=sys.stderr)
+    sys.stderr.flush()
+
     if on_message:
-        on_message("Opening browser for authentication...")
-        on_message(f"If browser doesn't open, visit: {auth_url}")
+        on_message(msg1)
+        on_message(msg2)
 
     # Open browser
     webbrowser.open(auth_url)
