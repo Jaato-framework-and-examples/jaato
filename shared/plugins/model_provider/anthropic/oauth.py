@@ -337,7 +337,9 @@ def exchange_code_for_tokens(code: str, code_verifier: str) -> OAuthTokens:
         data=urllib.parse.urlencode(token_data).encode(),
         headers={
             "Content-Type": "application/x-www-form-urlencoded",
-            "anthropic-beta": "oauth-2025-04-20",  # Required for OAuth token exchange
+            "Accept": "application/json",
+            "User-Agent": "claude-code/1.0",
+            "anthropic-beta": "oauth-2025-04-20",
         },
         method="POST",
     )
