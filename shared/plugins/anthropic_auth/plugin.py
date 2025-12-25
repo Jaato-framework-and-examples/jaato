@@ -161,10 +161,6 @@ class AnthropicAuthPlugin:
         self._pending_code_verifier = code_verifier
         self._pending_state = state
 
-        # Debug: show PKCE values
-        self._emit(f"[DEBUG] code_verifier: {code_verifier}\n")
-        self._emit(f"[DEBUG] state: {state}\n\n")
-
         # Emit to output panel
         self._emit("Opening browser for authentication...\n\n")
         self._emit(f"If browser doesn't open, visit:\n{auth_url}\n\n")
@@ -194,13 +190,8 @@ class AnthropicAuthPlugin:
         # The callback page shows: code#state, but we only need the code part
         if "#" in auth_code:
             auth_code = auth_code.split("#")[0]
-            self._emit("[INFO] Stripped URL fragment from code\n")
 
-        # Debug: show what we're sending
-        self._emit(f"[DEBUG] Exchanging with:\n")
-        self._emit(f"  code: {auth_code}\n")
-        self._emit(f"  code_verifier: {self._pending_code_verifier}\n")
-        self._emit(f"  state: {self._pending_state}\n\n")
+        self._emit("Exchanging authorization code for tokens...\n")
 
         try:
             tokens = exchange_code_for_tokens(
