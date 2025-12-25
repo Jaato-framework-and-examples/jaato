@@ -213,7 +213,7 @@ class RichClient:
 
         # Set output callback on plugin if it supports it
         if plugin and hasattr(plugin, 'set_output_callback') and self._display:
-            output_callback = self._make_output_callback()
+            output_callback = self._create_output_callback()
             plugin.set_output_callback(output_callback)
 
         try:
