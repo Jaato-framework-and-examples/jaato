@@ -190,6 +190,7 @@ def authorize_interactive(
     # Emit status messages via callback AND stderr
     # (stderr because the UI event loop can't update while we're blocking)
     import sys
+    import threading
     msg1 = "Opening browser for authentication..."
     msg2 = f"If browser doesn't open, visit: {auth_url}"
 
@@ -201,8 +202,15 @@ def authorize_interactive(
         on_message(msg1)
         on_message(msg2)
 
-    # Open browser
-    webbrowser.open(auth_url)
+    # Open browser in a thread to avoid blocking (some environments block on webbrowser.open)
+    def open_browser():
+        try:
+            webbrowser.open(auth_url)
+        except Exception:
+            pass  # Ignore browser open errors - user has the URL
+
+    browser_thread = threading.Thread(target=open_browser, daemon=True)
+    browser_thread.start()
 
     # Wait for callback
     start_time = time.time()
