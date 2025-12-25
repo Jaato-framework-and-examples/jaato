@@ -67,16 +67,37 @@ class OAuthTokens:
 def _generate_pkce_pair() -> Tuple[str, str]:
     """Generate PKCE code verifier and challenge.
 
+    Claude Code uses a non-standard encoding for the verifier:
+    - Standard base64, but with: + → ~, = → _, / → -
+
+    The challenge uses standard base64url encoding.
+
     Returns:
         Tuple of (code_verifier, code_challenge)
     """
-    # Generate random 32-byte verifier
+    # Generate random 32-byte verifier (same entropy as Claude Code)
     verifier_bytes = secrets.token_bytes(32)
-    code_verifier = base64.urlsafe_b64encode(verifier_bytes).rstrip(b"=").decode("ascii")
 
-    # Generate SHA256 challenge
+    # Claude Code encoding: standard base64 with custom replacements
+    # + → ~, / → -, and strip padding (despite JS code saying replace with _)
+    # MITM capture shows 43-char verifier, not 44, so padding is stripped
+    verifier_b64 = base64.b64encode(verifier_bytes).decode("ascii")
+    code_verifier = (
+        verifier_b64
+        .rstrip("=")  # Strip padding (matches MITM observation)
+        .replace("+", "~")
+        .replace("/", "-")
+    )
+
+    # Challenge uses standard base64url (+ → -, / → _, strip =)
     challenge_bytes = hashlib.sha256(code_verifier.encode("ascii")).digest()
-    code_challenge = base64.urlsafe_b64encode(challenge_bytes).rstrip(b"=").decode("ascii")
+    challenge_b64 = base64.b64encode(challenge_bytes).decode("ascii")
+    code_challenge = (
+        challenge_b64
+        .rstrip("=")
+        .replace("+", "-")
+        .replace("/", "_")
+    )
 
     return code_verifier, code_challenge
 
