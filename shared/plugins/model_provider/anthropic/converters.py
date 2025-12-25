@@ -44,43 +44,10 @@ def tool_schema_to_anthropic(schema: ToolSchema) -> Dict[str, Any]:
 
 
 def tool_schemas_to_anthropic(schemas: Optional[List[ToolSchema]]) -> Optional[List[Dict[str, Any]]]:
-    """Convert list of ToolSchemas to Anthropic tool definitions.
-
-    Deduplicates tools by name (Anthropic requires unique tool names).
-    If duplicates exist, the last definition wins.
-    """
+    """Convert list of ToolSchemas to Anthropic tool definitions."""
     if not schemas:
         return None
-
-    # Deduplicate by name (last one wins)
-    seen: Dict[str, Dict[str, Any]] = {}
-    duplicates: Dict[str, int] = {}  # Track duplicate counts
-
-    for schema in schemas:
-        if schema.name in seen:
-            duplicates[schema.name] = duplicates.get(schema.name, 1) + 1
-        seen[schema.name] = tool_schema_to_anthropic(schema)
-
-    # Trace duplicates if any were found (writes to JAATO_PROVIDER_TRACE)
-    if duplicates:
-        import os
-        import tempfile
-        import datetime
-        trace_path = os.environ.get(
-            "JAATO_PROVIDER_TRACE",
-            os.path.join(tempfile.gettempdir(), "provider_trace.log")
-        )
-        if trace_path:
-            try:
-                dup_info = ", ".join(f"{name} ({count}x)" for name, count in duplicates.items())
-                ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                with open(trace_path, "a") as f:
-                    f.write(f"[{ts}] [anthropic:tools] WARN Deduplicated {len(duplicates)} tool(s): {dup_info}\n")
-                    f.flush()
-            except Exception:
-                pass  # Don't let tracing errors break the conversion
-
-    return list(seen.values())
+    return [tool_schema_to_anthropic(s) for s in schemas]
 
 
 # ==================== Message Conversion ====================
