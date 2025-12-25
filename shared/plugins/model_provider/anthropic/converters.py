@@ -61,12 +61,24 @@ def tool_schemas_to_anthropic(schemas: Optional[List[ToolSchema]]) -> Optional[L
             duplicates[schema.name] = duplicates.get(schema.name, 1) + 1
         seen[schema.name] = tool_schema_to_anthropic(schema)
 
-    # Log duplicates if any were found
+    # Trace duplicates if any were found (writes to JAATO_PROVIDER_TRACE)
     if duplicates:
-        import logging
-        logger = logging.getLogger(__name__)
-        dup_info = ", ".join(f"{name} ({count}x)" for name, count in duplicates.items())
-        logger.warning(f"Deduplicated {len(duplicates)} tool(s) with duplicate names: {dup_info}")
+        import os
+        import tempfile
+        import datetime
+        trace_path = os.environ.get(
+            "JAATO_PROVIDER_TRACE",
+            os.path.join(tempfile.gettempdir(), "provider_trace.log")
+        )
+        if trace_path:
+            try:
+                dup_info = ", ".join(f"{name} ({count}x)" for name, count in duplicates.items())
+                ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                with open(trace_path, "a") as f:
+                    f.write(f"[{ts}] [anthropic:tools] WARN Deduplicated {len(duplicates)} tool(s): {dup_info}\n")
+                    f.flush()
+            except Exception:
+                pass  # Don't let tracing errors break the conversion
 
     return list(seen.values())
 
