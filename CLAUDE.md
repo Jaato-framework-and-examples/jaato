@@ -427,18 +427,24 @@ Key types in `shared/plugins/model_provider/types.py`:
 | `ANTHROPIC_AUTH_TOKEN` | OAuth token for Claude Pro/Max subscription (experimental) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Alternative OAuth token env var (Claude Code CLI) |
 
-**Authentication Options:**
-- **API Key** (`sk-ant-api03-...`): Uses API credits from console.anthropic.com
-- **OAuth Token** (`sk-ant-oat01-...`): Attempts to use Claude Pro/Max subscription (experimental)
+**Authentication Options (in priority order):**
 
-> **⚠️ OAuth Token Warning:** OAuth tokens are currently restricted by Anthropic to
-> only work with official Claude Code clients. Third-party tools may receive:
-> `"This credential is only authorized for use with Claude Code"`
->
-> The OAuth support is included for future compatibility if Anthropic relaxes this
-> restriction, or if the correct request format is discovered.
+1. **PKCE OAuth Login** (recommended for subscription): Interactive browser-based OAuth
+2. **OAuth Token** (`sk-ant-oat01-...`): From `claude setup-token` (experimental)
+3. **API Key** (`sk-ant-api03-...`): Uses API credits from console.anthropic.com
 
-To get an OAuth token for your subscription:
+**Option 1: PKCE OAuth Login (Interactive)**
+```python
+from shared.plugins.model_provider.anthropic import oauth_login
+
+# Run once - opens browser for Claude Pro/Max login
+oauth_login()
+
+# Tokens are stored in ~/.config/jaato/anthropic_oauth.json
+# Provider will automatically use stored tokens
+```
+
+**Option 2: OAuth Token from claude setup-token (Experimental)**
 ```bash
 # Install Claude Code CLI
 npm install -g @anthropic/claude-code
@@ -448,6 +454,15 @@ claude setup-token
 
 # Set the token
 export ANTHROPIC_AUTH_TOKEN='sk-ant-oat01-...'
+```
+
+> **⚠️ OAuth Warning:** OAuth tokens may be restricted by Anthropic to official
+> Claude Code clients. If you see "This credential is only authorized for use
+> with Claude Code", try the PKCE OAuth login option above.
+
+**Option 3: API Key**
+```bash
+export ANTHROPIC_API_KEY='sk-ant-api03-...'
 ```
 
 Configuration options via `ProviderConfig.extra`:
