@@ -51,7 +51,13 @@ from .converters import (
     serialize_history,
     tool_schemas_to_anthropic,
 )
-from .env import get_checked_credential_locations, resolve_api_key
+from .env import (
+    get_checked_credential_locations,
+    resolve_api_key,
+    resolve_enable_caching,
+    resolve_enable_thinking,
+    resolve_thinking_budget,
+)
 from .errors import (
     APIKeyInvalidError,
     APIKeyNotFoundError,
@@ -182,10 +188,16 @@ class AnthropicProvider:
                 checked_locations=get_checked_credential_locations()
             )
 
-        # Parse extra config
-        self._enable_caching = config.extra.get("enable_caching", False)
-        self._enable_thinking = config.extra.get("enable_thinking", False)
-        self._thinking_budget = config.extra.get("thinking_budget", 10000)
+        # Parse extra config (config.extra takes precedence over env vars)
+        self._enable_caching = config.extra.get(
+            "enable_caching", resolve_enable_caching()
+        )
+        self._enable_thinking = config.extra.get(
+            "enable_thinking", resolve_enable_thinking()
+        )
+        self._thinking_budget = config.extra.get(
+            "thinking_budget", resolve_thinking_budget()
+        )
         self._cache_ttl = config.extra.get("cache_ttl", "5m")
 
         # Create the client
