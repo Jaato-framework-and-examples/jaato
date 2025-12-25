@@ -202,15 +202,8 @@ def authorize_interactive(
         on_message(msg1)
         on_message(msg2)
 
-    # Open browser in a thread to avoid blocking (some environments block on webbrowser.open)
-    def open_browser():
-        try:
-            webbrowser.open(auth_url)
-        except Exception:
-            pass  # Ignore browser open errors - user has the URL
-
-    browser_thread = threading.Thread(target=open_browser, daemon=True)
-    browser_thread.start()
+    # Open browser in background thread (some environments block on webbrowser.open)
+    threading.Thread(target=webbrowser.open, args=(auth_url,), daemon=True).start()
 
     # Wait for callback
     start_time = time.time()
