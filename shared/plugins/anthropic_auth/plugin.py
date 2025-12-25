@@ -36,6 +36,7 @@ class AnthropicAuthPlugin:
         self._output_callback: Optional[OutputCallback] = None
         # Store pending auth state for two-step flow
         self._pending_code_verifier: Optional[str] = None
+        self._pending_state: Optional[str] = None
 
     @property
     def name(self) -> str:
@@ -155,9 +156,10 @@ class AnthropicAuthPlugin:
         """Handle the login command - step 1: open browser."""
         from ..model_provider.anthropic.oauth import build_auth_url
 
-        # Build auth URL and store code_verifier for step 2
+        # Build auth URL and store code_verifier and state for step 2
         auth_url, code_verifier, state = build_auth_url()
         self._pending_code_verifier = code_verifier
+        self._pending_state = state
 
         # Emit to output panel
         self._emit("Opening browser for authentication...\n\n")
@@ -177,7 +179,7 @@ class AnthropicAuthPlugin:
             save_tokens,
         )
 
-        if not self._pending_code_verifier:
+        if not self._pending_code_verifier or not self._pending_state:
             self._emit(
                 "✗ No pending login found.\n\n"
                 "Please run 'anthropic-auth login' first to start the OAuth flow.\n"
@@ -185,11 +187,14 @@ class AnthropicAuthPlugin:
             return ""
 
         try:
-            tokens = exchange_code_for_tokens(auth_code, self._pending_code_verifier)
+            tokens = exchange_code_for_tokens(
+                auth_code, self._pending_code_verifier, self._pending_state
+            )
             save_tokens(tokens)
 
             # Clear pending state
             self._pending_code_verifier = None
+            self._pending_state = None
 
             expires_at = datetime.fromtimestamp(tokens.expires_at)
             self._emit(
