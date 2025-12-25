@@ -122,9 +122,11 @@ class AnthropicAuthPlugin:
         try:
             from ..model_provider.anthropic.oauth import login
 
-            tokens = login()
+            tokens, auth_url = login()
             expires_at = datetime.fromtimestamp(tokens.expires_at)
             return (
+                "Opening browser for authentication...\n"
+                f"If browser doesn't open, visit: {auth_url}\n\n"
                 "✓ Successfully authenticated with Claude Pro/Max subscription.\n\n"
                 f"Access token expires: {expires_at.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 "Note: You may need to restart the session for the new tokens to take effect."

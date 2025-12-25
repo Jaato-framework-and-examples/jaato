@@ -141,7 +141,7 @@ class _OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         self.server.oauth_complete = True
 
 
-def authorize_interactive(timeout: int = 120) -> Tuple[str, str]:
+def authorize_interactive(timeout: int = 120) -> Tuple[str, str, str]:
     """Run interactive OAuth flow in browser.
 
     Opens browser to Claude's OAuth page and waits for callback.
@@ -150,7 +150,7 @@ def authorize_interactive(timeout: int = 120) -> Tuple[str, str]:
         timeout: Seconds to wait for user to complete auth.
 
     Returns:
-        Tuple of (authorization_code, code_verifier)
+        Tuple of (authorization_code, code_verifier, auth_url)
 
     Raises:
         TimeoutError: If user doesn't complete auth in time.
@@ -183,9 +183,7 @@ def authorize_interactive(timeout: int = 120) -> Tuple[str, str]:
     server.oauth_complete = False
     server.timeout = 1  # Check every second
 
-    # Open browser
-    print(f"Opening browser for authentication...")
-    print(f"If browser doesn't open, visit: {auth_url}")
+    # Open browser (no print - caller handles messaging)
     webbrowser.open(auth_url)
 
     # Wait for callback
@@ -208,7 +206,7 @@ def authorize_interactive(timeout: int = 120) -> Tuple[str, str]:
     if server.oauth_state != state:
         raise RuntimeError("OAuth state mismatch (possible CSRF attack)")
 
-    return server.oauth_code, code_verifier
+    return server.oauth_code, code_verifier, auth_url
 
 
 def exchange_code_for_tokens(code: str, code_verifier: str) -> OAuthTokens:
@@ -386,15 +384,16 @@ def get_valid_access_token() -> Optional[str]:
     return tokens.access_token
 
 
-def login() -> OAuthTokens:
+def login() -> Tuple[OAuthTokens, str]:
     """Run full OAuth login flow.
 
     Opens browser, waits for auth, exchanges code for tokens.
 
     Returns:
-        OAuthTokens after successful authentication.
+        Tuple of (OAuthTokens, auth_url) after successful authentication.
+        The auth_url is provided so callers can display it to users.
     """
-    code, verifier = authorize_interactive()
+    code, verifier, auth_url = authorize_interactive()
     tokens = exchange_code_for_tokens(code, verifier)
     save_tokens(tokens)
-    return tokens
+    return tokens, auth_url
