@@ -69,6 +69,13 @@ from .errors import (
     RateLimitError,
     UsageLimitError,
 )
+from .oauth import (
+    get_valid_access_token,
+    load_tokens,
+    login as oauth_login,
+    refresh_tokens,
+    save_tokens,
+)
 
 
 # Context window limits for Claude models
@@ -184,12 +191,25 @@ class AnthropicProvider:
         if config is None:
             config = ProviderConfig()
 
-        # Resolve credentials - API key OR OAuth token
-        # OAuth token allows using Claude Pro/Max subscription instead of API credits
+        # Resolve credentials in priority order:
+        # 1. PKCE OAuth tokens (from interactive login, stored in config dir)
+        # 2. OAuth token from env var (sk-ant-oat01-... from claude setup-token)
+        # 3. API key (sk-ant-api03-... from console.anthropic.com)
         self._api_key = config.api_key or resolve_api_key()
         self._oauth_token = config.extra.get("oauth_token") or resolve_oauth_token()
+        self._pkce_access_token: Optional[str] = None
+        self._use_pkce = False
 
-        if not self._api_key and not self._oauth_token:
+        # Try PKCE OAuth first (interactive login tokens)
+        try:
+            self._pkce_access_token = get_valid_access_token()
+            if self._pkce_access_token:
+                self._use_pkce = True
+        except Exception:
+            # PKCE token refresh failed, will try other methods
+            self._pkce_access_token = None
+
+        if not self._pkce_access_token and not self._oauth_token and not self._api_key:
             raise APIKeyNotFoundError(
                 checked_locations=get_checked_credential_locations()
             )
@@ -206,39 +226,64 @@ class AnthropicProvider:
         )
         self._cache_ttl = config.extra.get("cache_ttl", "5m")
 
-        # Create the client - use OAuth token if available, else API key
-        # OAuth token uses Authorization: Bearer header (for Pro/Max subscription)
-        # API key uses X-Api-Key header (for API credits)
-        if self._oauth_token:
-            # OAuth requires special beta headers to identify as Claude Code client
-            # This enables subscription-based auth for Pro/Max plans
-            # Reference: https://github.com/sst/opencode-anthropic-auth
-            #
-            # Key details from OpenCode's implementation:
-            # - Client ID: 9d1c250a-e61b-44d9-88ed-5944d1962f5e
-            # - Auth URL: https://claude.ai/oauth/authorize
-            # - Token URL: https://console.anthropic.com/v1/oauth/token
-            # - Scopes: org:create_api_key user:profile user:inference
-            # - Uses PKCE flow with Bearer token + beta headers
-            #
-            # Note: OAuth tokens may be restricted to official Claude Code clients.
-            # The beta header attempts to identify as a compatible client.
-            self._client = anthropic.Anthropic(
-                auth_token=self._oauth_token,
-                default_headers={
-                    # Full beta features used by OpenCode
-                    "anthropic-beta": (
-                        "claude-code-20250219,"
-                        "interleaved-thinking-2025-05-14,"
-                        "fine-grained-tool-streaming-2025-05-14"
-                    ),
-                },
-            )
-        else:
-            self._client = anthropic.Anthropic(api_key=self._api_key)
+        # Create the client based on auth method
+        # Priority: PKCE OAuth > env var OAuth > API key
+        self._client = self._create_client()
 
         # Verify connectivity with a lightweight call
         self._verify_connectivity()
+
+    def _create_client(self):
+        """Create Anthropic client with appropriate auth method."""
+        import anthropic
+
+        # Beta headers for Claude Code compatibility
+        oauth_headers = {
+            "anthropic-beta": (
+                "claude-code-20250219,"
+                "interleaved-thinking-2025-05-14,"
+                "fine-grained-tool-streaming-2025-05-14"
+            ),
+        }
+
+        # Priority: PKCE OAuth > env var OAuth > API key
+        if self._use_pkce and self._pkce_access_token:
+            # PKCE OAuth - uses access token from interactive login
+            return anthropic.Anthropic(
+                auth_token=self._pkce_access_token,
+                default_headers=oauth_headers,
+            )
+        elif self._oauth_token:
+            # Env var OAuth - uses token from claude setup-token
+            return anthropic.Anthropic(
+                auth_token=self._oauth_token,
+                default_headers=oauth_headers,
+            )
+        else:
+            # API key - standard authentication
+            return anthropic.Anthropic(api_key=self._api_key)
+
+    def _refresh_pkce_token_if_needed(self) -> None:
+        """Refresh PKCE access token if expired."""
+        if not self._use_pkce:
+            return
+
+        tokens = load_tokens()
+        if tokens and tokens.is_expired:
+            try:
+                new_tokens = refresh_tokens(tokens.refresh_token)
+                save_tokens(new_tokens)
+                self._pkce_access_token = new_tokens.access_token
+                # Recreate client with new token
+                self._client = self._create_client()
+            except Exception as e:
+                # Token refresh failed - fall back to other auth methods
+                self._use_pkce = False
+                self._pkce_access_token = None
+                if self._oauth_token or self._api_key:
+                    self._client = self._create_client()
+                else:
+                    raise RuntimeError(f"OAuth token refresh failed: {e}")
 
     def _verify_connectivity(self) -> None:
         """Verify connectivity by checking API key validity.
@@ -249,6 +294,16 @@ class AnthropicProvider:
         # A lightweight verification would be nice but Anthropic doesn't have
         # a dedicated endpoint for this
         pass
+
+    @staticmethod
+    def login() -> None:
+        """Run interactive OAuth login flow.
+
+        Opens browser to authenticate with Claude Pro/Max subscription.
+        Stores tokens for future use.
+        """
+        oauth_login()
+        print("Successfully authenticated with Claude Pro/Max subscription.")
 
     def shutdown(self) -> None:
         """Clean up resources."""
