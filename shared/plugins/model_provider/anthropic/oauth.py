@@ -23,7 +23,7 @@ import urllib.request
 # OAuth configuration (same as Claude Code CLI)
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_AUTH_URL = "https://claude.ai/oauth/authorize"
-OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+OAUTH_TOKEN_URL = "https://console.anthropic.com/oauth/token"
 OAUTH_SCOPES = "user:inference"
 
 # Callback configuration - using Anthropic's hosted callback page
