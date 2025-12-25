@@ -161,7 +161,8 @@ def build_auth_url() -> Tuple[str, str, str]:
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
     }
-    auth_url = f"{OAUTH_AUTH_URL}?{urllib.parse.urlencode(auth_params)}"
+    # Use quote_via to encode spaces as %20 instead of + (some OAuth servers require this)
+    auth_url = f"{OAUTH_AUTH_URL}?{urllib.parse.urlencode(auth_params, quote_via=urllib.parse.quote)}"
 
     return auth_url, code_verifier, state
 
@@ -257,7 +258,8 @@ def authorize_interactive(
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
     }
-    auth_url = f"{OAUTH_AUTH_URL}?{urllib.parse.urlencode(auth_params)}"
+    # Use quote_via to encode spaces as %20 instead of + (some OAuth servers require this)
+    auth_url = f"{OAUTH_AUTH_URL}?{urllib.parse.urlencode(auth_params, quote_via=urllib.parse.quote)}"
 
     # Start callback server
     server = http.server.HTTPServer((CALLBACK_HOST, CALLBACK_PORT), _OAuthCallbackHandler)
