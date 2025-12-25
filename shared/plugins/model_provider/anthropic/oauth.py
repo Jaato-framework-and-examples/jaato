@@ -347,11 +347,15 @@ def exchange_code_for_tokens(code: str, code_verifier: str, state: str) -> OAuth
             headers=headers,
             timeout=30,
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            # Get detailed error from response
+            try:
+                error_data = resp.json()
+                error_msg = error_data.get("error_description") or error_data.get("error") or resp.text
+            except Exception:
+                error_msg = resp.text or f"HTTP {resp.status_code}"
+            raise RuntimeError(f"Token exchange failed ({resp.status_code}): {error_msg}")
         data = resp.json()
-    except requests.exceptions.HTTPError as e:
-        error_body = e.response.text if e.response else str(e)
-        raise RuntimeError(f"Token exchange failed: {error_body}")
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"Token exchange failed: {e}")
 
