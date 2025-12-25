@@ -152,17 +152,18 @@ def build_auth_url() -> Tuple[str, str, str]:
 
     redirect_uri = f"http://{CALLBACK_HOST}:{CALLBACK_PORT}{CALLBACK_PATH}"
 
-    auth_params = {
-        "response_type": "code",
-        "client_id": OAUTH_CLIENT_ID,
-        "redirect_uri": redirect_uri,
-        "scope": OAUTH_SCOPES,
-        "state": state,
-        "code_challenge": code_challenge,
-        "code_challenge_method": "S256",
-    }
-    # Use quote_via to encode spaces as %20 instead of + (some OAuth servers require this)
-    auth_url = f"{OAUTH_AUTH_URL}?{urllib.parse.urlencode(auth_params, quote_via=urllib.parse.quote)}"
+    # Match exact parameter order used by Claude Code CLI
+    auth_params = [
+        ("code", "true"),  # Required by Anthropic's OAuth
+        ("client_id", OAUTH_CLIENT_ID),
+        ("response_type", "code"),
+        ("redirect_uri", redirect_uri),
+        ("scope", OAUTH_SCOPES),
+        ("code_challenge", code_challenge),
+        ("code_challenge_method", "S256"),
+        ("state", state),
+    ]
+    auth_url = f"{OAUTH_AUTH_URL}?{urllib.parse.urlencode(auth_params)}"
 
     return auth_url, code_verifier, state
 
@@ -248,18 +249,18 @@ def authorize_interactive(
     # Build callback URL
     redirect_uri = f"http://{CALLBACK_HOST}:{CALLBACK_PORT}{CALLBACK_PATH}"
 
-    # Build authorization URL
-    auth_params = {
-        "response_type": "code",
-        "client_id": OAUTH_CLIENT_ID,
-        "redirect_uri": redirect_uri,
-        "scope": OAUTH_SCOPES,
-        "state": state,
-        "code_challenge": code_challenge,
-        "code_challenge_method": "S256",
-    }
-    # Use quote_via to encode spaces as %20 instead of + (some OAuth servers require this)
-    auth_url = f"{OAUTH_AUTH_URL}?{urllib.parse.urlencode(auth_params, quote_via=urllib.parse.quote)}"
+    # Build authorization URL - match exact parameter order used by Claude Code CLI
+    auth_params = [
+        ("code", "true"),  # Required by Anthropic's OAuth
+        ("client_id", OAUTH_CLIENT_ID),
+        ("response_type", "code"),
+        ("redirect_uri", redirect_uri),
+        ("scope", OAUTH_SCOPES),
+        ("code_challenge", code_challenge),
+        ("code_challenge_method", "S256"),
+        ("state", state),
+    ]
+    auth_url = f"{OAUTH_AUTH_URL}?{urllib.parse.urlencode(auth_params)}"
 
     # Start callback server
     server = http.server.HTTPServer((CALLBACK_HOST, CALLBACK_PORT), _OAuthCallbackHandler)
