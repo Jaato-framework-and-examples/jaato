@@ -4,7 +4,7 @@
   "plugins": ["artifact_tracker", "background", "cli", "environment", "file_edit", "filesystem_query", "lsp", "mcp", "memory", "references", "template", "todo"],
   "plugin_configs": {
     "references": {
-      "preselected": ["enablement-knowledge-base", "adr-009-service-architecture-patterns", "eri-code-001-hexagonal-light-java-spring", "skill-020-microservice-java-spring"],
+      "preselected": ["enablement-knowledge-base", "eri-code-001-hexagonal-light-java-spring", "skill-020-microservice-java-spring"],
       "exclude_tools": ["selectReferences"]
     },
     "lsp": {

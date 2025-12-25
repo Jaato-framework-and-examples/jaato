@@ -4,7 +4,7 @@
   "plugins": ["artifact_tracker", "background", "cli", "environment", "file_edit", "filesystem_query", "lsp", "mcp", "memory", "references", "todo", "template"],
   "plugin_configs": {
     "references": {
-      "preselected": ["enablement-knowledge-base", "adr-004-resilience-patterns", "eri-code-008-circuit-breaker-java-resilience4j", "skill-001-circuit-breaker-java-resilience4j"],
+      "preselected": ["enablement-knowledge-base", "eri-code-008-circuit-breaker-java-resilience4j", "skill-001-circuit-breaker-java-resilience4j"],
       "exclude_tools": ["selectReferences"]
     },
     "lsp": {

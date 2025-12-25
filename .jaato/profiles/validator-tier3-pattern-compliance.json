@@ -4,7 +4,7 @@
   "plugins": ["artifact_tracker", "background", "cli", "environment", "file_edit", "lsp", "mcp", "references", "todo"],
   "plugin_configs": {
     "references": {
-      "preselected": ["enablement-knowledge-base", "skill-001-circuit-breaker-java-resilience4j", "skill-020-microservice-java-spring", "skill-021-api-rest-java-spring"],
+      "preselected": ["enablement-knowledge-base", "adr-001-api-design-standards", "adr-004-resilience-patterns", "adr-009-service-architecture-patterns", "skill-001-circuit-breaker-java-resilience4j", "skill-020-microservice-java-spring", "skill-021-api-rest-java-spring"],
       "exclude_tools": ["selectReferences"]
     },
     "lsp": {

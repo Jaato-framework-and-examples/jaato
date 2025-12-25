@@ -4,7 +4,7 @@
   "plugins": ["artifact_tracker", "background", "cli", "environment", "file_edit", "filesystem_query", "lsp", "mcp", "memory", "references", "template", "todo"],
   "plugin_configs": {
     "references": {
-      "preselected": ["enablement-knowledge-base", "adr-001-api-design-standards", "adr-009-service-architecture-patterns", "eri-code-001-hexagonal-light-java-spring", "eri-code-014-api-public-exposure-java-spring", "skill-020-microservice-java-spring", "skill-021-api-rest-java-spring"],
+      "preselected": ["enablement-knowledge-base", "eri-code-001-hexagonal-light-java-spring", "eri-code-014-api-public-exposure-java-spring", "skill-020-microservice-java-spring", "skill-021-api-rest-java-spring"],
       "exclude_tools": ["selectReferences"]
     },
     "lsp": {
