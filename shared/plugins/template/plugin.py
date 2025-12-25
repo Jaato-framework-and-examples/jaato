@@ -242,6 +242,20 @@ patterns. Manual coding when a template exists is NOT acceptable.
 3. ONLY write code manually if NO suitable template exists
 4. When in doubt, use `listExtractedTemplates` to see available templates
 
+### Non-Compliance Policy
+
+WARNING: Code generated without using available templates will be:
+- REJECTED as non-compliant during validation
+- Considered INVALID output that does not meet quality standards
+- Flagged for rework requiring template usage
+
+If no suitable template exists for your task:
+1. Report the missing template as a blocker
+2. Do NOT generate code directly as a workaround
+3. Request that the template be created first
+
+This policy ensures consistent, maintainable code across all generated projects.
+
 ### Templates Location
 Templates are stored in `.jaato/templates/`. When you read documentation files
 (like MODULE.md) containing embedded templates, they are automatically extracted
@@ -453,6 +467,7 @@ Template rendering requires approval since it writes files."""
                         f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
                         f"  Variables: {var_list or '(none detected)'}\n"
                         f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
+                        f"  Code generated without this template will be REJECTED as non-compliant.\n"
                         f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
                     )
                     self._trace(f"  extracted: {template_path.name} with {len(variables)} variables")
@@ -560,6 +575,7 @@ Template rendering requires approval since it writes files."""
                         f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
                         f"  Variables: {var_list or '(none detected)'}\n"
                         f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
+                        f"  Code generated without this template will be REJECTED as non-compliant.\n"
                         f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
                     )
                     self._trace(f"  extracted: {template_path.name} with {len(variables)} variables")
