@@ -16,6 +16,7 @@ Features:
 """
 
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from ..base import (
@@ -65,6 +66,7 @@ from .errors import (
     ModelNotFoundError,
     OverloadedError,
     RateLimitError,
+    UsageLimitError,
 )
 
 
@@ -563,6 +565,18 @@ class AnthropicProvider:
         # Check for rate limit errors
         if "rate" in error_str and "limit" in error_str or "429" in error_str:
             raise RateLimitError(original_error=str(error)) from error
+
+        # Check for usage limit errors (API spending/quota limits)
+        if "usage limit" in error_str or "api usage" in error_str:
+            # Try to extract reset date from error message
+            reset_date = None
+            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', str(error))
+            if date_match:
+                reset_date = date_match.group(1)
+            raise UsageLimitError(
+                reset_date=reset_date,
+                original_error=str(error),
+            ) from error
 
         # Check for overloaded errors
         if "overloaded" in error_str or "529" in error_str:

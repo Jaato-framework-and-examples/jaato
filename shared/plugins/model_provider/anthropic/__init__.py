@@ -18,6 +18,28 @@ Usage:
     response = provider.send_message("Hello!")
 """
 
+from .errors import (
+    AnthropicProviderError,
+    APIKeyInvalidError,
+    APIKeyNotFoundError,
+    ContextLimitError,
+    ModelNotFoundError,
+    OverloadedError,
+    RateLimitError,
+    UsageLimitError,
+)
 from .provider import AnthropicProvider, create_provider
 
-__all__ = ["AnthropicProvider", "create_provider"]
+__all__ = [
+    "AnthropicProvider",
+    "create_provider",
+    # Errors
+    "AnthropicProviderError",
+    "APIKeyInvalidError",
+    "APIKeyNotFoundError",
+    "ContextLimitError",
+    "ModelNotFoundError",
+    "OverloadedError",
+    "RateLimitError",
+    "UsageLimitError",
+]
