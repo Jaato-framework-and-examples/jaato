@@ -18,7 +18,13 @@ Features:
 import json
 from typing import Any, Dict, List, Optional
 
-from ..base import ModelProviderPlugin, ProviderConfig, StreamingCallback, UsageUpdateCallback
+from ..base import (
+    FunctionCallDetectedCallback,
+    ModelProviderPlugin,
+    ProviderConfig,
+    StreamingCallback,
+    UsageUpdateCallback,
+)
 from ..types import (
     CancelledException,
     CancelToken,
@@ -130,6 +136,11 @@ class AnthropicProvider:
         self._tools: Optional[List[ToolSchema]] = None
         self._history: List[Message] = []
         self._last_usage: TokenUsage = TokenUsage()
+
+        # Agent context for tracing
+        self._agent_type: str = "main"
+        self._agent_name: Optional[str] = None
+        self._agent_id: str = "main"
 
     @property
     def name(self) -> str:
@@ -650,6 +661,25 @@ class AnthropicProvider:
         """
         return True
 
+    # ==================== Agent Context ====================
+
+    def set_agent_context(
+        self,
+        agent_type: str = "main",
+        agent_name: Optional[str] = None,
+        agent_id: str = "main"
+    ) -> None:
+        """Set agent context for trace identification.
+
+        Args:
+            agent_type: Type of agent ("main" or "subagent").
+            agent_name: Optional name for the agent (e.g., profile name).
+            agent_id: Unique identifier for the agent instance.
+        """
+        self._agent_type = agent_type
+        self._agent_name = agent_name
+        self._agent_id = agent_id
+
     # ==================== Streaming ====================
 
     def send_message_streaming(
@@ -658,7 +688,8 @@ class AnthropicProvider:
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
         response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None
     ) -> ProviderResponse:
         """Send a message with streaming response and optional cancellation.
 
@@ -668,6 +699,7 @@ class AnthropicProvider:
             cancel_token: Optional token to request cancellation mid-stream.
             response_schema: Optional JSON Schema to constrain the response.
             on_usage_update: Optional callback for real-time token usage updates.
+            on_function_call: Optional callback for function call detection during streaming.
 
         Returns:
             ProviderResponse with accumulated text and/or function calls.
@@ -691,6 +723,7 @@ class AnthropicProvider:
                 on_chunk=on_chunk,
                 cancel_token=cancel_token,
                 on_usage_update=on_usage_update,
+                on_function_call=on_function_call,
             )
 
             self._last_usage = response.usage
@@ -720,7 +753,8 @@ class AnthropicProvider:
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
         response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None
     ) -> ProviderResponse:
         """Send tool results with streaming response and optional cancellation.
 
@@ -730,6 +764,7 @@ class AnthropicProvider:
             cancel_token: Optional token to request cancellation mid-stream.
             response_schema: Optional JSON Schema to constrain the response.
             on_usage_update: Optional callback for real-time token usage updates.
+            on_function_call: Optional callback for function call detection during streaming.
 
         Returns:
             ProviderResponse with accumulated text and/or function calls.
@@ -754,6 +789,7 @@ class AnthropicProvider:
                 on_chunk=on_chunk,
                 cancel_token=cancel_token,
                 on_usage_update=on_usage_update,
+                on_function_call=on_function_call,
             )
 
             self._last_usage = response.usage
@@ -773,6 +809,7 @@ class AnthropicProvider:
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
     ) -> ProviderResponse:
         """Stream a response from the Anthropic API.
 
@@ -874,6 +911,9 @@ class AnthropicProvider:
                                 name=tc["name"],
                                 args=args,
                             )
+                            # Notify caller about function call detection (for UI positioning)
+                            if on_function_call:
+                                on_function_call(fc)
                             parts.append(Part.from_function_call(fc))
                             del current_tool_calls[idx]
 
@@ -920,6 +960,9 @@ class AnthropicProvider:
             except json.JSONDecodeError:
                 args = {}
             fc = FunctionCall(id=tc["id"], name=tc["name"], args=args)
+            # Notify caller about function call detection
+            if on_function_call:
+                on_function_call(fc)
             parts.append(Part.from_function_call(fc))
 
         # Build thinking string
