@@ -57,6 +57,7 @@ from .env import (
     resolve_api_key,
     resolve_enable_caching,
     resolve_enable_thinking,
+    resolve_oauth_token,
     resolve_thinking_budget,
 )
 from .errors import (
@@ -183,9 +184,12 @@ class AnthropicProvider:
         if config is None:
             config = ProviderConfig()
 
-        # Resolve API key
+        # Resolve credentials - API key OR OAuth token
+        # OAuth token allows using Claude Pro/Max subscription instead of API credits
         self._api_key = config.api_key or resolve_api_key()
-        if not self._api_key:
+        self._oauth_token = config.extra.get("oauth_token") or resolve_oauth_token()
+
+        if not self._api_key and not self._oauth_token:
             raise APIKeyNotFoundError(
                 checked_locations=get_checked_credential_locations()
             )
@@ -202,8 +206,13 @@ class AnthropicProvider:
         )
         self._cache_ttl = config.extra.get("cache_ttl", "5m")
 
-        # Create the client
-        self._client = anthropic.Anthropic(api_key=self._api_key)
+        # Create the client - use OAuth token if available, else API key
+        # OAuth token uses Authorization: Bearer header (for Pro/Max subscription)
+        # API key uses X-Api-Key header (for API credits)
+        if self._oauth_token:
+            self._client = anthropic.Anthropic(auth_token=self._oauth_token)
+        else:
+            self._client = anthropic.Anthropic(api_key=self._api_key)
 
         # Verify connectivity with a lightweight call
         self._verify_connectivity()

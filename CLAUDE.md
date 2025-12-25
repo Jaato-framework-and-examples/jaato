@@ -423,11 +423,30 @@ Key types in `shared/plugins/model_provider/types.py`:
 ### Anthropic Claude
 | Variable | Purpose |
 |----------|---------|
-| `ANTHROPIC_API_KEY` | Anthropic API key (required) |
+| `ANTHROPIC_API_KEY` | Anthropic API key (uses API credits) |
+| `ANTHROPIC_AUTH_TOKEN` | OAuth token for Claude Pro/Max subscription |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Alternative OAuth token env var (Claude Code CLI) |
+
+**Authentication Options:**
+- **API Key** (`sk-ant-api03-...`): Uses API credits from console.anthropic.com
+- **OAuth Token** (`sk-ant-oat01-...`): Uses your Claude Pro/Max subscription
+
+To get an OAuth token for your subscription:
+```bash
+# Install Claude Code CLI
+npm install -g @anthropics/claude-code
+
+# Generate OAuth token (valid for 1 year)
+claude setup-token
+
+# Set the token
+export ANTHROPIC_AUTH_TOKEN='sk-ant-oat01-...'
+```
 
 Configuration options via `ProviderConfig.extra`:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| `oauth_token` | str | None | OAuth token (alternative to env var) |
 | `enable_caching` | bool | False | Enable prompt caching (90% cost reduction) |
 | `enable_thinking` | bool | False | Enable extended thinking (reasoning traces) |
 | `thinking_budget` | int | 10000 | Max thinking tokens when enabled |
