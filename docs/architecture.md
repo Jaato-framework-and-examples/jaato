@@ -2,6 +2,149 @@
 
 This document describes the architecture of the jaato framework and how a generic client uses it.
 
+## Server-First Architecture
+
+The framework supports a server-first architecture where the core logic runs as a standalone daemon, enabling multiple clients to connect via IPC or WebSocket.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     python -m server                             │
+│  (Daemon - persists independently of clients)                   │
+├─────────────────────────────────────────────────────────────────┤
+│  SessionManager                                                  │
+│  ├── Session "project-A" ─► JaatoServer ─► SessionPlugin        │
+│  ├── Session "project-B" ─► JaatoServer ─► SessionPlugin        │
+│  └── Session "default"   ─► JaatoServer ─► SessionPlugin        │
+├─────────────────────────────────────────────────────────────────┤
+│  --ipc-socket /tmp/jaato.sock   (local, fast, secure)           │
+│  --web-socket :8080             (remote, web clients)           │
+│  --daemon                       (background mode)               │
+└─────────────────────────────────────────────────────────────────┘
+              │                           │
+              ▼                           ▼
+    ┌──────────────────┐        ┌──────────────────┐
+    │   rich-client    │        │   web-client     │
+    │   (TUI via IPC)  │        │   (via WebSocket)│
+    └──────────────────┘        └──────────────────┘
+```
+
+### Server Components
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| `JaatoServer` | `server/core.py` | Core logic extracted from RichClient, UI-agnostic |
+| `SessionManager` | `server/session_manager.py` | Multi-session orchestration with persistence |
+| `JaatoIPCServer` | `server/ipc.py` | Unix domain socket for local clients |
+| `JaatoWSServer` | `server/websocket.py` | WebSocket for remote/web clients |
+| `Event Protocol` | `server/events.py` | 25+ typed events for client-server communication |
+
+### Event-Driven Communication
+
+Instead of direct callbacks, the server emits events that clients subscribe to:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        JaatoServer                               │
+├─────────────────────────────────────────────────────────────────┤
+│  Plugins ──callbacks──► JaatoServer ──emit()──► Event Queue     │
+│                                                                 │
+│  • Permission hooks → emit(PermissionRequestedEvent)            │
+│  • Clarification hooks → emit(ClarificationQuestionEvent)       │
+│  • Plan reporter → emit(PlanUpdatedEvent)                       │
+│  • Agent hooks → emit(AgentOutputEvent, ToolCallStartEvent...)  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼ broadcast
+┌─────────────────────────────────────────────────────────────────┐
+│                      Connected Clients                           │
+│  Receive events → render appropriately for their UI             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Event Protocol
+
+Events are JSON-serializable dataclasses flowing over IPC/WebSocket:
+
+**Server → Client Events:**
+| Event Type | Purpose |
+|------------|---------|
+| `agent.created` | New agent spawned |
+| `agent.output` | Streaming text output |
+| `agent.status_changed` | Agent active/done/error |
+| `tool.call_start` / `tool.call_end` | Tool execution lifecycle |
+| `permission.requested` | Permission prompt needed |
+| `clarification.question` | User input needed |
+| `plan.updated` | Plan/todo changed |
+| `context.updated` | Token usage changed |
+| `turn.completed` | Turn finished with accounting |
+
+**Client → Server Events:**
+| Event Type | Purpose |
+|------------|---------|
+| `message.send` | Send message to model |
+| `permission.response` | Answer permission prompt |
+| `clarification.response` | Answer clarification |
+| `session.stop` | Cancel current operation |
+| `command.execute` | Run a command |
+
+### SessionManager + SessionPlugin Integration
+
+The runtime `SessionManager` integrates with the persistence `SessionPlugin`:
+
+```
+SessionManager (runtime)
+├── In-memory sessions (hot)
+│   └── JaatoServer instances
+└── SessionPlugin (persistence)
+    └── .jaato/sessions/*.json
+
+Session Lifecycle:
+┌─────────────┐     attach_session()     ┌─────────────┐
+│   On Disk   │ ───────────────────────► │  In Memory  │
+│  (cold)     │   SessionPlugin.load()   │   (hot)     │
+└─────────────┘                          └─────────────┘
+                                               │
+                                               │ Client working...
+                                               ▼
+┌─────────────┐     detach_client()      ┌─────────────┐
+│   On Disk   │ ◄─────────────────────── │  In Memory  │
+│  (updated)  │   SessionPlugin.save()   │   (dirty)   │
+└─────────────┘   _maybe_unload()        └─────────────┘
+```
+
+### Server Usage
+
+```bash
+# Start server as daemon
+python -m server --ipc-socket /tmp/jaato.sock --daemon
+
+# Start with WebSocket for remote access
+python -m server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
+
+# Check server status
+python -m server --status
+
+# Stop server
+python -m server --stop
+
+# Connect TUI client
+python rich_client.py --connect /tmp/jaato.sock
+```
+
+### Benefits of Server-First Architecture
+
+| Aspect | Embedded (Legacy) | Server-First |
+|--------|-------------------|--------------|
+| **Lifecycle** | Dies with TUI | Persists independently |
+| **Multi-client** | Single client only | Multiple concurrent clients |
+| **Session continuity** | Lost on exit | Preserved across reconnects |
+| **Resource sharing** | N/A | Shared sessions, single model connection |
+| **Client types** | TUI only | TUI, Web, IDE extensions, mobile |
+
+---
+
 ## High-Level Overview
 
 ```
@@ -1095,6 +1238,16 @@ print(f"Context: {usage['percent_used']:.1f}% used")
 ## File Structure
 
 ```
+server/                          # Server package (top-level)
+├── __init__.py                  # Package exports
+├── __main__.py                  # Entry point: python -m server
+├── core.py                      # JaatoServer - UI-agnostic core logic
+├── events.py                    # Event protocol (25+ typed events)
+├── session_manager.py           # Multi-session orchestration
+├── ipc.py                       # Unix domain socket server
+├── websocket.py                 # WebSocket server
+└── test_client.py               # Interactive test client
+
 shared/
 ├── __init__.py              # Package exports
 ├── jaato_client.py          # Client facade (wraps Runtime + Session)
