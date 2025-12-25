@@ -1,6 +1,7 @@
 """Environment variable resolution for Anthropic provider.
 
-Provides a simple API key-based authentication (simpler than other providers).
+Supports both API key authentication (for API credits) and OAuth token
+authentication (for Claude Pro/Max subscriptions).
 """
 
 import os
@@ -19,13 +20,38 @@ def resolve_api_key() -> Optional[str]:
     return os.environ.get("ANTHROPIC_API_KEY")
 
 
+def resolve_oauth_token() -> Optional[str]:
+    """Resolve OAuth token for Claude Pro/Max subscription.
+
+    OAuth tokens allow using your Claude Pro/Max subscription instead of
+    API credits. Generate one with: `claude setup-token`
+
+    Checks (in order):
+    1. ANTHROPIC_AUTH_TOKEN environment variable
+    2. CLAUDE_CODE_OAUTH_TOKEN environment variable
+
+    Returns:
+        OAuth token (sk-ant-oat01-...) if found, None otherwise.
+    """
+    # Check both env vars - ANTHROPIC_AUTH_TOKEN is the SDK standard,
+    # CLAUDE_CODE_OAUTH_TOKEN is used by Claude Code CLI
+    return (
+        os.environ.get("ANTHROPIC_AUTH_TOKEN") or
+        os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    )
+
+
 def get_checked_credential_locations() -> list[str]:
     """Get list of locations checked for credentials.
 
     Returns:
         List of environment variable names checked.
     """
-    return ["ANTHROPIC_API_KEY"]
+    return [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ]
 
 
 def resolve_enable_thinking() -> bool:

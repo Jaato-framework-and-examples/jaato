@@ -13,7 +13,7 @@ class AnthropicProviderError(Exception):
 
 
 class APIKeyNotFoundError(AnthropicProviderError):
-    """Raised when no API key is found."""
+    """Raised when no API key or OAuth token is found."""
 
     def __init__(
         self,
@@ -23,12 +23,16 @@ class APIKeyNotFoundError(AnthropicProviderError):
 
         locations = ", ".join(self.checked_locations) if self.checked_locations else "environment"
         message = (
-            f"Anthropic API key not found.\n"
+            f"Anthropic credentials not found.\n"
             f"Checked: {locations}\n\n"
-            f"To fix this:\n"
-            f"  1. Get an API key from https://console.anthropic.com/\n"
-            f"  2. Set ANTHROPIC_API_KEY environment variable:\n"
-            f"     export ANTHROPIC_API_KEY='sk-ant-...'"
+            f"To fix this, choose one option:\n\n"
+            f"  Option 1 - API Key (uses API credits):\n"
+            f"    1. Get an API key from https://console.anthropic.com/\n"
+            f"    2. Set: export ANTHROPIC_API_KEY='sk-ant-api03-...'\n\n"
+            f"  Option 2 - OAuth Token (uses Claude Pro/Max subscription):\n"
+            f"    1. Install Claude Code CLI: npm install -g @anthropics/claude-code\n"
+            f"    2. Run: claude setup-token\n"
+            f"    3. Set: export ANTHROPIC_AUTH_TOKEN='sk-ant-oat01-...'"
         )
         super().__init__(message)
 
