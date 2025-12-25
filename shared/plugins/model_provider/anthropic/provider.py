@@ -210,12 +210,13 @@ class AnthropicProvider:
         # OAuth token uses Authorization: Bearer header (for Pro/Max subscription)
         # API key uses X-Api-Key header (for API credits)
         if self._oauth_token:
-            # OAuth requires the beta header for subscription-based auth
-            # See: https://github.com/sst/opencode/issues/417
+            # OAuth requires special beta headers to identify as Claude Code client
+            # This enables subscription-based auth for Pro/Max plans
+            # See: https://github.com/sst/opencode (provider.ts)
             self._client = anthropic.Anthropic(
                 auth_token=self._oauth_token,
                 default_headers={
-                    "anthropic-beta": "oauth-2025-04-20",
+                    "anthropic-beta": "claude-code-20250219",
                 },
             )
         else:
