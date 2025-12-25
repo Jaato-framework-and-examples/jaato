@@ -154,15 +154,16 @@ class AnthropicAuthPlugin:
         auth_url, code_verifier, state = build_auth_url()
         self._pending_code_verifier = code_verifier
 
+        # Emit to output panel
+        self._emit("Opening browser for authentication...\n\n")
+        self._emit(f"If browser doesn't open, visit:\n{auth_url}\n\n")
+        self._emit("After authenticating, copy the authorization code and run:\n")
+        self._emit("  anthropic-auth code <paste_code_here>\n")
+
         # Open browser in background thread (fire and forget)
         threading.Thread(target=webbrowser.open, args=(auth_url,), daemon=True).start()
 
-        return (
-            "Opening browser for authentication...\n\n"
-            f"If browser doesn't open, visit:\n{auth_url}\n\n"
-            "After authenticating, copy the authorization code and run:\n"
-            "  anthropic-auth code <paste_code_here>"
-        )
+        return ""
 
     def _cmd_code(self, auth_code: str) -> str:
         """Handle the code command - step 2: exchange code for tokens."""
