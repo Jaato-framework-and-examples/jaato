@@ -2221,14 +2221,24 @@ class RichClient:
 
 def main():
     import argparse
-    import asyncio
 
     # Configure UTF-8 encoding for Windows console (before any output)
     from shared.console_encoding import configure_utf8_output
     configure_utf8_output()
 
     parser = argparse.ArgumentParser(
-        description="Rich TUI client with sticky plan display"
+        description="Rich TUI client for Jaato AI assistant",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Server Mode:
+  To run the server separately, use:
+    python -m server --ipc-socket /tmp/jaato.sock
+
+  Then connect with:
+    python rich_client.py --connect /tmp/jaato.sock
+
+  Or let the client auto-start the server (default behavior).
+        """,
     )
     parser.add_argument(
         "--env-file",
@@ -2257,93 +2267,39 @@ def main():
              "Overrides JAATO_PROVIDER env var."
     )
 
-    # Server mode arguments
+    # Server connection arguments
     parser.add_argument(
-        "--headless",
+        "--connect",
+        metavar="SOCKET_PATH",
+        type=str,
+        help="Connect to an existing server via IPC socket. "
+             "If not specified, runs in legacy mode (embedded client)."
+    )
+    parser.add_argument(
+        "--no-auto-start",
         action="store_true",
-        help="Run in headless mode (WebSocket server only, no TUI). "
-             "Requires --port to specify the server port."
-    )
-    parser.add_argument(
-        "--expose-server",
-        metavar="[HOST:]PORT",
-        type=str,
-        help="Expose a WebSocket server alongside the TUI. "
-             "Format: PORT or HOST:PORT (e.g., '8080' or 'localhost:8080')"
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8080,
-        help="Port for headless server mode (default: 8080)"
-    )
-    parser.add_argument(
-        "--host",
-        type=str,
-        default="localhost",
-        help="Host for headless server mode (default: localhost)"
+        help="Don't auto-start server if not running (only with --connect)"
     )
 
     args = parser.parse_args()
-
-    # Handle headless mode (WebSocket server only)
-    if args.headless:
-        try:
-            from server.websocket import JaatoWSServer
-        except ImportError as e:
-            sys.exit(
-                f"Error: Failed to import server module: {e}\n"
-                "Make sure the 'websockets' package is installed: pip install websockets"
-            )
-
-        print(f"Starting headless server on ws://{args.host}:{args.port}")
-
-        server = JaatoWSServer(
-            host=args.host,
-            port=args.port,
-            env_file=args.env_file,
-            provider=args.provider,
-        )
-
-        try:
-            asyncio.run(server.start())
-        except KeyboardInterrupt:
-            print("\nShutting down...")
-        return
-
-    # Handle expose-server mode (TUI + WebSocket server)
-    ws_server = None
-    if args.expose_server:
-        try:
-            from server.websocket import JaatoWSServer
-        except ImportError as e:
-            sys.exit(
-                f"Error: Failed to import server module: {e}\n"
-                "Make sure the 'websockets' package is installed: pip install websockets"
-            )
-
-        # Parse host:port format
-        if ':' in args.expose_server:
-            host, port_str = args.expose_server.rsplit(':', 1)
-            port = int(port_str)
-        else:
-            host = "localhost"
-            port = int(args.expose_server)
-
-        print(f"Will expose WebSocket server on ws://{host}:{port}")
-        # Server will be started after TUI initializes (shares JaatoClient)
-        # For now, store the config for later
-        ws_server_config = {"host": host, "port": port}
-    else:
-        ws_server_config = None
 
     # Check TTY before proceeding (except for single prompt mode)
     if not sys.stdout.isatty() and not args.prompt:
         sys.exit(
             "Error: rich-client requires an interactive terminal.\n"
-            "Use simple-client for non-TTY environments, or --headless for server mode."
+            "Use simple-client for non-TTY environments."
         )
 
+    # Connection mode (future: connect to server via IPC)
+    if args.connect:
+        print(f"[Note] --connect mode is experimental and not yet fully implemented.")
+        print(f"       Running in legacy (embedded) mode for now.")
+        # TODO: Implement IPC client mode
+        # from ipc_client import IPCClient
+        # client = IPCClient(args.connect, auto_start=not args.no_auto_start)
+        # ... run with IPC client
+
+    # Legacy mode: embedded JaatoClient (current behavior)
     client = RichClient(
         env_file=args.env_file,
         verbose=not args.quiet,
@@ -2352,13 +2308,6 @@ def main():
 
     if not client.initialize():
         sys.exit(1)
-
-    # Start WebSocket server in background if requested
-    # Note: This is a placeholder - full integration would require
-    # refactoring RichClient to use JaatoServer internally
-    if ws_server_config:
-        print(f"[Note] --expose-server is experimental. "
-              f"For full server mode, use --headless instead.")
 
     try:
         if args.prompt:
