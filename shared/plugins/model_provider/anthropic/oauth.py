@@ -141,6 +141,86 @@ class _OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         self.server.oauth_complete = True
 
 
+def build_auth_url() -> Tuple[str, str, str]:
+    """Build OAuth authorization URL without starting server.
+
+    Returns:
+        Tuple of (auth_url, code_verifier, state) for use in authorize_with_params.
+    """
+    code_verifier, code_challenge = _generate_pkce_pair()
+    state = _generate_state()
+
+    redirect_uri = f"http://{CALLBACK_HOST}:{CALLBACK_PORT}{CALLBACK_PATH}"
+
+    auth_params = {
+        "response_type": "code",
+        "client_id": OAUTH_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "scope": OAUTH_SCOPES,
+        "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+    }
+    auth_url = f"{OAUTH_AUTH_URL}?{urllib.parse.urlencode(auth_params)}"
+
+    return auth_url, code_verifier, state
+
+
+def authorize_with_params(
+    auth_url: str,
+    code_verifier: str,
+    state: str,
+    timeout: int = 120,
+) -> str:
+    """Wait for OAuth callback after browser auth.
+
+    Args:
+        auth_url: Pre-built authorization URL.
+        code_verifier: PKCE code verifier.
+        state: OAuth state for CSRF protection.
+        timeout: Seconds to wait for user to complete auth.
+
+    Returns:
+        Authorization code from callback.
+
+    Raises:
+        TimeoutError: If user doesn't complete auth in time.
+        RuntimeError: If OAuth fails.
+    """
+    # Start callback server
+    server = http.server.HTTPServer((CALLBACK_HOST, CALLBACK_PORT), _OAuthCallbackHandler)
+    server.oauth_code = None
+    server.oauth_state = None
+    server.oauth_error = None
+    server.oauth_complete = False
+    server.timeout = 1
+
+    # Open browser
+    threading.Thread(target=webbrowser.open, args=(auth_url,), daemon=True).start()
+
+    # Wait for callback
+    start_time = time.time()
+    try:
+        while not server.oauth_complete:
+            server.handle_request()
+            if time.time() - start_time > timeout:
+                raise TimeoutError("OAuth authentication timed out")
+    finally:
+        server.server_close()
+
+    # Validate response
+    if server.oauth_error:
+        raise RuntimeError(f"OAuth error: {server.oauth_error}")
+
+    if not server.oauth_code:
+        raise RuntimeError("No authorization code received")
+
+    if server.oauth_state != state:
+        raise RuntimeError("OAuth state mismatch (possible CSRF attack)")
+
+    return server.oauth_code
+
+
 def authorize_interactive(
     timeout: int = 120,
     on_message: Optional[Callable[[str], None]] = None
