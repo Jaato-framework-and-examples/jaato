@@ -190,6 +190,12 @@ class AnthropicAuthPlugin:
             )
             return ""
 
+        # Strip URL fragment if user copied the whole callback URL or code with fragment
+        # The callback page shows: code#state, but we only need the code part
+        if "#" in auth_code:
+            auth_code = auth_code.split("#")[0]
+            self._emit("[INFO] Stripped URL fragment from code\n")
+
         # Debug: show what we're sending
         self._emit(f"[DEBUG] Exchanging with:\n")
         self._emit(f"  code: {auth_code}\n")
