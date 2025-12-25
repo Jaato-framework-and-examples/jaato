@@ -10,6 +10,7 @@ Commands:
     anthropic-auth status  - Show current authentication status
 """
 
+import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -135,27 +136,31 @@ class AnthropicAuthPlugin:
 
     def _cmd_login(self) -> str:
         """Handle the login command."""
-        try:
-            from ..model_provider.anthropic.oauth import login
+        from ..model_provider.anthropic.oauth import login
 
-            # Use callback to emit messages in real-time during OAuth flow
-            def on_message(msg: str) -> None:
-                self._emit(msg + "\n")
+        def on_message(msg: str) -> None:
+            self._emit(msg + "\n")
 
-            tokens, auth_url = login(on_message=on_message)
-            expires_at = datetime.fromtimestamp(tokens.expires_at)
-            return (
-                "✓ Successfully authenticated with Claude Pro/Max subscription.\n\n"
-                f"Access token expires: {expires_at.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                "Note: You may need to restart the session for the new tokens to take effect."
-            )
-        except TimeoutError:
-            return (
-                "✗ Authentication timed out.\n\n"
-                "Please try again and complete the browser authentication within 2 minutes."
-            )
-        except Exception as e:
-            return f"✗ Authentication failed: {e}"
+        def run_oauth():
+            """Run OAuth flow in background thread."""
+            try:
+                tokens, auth_url = login(on_message=on_message)
+                expires_at = datetime.fromtimestamp(tokens.expires_at)
+                self._emit(
+                    "\n✓ Successfully authenticated with Claude Pro/Max subscription.\n"
+                    f"Access token expires: {expires_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    "Note: You may need to restart the session for the new tokens to take effect.\n"
+                )
+            except TimeoutError:
+                self._emit(
+                    "\n✗ Authentication timed out.\n"
+                    "Please try again and complete the browser authentication within 2 minutes.\n"
+                )
+            except Exception as e:
+                self._emit(f"\n✗ Authentication failed: {e}\n")
+
+        threading.Thread(target=run_oauth, daemon=True).start()
+        return ""
 
     def _cmd_logout(self) -> str:
         """Handle the logout command."""
