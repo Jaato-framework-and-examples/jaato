@@ -22,13 +22,17 @@ import urllib.request
 
 # OAuth configuration (same as Claude Code CLI)
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-OAUTH_AUTH_URL = "https://console.anthropic.com/oauth/authorize"
+OAUTH_AUTH_URL = "https://claude.ai/oauth/authorize"
 OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
-OAUTH_SCOPES = "org:create_api_key user:profile user:inference"
+OAUTH_SCOPES = "user:inference"
 
-# Local callback server
+# Callback configuration - using Anthropic's hosted callback page
+# (Local callback servers are not supported for this client_id)
+CALLBACK_URL = "https://console.anthropic.com/oauth/code/callback"
+
+# Legacy local callback settings (kept for reference)
 CALLBACK_HOST = "127.0.0.1"
-CALLBACK_PORT = 19275  # Same port as Claude Code CLI uses
+CALLBACK_PORT = 19275
 CALLBACK_PATH = "/oauth/callback"
 
 
@@ -142,22 +146,23 @@ class _OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
 
 
 def build_auth_url() -> Tuple[str, str, str]:
-    """Build OAuth authorization URL without starting server.
+    """Build OAuth authorization URL.
+
+    Uses Anthropic's hosted callback page since local callbacks are not
+    supported for this client_id. User will need to copy the code manually.
 
     Returns:
-        Tuple of (auth_url, code_verifier, state) for use in authorize_with_params.
+        Tuple of (auth_url, code_verifier, state).
     """
     code_verifier, code_challenge = _generate_pkce_pair()
     state = _generate_state()
-
-    redirect_uri = f"http://{CALLBACK_HOST}:{CALLBACK_PORT}{CALLBACK_PATH}"
 
     # Match exact parameter order used by Claude Code CLI
     auth_params = [
         ("code", "true"),  # Required by Anthropic's OAuth
         ("client_id", OAUTH_CLIENT_ID),
         ("response_type", "code"),
-        ("redirect_uri", redirect_uri),
+        ("redirect_uri", CALLBACK_URL),  # Use Anthropic's hosted callback
         ("scope", OAUTH_SCOPES),
         ("code_challenge", code_challenge),
         ("code_challenge_method", "S256"),
@@ -317,14 +322,12 @@ def exchange_code_for_tokens(code: str, code_verifier: str) -> OAuthTokens:
     Raises:
         RuntimeError: If token exchange fails.
     """
-    redirect_uri = f"http://{CALLBACK_HOST}:{CALLBACK_PORT}{CALLBACK_PATH}"
-
-    # Build token request
+    # Build token request - redirect_uri must match the one used in auth request
     token_data = {
         "grant_type": "authorization_code",
         "client_id": OAUTH_CLIENT_ID,
         "code": code,
-        "redirect_uri": redirect_uri,
+        "redirect_uri": CALLBACK_URL,
         "code_verifier": code_verifier,
     }
 
