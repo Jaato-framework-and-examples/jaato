@@ -44,10 +44,20 @@ def tool_schema_to_anthropic(schema: ToolSchema) -> Dict[str, Any]:
 
 
 def tool_schemas_to_anthropic(schemas: Optional[List[ToolSchema]]) -> Optional[List[Dict[str, Any]]]:
-    """Convert list of ToolSchemas to Anthropic tool definitions."""
+    """Convert list of ToolSchemas to Anthropic tool definitions.
+
+    Deduplicates tools by name (Anthropic requires unique tool names).
+    If duplicates exist, the last definition wins.
+    """
     if not schemas:
         return None
-    return [tool_schema_to_anthropic(s) for s in schemas]
+
+    # Deduplicate by name (last one wins)
+    seen: Dict[str, Dict[str, Any]] = {}
+    for schema in schemas:
+        seen[schema.name] = tool_schema_to_anthropic(schema)
+
+    return list(seen.values())
 
 
 # ==================== Message Conversion ====================
