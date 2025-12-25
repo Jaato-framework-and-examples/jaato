@@ -52,13 +52,13 @@ from .events import (
 )
 
 from .core import JaatoServer
-from .session_manager import SessionManager, SessionInfo
+from .session_manager import SessionManager, RuntimeSessionInfo
 
 __all__ = [
     # Core
     "JaatoServer",
     "SessionManager",
-    "SessionInfo",
+    "RuntimeSessionInfo",
     # Events
     "Event",
     "EventType",
