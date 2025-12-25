@@ -43,8 +43,10 @@ class AnthropicAuthPlugin:
         return []
 
     def get_executors(self) -> Dict[str, Any]:
-        """Return empty dict - this plugin only provides user commands."""
-        return {}
+        """Return executor for the user command."""
+        return {
+            "anthropic-auth": lambda args: self.execute_user_command("anthropic-auth", args),
+        }
 
     def get_system_instructions(self) -> Optional[str]:
         """No system instructions for this plugin."""
