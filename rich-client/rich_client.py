@@ -265,6 +265,10 @@ class RichClient:
         if command_name == "plan":
             return
 
+        # Skip pager for empty results (command handles its own output via callback)
+        if result is None or result == "":
+            return
+
         lines = [(f"[{command_name}]", "bold")]
 
         if isinstance(result, dict):
