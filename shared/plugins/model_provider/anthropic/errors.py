@@ -141,3 +141,28 @@ class OverloadedError(AnthropicProviderError):
             message += f"\n\nOriginal error: {original_error}"
 
         super().__init__(message)
+
+
+class UsageLimitError(AnthropicProviderError):
+    """Raised when API usage limit is reached."""
+
+    def __init__(
+        self,
+        reset_date: Optional[str] = None,
+        original_error: Optional[str] = None,
+    ):
+        self.reset_date = reset_date
+        self.original_error = original_error
+
+        message = "Anthropic API usage limit reached."
+        if reset_date:
+            message += f" Access will be restored on {reset_date}."
+        message += (
+            "\n\nTo fix this:\n"
+            "  1. Check your usage at https://console.anthropic.com/\n"
+            "  2. Upgrade your plan or wait for the reset date"
+        )
+        if original_error:
+            message += f"\n\nOriginal error: {original_error}"
+
+        super().__init__(message)
