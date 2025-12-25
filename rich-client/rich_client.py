@@ -147,11 +147,14 @@ class RichClient:
             return asyncio.run(coro)
 
     def _create_output_callback(self,
-                                  suppress_sources: Optional[set] = None) -> Callable[[str, str, str], None]:
+                                  suppress_sources: Optional[set] = None,
+                                  force_display: bool = False) -> Callable[[str, str, str], None]:
         """Create callback for real-time output to display.
 
         Args:
             suppress_sources: Set of source names to suppress (e.g., {"permission"})
+            force_display: If True, always display output even when agent_registry is active.
+                          Use this for user commands that don't go through agent hooks.
         """
         suppress = suppress_sources or set()
 
@@ -166,7 +169,8 @@ class RichClient:
                 # Skip ALL sources when UI hooks are active - the hooks handle
                 # routing all output (model, system, plugin) to the correct buffer
                 # via on_agent_output. Without this, output gets duplicated.
-                if self._agent_registry:
+                # Exception: force_display=True bypasses this for user commands.
+                if self._agent_registry and not force_display:
                     return
                 self._display.append_output(source, text, mode)
         return callback
@@ -212,8 +216,9 @@ class RichClient:
                     break
 
         # Set output callback on plugin if it supports it
+        # Use force_display=True since user commands don't go through agent hooks
         if plugin and hasattr(plugin, 'set_output_callback') and self._display:
-            output_callback = self._create_output_callback()
+            output_callback = self._create_output_callback(force_display=True)
             plugin.set_output_callback(output_callback)
 
         try:
