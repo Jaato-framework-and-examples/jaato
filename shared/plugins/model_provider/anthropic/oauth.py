@@ -23,7 +23,7 @@ import urllib.request
 # OAuth configuration (same as Claude Code CLI)
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_AUTH_URL = "https://claude.ai/oauth/authorize"
-OAUTH_TOKEN_URL = "https://claude.ai/oauth/token"
+OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 OAUTH_SCOPES = "user:inference"
 
 # Callback configuration - using Anthropic's hosted callback page
@@ -322,6 +322,8 @@ def exchange_code_for_tokens(code: str, code_verifier: str) -> OAuthTokens:
     Raises:
         RuntimeError: If token exchange fails.
     """
+    import requests
+
     # Build token request - redirect_uri must match the one used in auth request
     token_data = {
         "grant_type": "authorization_code",
@@ -331,26 +333,26 @@ def exchange_code_for_tokens(code: str, code_verifier: str) -> OAuthTokens:
         "code_verifier": code_verifier,
     }
 
-    # Make token request
-    req = urllib.request.Request(
-        OAUTH_TOKEN_URL,
-        data=urllib.parse.urlencode(token_data).encode(),
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-            "User-Agent": "claude-code/1.0",
-            "anthropic-beta": "oauth-2025-04-20",
-        },
-        method="POST",
-    )
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "User-Agent": "claude-code/1.0.0",
+        "anthropic-beta": "oauth-2025-04-20",
+    }
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode() if e.fp else str(e)
+        resp = requests.post(
+            OAUTH_TOKEN_URL,
+            data=token_data,
+            headers=headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.exceptions.HTTPError as e:
+        error_body = e.response.text if e.response else str(e)
         raise RuntimeError(f"Token exchange failed: {error_body}")
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         raise RuntimeError(f"Token exchange failed: {e}")
 
     # Parse response
