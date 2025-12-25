@@ -340,6 +340,12 @@ def exchange_code_for_tokens(code: str, code_verifier: str, state: str) -> OAuth
         "Content-Type": "application/json",
     }
 
+    # Debug: log the exact request being sent
+    import sys
+    print(f"[DEBUG] POST {OAUTH_TOKEN_URL}", file=sys.stderr)
+    print(f"[DEBUG] Headers: {headers}", file=sys.stderr)
+    print(f"[DEBUG] Body: {token_data}", file=sys.stderr)
+
     try:
         resp = requests.post(
             OAUTH_TOKEN_URL,
