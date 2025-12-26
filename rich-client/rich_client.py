@@ -2387,7 +2387,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                             style="dim"
                         )
                     display.add_system_message(
-                        "Type 'help' for commands, 'quit' to exit, Esc+Esc to clear input",
+                        "Type 'help' for commands, 'quit' to exit",
                         style="dim"
                     )
                 display.refresh()
@@ -2551,12 +2551,6 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 if not text:
                     continue
 
-                # Handle exit commands
-                if text.lower() in ("/exit", "/quit", "/q"):
-                    should_exit = True
-                    display.stop()
-                    break
-
                 # Handle permission response
                 if pending_permission_request:
                     await client.respond_to_permission(
@@ -2573,31 +2567,41 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     )
                     continue
 
-                # Handle slash commands
-                if text.startswith("/"):
-                    cmd_parts = text[1:].split(None, 1)
-                    cmd = cmd_parts[0] if cmd_parts else ""
-                    args = cmd_parts[1] if len(cmd_parts) > 1 else ""
+                # Handle commands (without slash, matching non-IPC mode)
+                text_lower = text.lower()
 
-                    if cmd == "stop":
-                        await client.stop()
-                    elif cmd == "sessions":
-                        await client.list_sessions()
-                    elif cmd == "new":
-                        # Create new session with optional name
-                        await client.execute_command("session.create", args.split() if args else [])
-                        display.add_system_message("Creating new session...", style="dim")
-                    elif cmd == "reset":
-                        # Reset current session history
-                        await client.execute_command("reset", [])
-                    elif cmd == "clear":
-                        display.clear_output()
-                    elif cmd == "help":
-                        display.add_system_message(
-                            "Commands: /exit, /quit, /stop, /sessions, /new [name], /reset, /clear, /help"
-                        )
-                    else:
-                        await client.execute_command(cmd, args.split() if args else [])
+                # Simple commands - match entire input
+                if text_lower in ("exit", "quit", "q"):
+                    should_exit = True
+                    display.stop()
+                    break
+                elif text_lower == "stop":
+                    await client.stop()
+                    continue
+                elif text_lower == "sessions":
+                    await client.list_sessions()
+                    continue
+                elif text_lower == "reset":
+                    await client.execute_command("reset", [])
+                    continue
+                elif text_lower == "clear":
+                    display.clear_output()
+                    continue
+                elif text_lower == "help":
+                    display.add_system_message(
+                        "Commands: exit, quit, stop, sessions, new [name], reset, clear, help"
+                    )
+                    continue
+
+                # Commands with arguments - match first word
+                cmd_parts = text.split(None, 1)
+                cmd = cmd_parts[0].lower() if cmd_parts else ""
+                args = cmd_parts[1] if len(cmd_parts) > 1 else ""
+
+                if cmd == "new":
+                    # Create new session with optional name
+                    await client.execute_command("session.create", args.split() if args else [])
+                    display.add_system_message("Creating new session...", style="dim")
                     continue
 
                 # Send message to model
