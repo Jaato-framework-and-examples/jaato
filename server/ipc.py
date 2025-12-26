@@ -353,20 +353,26 @@ class JaatoIPCServer:
 
     async def _broadcast_to_client(self, client_id: str) -> None:
         """Continuously send queued events to a client."""
+        logger.debug(f"_broadcast_to_client started for {client_id}")
         queue = self._event_queues.get(client_id)
         if not queue:
+            logger.warning(f"_broadcast_to_client: no queue for {client_id}")
             return
 
         while not self._shutdown_event.is_set():
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=0.5)
+                logger.debug(f"_broadcast_to_client: sending {type(event).__name__} to {client_id}")
                 await self._send_to_client(client_id, event)
+                logger.debug(f"_broadcast_to_client: sent successfully")
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
+                logger.debug(f"_broadcast_to_client cancelled for {client_id}")
                 break
             except Exception as e:
                 logger.error(f"Broadcast error to {client_id}: {e}")
+        logger.debug(f"_broadcast_to_client exiting for {client_id}")
 
     # =========================================================================
     # Status Methods
