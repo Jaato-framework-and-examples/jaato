@@ -2345,12 +2345,23 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         nonlocal pending_permission_request, pending_clarification_request
         nonlocal model_running, should_exit
 
+        # Logger for IPC event tracing
+        import logging
+        import sys
+        ipc_logger = logging.getLogger("rich_client.ipc")
+
+        print("[IPC] Event handler starting", file=sys.stderr, flush=True)
         async for event in client.events():
+            print(f"[IPC] <- {type(event).__name__}", file=sys.stderr, flush=True)
             if should_exit:
                 break
 
+            # Log received events for debugging
+            ipc_logger.debug(f"<- {type(event).__name__}")
+
             if isinstance(event, AgentOutputEvent):
                 # Display agent output using PTDisplay's append_output
+                ipc_logger.debug(f"  AgentOutputEvent: source={event.source}, mode={event.mode}, len={len(event.text)}")
                 display.append_output(event.source, event.text, event.mode)
 
             elif isinstance(event, AgentCreatedEvent):

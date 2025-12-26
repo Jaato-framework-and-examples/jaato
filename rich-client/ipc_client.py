@@ -19,12 +19,15 @@ Usage:
 
 import asyncio
 import json
+import logging
 import struct
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 # Add project root to path
 ROOT = Path(__file__).resolve().parents[1]
@@ -430,13 +433,16 @@ class IPCClient:
         Yields:
             Events from the server.
         """
+        logger.debug("events(): starting event loop")
         while self._connected:
             try:
                 message = await self._read_message()
                 if message is None:
+                    logger.debug("events(): received None message, breaking")
                     break
 
                 event = deserialize_event(message)
+                logger.debug(f"events(): received {type(event).__name__}")
 
                 # Call callback if set
                 if self._on_event:
@@ -445,8 +451,10 @@ class IPCClient:
                 yield event
 
             except asyncio.CancelledError:
+                logger.debug("events(): cancelled")
                 break
             except Exception as e:
+                logger.error(f"events(): error: {e}")
                 yield ErrorEvent(
                     error=str(e),
                     error_type=type(e).__name__,
