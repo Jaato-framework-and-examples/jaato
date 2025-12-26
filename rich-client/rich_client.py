@@ -487,8 +487,8 @@ class RichClient:
         # Create a cancel token provider that checks the session's current token
         def get_cancel_token():
             """Get the current cancel token from the session, if any."""
-            if self._jaato:
-                session = self._jaato.get_session()
+            if self._backend:
+                session = self._backend.get_session()
                 if session and hasattr(session, '_cancel_token'):
                     return session._cancel_token
             return None
@@ -548,11 +548,7 @@ class RichClient:
         Routes retry notifications through the output callback system instead
         of printing directly to console, so they appear in the output panel.
         """
-        if not self._jaato:
-            return
-
-        session = self._jaato.get_session()
-        if not session:
+        if not self._backend:
             return
 
         # Create output callback for retry messages
@@ -563,7 +559,7 @@ class RichClient:
             # Use source="retry" so UI can style appropriately
             output_callback("retry", message, "write")
 
-        session.set_retry_callback(on_retry)
+        self._backend.set_retry_callback(on_retry)
         self._trace("Retry callback configured for output panel")
 
         # Also set callback on subagent plugin so subagent sessions use it
@@ -575,7 +571,7 @@ class RichClient:
 
     def _setup_agent_hooks(self) -> None:
         """Set up agent lifecycle hooks for UI integration."""
-        if not self._jaato or not self._agent_registry:
+        if not self._backend or not self._agent_registry:
             return
 
         # Import the protocol
@@ -673,10 +669,11 @@ class RichClient:
         # Store hooks reference for direct calls (e.g., when user sends input)
         self._ui_hooks = hooks
 
-        # Register hooks with JaatoClient (main agent)
-        self._jaato.set_ui_hooks(hooks)
+        # Register hooks with backend (main agent)
+        if self._backend:
+            self._backend.set_ui_hooks(hooks)
 
-        # Register hooks with SubagentPlugin if present
+        # Register hooks with SubagentPlugin if present (direct mode only)
         if self.registry:
             subagent_plugin = self.registry.get_plugin("subagent")
             if subagent_plugin and hasattr(subagent_plugin, 'set_ui_hooks'):
@@ -793,14 +790,14 @@ class RichClient:
 
     def _setup_session_plugin(self) -> None:
         """Set up session persistence plugin."""
-        if not self._jaato:
+        if not self._backend:
             return
 
         try:
             session_config = load_session_config()
             session_plugin = create_session_plugin()
             session_plugin.initialize({'storage_path': session_config.storage_path})
-            self._jaato.set_session_plugin(session_plugin, session_config)
+            self._backend.set_session_plugin(session_plugin, session_config)
 
             if self.registry:
                 self.registry.register_plugin(session_plugin, enrichment_only=True)
@@ -830,8 +827,8 @@ class RichClient:
             if commands:
                 commands_by_plugin[self.permission_plugin.name] = commands
 
-        if self._jaato:
-            user_commands = self._jaato.get_user_commands()
+        if self._backend:
+            user_commands = self._run_async(self._backend.get_user_commands())
             session_cmds = [cmd for name, cmd in user_commands.items()
                            if name in ('save', 'resume', 'sessions', 'delete-session', 'backtoturn')]
             if session_cmds:
@@ -841,20 +838,20 @@ class RichClient:
 
     def _register_plugin_commands(self) -> None:
         """Register plugin commands for autocompletion."""
-        if not self._jaato:
+        if not self._backend:
             return
 
-        user_commands = self._jaato.get_user_commands()
+        user_commands = self._run_async(self._backend.get_user_commands())
         if not user_commands:
             return
 
         completer_cmds = [(cmd.name, cmd.description) for cmd in user_commands.values()]
         self._input_handler.add_commands(completer_cmds)
 
-        if hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
-            session_plugin = self._jaato._session_plugin
-            if hasattr(session_plugin, 'list_sessions'):
-                self._input_handler.set_session_provider(session_plugin.list_sessions)
+        # Session provider - direct mode only (uses plugin directly)
+        session_plugin = self._backend.get_session_plugin()
+        if session_plugin and hasattr(session_plugin, 'list_sessions'):
+            self._input_handler.set_session_provider(session_plugin.list_sessions)
 
         # Set up plugin command argument completion
         self._setup_command_completion_provider()
@@ -873,12 +870,11 @@ class RichClient:
                     for cmd in plugin.get_user_commands():
                         command_to_plugin[cmd.name] = plugin
 
-        if hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
-            session_plugin = self._jaato._session_plugin
-            if hasattr(session_plugin, 'get_command_completions'):
-                if hasattr(session_plugin, 'get_user_commands'):
-                    for cmd in session_plugin.get_user_commands():
-                        command_to_plugin[cmd.name] = session_plugin
+        session_plugin = self._backend.get_session_plugin() if self._backend else None
+        if session_plugin and hasattr(session_plugin, 'get_command_completions'):
+            if hasattr(session_plugin, 'get_user_commands'):
+                for cmd in session_plugin.get_user_commands():
+                    command_to_plugin[cmd.name] = session_plugin
 
         if self.permission_plugin and hasattr(self.permission_plugin, 'get_command_completions'):
             if hasattr(self.permission_plugin, 'get_user_commands'):
@@ -893,8 +889,8 @@ class RichClient:
 
         def completion_provider(command: str, args: list) -> list:
             # Handle built-in model command
-            if command == "model" and self._jaato:
-                return self._jaato.get_model_completions(args)
+            if command == "model" and self._backend:
+                return self._run_async(self._backend.get_model_completions(args))
 
             # Handle tools enable/disable completions
             if command == 'tools enable':
@@ -933,11 +929,13 @@ class RichClient:
         This is used for single-prompt (non-interactive) mode only.
         For interactive mode, use _start_model_thread instead.
         """
-        if not self._jaato:
+        if not self._backend:
             return "Error: Client not initialized"
 
         try:
-            response = self._jaato.send_message(prompt, on_output=lambda s, t, m: print(f"[{s}] {t}"))
+            response = self._run_async(
+                self._backend.send_message(prompt, on_output=lambda s, t, m: print(f"[{s}] {t}"))
+            )
             return response if response else "(No response)"
         except Exception as e:
             return f"Error: {e}"
@@ -949,7 +947,7 @@ class RichClient:
         which is necessary for handling permission/clarification prompts.
         The model thread will update the display via callbacks.
         """
-        if not self._jaato:
+        if not self._backend:
             if self._display:
                 self._display.add_system_message("Error: Client not initialized", style="red")
             return
@@ -1013,13 +1011,13 @@ class RichClient:
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [rich_client_callback] display={self._display is not None} jaato={self._jaato is not None}\n")
+                    f.write(f"[{ts}] [rich_client_callback] display={self._display is not None} backend={self._backend is not None}\n")
                     f.flush()
             except Exception:
                 pass
-            if self._display and self._jaato:
+            if self._display and self._backend:
                 # Get context limit for percentage calculation
-                context_limit = self._jaato.get_context_limit()
+                context_limit = self._run_async(self._backend.get_context_limit())
                 total_tokens = max_tokens_seen['total']
                 percent_used = (total_tokens / context_limit * 100) if context_limit > 0 else 0
                 tokens_remaining = max(0, context_limit - total_tokens)
@@ -1075,17 +1073,20 @@ class RichClient:
             self._model_running = True
             try:
                 self._trace("[model_thread] calling send_message...")
-                self._jaato.send_message(
-                    prompt,
-                    on_output=output_callback,
-                    on_usage_update=usage_update_callback,
-                    on_gc_threshold=gc_threshold_callback
-                )
+                # For direct mode, get the underlying sync client
+                client = self._backend.get_client() if self._backend else None
+                if client and hasattr(client, 'send_message'):
+                    client.send_message(
+                        prompt,
+                        on_output=output_callback,
+                        on_usage_update=usage_update_callback,
+                        on_gc_threshold=gc_threshold_callback
+                    )
                 self._trace(f"[model_thread] send_message returned")
 
                 # Update context usage in status bar
-                if self._display and self._jaato:
-                    usage = self._jaato.get_context_usage()
+                if self._display and self._backend:
+                    usage = self._run_async(self._backend.get_context_usage())
                     self._display.update_context_usage(usage)
 
                 # Add separator after model finishes
@@ -1337,9 +1338,9 @@ class RichClient:
             all_decls.extend(self.registry.get_exposed_tool_schemas())
         if self.permission_plugin:
             all_decls.extend(self.permission_plugin.get_tool_schemas())
-        if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
-            if hasattr(self._jaato._session_plugin, 'get_tool_schemas'):
-                all_decls.extend(self._jaato._session_plugin.get_tool_schemas())
+        session_plugin = self._backend.get_session_plugin() if self._backend else None
+        if session_plugin and hasattr(session_plugin, 'get_tool_schemas'):
+            all_decls.extend(session_plugin.get_tool_schemas())
         return all_decls
 
     def _handle_tools_command(self, user_input: str) -> None:
@@ -1694,16 +1695,15 @@ class RichClient:
                 })
 
         # Add session plugin tools (always enabled)
-        if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
-            session_plugin = self._jaato._session_plugin
-            if hasattr(session_plugin, 'get_tool_schemas'):
-                for schema in session_plugin.get_tool_schemas():
-                    status.append({
-                        'name': schema.name,
-                        'description': schema.description,
-                        'enabled': True,
-                        'plugin': 'session',
-                    })
+        session_plugin = self._backend.get_session_plugin() if self._backend else None
+        if session_plugin and hasattr(session_plugin, 'get_tool_schemas'):
+            for schema in session_plugin.get_tool_schemas():
+                status.append({
+                    'name': schema.name,
+                    'description': schema.description,
+                    'enabled': True,
+                    'plugin': 'session',
+                })
 
         return status
 
@@ -1830,8 +1830,8 @@ class RichClient:
 
     def _refresh_session_tools(self) -> None:
         """Refresh the session's tools after enabling/disabling."""
-        if self._jaato and hasattr(self._jaato, '_session') and self._jaato._session:
-            self._jaato._session.refresh_tools()
+        if self._backend:
+            self._run_async(self._backend.refresh_tools())
             self.log("[client] Session tools refreshed")
 
     def _show_plugins(self) -> None:

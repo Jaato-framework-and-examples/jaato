@@ -247,6 +247,33 @@ class Backend(ABC):
         """Refresh tool definitions."""
         ...
 
+    # =========================================================================
+    # Direct Access (for features not easily abstracted)
+    # =========================================================================
+
+    @abstractmethod
+    def get_session(self) -> Optional[Any]:
+        """Get the underlying session if available.
+
+        Returns:
+            JaatoSession for DirectBackend, None for IPCBackend.
+        """
+        ...
+
+    @abstractmethod
+    def get_client(self) -> Optional[Any]:
+        """Get the underlying client if available.
+
+        Returns:
+            JaatoClient for DirectBackend, IPCClient for IPCBackend.
+        """
+        ...
+
+    @abstractmethod
+    def set_retry_callback(self, callback: Optional[Callable]) -> None:
+        """Set callback for retry notifications."""
+        ...
+
 
 class DirectBackend(Backend):
     """Backend that wraps a JaatoClient for direct (non-IPC) mode.
@@ -388,6 +415,20 @@ class DirectBackend(Backend):
     async def refresh_tools(self) -> None:
         if self._jaato and hasattr(self._jaato, '_session') and self._jaato._session:
             self._jaato._session.refresh_tools()
+
+    def get_session(self) -> Optional[Any]:
+        if self._jaato:
+            return self._jaato.get_session()
+        return None
+
+    def get_client(self) -> Optional[Any]:
+        return self._jaato
+
+    def set_retry_callback(self, callback: Optional[Callable]) -> None:
+        if self._jaato:
+            session = self._jaato.get_session()
+            if session:
+                session.set_retry_callback(callback)
 
 
 class IPCBackend(Backend):
@@ -544,3 +585,12 @@ class IPCBackend(Backend):
 
     async def refresh_tools(self) -> None:
         pass  # Server handles tool refresh
+
+    def get_session(self) -> Optional[Any]:
+        return None  # IPC mode doesn't have direct session access
+
+    def get_client(self) -> Optional[Any]:
+        return self._client
+
+    def set_retry_callback(self, callback: Optional[Callable]) -> None:
+        pass  # IPC mode handles retries via events
