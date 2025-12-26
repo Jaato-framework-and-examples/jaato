@@ -2262,6 +2262,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         ErrorEvent,
         SessionListEvent,
         SessionInfoEvent,
+        CommandListEvent,
     )
 
     # Load keybindings
@@ -2532,6 +2533,17 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.set_model_info(event.model_provider, event.model_name)
                 display.refresh()
 
+            elif isinstance(event, CommandListEvent):
+                # Register server/plugin commands for tab completion
+                ipc_trace(f"  CommandListEvent: {len(event.commands)} commands")
+                server_commands = [
+                    (cmd.get("name", ""), cmd.get("description", ""))
+                    for cmd in event.commands
+                ]
+                if server_commands:
+                    input_handler.add_commands(server_commands)
+                    ipc_trace(f"    Registered {len(server_commands)} commands")
+
     async def handle_input():
         """Handle user input from the queue."""
         nonlocal pending_permission_request, pending_clarification_request
@@ -2539,6 +2551,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
         # Request default session
         await client.get_default_session()
+
+        # Request available commands for tab completion
+        await client.request_command_list()
 
         # Handle single prompt mode
         if single_prompt:

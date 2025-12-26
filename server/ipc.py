@@ -31,6 +31,7 @@ from .events import (
     ConnectedEvent,
     ErrorEvent,
     SystemMessageEvent,
+    CommandListEvent,
     serialize_event,
     deserialize_event,
     SendMessageRequest,
@@ -38,6 +39,7 @@ from .events import (
     ClarificationResponseRequest,
     StopRequest,
     CommandRequest,
+    CommandListRequest,
 )
 
 
@@ -78,6 +80,7 @@ class JaatoIPCServer:
         self,
         socket_path: str = "/tmp/jaato.sock",
         on_session_request: Optional[Callable[[str, str, Event], None]] = None,
+        on_command_list_request: Optional[Callable[[], list]] = None,
     ):
         """Initialize the IPC server.
 
@@ -85,9 +88,12 @@ class JaatoIPCServer:
             socket_path: Path to the Unix domain socket.
             on_session_request: Callback for session requests.
                 Called with (client_id, session_id, event).
+            on_command_list_request: Callback to get list of available commands.
+                Returns list of {name, description} dicts.
         """
         self.socket_path = socket_path
         self._on_session_request = on_session_request
+        self._on_command_list_request = on_command_list_request
 
         # Server state
         self._server: Optional[asyncio.Server] = None
@@ -278,6 +284,17 @@ class JaatoIPCServer:
             return
         except ValueError as e:
             await self._send_error(client_id, str(e))
+            return
+
+        # Handle CommandListRequest directly - no session needed
+        if isinstance(event, CommandListRequest):
+            commands = []
+            if self._on_command_list_request:
+                commands = self._on_command_list_request()
+            await self._send_to_client(
+                client_id,
+                CommandListEvent(commands=commands)
+            )
             return
 
         # Get client's session

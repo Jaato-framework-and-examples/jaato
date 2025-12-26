@@ -44,6 +44,8 @@ from server.events import (
     ClarificationResponseRequest,
     StopRequest,
     CommandRequest,
+    CommandListRequest,
+    CommandListEvent,
     ConnectedEvent,
     ErrorEvent,
 )
@@ -422,6 +424,13 @@ class IPCClient:
             command=command,
             args=args or [],
         ))
+
+    async def request_command_list(self) -> None:
+        """Request the list of available commands from server.
+
+        The response will arrive as a CommandListEvent via the event stream.
+        """
+        await self._send_event(CommandListRequest())
 
     # =========================================================================
     # Event Stream
