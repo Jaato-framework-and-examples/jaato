@@ -387,6 +387,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.SYSTEM_MESSAGE.value: SystemMessageEvent,
     EventType.ERROR.value: ErrorEvent,
     EventType.SESSION_LIST.value: SessionListEvent,
+    EventType.SESSION_INFO.value: SessionInfoEvent,
     EventType.SEND_MESSAGE.value: SendMessageRequest,
     EventType.PERMISSION_RESPONSE.value: PermissionResponseRequest,
     EventType.CLARIFICATION_RESPONSE.value: ClarificationResponseRequest,
