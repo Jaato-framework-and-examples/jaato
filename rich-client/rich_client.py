@@ -2873,6 +2873,41 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     await client.execute_command(cmd, args)
                     continue
 
+                # Check if input matches any server/plugin command
+                # (mcp, permissions, model, save, resume, etc.)
+                # Server expects base command name + args (e.g., "model" + ["list"])
+                matched_base_command = None
+                command_args = []
+                if server_commands:
+                    input_lower = text.lower()
+                    input_parts = text.split()
+
+                    # Try to match input against known commands
+                    # Commands are like "model", "model list", "mcp status", etc.
+                    for srv_cmd in server_commands:
+                        cmd_name = srv_cmd.get("name", "").lower()
+                        cmd_parts = cmd_name.split()
+
+                        if not cmd_parts:
+                            continue
+
+                        base_cmd = cmd_parts[0]  # e.g., "model", "mcp"
+
+                        # Check if input starts with this base command
+                        if input_lower == base_cmd or input_lower.startswith(base_cmd + " "):
+                            matched_base_command = base_cmd
+                            # All parts after base command are args
+                            if len(input_parts) > 1:
+                                command_args = input_parts[1:]
+                            else:
+                                command_args = []
+                            break
+
+                if matched_base_command:
+                    # Forward to server as base command + args
+                    await client.execute_command(matched_base_command, command_args)
+                    continue
+
                 # Send message to model
                 model_running = True
                 display.add_to_history(text)
