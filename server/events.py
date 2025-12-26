@@ -62,7 +62,8 @@ class EventType(str, Enum):
     ERROR = "error"
 
     # Session management (Server -> Client)
-    SESSION_LIST = "session.list"
+    SESSION_LIST = "session.list"  # For user display
+    SESSION_DATA = "session.data"  # For silent data updates (completion, etc.)
     SESSION_INFO = "session.info"
 
     # Client requests (Client -> Server)
@@ -312,10 +313,18 @@ class ErrorEvent(Event):
 
 @dataclass
 class SessionListEvent(Event):
-    """List of available sessions."""
+    """List of available sessions - for user display."""
     type: EventType = field(default=EventType.SESSION_LIST)
     sessions: List[Dict[str, Any]] = field(default_factory=list)
     # ^ List of {id: str, name: str, created_at: str, last_active: str, ...}
+
+
+@dataclass
+class SessionDataEvent(Event):
+    """Session data update - silent, for completion/internal use."""
+    type: EventType = field(default=EventType.SESSION_DATA)
+    sessions: List[Dict[str, Any]] = field(default_factory=list)
+    # Same data as SessionListEvent, but client doesn't display it
 
 
 @dataclass
@@ -439,6 +448,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.SYSTEM_MESSAGE.value: SystemMessageEvent,
     EventType.ERROR.value: ErrorEvent,
     EventType.SESSION_LIST.value: SessionListEvent,
+    EventType.SESSION_DATA.value: SessionDataEvent,
     EventType.SESSION_INFO.value: SessionInfoEvent,
     EventType.SEND_MESSAGE.value: SendMessageRequest,
     EventType.PERMISSION_RESPONSE.value: PermissionResponseRequest,
