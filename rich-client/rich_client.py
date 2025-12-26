@@ -2419,20 +2419,25 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.refresh()
 
             elif isinstance(event, PermissionRequestedEvent):
+                ipc_trace(f"  PermissionRequestedEvent: tool={event.tool_name}, id={event.request_id}")
                 # Show permission request
                 pending_permission_request = {
                     "request_id": event.request_id,
                     "options": event.response_options,
                 }
                 # Display permission prompt
-                display.append_output("system", "\n", "write")
-                for line in event.prompt_lines:
-                    display.append_output("system", line + "\n", "append")
-                display.append_output(
-                    "system",
-                    f"[Options: {', '.join(event.response_options)}]\n",
-                    "append"
-                )
+                buffer = agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.append_text("\n", source="system", mode="write")
+                    for line in event.prompt_lines:
+                        buffer.append_text(line + "\n", source="system", mode="append")
+                    # Format options: key=label pairs
+                    options_str = ", ".join(
+                        f"{opt.get('key', '?')}={opt.get('label', '?')}"
+                        for opt in event.response_options
+                    )
+                    buffer.append_text(f"[{options_str}]: ", source="system", mode="append")
+                display.refresh()
                 # Enable permission input mode
                 display.set_waiting_for_channel_input(True, event.response_options)
 
@@ -2553,6 +2558,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
                 # Handle permission response
                 if pending_permission_request:
+                    ipc_trace(f"Sending permission response: {text} for {pending_permission_request['request_id']}")
                     await client.respond_to_permission(
                         pending_permission_request["request_id"],
                         text
