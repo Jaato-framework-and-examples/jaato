@@ -184,14 +184,16 @@ class CommandCompleter(Completer):
                 for sub_lower, (sub_name, sub_desc) in subcommands.items():
                     full_cmd = f"{first_word} {sub_name}"
                     yield Completion(sub_name, start_position=0, display=sub_name, display_meta=sub_desc)
-            else:
+            elif len(parts) == 2 and not has_trailing_space:
                 # User is typing a subcommand - filter matches
-                partial_sub = ' '.join(parts[1:])
+                partial_sub = parts[1]
                 for sub_lower, (sub_name, sub_desc) in subcommands.items():
                     if sub_lower.startswith(partial_sub):
                         # Calculate start position relative to subcommand portion
                         start_pos = -len(partial_sub)
                         yield Completion(sub_name, start_position=start_pos, display=sub_name, display_meta=sub_desc)
+            # If len(parts) >= 2 and has_trailing_space, user is past subcommand
+            # into argument position - don't show command completions
 
 
 class AtFileCompleter(Completer):
