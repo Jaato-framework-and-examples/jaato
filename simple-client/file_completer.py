@@ -108,8 +108,10 @@ class CommandCompleter(Completer):
     ) -> Iterable[Completion]:
         """Get command completions for the current document.
 
-        Handles both single-word commands (help, reset) and multi-word
-        commands with subcommands (tools list, tools enable).
+        Handles progressive completion of multi-word commands:
+        - Typing "se" -> shows "session" (base command)
+        - Typing "session " -> shows "list", "new", "attach" (subcommands)
+        - Typing "session l" -> shows "list"
         """
         raw_text = document.text_before_cursor
         text = raw_text.strip()
@@ -121,37 +123,75 @@ class CommandCompleter(Completer):
         # Get the full text being typed (lowercase for matching)
         full_text = text.lower()
 
-        # Check if user has trailing space (typing arguments, not the command)
+        # Check if user has trailing space (indicating they finished a word)
         has_trailing_space = raw_text.endswith(' ') and text
 
+        # Parse what user has typed so far
+        parts = full_text.split()
+
+        # Build set of base commands and their subcommands
+        base_commands = {}  # base -> {subcommand -> description}
+        single_commands = {}  # command -> description
+
         for cmd_name, cmd_desc in self.commands:
-            cmd_lower = cmd_name.lower()
+            cmd_parts = cmd_name.split()
+            if len(cmd_parts) == 1:
+                single_commands[cmd_name.lower()] = (cmd_name, cmd_desc)
+            else:
+                base = cmd_parts[0].lower()
+                rest = ' '.join(cmd_parts[1:])
+                if base not in base_commands:
+                    base_commands[base] = {}
+                base_commands[base][rest.lower()] = (rest, cmd_desc)
 
-            # If user typed a command exactly and added a space, they're now
-            # typing arguments - don't offer that command as completion
-            if has_trailing_space and full_text == cmd_lower:
-                continue
+        if not parts:
+            # Empty input - show all base commands and single commands
+            seen = set()
+            for base in base_commands:
+                if base not in seen:
+                    seen.add(base)
+                    # Get description from first subcommand or generic
+                    desc = f"{base} [subcommand]"
+                    yield Completion(base, start_position=0, display=base, display_meta=desc)
+            for cmd_lower, (cmd_name, cmd_desc) in single_commands.items():
+                if cmd_lower not in seen:
+                    seen.add(cmd_lower)
+                    yield Completion(cmd_name, start_position=0, display=cmd_name, display_meta=cmd_desc)
+            return
 
-            # Check if this command matches what the user is typing
-            if cmd_lower.startswith(full_text):
-                # Full command matches prefix - offer completion
-                yield Completion(
-                    cmd_name,
-                    start_position=-len(text),
-                    display=cmd_name,
-                    display_meta=cmd_desc,
-                )
-            elif ' ' in cmd_name and full_text:
-                # Multi-word command: check if user is typing a partial subcommand
-                # e.g., full_text="tools l", cmd_name="tools list"
-                base_cmd = cmd_name.split()[0].lower()
-                if full_text.startswith(base_cmd) and cmd_lower.startswith(full_text):
-                    yield Completion(
-                        cmd_name,
-                        start_position=-len(text),
-                        display=cmd_name,
-                        display_meta=cmd_desc,
-                    )
+        first_word = parts[0]
+
+        if len(parts) == 1 and not has_trailing_space:
+            # User is typing the first word - complete base commands and single commands
+            seen = set()
+            for base in base_commands:
+                if base.startswith(first_word) and base not in seen:
+                    seen.add(base)
+                    desc = f"{base} [subcommand]"
+                    yield Completion(base, start_position=-len(text), display=base, display_meta=desc)
+            for cmd_lower, (cmd_name, cmd_desc) in single_commands.items():
+                if cmd_lower.startswith(first_word) and cmd_lower not in seen:
+                    seen.add(cmd_lower)
+                    yield Completion(cmd_name, start_position=-len(text), display=cmd_name, display_meta=cmd_desc)
+            return
+
+        # User has typed at least one word and space - check for subcommands
+        if first_word in base_commands:
+            subcommands = base_commands[first_word]
+
+            if len(parts) == 1 and has_trailing_space:
+                # User typed base command + space - show all subcommands
+                for sub_lower, (sub_name, sub_desc) in subcommands.items():
+                    full_cmd = f"{first_word} {sub_name}"
+                    yield Completion(sub_name, start_position=0, display=sub_name, display_meta=sub_desc)
+            else:
+                # User is typing a subcommand - filter matches
+                partial_sub = ' '.join(parts[1:])
+                for sub_lower, (sub_name, sub_desc) in subcommands.items():
+                    if sub_lower.startswith(partial_sub):
+                        # Calculate start position relative to subcommand portion
+                        start_pos = -len(partial_sub)
+                        yield Completion(sub_name, start_position=start_pos, display=sub_name, display_meta=sub_desc)
 
 
 class AtFileCompleter(Completer):
