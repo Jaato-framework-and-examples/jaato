@@ -2583,11 +2583,18 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         await client.stop()
                     elif cmd == "sessions":
                         await client.list_sessions()
+                    elif cmd == "new":
+                        # Create new session with optional name
+                        await client.execute_command("session.create", args.split() if args else [])
+                        display.add_system_message("Creating new session...", style="dim")
+                    elif cmd == "reset":
+                        # Reset current session history
+                        await client.execute_command("reset", [])
                     elif cmd == "clear":
                         display.clear_output()
                     elif cmd == "help":
                         display.add_system_message(
-                            "Commands: /exit, /quit, /stop, /sessions, /clear, /help"
+                            "Commands: /exit, /quit, /stop, /sessions, /new [name], /reset, /clear, /help"
                         )
                     else:
                         await client.execute_command(cmd, args.split() if args else [])
