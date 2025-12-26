@@ -749,7 +749,19 @@ class SessionManager:
                     lines = []
                     for key, value in result.items():
                         if not key.startswith('_'):
-                            lines.append(f"{key}: {value}")
+                            if isinstance(value, list):
+                                # Format lists nicely
+                                if value:
+                                    lines.append(f"{key}:")
+                                    for item in value:
+                                        # Extract short name for model paths
+                                        if isinstance(item, str) and '/' in item:
+                                            item = item.split('/')[-1]
+                                        lines.append(f"  • {item}")
+                                else:
+                                    lines.append(f"{key}: (none)")
+                            else:
+                                lines.append(f"{key}: {value}")
                     self._emit_to_client(client_id, SystemMessageEvent(
                         message="\n".join(lines) if lines else str(result),
                         style="info",
