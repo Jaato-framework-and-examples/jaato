@@ -2600,7 +2600,17 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.refresh()
 
             elif isinstance(event, SystemMessageEvent):
-                display.add_system_message(event.message)
+                # Map style to actual prompt_toolkit style
+                style = event.style if event.style else ""
+                if style == "error":
+                    style = "bold red"
+                elif style == "warning":
+                    style = "yellow"
+                elif style == "success":
+                    style = "green"
+                elif style == "info":
+                    style = "cyan"
+                display.add_system_message(event.message, style=style)
 
             elif isinstance(event, ErrorEvent):
                 display.add_system_message(
