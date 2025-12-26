@@ -2355,9 +2355,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 f.write(f"[{ts}] [IPC] {msg}\n")
 
         ipc_trace("Event handler starting")
+        event_count = 0
         async for event in client.events():
-            ipc_trace(f"<- {type(event).__name__}")
+            event_count += 1
+            ipc_trace(f"<- [{event_count}] {type(event).__name__}")
             if should_exit:
+                ipc_trace("  should_exit=True, breaking")
                 break
 
             if isinstance(event, AgentOutputEvent):
@@ -2381,13 +2384,16 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.refresh()
 
             elif isinstance(event, AgentStatusChangedEvent):
+                ipc_trace(f"  AgentStatusChangedEvent: status={event.status}")
                 if event.status == "active":
                     model_running = True
                     agent_registry.set_agent_status(event.agent_id, "active")
                 elif event.status in ("done", "error"):
                     model_running = False
                     agent_registry.set_agent_status(event.agent_id, event.status)
+                ipc_trace("  calling display.refresh()...")
                 display.refresh()
+                ipc_trace("  display.refresh() done, continuing loop...")
 
             elif isinstance(event, AgentCompletedEvent):
                 agent_registry.complete_agent(event.agent_id)
