@@ -333,28 +333,22 @@ class JaatoDaemon:
                     return
 
                 tools_subcmd = cmd.split(".", 1)[1] if "." in cmd else "list"
-                from server.events import SystemMessageEvent
+                from server.events import ToolStatusEvent
 
                 if tools_subcmd == "list":
-                    # Get tool status from session's server
-                    lines = self._format_tools_list(session.server)
-                    self._route_event(client_id, SystemMessageEvent(
-                        message="\n".join(lines),
-                        style="info",
-                    ))
+                    # Get tool status from session's server - send structured data
+                    tools = self._get_tool_status(session.server)
+                    self._route_event(client_id, ToolStatusEvent(tools=tools))
                 elif tools_subcmd == "enable" and event.args:
                     result = self._tools_enable(session.server, event.args[0])
-                    self._route_event(client_id, SystemMessageEvent(
-                        message=result,
-                        style="info",
-                    ))
+                    tools = self._get_tool_status(session.server)
+                    self._route_event(client_id, ToolStatusEvent(tools=tools, message=result))
                 elif tools_subcmd == "disable" and event.args:
                     result = self._tools_disable(session.server, event.args[0])
-                    self._route_event(client_id, SystemMessageEvent(
-                        message=result,
-                        style="info",
-                    ))
+                    tools = self._get_tool_status(session.server)
+                    self._route_event(client_id, ToolStatusEvent(tools=tools, message=result))
                 else:
+                    from server.events import SystemMessageEvent
                     self._route_event(client_id, SystemMessageEvent(
                         message="Usage: tools list | tools enable <name> | tools disable <name>",
                         style="dim",
@@ -444,14 +438,14 @@ class JaatoDaemon:
 
         return unique_commands
 
-    def _format_tools_list(self, server) -> list:
-        """Format tools list for display.
+    def _get_tool_status(self, server) -> list:
+        """Get tool status as structured data.
 
         Args:
             server: JaatoServer instance.
 
         Returns:
-            List of formatted lines.
+            List of tool status dicts: {name, description, enabled, plugin}
         """
         tool_status = []
 
@@ -469,39 +463,7 @@ class JaatoDaemon:
                     'plugin': 'permission',
                 })
 
-        if not tool_status:
-            return ["No tools available."]
-
-        # Group tools by plugin
-        by_plugin = {}
-        for tool in tool_status:
-            plugin = tool.get('plugin', 'unknown')
-            if plugin not in by_plugin:
-                by_plugin[plugin] = []
-            by_plugin[plugin].append(tool)
-
-        # Count enabled/disabled
-        enabled_count = sum(1 for t in tool_status if t.get('enabled', True))
-        disabled_count = len(tool_status) - enabled_count
-
-        lines = [
-            f"Tools ({enabled_count} enabled, {disabled_count} disabled):",
-            "  Use 'tools enable <name>' or 'tools disable <name>' to toggle",
-            "",
-        ]
-
-        for plugin_name in sorted(by_plugin.keys()):
-            tools = by_plugin[plugin_name]
-            lines.append(f"  [{plugin_name}]")
-
-            for tool in sorted(tools, key=lambda t: t['name']):
-                name = tool['name']
-                desc = tool.get('description', '')[:50]  # Truncate long descriptions
-                enabled = tool.get('enabled', True)
-                status = "✓" if enabled else "○"
-                lines.append(f"    {status} {name}: {desc}")
-
-        return lines
+        return tool_status
 
     def _tools_enable(self, server, tool_name: str) -> str:
         """Enable a tool.

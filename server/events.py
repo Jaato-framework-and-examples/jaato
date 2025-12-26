@@ -74,6 +74,9 @@ class EventType(str, Enum):
     # Command list (Server -> Client)
     COMMAND_LIST = "command.list"
 
+    # Tool status (Server -> Client)
+    TOOL_STATUS = "tools.status"
+
 
 # =============================================================================
 # Base Event
@@ -380,6 +383,15 @@ class CommandListEvent(Event):
     # ^ List of {name, description, ?subcommands}
 
 
+@dataclass
+class ToolStatusEvent(Event):
+    """Tool status information for client display."""
+    type: EventType = field(default=EventType.TOOL_STATUS)
+    tools: List[Dict[str, Any]] = field(default_factory=list)
+    # ^ List of {name, description, enabled, plugin}
+    message: str = ""  # Optional result message (for enable/disable operations)
+
+
 # =============================================================================
 # Serialization Helpers
 # =============================================================================
@@ -413,6 +425,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.COMMAND.value: CommandRequest,
     EventType.COMMAND_LIST_REQUEST.value: CommandListRequest,
     EventType.COMMAND_LIST.value: CommandListEvent,
+    EventType.TOOL_STATUS.value: ToolStatusEvent,
 }
 
 

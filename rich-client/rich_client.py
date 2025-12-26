@@ -2265,6 +2265,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         SessionListEvent,
         SessionInfoEvent,
         CommandListEvent,
+        ToolStatusEvent,
     )
 
     # Load keybindings
@@ -2548,6 +2549,51 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 if cmd_tuples:
                     input_handler.add_commands(cmd_tuples)
                     ipc_trace(f"    Registered {len(cmd_tuples)} commands")
+
+            elif isinstance(event, ToolStatusEvent):
+                # Format tools list for display with pager
+                tool_status = event.tools
+                ipc_trace(f"  ToolStatusEvent: {len(tool_status)} tools")
+
+                if not tool_status:
+                    display.show_lines([("No tools available.", "yellow")])
+                else:
+                    # Group tools by plugin
+                    by_plugin = {}
+                    for tool in tool_status:
+                        plugin = tool.get('plugin', 'unknown')
+                        if plugin not in by_plugin:
+                            by_plugin[plugin] = []
+                        by_plugin[plugin].append(tool)
+
+                    # Count enabled/disabled
+                    enabled_count = sum(1 for t in tool_status if t.get('enabled', True))
+                    disabled_count = len(tool_status) - enabled_count
+
+                    lines = [
+                        (f"Tools ({enabled_count} enabled, {disabled_count} disabled):", "bold"),
+                        ("  Use 'tools enable <name>' or 'tools disable <name>' to toggle", "dim"),
+                        ("", ""),
+                    ]
+
+                    # Show result message if present
+                    if event.message:
+                        lines.insert(0, (event.message, "green"))
+                        lines.insert(1, ("", ""))
+
+                    for plugin_name in sorted(by_plugin.keys()):
+                        tools = by_plugin[plugin_name]
+                        lines.append((f"  [{plugin_name}]", "cyan"))
+
+                        for tool in sorted(tools, key=lambda t: t['name']):
+                            name = tool['name']
+                            desc = tool.get('description', '')
+                            enabled = tool.get('enabled', True)
+                            status = "✓" if enabled else "○"
+                            status_style = "green" if enabled else "red"
+                            lines.append((f"    {status} {name}: {desc}", status_style if not enabled else "dim"))
+
+                    display.show_lines(lines)
 
     async def handle_input():
         """Handle user input from the queue."""
