@@ -7,6 +7,7 @@ The server emits events for all state changes, allowing clients to
 subscribe and render appropriately.
 """
 
+import logging
 import os
 import sys
 import pathlib
@@ -15,6 +16,8 @@ import threading
 import tempfile
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set
+
+logger = logging.getLogger(__name__)
 
 # Add project root to path
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -190,9 +193,11 @@ class JaatoServer:
             emit_fn: Optional callback to emit to a specific client.
                      If None, uses the default event callback (broadcast).
         """
+        logger.info(f"emit_current_state called, emit_fn={emit_fn is not None}, agents={list(self._agents.keys())}")
         emit = emit_fn or self._on_event
 
         # Emit session info with model details
+        logger.info(f"  emitting SessionInfoEvent")
         emit(SessionInfoEvent(
             session_id="",  # Will be set by SessionManager if needed
             session_name="",
