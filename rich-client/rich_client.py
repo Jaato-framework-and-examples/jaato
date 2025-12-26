@@ -2288,6 +2288,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     ]
     input_handler.add_commands(client_only_commands)
 
+    # Session provider will be set after state variables are defined (below)
+
     # Create display with full features
     display = PTDisplay(
         keybinding_config=keybindings,
@@ -2308,9 +2310,22 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     model_running = False
     should_exit = False
     server_commands: list = []  # Commands from server for help display
+    available_sessions: list = []  # Sessions from server for completion
 
     # Queue for input from PTDisplay to async handler
     input_queue: asyncio.Queue[str] = asyncio.Queue()
+
+    def get_sessions_for_completion():
+        """Provider for session ID completion."""
+        # Return session objects with session_id and description attributes
+        class SessionInfo:
+            def __init__(self, session_id, description=""):
+                self.session_id = session_id
+                self.description = description
+        return [SessionInfo(s.get('id', ''), s.get('name', '')) for s in available_sessions]
+
+    # Set up session provider for completion
+    input_handler.set_session_provider(get_sessions_for_completion)
 
     def on_input(text: str) -> None:
         """Callback when user submits input in PTDisplay."""
@@ -2504,8 +2519,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 usage = {
                     "prompt_tokens": event.prompt_tokens,
                     "output_tokens": event.output_tokens,
-                    "total_tokens": event.prompt_tokens + event.output_tokens,
-                    "context_size": event.context_size,
+                    "total_tokens": event.total_tokens,
+                    "context_size": event.context_limit,
                     "percent_used": event.percent_used,
                 }
                 display.update_context_usage(usage)
@@ -2524,6 +2539,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 )
 
             elif isinstance(event, SessionListEvent):
+                # Store sessions for completion
+                nonlocal available_sessions
+                available_sessions = event.sessions
+
                 # Format session list for display with pager
                 sessions = event.sessions
 
@@ -2633,6 +2652,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
         # Request available commands for tab completion
         await client.request_command_list()
+
+        # Request session list for completion
+        await client.execute_command("session.list", [])
 
         # Handle single prompt mode
         if single_prompt:

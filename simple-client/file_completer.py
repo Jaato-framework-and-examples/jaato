@@ -752,14 +752,16 @@ class SessionIdCompleter(Completer):
     """Complete session IDs for session commands.
 
     Triggers completion when user types session commands followed by a space:
-    - "delete-session " -> completes with available session IDs
+    - "session attach " -> completes with available session IDs
+    - "session delete " -> completes with available session IDs
+    - "delete-session " -> completes with available session IDs (legacy)
     - "resume " -> completes with available session IDs
 
     Supports both full session IDs and numeric indexes.
     """
 
-    # Commands that accept session ID arguments
-    SESSION_COMMANDS = ['delete-session', 'resume']
+    # Commands that accept session ID arguments (single-word and multi-word)
+    SESSION_COMMANDS = ['delete-session', 'resume', 'session attach', 'session delete']
 
     def __init__(self, session_provider: Optional[Callable[[], list]] = None):
         """Initialize the session ID completer.
