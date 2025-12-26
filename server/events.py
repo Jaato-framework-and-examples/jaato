@@ -61,6 +61,9 @@ class EventType(str, Enum):
     SYSTEM_MESSAGE = "system.message"
     ERROR = "error"
 
+    # Session management (Server -> Client)
+    SESSION_LIST = "session.list"
+
     # Client requests (Client -> Server)
     SEND_MESSAGE = "message.send"
     STOP = "session.stop"
@@ -295,6 +298,14 @@ class ErrorEvent(Event):
     recoverable: bool = True
 
 
+@dataclass
+class SessionListEvent(Event):
+    """List of available sessions."""
+    type: EventType = field(default=EventType.SESSION_LIST)
+    sessions: List[Dict[str, Any]] = field(default_factory=list)
+    # ^ List of {id: str, name: str, created_at: str, last_active: str, ...}
+
+
 # =============================================================================
 # Client -> Server Events (Requests)
 # =============================================================================
@@ -364,6 +375,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.TURN_COMPLETED.value: TurnCompletedEvent,
     EventType.SYSTEM_MESSAGE.value: SystemMessageEvent,
     EventType.ERROR.value: ErrorEvent,
+    EventType.SESSION_LIST.value: SessionListEvent,
     EventType.SEND_MESSAGE.value: SendMessageRequest,
     EventType.PERMISSION_RESPONSE.value: PermissionResponseRequest,
     EventType.CLARIFICATION_RESPONSE.value: ClarificationResponseRequest,
