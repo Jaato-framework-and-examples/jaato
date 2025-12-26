@@ -2227,8 +2227,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                        initial_prompt: Optional[str] = None, single_prompt: Optional[str] = None):
     """Run the client in IPC mode, connecting to a server.
 
-    This is a simplified terminal-based IPC mode. Full PTDisplay integration
-    can be added in a future version.
+    Uses full PTDisplay for rich TUI experience with plan panel, scrolling output,
+    and integrated input prompt.
 
     Args:
         socket_path: Path to the Unix domain socket.
@@ -2243,9 +2243,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         Event,
         EventType,
         AgentOutputEvent,
+        AgentCreatedEvent,
         AgentStatusChangedEvent,
+        AgentCompletedEvent,
         PermissionRequestedEvent,
+        PermissionResolvedEvent,
         ClarificationQuestionEvent,
+        ClarificationResolvedEvent,
         PlanUpdatedEvent,
         PlanClearedEvent,
         ToolCallStartEvent,
@@ -2257,29 +2261,21 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         SessionListEvent,
     )
 
-    # ANSI color codes for terminal output
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    RED = "\033[31m"
-    CYAN = "\033[36m"
+    # Load keybindings
+    keybindings = load_keybindings()
 
-    def print_system(msg: str) -> None:
-        print(f"{DIM}[system] {msg}{RESET}")
+    # Create agent registry for multi-agent support
+    agent_registry = AgentRegistry()
 
-    def print_error(msg: str) -> None:
-        print(f"{RED}[error] {msg}{RESET}")
+    # Create input handler for completions
+    input_handler = InputHandler()
 
-    def print_output(text: str, source: str = "model", end: str = "\n") -> None:
-        if source == "model":
-            print(text, end=end, flush=True)
-        elif source == "tool":
-            print(f"{DIM}{text}{RESET}", end=end, flush=True)
-        else:
-            print(f"{CYAN}[{source}]{RESET} {text}", end=end, flush=True)
+    # Create display with full features
+    display = PTDisplay(
+        keybindings=keybindings,
+        agent_registry=agent_registry,
+        input_handler=input_handler,
+    )
 
     # Create IPC client
     client = IPCClient(
@@ -2293,129 +2289,211 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     pending_clarification_request: Optional[dict] = None
     model_running = False
     should_exit = False
-    current_output_source = ""
 
-    # Connect to server
+    # Queue for input from PTDisplay to async handler
+    input_queue: asyncio.Queue[str] = asyncio.Queue()
+
+    def on_input(text: str) -> None:
+        """Callback when user submits input in PTDisplay."""
+        try:
+            # Schedule putting the text in the queue
+            asyncio.get_event_loop().call_soon_threadsafe(
+                lambda: input_queue.put_nowait(text)
+            )
+        except Exception:
+            pass
+
+    # Set up stop callback for Ctrl-C handling
+    def on_stop() -> bool:
+        """Handle stop request from display."""
+        if model_running:
+            try:
+                asyncio.get_event_loop().call_soon_threadsafe(
+                    lambda: asyncio.create_task(client.stop())
+                )
+            except Exception:
+                pass
+            return True
+        return False
+
+    def is_running() -> bool:
+        """Check if model is currently running."""
+        return model_running
+
+    display.set_stop_callbacks(on_stop, is_running)
+
+    # Connect to server before starting display
+    print(f"Connecting to server at {socket_path}...")
+
     try:
-        print_system(f"Connecting to server at {socket_path}...")
         await client.connect()
-        print_system("Connected!")
-
-        # Request default session
-        await client.get_default_session()
+        print("Connected!")
 
     except ConnectionError as e:
-        print_error(f"Connection failed: {e}")
+        print(f"Connection failed: {e}")
         return
 
     async def handle_events():
         """Handle events from the server."""
         nonlocal pending_permission_request, pending_clarification_request
-        nonlocal model_running, should_exit, current_output_source
+        nonlocal model_running, should_exit
 
         async for event in client.events():
+            if should_exit:
+                break
+
             if isinstance(event, AgentOutputEvent):
-                # Display agent output
-                if event.mode == "write":
-                    if current_output_source and current_output_source != event.source:
-                        print()  # Newline between sources
-                    current_output_source = event.source
-                    print_output(event.text, source=event.source, end="")
-                else:
-                    print(event.text, end="", flush=True)
+                # Display agent output using PTDisplay's append_output
+                display.append_output(event.source, event.text, event.mode)
 
-            elif isinstance(event, PermissionRequestedEvent):
-                # Show permission request
-                print()  # Ensure we're on a new line
-                pending_permission_request = {
-                    "request_id": event.request_id,
-                    "options": event.response_options,
-                }
-                for line in event.prompt_lines:
-                    print(f"{YELLOW}{line}{RESET}")
-                print(f"{BOLD}Options: {', '.join(event.response_options)}{RESET}")
-
-            elif isinstance(event, ClarificationQuestionEvent):
-                # Show clarification question
-                print()
-                pending_clarification_request = {
-                    "request_id": event.request_id,
-                }
-                print(f"{YELLOW}{event.question}{RESET}")
-
-            elif isinstance(event, PlanUpdatedEvent):
-                # Show plan update
-                print(f"\n{BLUE}[Plan]{RESET}")
-                for line in event.plan_lines[:5]:  # Show first 5 lines
-                    print(f"  {line}")
-                if len(event.plan_lines) > 5:
-                    print(f"  ... ({len(event.plan_lines) - 5} more)")
-
-            elif isinstance(event, ToolCallStartEvent):
-                print(f"\n{DIM}→ {event.tool_name}...{RESET}", end="", flush=True)
-
-            elif isinstance(event, ToolCallEndEvent):
-                if event.error:
-                    print(f" {RED}error: {event.error}{RESET}")
-                else:
-                    print(f" {GREEN}done{RESET}")
-
-            elif isinstance(event, TurnCompletedEvent):
-                print()  # Ensure newline after output
-                model_running = False
-                current_output_source = ""
+            elif isinstance(event, AgentCreatedEvent):
+                # Register new agent
+                agent_registry.register_agent(
+                    agent_id=event.agent_id,
+                    agent_type=event.agent_type,
+                    name=event.agent_name,
+                    profile_name=event.profile_name,
+                    parent_id=event.parent_agent_id,
+                    icon_lines=event.icon_lines,
+                )
+                display.refresh()
 
             elif isinstance(event, AgentStatusChangedEvent):
                 if event.status == "active":
                     model_running = True
+                    agent_registry.set_agent_status(event.agent_id, "active")
                 elif event.status in ("done", "error"):
                     model_running = False
+                    agent_registry.set_agent_status(event.agent_id, event.status)
+                display.refresh()
+
+            elif isinstance(event, AgentCompletedEvent):
+                agent_registry.complete_agent(event.agent_id)
+                display.refresh()
+
+            elif isinstance(event, PermissionRequestedEvent):
+                # Show permission request
+                pending_permission_request = {
+                    "request_id": event.request_id,
+                    "options": event.response_options,
+                }
+                # Display permission prompt
+                display.append_output("system", "\n", "write")
+                for line in event.prompt_lines:
+                    display.append_output("system", line + "\n", "append")
+                display.append_output(
+                    "system",
+                    f"[Options: {', '.join(event.response_options)}]\n",
+                    "append"
+                )
+                # Enable permission input mode
+                display.set_waiting_for_channel_input(True, event.response_options)
+
+            elif isinstance(event, PermissionResolvedEvent):
+                pending_permission_request = None
+                display.set_waiting_for_channel_input(False)
+
+            elif isinstance(event, ClarificationQuestionEvent):
+                # Show clarification question
+                pending_clarification_request = {
+                    "request_id": event.request_id,
+                }
+                display.append_output("system", f"\n{event.question}\n", "write")
+                display.set_waiting_for_channel_input(True)
+
+            elif isinstance(event, ClarificationResolvedEvent):
+                pending_clarification_request = None
+                display.set_waiting_for_channel_input(False)
+
+            elif isinstance(event, PlanUpdatedEvent):
+                # Update plan display - convert list to dict format expected by PTDisplay
+                plan_data = {
+                    "title": "Plan",
+                    "steps": [{"text": line, "status": "pending"} for line in event.plan_lines],
+                    "progress": {"current": 0, "total": len(event.plan_lines)},
+                }
+                agent_id = getattr(event, 'agent_id', None)
+                display.update_plan(plan_data, agent_id)
+
+            elif isinstance(event, PlanClearedEvent):
+                agent_id = getattr(event, 'agent_id', None)
+                display.clear_plan(agent_id)
+
+            elif isinstance(event, ToolCallStartEvent):
+                display.append_output("tool", f"→ {event.tool_name}...", "write")
+
+            elif isinstance(event, ToolCallEndEvent):
+                if event.error:
+                    display.append_output("tool", f" error: {event.error}\n", "append")
+                else:
+                    display.append_output("tool", " done\n", "append")
+
+            elif isinstance(event, ContextUpdatedEvent):
+                # Update context usage in status bar
+                usage = {
+                    "prompt_tokens": event.prompt_tokens,
+                    "output_tokens": event.output_tokens,
+                    "total_tokens": event.prompt_tokens + event.output_tokens,
+                    "context_size": event.context_size,
+                    "percent_used": event.percent_used,
+                }
+                display.update_context_usage(usage)
+
+            elif isinstance(event, TurnCompletedEvent):
+                model_running = False
+                display.refresh()
 
             elif isinstance(event, SystemMessageEvent):
-                print_system(event.message)
+                display.add_system_message(event.message)
 
             elif isinstance(event, ErrorEvent):
-                print_error(f"{event.error_type}: {event.error}")
+                display.add_system_message(
+                    f"Error: {event.error_type}: {event.error}",
+                    style="bold red"
+                )
 
             elif isinstance(event, SessionListEvent):
-                print_system("Available sessions:")
+                display.add_system_message("Available sessions:")
                 for s in event.sessions:
-                    print(f"  {s.get('id', 'unknown')}: {s.get('name', '')}")
+                    display.append_output(
+                        "system",
+                        f"  {s.get('id', 'unknown')}: {s.get('name', '')}\n",
+                        "write"
+                    )
 
     async def handle_input():
-        """Handle user input."""
+        """Handle user input from the queue."""
         nonlocal pending_permission_request, pending_clarification_request
         nonlocal model_running, should_exit
 
-        # Handle initial/single prompt
+        # Request default session
+        await client.get_default_session()
+
+        # Handle single prompt mode
         if single_prompt:
+            model_running = True
             await client.send_message(single_prompt)
-            # Wait for turn to complete
-            while model_running or not should_exit:
+            # Wait for completion
+            while model_running and not should_exit:
                 await asyncio.sleep(0.1)
-                # Check if we got a response
-                if not model_running:
-                    await asyncio.sleep(0.5)  # Wait a bit for final events
-                    break
+            await asyncio.sleep(0.5)  # Wait for final events
             should_exit = True
+            display.stop()
             return
-        elif initial_prompt:
+
+        # Handle initial prompt
+        if initial_prompt:
+            model_running = True
             await client.send_message(initial_prompt)
 
-        # Main input loop
+        # Main input loop - get input from queue
         while not should_exit:
             try:
-                # Get input from user
-                prompt = "> " if not pending_permission_request and not pending_clarification_request else "? "
-
-                # Use run_in_executor for non-blocking input
+                # Wait for input with timeout to allow checking should_exit
                 try:
-                    text = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: input(prompt)
-                    )
-                except EOFError:
-                    should_exit = True
-                    break
+                    text = await asyncio.wait_for(input_queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
 
                 text = text.strip()
                 if not text:
@@ -2424,6 +2502,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 # Handle exit commands
                 if text.lower() in ("/exit", "/quit", "/q"):
                     should_exit = True
+                    display.stop()
                     break
 
                 # Handle permission response
@@ -2432,7 +2511,6 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         pending_permission_request["request_id"],
                         text
                     )
-                    pending_permission_request = None
                     continue
 
                 # Handle clarification response
@@ -2441,10 +2519,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         pending_clarification_request["request_id"],
                         text
                     )
-                    pending_clarification_request = None
                     continue
 
-                # Handle commands
+                # Handle slash commands
                 if text.startswith("/"):
                     cmd_parts = text[1:].split(None, 1)
                     cmd = cmd_parts[0] if cmd_parts else ""
@@ -2454,38 +2531,47 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         await client.stop()
                     elif cmd == "sessions":
                         await client.list_sessions()
+                    elif cmd == "clear":
+                        display.clear_output()
                     elif cmd == "help":
-                        print_system("Commands: /exit, /quit, /stop, /sessions, /help")
+                        display.add_system_message(
+                            "Commands: /exit, /quit, /stop, /sessions, /clear, /help"
+                        )
                     else:
                         await client.execute_command(cmd, args.split() if args else [])
                     continue
 
-                # Send message
+                # Send message to model
                 model_running = True
+                display.add_to_history(text)
                 await client.send_message(text)
 
             except asyncio.CancelledError:
                 break
-            except KeyboardInterrupt:
-                print()
-                if model_running:
-                    print_system("Stopping...")
-                    await client.stop()
-                else:
-                    should_exit = True
             except Exception as e:
-                print_error(f"Error: {e}")
+                display.add_system_message(f"Error: {e}", style="bold red")
 
-    # Run event handler and input handler concurrently
+    # Run everything concurrently
     try:
+        # Start event handler
         event_task = asyncio.create_task(handle_events())
+
+        # Start input handler
         input_task = asyncio.create_task(handle_input())
 
-        # Wait for input task to complete (user exits)
-        await input_task
+        # Run PTDisplay (this is the main UI loop)
+        # Use run_input_loop_async which returns when display.stop() is called
+        await display.run_input_loop_async(on_input, initial_prompt=None)
 
-        # Cancel event task
+        # Clean up tasks
+        should_exit = True
+        input_task.cancel()
         event_task.cancel()
+
+        try:
+            await input_task
+        except asyncio.CancelledError:
+            pass
         try:
             await event_task
         except asyncio.CancelledError:
@@ -2493,7 +2579,6 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
     finally:
         await client.disconnect()
-        print_system("Disconnected.")
 
 
 def main():
