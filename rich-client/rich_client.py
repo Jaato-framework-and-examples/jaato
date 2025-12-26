@@ -2350,21 +2350,18 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
             if should_exit:
                 break
 
-            # DEBUG: Log all received events
-            display.add_system_message(f"[DEBUG] Event: {type(event).__name__}", style="dim")
-
             if isinstance(event, AgentOutputEvent):
                 # Display agent output using PTDisplay's append_output
                 display.append_output(event.source, event.text, event.mode)
 
             elif isinstance(event, AgentCreatedEvent):
                 # Register new agent
-                agent_registry.register_agent(
+                agent_registry.create_agent(
                     agent_id=event.agent_id,
                     agent_type=event.agent_type,
                     name=event.agent_name,
                     profile_name=event.profile_name,
-                    parent_id=event.parent_agent_id,
+                    parent_agent_id=event.parent_agent_id,
                     icon_lines=event.icon_lines,
                 )
                 display.refresh()
