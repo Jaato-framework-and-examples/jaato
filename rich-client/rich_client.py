@@ -381,7 +381,9 @@ class RichClient:
     def _trace(self, msg: str) -> None:
         """Write trace message to file for debugging."""
         import datetime
-        trace_path = os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        trace_path = os.environ.get("JAATO_TRACE_LOG")
+        if not trace_path:
+            return  # Tracing disabled
         with open(trace_path, "a") as f:
             ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
             f.write(f"[{ts}] {msg}\n")
@@ -2345,11 +2347,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         nonlocal pending_permission_request, pending_clarification_request
         nonlocal model_running, should_exit
 
-        # IPC event tracing - write to same trace file as RichClient
-        import tempfile
+        # IPC event tracing - use JAATO_TRACE_LOG if set
         from datetime import datetime as dt
-        trace_file = os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        trace_file = os.environ.get("JAATO_TRACE_LOG")
         def ipc_trace(msg: str):
+            if not trace_file:
+                return  # Tracing disabled
             with open(trace_file, "a") as f:
                 ts = dt.now().strftime("%H:%M:%S.%f")[:-3]
                 f.write(f"[{ts}] [IPC] {msg}\n")
