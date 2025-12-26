@@ -2524,13 +2524,38 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 )
 
             elif isinstance(event, SessionListEvent):
-                display.add_system_message("Available sessions:")
-                for s in event.sessions:
-                    display.append_output(
-                        "system",
-                        f"  {s.get('id', 'unknown')}: {s.get('name', '')}\n",
-                        "write"
-                    )
+                # Format session list for display with pager
+                sessions = event.sessions
+
+                if not sessions:
+                    display.show_lines([
+                        ("No sessions available.", "yellow"),
+                        ("Use 'session new' to create one.", "dim"),
+                    ])
+                else:
+                    lines = [
+                        ("Sessions:", "bold"),
+                        ("  Use 'session attach <id>' to switch sessions", "dim"),
+                        ("", ""),
+                    ]
+
+                    for s in sessions:
+                        status = "●" if s.get('is_loaded') else "○"
+                        sid = s.get('id', 'unknown')
+                        name = s.get('name', '')
+                        name_part = f" ({name})" if name else ""
+                        provider = s.get('model_provider', '')
+                        model = s.get('model_name', '')
+                        model_part = f" [{provider}/{model}]" if provider else ""
+                        clients = s.get('client_count', 0)
+                        clients_part = f", {clients} client(s)" if clients else ""
+                        turns = s.get('turn_count', 0)
+                        turns_part = f", {turns} turns" if turns else ""
+
+                        status_style = "green" if s.get('is_loaded') else "dim"
+                        lines.append((f"  {status} {sid}{name_part}{model_part}{clients_part}{turns_part}", status_style))
+
+                    display.show_lines(lines)
 
             elif isinstance(event, SessionInfoEvent):
                 # Update status bar with model info
