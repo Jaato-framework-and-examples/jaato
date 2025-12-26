@@ -2381,6 +2381,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     should_exit = False
     server_commands: list = []  # Commands from server for help display
     available_sessions: list = []  # Sessions from server for completion
+    initialization_complete = False  # Don't display session list during init
 
     # Queue for input from PTDisplay to async handler
     input_queue: asyncio.Queue[str] = asyncio.Queue()
@@ -2623,6 +2624,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 nonlocal available_sessions
                 available_sessions = event.sessions
 
+                # Only display if user requested (not during initialization)
+                if not initialization_complete:
+                    continue
+
                 # Format session list for display with pager
                 sessions = event.sessions
 
@@ -2796,6 +2801,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
         # Request session list for completion
         await client.execute_command("session.list", [])
+
+        # Mark initialization complete - events after this will be displayed
+        nonlocal initialization_complete
+        initialization_complete = True
 
         # Handle single prompt mode
         if single_prompt:
