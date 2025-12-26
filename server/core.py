@@ -183,7 +183,11 @@ class JaatoServer:
         """Set the event callback for clients."""
         self._on_event = callback
 
-    def emit_current_state(self, emit_fn: Optional[EventCallback] = None) -> None:
+    def emit_current_state(
+        self,
+        emit_fn: Optional[EventCallback] = None,
+        skip_session_info: bool = False
+    ) -> None:
         """Emit current agent state to a specific client or all clients.
 
         This is useful when a client attaches to an existing session and needs
@@ -192,18 +196,20 @@ class JaatoServer:
         Args:
             emit_fn: Optional callback to emit to a specific client.
                      If None, uses the default event callback (broadcast).
+            skip_session_info: If True, skip emitting SessionInfoEvent (caller will send it).
         """
         logger.info(f"emit_current_state called, emit_fn={emit_fn is not None}, agents={list(self._agents.keys())}")
         emit = emit_fn or self._on_event
 
-        # Emit session info with model details
-        logger.info(f"  emitting SessionInfoEvent")
-        emit(SessionInfoEvent(
-            session_id="",  # Will be set by SessionManager if needed
-            session_name="",
-            model_provider=self._model_provider,
-            model_name=self._model_name,
-        ))
+        # Emit session info with model details (unless caller is sending its own)
+        if not skip_session_info:
+            logger.info(f"  emitting SessionInfoEvent")
+            emit(SessionInfoEvent(
+                session_id="",  # Will be set by SessionManager if needed
+                session_name="",
+                model_provider=self._model_provider,
+                model_name=self._model_name,
+            ))
 
         # Emit AgentCreatedEvent for all existing agents
         for agent_id, agent in self._agents.items():
@@ -1065,6 +1071,30 @@ class JaatoServer:
         if not self.registry:
             return []
         return self.registry.get_tool_status()
+
+    def get_tool_status(self) -> List[Dict[str, Any]]:
+        """Get tool status for state snapshot.
+
+        Returns list of {name, description, enabled, plugin}.
+        """
+        if not self.registry:
+            return []
+        # Use registry's tool status which includes enabled/disabled info
+        return self.registry.get_tool_status()
+
+    def get_available_models(self) -> List[str]:
+        """Get available model names for completion.
+
+        Returns list of model name strings.
+        """
+        if not self._jaato:
+            return []
+        # Get model completions and extract just the names
+        try:
+            completions = self._jaato.get_model_completions([])
+            return [c[0] if isinstance(c, tuple) else str(c) for c in completions]
+        except Exception:
+            return []
 
     # =========================================================================
     # Cleanup

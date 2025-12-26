@@ -270,9 +270,9 @@ class JaatoDaemon:
                             self._ipc_server.set_client_session(client_id, event.args[0])
                 return
 
-            elif cmd in ("session.list", "session.data"):
+            elif cmd == "session.list":
                 sessions = self._session_manager.list_sessions()
-                from server.events import SessionListEvent, SessionDataEvent
+                from server.events import SessionListEvent
 
                 # Send structured session data - client handles formatting
                 session_data = [{
@@ -285,11 +285,7 @@ class JaatoDaemon:
                     "turn_count": s.turn_count,
                 } for s in sessions]
 
-                # session.data is silent (for completion), session.list displays
-                if cmd == "session.data":
-                    self._route_event(client_id, SessionDataEvent(sessions=session_data))
-                else:
-                    self._route_event(client_id, SessionListEvent(sessions=session_data))
+                self._route_event(client_id, SessionListEvent(sessions=session_data))
                 return
 
             elif cmd == "session.default":

@@ -70,6 +70,7 @@ Events are JSON-serializable dataclasses flowing over IPC/WebSocket:
 **Server → Client Events:**
 | Event Type | Purpose |
 |------------|---------|
+| `session.info` | State snapshot on connect (sessions, tools, models) |
 | `agent.created` | New agent spawned |
 | `agent.output` | Streaming text output |
 | `agent.status_changed` | Agent active/done/error |
@@ -79,6 +80,7 @@ Events are JSON-serializable dataclasses flowing over IPC/WebSocket:
 | `plan.updated` | Plan/todo changed |
 | `context.updated` | Token usage changed |
 | `turn.completed` | Turn finished with accounting |
+| `session.list` | Response to explicit session list request |
 
 **Client → Server Events:**
 | Event Type | Purpose |
@@ -88,6 +90,50 @@ Events are JSON-serializable dataclasses flowing over IPC/WebSocket:
 | `clarification.response` | Answer clarification |
 | `session.stop` | Cancel current operation |
 | `command.execute` | Run a command |
+
+### State Snapshot on Connect
+
+When a client connects or attaches to a session, the server sends a `SessionInfoEvent` containing a complete state snapshot. This eliminates the need for separate data requests and ensures the client has all information needed for both display and completion:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Client Connects                           │
+└─────────────────────────────────────┬───────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    SessionInfoEvent                              │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  Current Session:                                        │    │
+│  │    session_id, session_name, model_provider, model_name  │    │
+│  ├─────────────────────────────────────────────────────────┤    │
+│  │  State Snapshot:                                         │    │
+│  │    sessions: [{id, name, model, is_loaded, ...}, ...]   │    │
+│  │    tools: [{name, description, enabled, plugin}, ...]   │    │
+│  │    models: ["gemini-2.5-flash", "gemini-2.5-pro", ...]  │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       Client Local Cache                         │
+│  • Session completions (for /session attach <TAB>)              │
+│  • Tool completions (for tool status display)                   │
+│  • Model completions (for /model command)                       │
+│  • Status bar updates (provider/model display)                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+This design has several benefits:
+
+| Aspect | Before (Request/Response) | After (State Snapshot) |
+|--------|---------------------------|------------------------|
+| **Round trips** | N requests for N data types | 1 event with all data |
+| **Race conditions** | Data may arrive out of order | Atomic state delivery |
+| **Code complexity** | Separate handlers per data type | Single event handler |
+| **Consistency** | Data may be stale between requests | Point-in-time snapshot |
+
+The server sends updated snapshots when relevant state changes (e.g., session created, model changed).
 
 ### SessionManager + SessionPlugin Integration
 
