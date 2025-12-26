@@ -418,9 +418,12 @@ class JaatoServer:
 
     def _setup_agent_hooks(self) -> None:
         """Set up agent lifecycle hooks."""
+        logger.info("  _setup_agent_hooks: entering...")
         if not self._jaato:
+            logger.info("  _setup_agent_hooks: no _jaato, returning early")
             return
 
+        logger.info("  _setup_agent_hooks: defining ServerAgentHooks class...")
         server = self
 
         class ServerAgentHooks:
@@ -544,14 +547,21 @@ class JaatoServer:
                     error_message=error_message,
                 ))
 
+        logger.info("  _setup_agent_hooks: class defined, creating instance...")
         hooks = ServerAgentHooks()
+        logger.info("  _setup_agent_hooks: calling jaato.set_ui_hooks...")
         self._jaato.set_ui_hooks(hooks)
+        logger.info("  _setup_agent_hooks: jaato.set_ui_hooks done")
 
         # Register with subagent plugin
         if self.registry:
+            logger.info("  _setup_agent_hooks: getting subagent plugin...")
             subagent_plugin = self.registry.get_plugin("subagent")
             if subagent_plugin and hasattr(subagent_plugin, 'set_ui_hooks'):
+                logger.info("  _setup_agent_hooks: calling subagent.set_ui_hooks...")
                 subagent_plugin.set_ui_hooks(hooks)
+                logger.info("  _setup_agent_hooks: subagent.set_ui_hooks done")
+        logger.info("  _setup_agent_hooks: completed")
 
     def _setup_permission_hooks(self) -> None:
         """Set up permission lifecycle hooks."""
