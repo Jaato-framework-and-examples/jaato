@@ -2266,6 +2266,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         SessionInfoEvent,
         CommandListEvent,
         ToolStatusEvent,
+        HistoryEvent,
     )
 
     # Load keybindings
@@ -2281,6 +2282,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     # Server/plugin commands (session, reset, etc.) should be fetched from server
     client_only_commands = [
         ("help", "Show available commands"),
+        ("history", "Show conversation history"),
         ("exit", "Exit the client"),
         ("quit", "Exit the client"),
         ("stop", "Stop current model generation"),
@@ -2639,6 +2641,67 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
                     display.show_lines(lines)
 
+            elif isinstance(event, HistoryEvent):
+                # Format and display conversation history
+                ipc_trace(f"  HistoryEvent: {len(event.history)} messages")
+
+                if not event.history:
+                    display.show_lines([("No conversation history.", "yellow")])
+                else:
+                    turn_accounting = event.turn_accounting or []
+                    lines = [
+                        (f"Conversation History ({len(event.history)} messages, {len(turn_accounting)} turns):", "bold"),
+                        ("", ""),
+                    ]
+
+                    turn_index = 0
+                    for i, msg in enumerate(event.history):
+                        role = msg.get('role', 'unknown')
+                        parts = msg.get('parts', [])
+
+                        # Format role header
+                        if role == 'user':
+                            lines.append((f"[User]", "cyan bold"))
+                        elif role == 'model':
+                            lines.append((f"[Model]", "green bold"))
+                        else:
+                            lines.append((f"[{role}]", "yellow bold"))
+
+                        # Format parts
+                        for part in parts:
+                            part_type = part.get('type', 'unknown')
+                            if part_type == 'text':
+                                text = part.get('text', '')
+                                # Truncate long text
+                                if len(text) > 500:
+                                    text = text[:500] + "..."
+                                lines.append((f"  {text}", ""))
+                            elif part_type == 'function_call':
+                                name = part.get('name', 'unknown')
+                                lines.append((f"  [Function Call: {name}]", "magenta"))
+                            elif part_type == 'function_response':
+                                name = part.get('name', 'unknown')
+                                lines.append((f"  [Function Response: {name}]", "blue"))
+
+                        # Show turn accounting at end of model turn
+                        is_model = role == 'model'
+                        is_last = (i == len(event.history) - 1)
+                        next_is_user = (not is_last and
+                                       event.history[i + 1].get('role') == 'user')
+
+                        if is_model and (is_last or next_is_user):
+                            if turn_index < len(turn_accounting):
+                                acc = turn_accounting[turn_index]
+                                prompt = acc.get('prompt', 0)
+                                output = acc.get('output', 0)
+                                total = acc.get('total', prompt + output)
+                                lines.append((f"  --- Turn {turn_index + 1}: {total:,} tokens (in: {prompt:,}, out: {output:,}) ---", "dim"))
+                                turn_index += 1
+
+                        lines.append(("", ""))
+
+                    display.show_lines(lines)
+
     async def handle_input():
         """Handle user input from the queue."""
         nonlocal pending_permission_request, pending_clarification_request
@@ -2798,6 +2861,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     subcmd = args[0] if args else "list"
                     subargs = args[1:] if len(args) > 1 else []
                     await client.execute_command(f"session.{subcmd}", subargs)
+                    continue
+
+                # History command - request from server
+                elif cmd == "history":
+                    await client.request_history()
                     continue
 
                 # Other server commands (reset, plugin commands) - forward directly

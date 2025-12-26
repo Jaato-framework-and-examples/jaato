@@ -77,6 +77,10 @@ class EventType(str, Enum):
     # Tool status (Server -> Client)
     TOOL_STATUS = "tools.status"
 
+    # History (Client <-> Server)
+    HISTORY_REQUEST = "history.request"
+    HISTORY = "history"
+
 
 # =============================================================================
 # Base Event
@@ -392,6 +396,24 @@ class ToolStatusEvent(Event):
     message: str = ""  # Optional result message (for enable/disable operations)
 
 
+@dataclass
+class HistoryRequest(Event):
+    """Client request for conversation history."""
+    type: EventType = field(default=EventType.HISTORY_REQUEST)
+    agent_id: str = "main"  # Which agent's history to get
+
+
+@dataclass
+class HistoryEvent(Event):
+    """Conversation history from server."""
+    type: EventType = field(default=EventType.HISTORY)
+    agent_id: str = "main"
+    history: List[Dict[str, Any]] = field(default_factory=list)
+    # ^ List of serialized Message objects
+    turn_accounting: List[Dict[str, int]] = field(default_factory=list)
+    # ^ List of {prompt, output, total} per turn
+
+
 # =============================================================================
 # Serialization Helpers
 # =============================================================================
@@ -426,6 +448,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.COMMAND_LIST_REQUEST.value: CommandListRequest,
     EventType.COMMAND_LIST.value: CommandListEvent,
     EventType.TOOL_STATUS.value: ToolStatusEvent,
+    EventType.HISTORY_REQUEST.value: HistoryRequest,
+    EventType.HISTORY.value: HistoryEvent,
 }
 
 

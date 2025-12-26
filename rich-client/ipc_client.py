@@ -48,6 +48,8 @@ from server.events import (
     CommandListEvent,
     ConnectedEvent,
     ErrorEvent,
+    HistoryRequest,
+    HistoryEvent,
 )
 
 
@@ -431,6 +433,16 @@ class IPCClient:
         The response will arrive as a CommandListEvent via the event stream.
         """
         await self._send_event(CommandListRequest())
+
+    async def request_history(self, agent_id: str = "main") -> None:
+        """Request conversation history from server.
+
+        The response will arrive as a HistoryEvent via the event stream.
+
+        Args:
+            agent_id: Which agent's history to request.
+        """
+        await self._send_event(HistoryRequest(agent_id=agent_id))
 
     # =========================================================================
     # Event Stream

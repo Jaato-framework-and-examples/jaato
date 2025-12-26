@@ -346,6 +346,30 @@ class JaatoDaemon:
                     ))
                 return
 
+        # Handle HistoryRequest
+        from server.events import HistoryRequest, HistoryEvent
+        if isinstance(event, HistoryRequest):
+            session = self._session_manager.get_client_session(client_id)
+            if session and session.server:
+                # Get history from session
+                history = session.server.get_history(event.agent_id)
+                turn_accounting = session.server.get_turn_accounting(event.agent_id)
+
+                # Serialize history to dicts
+                history_data = []
+                for msg in history:
+                    history_data.append({
+                        "role": msg.role.value if hasattr(msg.role, 'value') else str(msg.role),
+                        "parts": [self._serialize_part(p) for p in (msg.parts or [])],
+                    })
+
+                self._route_event(client_id, HistoryEvent(
+                    agent_id=event.agent_id,
+                    history=history_data,
+                    turn_accounting=turn_accounting or [],
+                ))
+            return
+
         # Route to session
         self._session_manager.handle_request(client_id, session_id, event)
 
@@ -544,6 +568,34 @@ class JaatoDaemon:
         if server.registry.disable_tool(tool_name):
             return f"Disabled tool: {tool_name}"
         return f"Tool not found or already disabled: {tool_name}"
+
+    def _serialize_part(self, part) -> dict:
+        """Serialize a message part to a dict.
+
+        Args:
+            part: Message Part object.
+
+        Returns:
+            Dict with part data.
+        """
+        if hasattr(part, 'text') and part.text is not None:
+            return {"type": "text", "text": part.text}
+        elif hasattr(part, 'function_call') and part.function_call:
+            fc = part.function_call
+            return {
+                "type": "function_call",
+                "name": fc.name if hasattr(fc, 'name') else str(fc),
+                "args": fc.args if hasattr(fc, 'args') else {},
+            }
+        elif hasattr(part, 'function_response') and part.function_response:
+            fr = part.function_response
+            return {
+                "type": "function_response",
+                "name": fr.name if hasattr(fr, 'name') else str(fr),
+                "response": fr.response if hasattr(fr, 'response') else str(fr),
+            }
+        else:
+            return {"type": "unknown", "data": str(part)}
 
 
 def daemonize(log_file: str = DEFAULT_LOG_FILE) -> None:
