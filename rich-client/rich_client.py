@@ -2387,16 +2387,16 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 ipc_trace(f"  AgentStatusChangedEvent: status={event.status}")
                 if event.status == "active":
                     model_running = True
-                    agent_registry.set_agent_status(event.agent_id, "active")
+                    agent_registry.update_status(event.agent_id, "active")
                 elif event.status in ("done", "error"):
                     model_running = False
-                    agent_registry.set_agent_status(event.agent_id, event.status)
+                    agent_registry.update_status(event.agent_id, event.status)
                 ipc_trace("  calling display.refresh()...")
                 display.refresh()
                 ipc_trace("  display.refresh() done, continuing loop...")
 
             elif isinstance(event, AgentCompletedEvent):
-                agent_registry.complete_agent(event.agent_id)
+                agent_registry.mark_completed(event.agent_id)
                 display.refresh()
 
             elif isinstance(event, PermissionRequestedEvent):
