@@ -217,6 +217,8 @@ class SessionManager:
             ))
             return ""
 
+        logger.info(f"Server initialized successfully for session {session_id}")
+
         # Create session object
         session = Session(
             session_id=session_id,
@@ -313,9 +315,12 @@ class SessionManager:
         Returns:
             The loaded Session, or None if not found.
         """
+        logger.info(f"_load_session: attempting to load {session_id}")
         try:
             state = self._session_plugin.load(session_id)
+            logger.info(f"_load_session: loaded state for {session_id}")
         except FileNotFoundError:
+            logger.info(f"_load_session: session {session_id} not found on disk")
             return None
         except Exception as e:
             logger.error(f"Failed to load session {session_id}: {e}")
@@ -331,6 +336,8 @@ class SessionManager:
         if not server.initialize():
             logger.error(f"Failed to initialize server for session {session_id}")
             return None
+
+        logger.info(f"_load_session: server initialized for {session_id}")
 
         # Restore history to the server's JaatoClient
         if state.history and server._jaato:
@@ -485,10 +492,13 @@ class SessionManager:
         Returns:
             The default session ID.
         """
+        logger.info(f"get_or_create_default called for client {client_id}")
+
         # Check in-memory sessions first
         with self._lock:
             for session in self._sessions.values():
                 if session.name == self._default_session_name:
+                    logger.info(f"  found in-memory default session: {session.session_id}")
                     session.attached_clients.add(client_id)
                     self._client_to_session[client_id] = session.session_id
                     # Emit current agent state to the newly attached client
@@ -496,13 +506,18 @@ class SessionManager:
                     return session.session_id
 
         # Check persisted sessions
+        logger.info(f"  checking persisted sessions...")
         persisted = self._get_persisted_sessions()
+        logger.info(f"  found {len(persisted)} persisted session(s)")
         for info in persisted:
+            logger.info(f"    checking: {info.session_id} desc={info.description}")
             if info.description == self._default_session_name:
+                logger.info(f"  found persisted default session: {info.session_id}")
                 if self.attach_session(client_id, info.session_id):
                     return info.session_id
 
         # Create new default session
+        logger.info(f"  creating new default session...")
         return self.create_session(client_id, self._default_session_name)
 
     # =========================================================================
