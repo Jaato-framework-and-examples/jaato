@@ -62,9 +62,8 @@ class EventType(str, Enum):
     ERROR = "error"
 
     # Session management (Server -> Client)
-    SESSION_LIST = "session.list"  # For user display
-    SESSION_DATA = "session.data"  # For silent data updates (completion, etc.)
-    SESSION_INFO = "session.info"
+    SESSION_LIST = "session.list"  # For user display (updates local cache too)
+    SESSION_INFO = "session.info"  # Full state snapshot on connect/attach
 
     # Client requests (Client -> Server)
     SEND_MESSAGE = "message.send"
@@ -320,21 +319,30 @@ class SessionListEvent(Event):
 
 
 @dataclass
-class SessionDataEvent(Event):
-    """Session data update - silent, for completion/internal use."""
-    type: EventType = field(default=EventType.SESSION_DATA)
-    sessions: List[Dict[str, Any]] = field(default_factory=list)
-    # Same data as SessionListEvent, but client doesn't display it
-
-
-@dataclass
 class SessionInfoEvent(Event):
-    """Session information including model details."""
+    """Session state snapshot - sent on connect/attach with all data client needs.
+
+    Includes current session info plus lists for completion/display:
+    - sessions: All available sessions (for session commands)
+    - tools: All available tools with enabled status (for tools commands)
+    - models: Available model names (for model command)
+
+    Client stores this locally and uses it for both completion and display.
+    Server pushes updates when state changes.
+    """
     type: EventType = field(default=EventType.SESSION_INFO)
+    # Current session
     session_id: str = ""
     session_name: str = ""
     model_provider: str = ""
     model_name: str = ""
+    # State snapshot for local use
+    sessions: List[Dict[str, Any]] = field(default_factory=list)
+    # ^ [{id, name, model_provider, model_name, is_loaded, client_count, turn_count}, ...]
+    tools: List[Dict[str, Any]] = field(default_factory=list)
+    # ^ [{name, description, enabled, plugin}, ...]
+    models: List[str] = field(default_factory=list)
+    # ^ ["gemini-2.5-flash", "gemini-2.5-pro", ...]
 
 
 # =============================================================================
@@ -448,7 +456,6 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.SYSTEM_MESSAGE.value: SystemMessageEvent,
     EventType.ERROR.value: ErrorEvent,
     EventType.SESSION_LIST.value: SessionListEvent,
-    EventType.SESSION_DATA.value: SessionDataEvent,
     EventType.SESSION_INFO.value: SessionInfoEvent,
     EventType.SEND_MESSAGE.value: SendMessageRequest,
     EventType.PERMISSION_RESPONSE.value: PermissionResponseRequest,

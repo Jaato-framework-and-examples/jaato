@@ -43,6 +43,7 @@ from .events import (
     EventType,
     SystemMessageEvent,
     ErrorEvent,
+    SessionInfoEvent,
 )
 
 
@@ -237,8 +238,14 @@ class SessionManager:
 
         logger.info(f"Session created: {session_id} ({name})")
 
-        # Emit current agent state to the newly attached client
-        server.emit_current_state(lambda e: self._emit_to_client(client_id, e))
+        # Emit current agent state to the newly attached client (skip SessionInfo, we'll send our own)
+        server.emit_current_state(
+            lambda e: self._emit_to_client(client_id, e),
+            skip_session_info=True
+        )
+
+        # Send complete SessionInfoEvent with state snapshot
+        self._emit_to_client(client_id, self._build_session_info_event(session))
 
         self._emit_to_client(client_id, SystemMessageEvent(
             message=f"Session created: {name} ({session_id})",
@@ -302,8 +309,14 @@ class SessionManager:
 
         logger.info(f"Client {client_id} attached to session {session_id}")
 
-        # Emit current agent state to the newly attached client
-        session.server.emit_current_state(lambda e: self._emit_to_client(client_id, e))
+        # Emit current agent state to the newly attached client (skip SessionInfo, we'll send our own)
+        session.server.emit_current_state(
+            lambda e: self._emit_to_client(client_id, e),
+            skip_session_info=True
+        )
+
+        # Send complete SessionInfoEvent with state snapshot
+        self._emit_to_client(client_id, self._build_session_info_event(session))
 
         self._emit_to_client(client_id, SystemMessageEvent(
             message=f"Attached to session: {session.name} ({session_id})",
@@ -520,8 +533,13 @@ class SessionManager:
                 logger.debug(f"  found in-memory session: {session.session_id}")
                 session.attached_clients.add(client_id)
                 self._client_to_session[client_id] = session.session_id
-                # Emit current agent state to the newly attached client
-                session.server.emit_current_state(lambda e: self._emit_to_client(client_id, e))
+                # Emit current agent state to the newly attached client (skip SessionInfo, we'll send our own)
+                session.server.emit_current_state(
+                    lambda e: self._emit_to_client(client_id, e),
+                    skip_session_info=True
+                )
+                # Send complete SessionInfoEvent with state snapshot
+                self._emit_to_client(client_id, self._build_session_info_event(session))
                 return session.session_id
 
         # Check persisted sessions (already sorted by updated_at descending)
@@ -596,6 +614,45 @@ class SessionManager:
         sessions = list(result.values())
         sessions.sort(key=lambda s: s.last_activity, reverse=True)
         return sessions
+
+    def _build_session_info_event(self, session: "Session") -> SessionInfoEvent:
+        """Build a complete SessionInfoEvent with state snapshot.
+
+        Includes current session info plus:
+        - sessions: All available sessions for completion/display
+        - tools: All tools with enabled status
+        - models: Available model names
+        """
+        # Get sessions list
+        sessions_data = [{
+            "id": s.session_id,
+            "name": s.name or "",
+            "model_provider": s.model_provider or "",
+            "model_name": s.model_name or "",
+            "is_loaded": s.is_loaded,
+            "client_count": s.client_count,
+            "turn_count": s.turn_count,
+        } for s in self.list_sessions()]
+
+        # Get tools list from the session's server
+        tools_data = []
+        if session.server:
+            tools_data = session.server.get_tool_status()
+
+        # Get models list from the session's server
+        models_data = []
+        if session.server:
+            models_data = session.server.get_available_models()
+
+        return SessionInfoEvent(
+            session_id=session.session_id,
+            session_name=session.name,
+            model_provider=session.server.model_provider if session.server else "",
+            model_name=session.server.model_name if session.server else "",
+            sessions=sessions_data,
+            tools=tools_data,
+            models=models_data,
+        )
 
     def get_session(self, session_id: str) -> Optional[Session]:
         """Get a session by ID (in-memory only)."""

@@ -2331,7 +2331,6 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         SystemMessageEvent,
         ErrorEvent,
         SessionListEvent,
-        SessionDataEvent,
         SessionInfoEvent,
         CommandListEvent,
         ToolStatusEvent,
@@ -2382,6 +2381,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     should_exit = False
     server_commands: list = []  # Commands from server for help display
     available_sessions: list = []  # Sessions from server for completion
+    available_tools: list = []  # Tools from server for completion
+    available_models: list = []  # Models from server for completion
 
     # Queue for input from PTDisplay to async handler
     input_queue: asyncio.Queue[str] = asyncio.Queue()
@@ -2619,11 +2620,6 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     style="bold red"
                 )
 
-            elif isinstance(event, SessionDataEvent):
-                # Silent data update - store for completion, no display
-                nonlocal available_sessions
-                available_sessions = event.sessions
-
             elif isinstance(event, SessionListEvent):
                 # Store sessions for completion AND display
                 available_sessions = event.sessions
@@ -2662,6 +2658,14 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     display.show_lines(lines)
 
             elif isinstance(event, SessionInfoEvent):
+                # Store state snapshot for local use (completion, display)
+                nonlocal available_sessions, available_tools, available_models
+                if event.sessions:
+                    available_sessions = event.sessions
+                if event.tools:
+                    available_tools = event.tools
+                if event.models:
+                    available_models = event.models
                 # Update status bar with model info
                 display.set_model_info(event.model_provider, event.model_name)
                 display.refresh()
@@ -2799,8 +2803,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         # Request available commands for tab completion
         await client.request_command_list()
 
-        # Request session data for completion (silent - no display)
-        await client.execute_command("session.data", [])
+        # Note: Session data (sessions, tools, models) is received via
+        # SessionInfoEvent on connect - no separate request needed
 
         # Handle single prompt mode
         if single_prompt:
