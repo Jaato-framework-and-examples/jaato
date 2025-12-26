@@ -2345,13 +2345,14 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         nonlocal pending_permission_request, pending_clarification_request
         nonlocal model_running, should_exit
 
-        # Logger for IPC event tracing - write to trace file
+        # IPC event tracing - write to same trace file as RichClient
+        import tempfile
         from datetime import datetime as dt
-        trace_file = pathlib.Path.cwd() / "ipc_trace.log"
+        trace_file = os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
         def ipc_trace(msg: str):
             with open(trace_file, "a") as f:
                 ts = dt.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] {msg}\n")
+                f.write(f"[{ts}] [IPC] {msg}\n")
 
         ipc_trace("Event handler starting")
         async for event in client.events():
