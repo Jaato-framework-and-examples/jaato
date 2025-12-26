@@ -273,14 +273,26 @@ class JaatoDaemon:
             elif cmd == "session.list":
                 sessions = self._session_manager.list_sessions()
                 from server.events import SystemMessageEvent
+
+                if not sessions:
+                    self._route_event(client_id, SystemMessageEvent(
+                        message="No sessions available. Use 'session new' to create one.",
+                        style="dim",
+                    ))
+                    return
+
+                # Format as a readable table
+                lines = ["Sessions:"]
+                for s in sessions:
+                    status = "●" if s.is_loaded else "○"
+                    name_part = f" ({s.name})" if s.name else ""
+                    model_part = f" [{s.model_provider}/{s.model_name}]" if s.model_provider else ""
+                    clients_part = f", {s.client_count} client(s)" if s.client_count else ""
+                    turns_part = f", {s.turn_count} turns" if s.turn_count else ""
+                    lines.append(f"  {status} {s.session_id}{name_part}{model_part}{clients_part}{turns_part}")
+
                 self._route_event(client_id, SystemMessageEvent(
-                    message=json.dumps([{
-                        "id": s.session_id,
-                        "name": s.name,
-                        "model": f"{s.model_provider}/{s.model_name}",
-                        "clients": s.client_count,
-                        "turns": s.turn_count,
-                    } for s in sessions], indent=2),
+                    message="\n".join(lines),
                     style="info",
                 ))
                 return
