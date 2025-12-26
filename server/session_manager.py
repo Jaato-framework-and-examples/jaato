@@ -155,9 +155,9 @@ class SessionManager:
 
     def _emit_to_client(self, client_id: str, event: Event) -> None:
         """Emit an event to a specific client."""
-        logger.info(f"_emit_to_client: {client_id} <- {type(event).__name__}")
+        logger.debug(f"_emit_to_client: {client_id} <- {type(event).__name__}")
         if self._event_callback:
-            logger.info(f"  calling event_callback")
+            logger.debug(f"  calling event_callback")
             self._event_callback(client_id, event)
         else:
             logger.warning(f"  NO event_callback set!")
@@ -271,10 +271,10 @@ class SessionManager:
 
             if not session:
                 # Try to load from disk
-                logger.info(f"attach_session: session {session_id} not in memory, loading from disk...")
+                logger.debug(f"attach_session: session {session_id} not in memory, loading from disk...")
                 try:
                     session = self._load_session(session_id)
-                    logger.info(f"attach_session: _load_session returned {session is not None}")
+                    logger.debug(f"attach_session: _load_session returned {session is not None}")
                 except Exception as e:
                     logger.error(f"attach_session: _load_session raised: {type(e).__name__}: {e}")
                     import traceback
@@ -323,29 +323,29 @@ class SessionManager:
         Returns:
             The loaded Session, or None if not found.
         """
-        logger.info(f"_load_session: attempting to load {session_id}")
+        logger.debug(f"_load_session: attempting to load {session_id}")
         try:
             state = self._session_plugin.load(session_id)
-            logger.info(f"_load_session: loaded state for {session_id}")
+            logger.debug(f"_load_session: loaded state for {session_id}")
         except FileNotFoundError:
-            logger.info(f"_load_session: session {session_id} not found on disk")
+            logger.debug(f"_load_session: session {session_id} not found on disk")
             return None
         except Exception as e:
             logger.error(f"Failed to load session {session_id}: {e}")
             return None
 
         # Create JaatoServer and restore state
-        logger.info(f"_load_session: creating JaatoServer for {session_id}...")
+        logger.debug(f"_load_session: creating JaatoServer for {session_id}...")
         server = JaatoServer(
             env_file=self._env_file,
             provider=self._provider,
             on_event=lambda e: self._emit_to_session(session_id, e),
         )
-        logger.info(f"_load_session: JaatoServer created, calling initialize()...")
+        logger.debug(f"_load_session: JaatoServer created, calling initialize()...")
 
         try:
             init_result = server.initialize()
-            logger.info(f"_load_session: initialize() returned {init_result}")
+            logger.debug(f"_load_session: initialize() returned {init_result}")
             if not init_result:
                 logger.error(f"Failed to initialize server for session {session_id}")
                 return None
@@ -355,12 +355,12 @@ class SessionManager:
             logger.error(f"_load_session: traceback:\n{traceback.format_exc()}")
             return None
 
-        logger.info(f"_load_session: server initialized for {session_id}")
+        logger.debug(f"_load_session: server initialized for {session_id}")
 
         # Restore history to the server's JaatoClient
         if state.history and server._jaato:
             server._jaato.reset_session(state.history)
-            logger.info(f"Restored {len(state.history)} messages for session {session_id}")
+            logger.debug(f"Restored {len(state.history)} messages for session {session_id}")
 
         session = Session(
             session_id=session_id,
@@ -510,13 +510,13 @@ class SessionManager:
         Returns:
             The default session ID.
         """
-        logger.info(f"get_or_create_default called for client {client_id}")
+        logger.debug(f"get_or_create_default called for client {client_id}")
 
         # Check in-memory sessions first
         with self._lock:
             for session in self._sessions.values():
                 if session.name == self._default_session_name:
-                    logger.info(f"  found in-memory default session: {session.session_id}")
+                    logger.debug(f"  found in-memory default session: {session.session_id}")
                     session.attached_clients.add(client_id)
                     self._client_to_session[client_id] = session.session_id
                     # Emit current agent state to the newly attached client
@@ -524,18 +524,18 @@ class SessionManager:
                     return session.session_id
 
         # Check persisted sessions
-        logger.info(f"  checking persisted sessions...")
+        logger.debug(f"  checking persisted sessions...")
         persisted = self._get_persisted_sessions()
-        logger.info(f"  found {len(persisted)} persisted session(s)")
+        logger.debug(f"  found {len(persisted)} persisted session(s)")
         for info in persisted:
-            logger.info(f"    checking: {info.session_id} desc={info.description}")
+            logger.debug(f"    checking: {info.session_id} desc={info.description}")
             if info.description == self._default_session_name:
-                logger.info(f"  found persisted default session: {info.session_id}")
+                logger.debug(f"  found persisted default session: {info.session_id}")
                 if self.attach_session(client_id, info.session_id):
                     return info.session_id
 
         # Create new default session
-        logger.info(f"  creating new default session...")
+        logger.debug(f"  creating new default session...")
         return self.create_session(client_id, self._default_session_name)
 
     # =========================================================================
