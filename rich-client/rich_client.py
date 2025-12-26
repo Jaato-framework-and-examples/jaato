@@ -2799,8 +2799,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         # Request available commands for tab completion
         await client.request_command_list()
 
-        # Request session list for completion
+        # Request session list for completion (silent - don't display)
         await client.execute_command("session.list", [])
+
+        # Wait for session list event to be processed before marking init complete
+        # This ensures the event handler sees initialization_complete=False
+        await asyncio.sleep(0.2)
 
         # Mark initialization complete - events after this will be displayed
         nonlocal initialization_complete
