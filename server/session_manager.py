@@ -104,7 +104,6 @@ class SessionManager:
         self,
         env_file: str = ".env",
         provider: Optional[str] = None,
-        default_session_name: str = "default",
         storage_path: Optional[str] = None,
     ):
         """Initialize the session manager.
@@ -112,12 +111,10 @@ class SessionManager:
         Args:
             env_file: Path to .env file.
             provider: Model provider override.
-            default_session_name: Name for the default session.
             storage_path: Override for session storage path.
         """
         self._env_file = env_file
         self._provider = provider
-        self._default_session_name = default_session_name
 
         # Initialize session plugin for persistence
         self._session_plugin: SessionPlugin = create_session_plugin()
@@ -501,43 +498,47 @@ class SessionManager:
         return deleted or session is not None
 
     def get_or_create_default(self, client_id: str) -> str:
-        """Get the default session, creating if needed.
+        """Get the most recent session, or create a new one.
 
-        Tries to find/load default session first, creates if not found.
+        Attaches to the most recently used session (by updated_at).
+        Creates a new session if none exist.
 
         Args:
             client_id: The requesting client.
 
         Returns:
-            The default session ID.
+            The session ID.
         """
         logger.debug(f"get_or_create_default called for client {client_id}")
 
-        # Check in-memory sessions first
+        # Check in-memory sessions first - find most recently updated
         with self._lock:
-            for session in self._sessions.values():
-                if session.name == self._default_session_name:
-                    logger.debug(f"  found in-memory default session: {session.session_id}")
-                    session.attached_clients.add(client_id)
-                    self._client_to_session[client_id] = session.session_id
-                    # Emit current agent state to the newly attached client
-                    session.server.emit_current_state(lambda e: self._emit_to_client(client_id, e))
-                    return session.session_id
+            if self._sessions:
+                # Sort by name (which is the session description) to find most recent
+                # In-memory sessions don't have updated_at, so use the first one
+                session = next(iter(self._sessions.values()))
+                logger.debug(f"  found in-memory session: {session.session_id}")
+                session.attached_clients.add(client_id)
+                self._client_to_session[client_id] = session.session_id
+                # Emit current agent state to the newly attached client
+                session.server.emit_current_state(lambda e: self._emit_to_client(client_id, e))
+                return session.session_id
 
-        # Check persisted sessions
+        # Check persisted sessions (already sorted by updated_at descending)
         logger.debug(f"  checking persisted sessions...")
         persisted = self._get_persisted_sessions()
         logger.debug(f"  found {len(persisted)} persisted session(s)")
-        for info in persisted:
-            logger.debug(f"    checking: {info.session_id} desc={info.description}")
-            if info.description == self._default_session_name:
-                logger.debug(f"  found persisted default session: {info.session_id}")
-                if self.attach_session(client_id, info.session_id):
-                    return info.session_id
 
-        # Create new default session
-        logger.debug(f"  creating new default session...")
-        return self.create_session(client_id, self._default_session_name)
+        if persisted:
+            # Use the most recent one (first in the list)
+            most_recent = persisted[0]
+            logger.debug(f"  attaching to most recent session: {most_recent.session_id}")
+            if self.attach_session(client_id, most_recent.session_id):
+                return most_recent.session_id
+
+        # No sessions exist - create a new one
+        logger.debug(f"  creating new session...")
+        return self.create_session(client_id)
 
     # =========================================================================
     # Session Queries
