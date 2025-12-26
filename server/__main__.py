@@ -124,6 +124,7 @@ class JaatoDaemon:
             self._ipc_server = JaatoIPCServer(
                 socket_path=self.ipc_socket,
                 on_session_request=self._handle_session_request,
+                on_command_list_request=self._get_command_list,
             )
             tasks.append(asyncio.create_task(self._ipc_server.start()))
             logger.info(f"IPC server will listen on {self.ipc_socket}")
@@ -298,6 +299,72 @@ class JaatoDaemon:
         if self._ipc_server:
             self._ipc_server.queue_event(client_id, event)
         # WebSocket routing would be added here
+
+    def _get_command_list(self) -> list:
+        """Get list of available commands for clients.
+
+        Returns:
+            List of {name, description} dicts.
+        """
+        commands = []
+
+        # Static session management commands (handled by daemon)
+        session_commands = [
+            {"name": "session list", "description": "List all sessions"},
+            {"name": "session new", "description": "Create a new session"},
+            {"name": "session attach", "description": "Attach to an existing session"},
+            {"name": "session delete", "description": "Delete a session"},
+        ]
+        commands.extend(session_commands)
+
+        # Get commands from any active session
+        if self._session_manager:
+            sessions = self._session_manager.list_sessions()
+            for session_info in sessions:
+                if session_info.is_loaded:
+                    session = self._session_manager.get_session(session_info.session_id)
+                    if session and session.server:
+                        # Get commands from server
+                        server_cmds = session.server.get_available_commands()
+                        for name, description in server_cmds.items():
+                            commands.append({
+                                "name": name,
+                                "description": description or "",
+                            })
+
+                        # Get commands from registry plugins
+                        if session.server.registry:
+                            for plugin_name in session.server.registry.list_exposed():
+                                plugin = session.server.registry.get_plugin(plugin_name)
+                                if plugin and hasattr(plugin, 'get_user_commands'):
+                                    for cmd in plugin.get_user_commands():
+                                        commands.append({
+                                            "name": cmd.name,
+                                            "description": cmd.description or "",
+                                        })
+
+                        # Get commands from permission plugin
+                        if session.server.permission_plugin:
+                            perm = session.server.permission_plugin
+                            if hasattr(perm, 'get_user_commands'):
+                                for cmd in perm.get_user_commands():
+                                    commands.append({
+                                        "name": cmd.name,
+                                        "description": cmd.description or "",
+                                    })
+
+                        # Got commands from one session, that's enough
+                        break
+
+        # Deduplicate by name
+        seen = set()
+        unique_commands = []
+        for cmd in commands:
+            if cmd["name"] not in seen:
+                seen.add(cmd["name"])
+                unique_commands.append(cmd)
+
+        return unique_commands
 
 
 def daemonize(log_file: str = DEFAULT_LOG_FILE) -> None:

@@ -69,6 +69,10 @@ class EventType(str, Enum):
     SEND_MESSAGE = "message.send"
     STOP = "session.stop"
     COMMAND = "command.execute"
+    COMMAND_LIST_REQUEST = "command.list_request"
+
+    # Command list (Server -> Client)
+    COMMAND_LIST = "command.list"
 
 
 # =============================================================================
@@ -362,6 +366,20 @@ class CommandRequest(Event):
     args: List[str] = field(default_factory=list)
 
 
+@dataclass
+class CommandListRequest(Event):
+    """Request list of available commands from server."""
+    type: EventType = field(default=EventType.COMMAND_LIST_REQUEST)
+
+
+@dataclass
+class CommandListEvent(Event):
+    """List of available commands from server/plugins."""
+    type: EventType = field(default=EventType.COMMAND_LIST)
+    commands: List[Dict[str, str]] = field(default_factory=list)
+    # ^ List of {name, description, ?subcommands}
+
+
 # =============================================================================
 # Serialization Helpers
 # =============================================================================
@@ -393,6 +411,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.CLARIFICATION_RESPONSE.value: ClarificationResponseRequest,
     EventType.STOP.value: StopRequest,
     EventType.COMMAND.value: CommandRequest,
+    EventType.COMMAND_LIST_REQUEST.value: CommandListRequest,
+    EventType.COMMAND_LIST.value: CommandListEvent,
 }
 
 
