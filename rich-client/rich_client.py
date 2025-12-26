@@ -2388,9 +2388,19 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 if event.status == "active":
                     model_running = True
                     agent_registry.update_status(event.agent_id, "active")
+                    # Start spinner on agent's buffer
+                    buffer = agent_registry.get_buffer(event.agent_id)
+                    if buffer:
+                        buffer.start_spinner()
+                        if event.agent_id == agent_registry.get_selected_agent_id():
+                            display.ensure_spinner_timer_running()
                 elif event.status in ("done", "error"):
                     model_running = False
                     agent_registry.update_status(event.agent_id, event.status)
+                    # Stop spinner on agent's buffer
+                    buffer = agent_registry.get_buffer(event.agent_id)
+                    if buffer:
+                        buffer.stop_spinner()
                 ipc_trace("  calling display.refresh()...")
                 display.refresh()
                 ipc_trace("  display.refresh() done, continuing loop...")
