@@ -132,7 +132,8 @@ class SessionManager:
 
         # In-memory session storage
         self._sessions: Dict[str, Session] = {}
-        self._lock = threading.Lock()
+        # Use RLock (reentrant) because initialize() may emit events during session load
+        self._lock = threading.RLock()
 
         # Client to session mapping
         self._client_to_session: Dict[str, str] = {}
