@@ -317,33 +317,56 @@ class JaatoServer:
         self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
         # Load GC configuration
+        logger.info("initialize: loading GC config...")
         gc_result = load_gc_from_file()
         if gc_result:
             gc_plugin, gc_config = gc_result
             self._jaato.set_gc_plugin(gc_plugin, gc_config)
+        logger.info("initialize: GC config done")
 
         # Setup session plugin
+        logger.info("initialize: setting up session plugin...")
         self._setup_session_plugin()
+        logger.info("initialize: session plugin done")
 
         # Setup hooks
+        logger.info("initialize: setting up agent hooks...")
         self._setup_agent_hooks()
+        logger.info("initialize: agent hooks done")
+
+        logger.info("initialize: setting up permission hooks...")
         self._setup_permission_hooks()
+        logger.info("initialize: permission hooks done")
+
+        logger.info("initialize: setting up clarification hooks...")
         self._setup_clarification_hooks()
+        logger.info("initialize: clarification hooks done")
+
+        logger.info("initialize: setting up plan hooks...")
         self._setup_plan_hooks()
+        logger.info("initialize: plan hooks done")
+
+        logger.info("initialize: setting up queue channels...")
         self._setup_queue_channels()
+        logger.info("initialize: queue channels done")
 
         # Create main agent
+        logger.info("initialize: creating main agent...")
         self._create_main_agent()
+        logger.info("initialize: main agent done")
 
+        logger.info("initialize: emitting system message...")
         self.emit(SystemMessageEvent(
             message=f"Connected to {self._model_provider}/{self._model_name}",
             style="info",
         ))
 
+        logger.info("initialize: returning True")
         return True
 
     def _create_main_agent(self) -> None:
         """Create the main agent entry."""
+        logger.info("  _create_main_agent: creating AgentState...")
         agent = AgentState(
             agent_id="main",
             name="Main Agent",
@@ -351,6 +374,7 @@ class JaatoServer:
         )
         self._agents["main"] = agent
         self._selected_agent_id = "main"
+        logger.info("  _create_main_agent: agent state created, emitting AgentCreatedEvent...")
 
         self.emit(AgentCreatedEvent(
             agent_id="main",
@@ -358,27 +382,38 @@ class JaatoServer:
             agent_type="main",
             created_at=agent.created_at,
         ))
+        logger.info("  _create_main_agent: event emitted")
 
     def _setup_session_plugin(self) -> None:
         """Set up session persistence plugin."""
         if not self._jaato:
+            logger.info("  _setup_session_plugin: no _jaato, returning early")
             return
 
         try:
+            logger.info("  _setup_session_plugin: loading session config...")
             session_config = load_session_config()
+            logger.info("  _setup_session_plugin: creating session plugin...")
             session_plugin = create_session_plugin()
+            logger.info("  _setup_session_plugin: initializing session plugin...")
             session_plugin.initialize({'storage_path': session_config.storage_path})
+            logger.info("  _setup_session_plugin: setting session plugin on jaato...")
             self._jaato.set_session_plugin(session_plugin, session_config)
+            logger.info("  _setup_session_plugin: session plugin set")
 
             if self.registry:
+                logger.info("  _setup_session_plugin: registering session plugin with registry...")
                 self.registry.register_plugin(session_plugin, enrichment_only=True)
 
             if self.permission_plugin and hasattr(session_plugin, 'get_auto_approved_tools'):
                 auto_approved = session_plugin.get_auto_approved_tools()
                 if auto_approved:
+                    logger.info(f"  _setup_session_plugin: adding {len(auto_approved)} auto-approved tools")
                     self.permission_plugin.add_whitelist_tools(auto_approved)
 
-        except Exception:
+            logger.info("  _setup_session_plugin: completed successfully")
+        except Exception as e:
+            logger.warning(f"  _setup_session_plugin: exception: {e}")
             pass  # Session plugin is optional
 
     def _setup_agent_hooks(self) -> None:

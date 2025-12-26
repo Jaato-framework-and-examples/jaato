@@ -271,7 +271,15 @@ class SessionManager:
 
             if not session:
                 # Try to load from disk
-                session = self._load_session(session_id)
+                logger.info(f"attach_session: session {session_id} not in memory, loading from disk...")
+                try:
+                    session = self._load_session(session_id)
+                    logger.info(f"attach_session: _load_session returned {session is not None}")
+                except Exception as e:
+                    logger.error(f"attach_session: _load_session raised: {type(e).__name__}: {e}")
+                    import traceback
+                    logger.error(f"attach_session: traceback:\n{traceback.format_exc()}")
+                    session = None
                 if session:
                     self._sessions[session_id] = session
 
@@ -327,14 +335,24 @@ class SessionManager:
             return None
 
         # Create JaatoServer and restore state
+        logger.info(f"_load_session: creating JaatoServer for {session_id}...")
         server = JaatoServer(
             env_file=self._env_file,
             provider=self._provider,
             on_event=lambda e: self._emit_to_session(session_id, e),
         )
+        logger.info(f"_load_session: JaatoServer created, calling initialize()...")
 
-        if not server.initialize():
-            logger.error(f"Failed to initialize server for session {session_id}")
+        try:
+            init_result = server.initialize()
+            logger.info(f"_load_session: initialize() returned {init_result}")
+            if not init_result:
+                logger.error(f"Failed to initialize server for session {session_id}")
+                return None
+        except Exception as e:
+            logger.error(f"_load_session: initialize() raised exception: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(f"_load_session: traceback:\n{traceback.format_exc()}")
             return None
 
         logger.info(f"_load_session: server initialized for {session_id}")
