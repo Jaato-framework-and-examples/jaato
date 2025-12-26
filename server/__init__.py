@@ -40,6 +40,7 @@ from .events import (
     TurnCompletedEvent,
     SystemMessageEvent,
     ErrorEvent,
+    SessionListEvent,
     # Client -> Server events
     SendMessageRequest,
     PermissionResponseRequest,
@@ -79,6 +80,7 @@ __all__ = [
     "TurnCompletedEvent",
     "SystemMessageEvent",
     "ErrorEvent",
+    "SessionListEvent",
     "SendMessageRequest",
     "PermissionResponseRequest",
     "ClarificationResponseRequest",
