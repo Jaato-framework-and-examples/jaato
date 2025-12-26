@@ -2272,7 +2272,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
     # Create display with full features
     display = PTDisplay(
-        keybindings=keybindings,
+        keybinding_config=keybindings,
         agent_registry=agent_registry,
         input_handler=input_handler,
     )
