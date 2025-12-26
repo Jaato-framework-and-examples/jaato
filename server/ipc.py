@@ -293,13 +293,15 @@ class JaatoIPCServer:
                     client.session_id = session_id
 
         # Route to session handler
-        if self._on_session_request and session_id:
-            self._on_session_request(client_id, session_id, event)
-        else:
-            await self._send_error(
-                client_id,
-                "No session selected. Use session.create or session.attach first."
-            )
+        # CommandRequest is allowed without session_id (for session.create, session.default, etc.)
+        if self._on_session_request:
+            if session_id or isinstance(event, CommandRequest):
+                self._on_session_request(client_id, session_id or "", event)
+            else:
+                await self._send_error(
+                    client_id,
+                    "No session selected. Use session.create or session.attach first."
+                )
 
     async def _send_to_client(self, client_id: str, event: Event) -> None:
         """Send an event to a specific client."""
@@ -330,6 +332,14 @@ class JaatoIPCServer:
                 self._event_queues[client_id].put_nowait(event)
             except asyncio.QueueFull:
                 logger.warning(f"Event queue full for {client_id}")
+
+    def set_client_session(self, client_id: str, session_id: str) -> None:
+        """Set the session ID for a client.
+
+        This is thread-safe and should be called after session.create/attach/default.
+        """
+        if client_id in self._clients:
+            self._clients[client_id].session_id = session_id
 
     def broadcast_to_session(self, session_id: str, event: Event) -> None:
         """Broadcast an event to all clients attached to a session."""

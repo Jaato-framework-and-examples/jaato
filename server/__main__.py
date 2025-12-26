@@ -218,12 +218,16 @@ class JaatoDaemon:
 
             if cmd == "session.create":
                 name = event.args[0] if event.args else None
-                self._session_manager.create_session(client_id, name)
+                new_session_id = self._session_manager.create_session(client_id, name)
+                if self._ipc_server and new_session_id:
+                    self._ipc_server.set_client_session(client_id, new_session_id)
                 return
 
             elif cmd == "session.attach":
                 if event.args:
-                    self._session_manager.attach_session(client_id, event.args[0])
+                    if self._session_manager.attach_session(client_id, event.args[0]):
+                        if self._ipc_server:
+                            self._ipc_server.set_client_session(client_id, event.args[0])
                 return
 
             elif cmd == "session.list":
@@ -242,7 +246,9 @@ class JaatoDaemon:
                 return
 
             elif cmd == "session.default":
-                self._session_manager.get_or_create_default(client_id)
+                default_session_id = self._session_manager.get_or_create_default(client_id)
+                if self._ipc_server and default_session_id:
+                    self._ipc_server.set_client_session(client_id, default_session_id)
                 return
 
         # Route to session
