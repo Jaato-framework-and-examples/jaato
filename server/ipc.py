@@ -327,11 +327,11 @@ class JaatoIPCServer:
 
         This is thread-safe and can be called from session handlers.
         """
-        logger.info(f"queue_event: {client_id} <- {type(event).__name__}")
+        logger.debug(f"queue_event: {client_id} <- {type(event).__name__}")
         if client_id in self._event_queues:
             try:
                 self._event_queues[client_id].put_nowait(event)
-                logger.info(f"  queued successfully")
+                logger.debug(f"  queued successfully")
             except asyncio.QueueFull:
                 logger.warning(f"Event queue full for {client_id}")
         else:
