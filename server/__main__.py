@@ -380,6 +380,13 @@ class JaatoDaemon:
         ]
         commands.extend(tools_commands)
 
+        # Model commands (handled per-session)
+        model_commands = [
+            {"name": "model list", "description": "Show available models"},
+            {"name": "model select", "description": "Switch to a model"},
+        ]
+        commands.extend(model_commands)
+
         # Get commands from any active session
         if self._session_manager:
             sessions = self._session_manager.list_sessions()
@@ -395,26 +402,58 @@ class JaatoDaemon:
                                 "description": description or "",
                             })
 
-                        # Get commands from registry plugins
+                        # Get commands from registry plugins (with subcommand expansion)
                         if session.server.registry:
                             for plugin_name in session.server.registry.list_exposed():
                                 plugin = session.server.registry.get_plugin(plugin_name)
                                 if plugin and hasattr(plugin, 'get_user_commands'):
                                     for cmd in plugin.get_user_commands():
-                                        commands.append({
-                                            "name": cmd.name,
-                                            "description": cmd.description or "",
-                                        })
+                                        # Check if plugin has subcommand completions
+                                        if hasattr(plugin, 'get_command_completions'):
+                                            subcommands = plugin.get_command_completions(cmd.name, [])
+                                            if subcommands:
+                                                # Add expanded subcommands
+                                                for sub in subcommands:
+                                                    commands.append({
+                                                        "name": f"{cmd.name} {sub.value}",
+                                                        "description": sub.description or "",
+                                                    })
+                                            else:
+                                                # No subcommands, add base command
+                                                commands.append({
+                                                    "name": cmd.name,
+                                                    "description": cmd.description or "",
+                                                })
+                                        else:
+                                            # No completion method, add base command
+                                            commands.append({
+                                                "name": cmd.name,
+                                                "description": cmd.description or "",
+                                            })
 
-                        # Get commands from permission plugin
+                        # Get commands from permission plugin (with subcommand expansion)
                         if session.server.permission_plugin:
                             perm = session.server.permission_plugin
                             if hasattr(perm, 'get_user_commands'):
                                 for cmd in perm.get_user_commands():
-                                    commands.append({
-                                        "name": cmd.name,
-                                        "description": cmd.description or "",
-                                    })
+                                    if hasattr(perm, 'get_command_completions'):
+                                        subcommands = perm.get_command_completions(cmd.name, [])
+                                        if subcommands:
+                                            for sub in subcommands:
+                                                commands.append({
+                                                    "name": f"{cmd.name} {sub.value}",
+                                                    "description": sub.description or "",
+                                                })
+                                        else:
+                                            commands.append({
+                                                "name": cmd.name,
+                                                "description": cmd.description or "",
+                                            })
+                                    else:
+                                        commands.append({
+                                            "name": cmd.name,
+                                            "description": cmd.description or "",
+                                        })
 
                         # Got commands from one session, that's enough
                         break
