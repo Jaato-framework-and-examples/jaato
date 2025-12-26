@@ -2273,22 +2273,16 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     # Create input handler for completions
     input_handler = InputHandler()
 
-    # Add IPC mode client-side commands for completion
-    # Server commands (session.list, etc.) are forwarded via execute_command
-    client_commands = [
+    # Client-only commands for completion
+    # Server/plugin commands (session, reset, etc.) should be fetched from server
+    client_only_commands = [
         ("help", "Show available commands"),
         ("exit", "Exit the client"),
         ("quit", "Exit the client"),
         ("stop", "Stop current model generation"),
-        ("reset", "Reset session history"),
         ("clear", "Clear output display"),
-        # Server session commands (use server syntax)
-        ("session.list", "List all sessions"),
-        ("session.create", "Create a new session"),
-        ("session.attach", "Attach to an existing session"),
-        ("session.delete", "Delete a session"),
     ]
-    input_handler.add_commands(client_commands)
+    input_handler.add_commands(client_only_commands)
 
     # Create display with full features
     display = PTDisplay(
@@ -2599,7 +2593,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 cmd = cmd_parts[0].lower() if cmd_parts else ""
                 args = cmd_parts[1:] if len(cmd_parts) > 1 else []
 
-                # Client-side commands
+                # Client-only commands
                 if text_lower in ("exit", "quit", "q"):
                     should_exit = True
                     display.stop()
@@ -2607,24 +2601,28 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 elif text_lower == "stop":
                     await client.stop()
                     continue
-                elif text_lower == "reset":
-                    await client.execute_command("reset", [])
-                    continue
                 elif text_lower == "clear":
                     display.clear_output()
                     continue
                 elif text_lower == "help":
                     display.add_system_message(
-                        "Commands: exit, stop, reset, clear, help"
+                        "Client: exit, stop, clear, help"
                     )
                     display.add_system_message(
-                        "Session: session.list, session.create [name], session.attach <id>, session.delete <id>",
+                        "Server: session list|create|attach|delete, reset, and plugin commands",
                         style="dim"
                     )
                     continue
 
-                # Server commands (session.*, etc.) - forward to server
-                elif cmd.startswith("session."):
+                # Session subcommands - forward to server as session.<subcommand>
+                elif cmd == "session":
+                    subcmd = args[0] if args else "list"
+                    subargs = args[1:] if len(args) > 1 else []
+                    await client.execute_command(f"session.{subcmd}", subargs)
+                    continue
+
+                # Other server commands (reset, plugin commands) - forward directly
+                elif cmd in ("reset",):
                     await client.execute_command(cmd, args)
                     continue
 
