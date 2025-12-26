@@ -22,6 +22,12 @@ Usage:
 
     # Check if running
     python -m server --status
+
+    # Stop daemon
+    python -m server --stop
+
+    # Restart with same parameters (useful during development)
+    python -m server --restart
 """
 
 import argparse
@@ -49,6 +55,7 @@ from server.events import Event
 DEFAULT_SOCKET_PATH = "/tmp/jaato.sock"
 DEFAULT_PID_FILE = "/tmp/jaato.pid"
 DEFAULT_LOG_FILE = "/tmp/jaato.log"
+DEFAULT_CONFIG_FILE = "/tmp/jaato.config.json"
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +71,8 @@ class JaatoDaemon:
         env_file: str = ".env",
         provider: Optional[str] = None,
         pid_file: str = DEFAULT_PID_FILE,
+        config_file: str = DEFAULT_CONFIG_FILE,
+        log_file: str = DEFAULT_LOG_FILE,
     ):
         """Initialize the daemon.
 
@@ -73,12 +82,16 @@ class JaatoDaemon:
             env_file: Path to .env file.
             provider: Model provider override.
             pid_file: Path to PID file for daemon mode.
+            config_file: Path to config file for restart support.
+            log_file: Path to log file for daemon mode.
         """
         self.ipc_socket = ipc_socket
         self.web_socket = web_socket
         self.env_file = env_file
         self.provider = provider
         self.pid_file = pid_file
+        self.config_file = config_file
+        self.log_file = log_file
 
         # Components
         self._session_manager: Optional[SessionManager] = None
@@ -146,8 +159,9 @@ class JaatoDaemon:
             logger.error("No servers configured. Use --ipc-socket and/or --web-socket")
             return
 
-        # Write PID file
+        # Write PID and config files
         self._write_pid()
+        self._write_config()
 
         # Set up signal handlers
         loop = asyncio.get_event_loop()
@@ -172,6 +186,7 @@ class JaatoDaemon:
             self._session_manager.shutdown()
 
         self._remove_pid()
+        # Note: Don't remove config on normal stop - needed for restart
         logger.info("Jaato server stopped")
 
     async def stop(self) -> None:
@@ -199,6 +214,30 @@ class JaatoDaemon:
                 os.remove(self.pid_file)
         except Exception as e:
             logger.warning(f"Could not remove PID file: {e}")
+
+    def _write_config(self) -> None:
+        """Write startup config for restart support."""
+        config = {
+            "ipc_socket": self.ipc_socket,
+            "web_socket": self.web_socket,
+            "env_file": self.env_file,
+            "provider": self.provider,
+            "pid_file": self.pid_file,
+            "log_file": self.log_file,
+        }
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump(config, f)
+        except Exception as e:
+            logger.warning(f"Could not write config file: {e}")
+
+    def _remove_config(self) -> None:
+        """Remove config file."""
+        try:
+            if os.path.exists(self.config_file):
+                os.remove(self.config_file)
+        except Exception as e:
+            logger.warning(f"Could not remove config file: {e}")
 
     def _handle_session_request(
         self,
@@ -315,6 +354,22 @@ def check_running(pid_file: str = DEFAULT_PID_FILE) -> Optional[int]:
         return None
 
 
+def load_config(config_file: str = DEFAULT_CONFIG_FILE) -> Optional[dict]:
+    """Load saved startup config.
+
+    Returns:
+        Config dict if exists, None otherwise.
+    """
+    if not os.path.exists(config_file):
+        return None
+
+    try:
+        with open(config_file, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
 def stop_server(pid_file: str = DEFAULT_PID_FILE) -> bool:
     """Stop a running server.
 
@@ -365,6 +420,9 @@ Examples:
 
   # Stop daemon
   python -m server --stop
+
+  # Restart with same parameters (development)
+  python -m server --restart
         """,
     )
 
@@ -395,6 +453,11 @@ Examples:
         "--stop",
         action="store_true",
         help="Stop a running daemon",
+    )
+    parser.add_argument(
+        "--restart",
+        action="store_true",
+        help="Restart the daemon with same parameters",
     )
 
     # Configuration
@@ -453,6 +516,41 @@ Examples:
             print("Jaato server is not running")
             sys.exit(1)
 
+    # Handle --restart
+    if args.restart:
+        config = load_config()
+        if not config:
+            print("Error: No saved config found. Cannot restart.")
+            print("  Start the server normally first, then use --restart")
+            sys.exit(1)
+
+        # Stop current server
+        pid = check_running(args.pid_file)
+        if pid:
+            print(f"Stopping server (PID: {pid})...")
+            if not stop_server(args.pid_file):
+                print("Error: Failed to stop server")
+                sys.exit(1)
+            print("Server stopped")
+        else:
+            print("Server was not running")
+
+        # Apply saved config
+        args.ipc_socket = config.get("ipc_socket")
+        args.web_socket = config.get("web_socket")
+        args.env_file = config.get("env_file", ".env")
+        args.provider = config.get("provider")
+        args.log_file = config.get("log_file", DEFAULT_LOG_FILE)
+
+        # Always restart as daemon
+        args.daemon = True
+
+        print(f"Restarting server...")
+        if args.ipc_socket:
+            print(f"  IPC socket: {args.ipc_socket}")
+        if args.web_socket:
+            print(f"  WebSocket: {args.web_socket}")
+
     # Validate arguments
     if not args.ipc_socket and not args.web_socket:
         # Default to IPC socket
@@ -484,6 +582,7 @@ Examples:
         env_file=args.env_file,
         provider=args.provider,
         pid_file=args.pid_file,
+        log_file=args.log_file,
     )
 
     try:
