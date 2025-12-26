@@ -179,6 +179,36 @@ class JaatoServer:
         """Set the event callback for clients."""
         self._on_event = callback
 
+    def emit_current_state(self, emit_fn: Optional[EventCallback] = None) -> None:
+        """Emit current agent state to a specific client or all clients.
+
+        This is useful when a client attaches to an existing session and needs
+        to receive the current agent state that was emitted before they connected.
+
+        Args:
+            emit_fn: Optional callback to emit to a specific client.
+                     If None, uses the default event callback (broadcast).
+        """
+        emit = emit_fn or self._on_event
+
+        # Emit AgentCreatedEvent for all existing agents
+        for agent_id, agent in self._agents.items():
+            emit(AgentCreatedEvent(
+                agent_id=agent.agent_id,
+                agent_name=agent.name,
+                agent_type=agent.agent_type,
+                profile_name=agent.profile_name,
+                parent_agent_id=agent.parent_agent_id,
+                created_at=agent.created_at,
+            ))
+
+            # If agent has a non-idle status, emit that too
+            if agent.status != "idle":
+                emit(AgentStatusChangedEvent(
+                    agent_id=agent.agent_id,
+                    status=agent.status,
+                ))
+
     # =========================================================================
     # Initialization
     # =========================================================================

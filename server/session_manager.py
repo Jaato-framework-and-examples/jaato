@@ -233,6 +233,9 @@ class SessionManager:
 
         logger.info(f"Session created: {session_id} ({name})")
 
+        # Emit current agent state to the newly attached client
+        server.emit_current_state(lambda e: self._emit_to_client(client_id, e))
+
         self._emit_to_client(client_id, SystemMessageEvent(
             message=f"Session created: {name} ({session_id})",
             style="info",
@@ -286,6 +289,9 @@ class SessionManager:
             self._client_to_session[client_id] = session_id
 
         logger.info(f"Client {client_id} attached to session {session_id}")
+
+        # Emit current agent state to the newly attached client
+        session.server.emit_current_state(lambda e: self._emit_to_client(client_id, e))
 
         self._emit_to_client(client_id, SystemMessageEvent(
             message=f"Attached to session: {session.name} ({session_id})",
@@ -481,6 +487,8 @@ class SessionManager:
                 if session.name == self._default_session_name:
                     session.attached_clients.add(client_id)
                     self._client_to_session[client_id] = session.session_id
+                    # Emit current agent state to the newly attached client
+                    session.server.emit_current_state(lambda e: self._emit_to_client(client_id, e))
                     return session.session_id
 
         # Check persisted sessions
