@@ -64,6 +64,7 @@ from .events import (
     TurnCompletedEvent,
     SystemMessageEvent,
     ErrorEvent,
+    SessionInfoEvent,
     SendMessageRequest,
     PermissionResponseRequest,
     ClarificationResponseRequest,
@@ -190,6 +191,14 @@ class JaatoServer:
                      If None, uses the default event callback (broadcast).
         """
         emit = emit_fn or self._on_event
+
+        # Emit session info with model details
+        emit(SessionInfoEvent(
+            session_id="",  # Will be set by SessionManager if needed
+            session_name="",
+            model_provider=self._model_provider,
+            model_name=self._model_name,
+        ))
 
         # Emit AgentCreatedEvent for all existing agents
         for agent_id, agent in self._agents.items():
