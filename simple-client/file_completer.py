@@ -813,45 +813,27 @@ class SessionIdCompleter(Completer):
         if not sessions:
             return
 
-        # Provide completions - prefer numeric indexes, show session IDs only when typed
-        for i, session in enumerate(sessions, 1):
+        # Provide completions - show session IDs directly
+        for session in sessions:
             session_id = getattr(session, 'session_id', str(session))
             description = getattr(session, 'description', None) or '(unnamed)'
-            index_str = str(i)
 
             if not arg_text:
-                # No input yet - show only numeric indexes (cleaner UX)
+                # No input yet - show all session IDs
                 yield Completion(
-                    index_str,
+                    session_id,
                     start_position=0,
-                    display=f"{index_str}",
-                    display_meta=f"{session_id} - {description}",
+                    display=session_id,
+                    display_meta=description,
                 )
-            elif arg_text.isdigit():
-                # User typing a number - could be index or start of session_id
-                if index_str.startswith(arg_text):
-                    yield Completion(
-                        index_str,
-                        start_position=-len(arg_text),
-                        display=f"{index_str}",
-                        display_meta=f"{session_id} - {description}",
-                    )
-                if session_id.startswith(arg_text):
-                    yield Completion(
-                        session_id,
-                        start_position=-len(arg_text),
-                        display=session_id,
-                        display_meta=description,
-                    )
-            else:
-                # User typing non-numeric - must be session_id
-                if session_id.startswith(arg_text):
-                    yield Completion(
-                        session_id,
-                        start_position=-len(arg_text),
-                        display=session_id,
-                        display_meta=description,
-                    )
+            elif session_id.startswith(arg_text):
+                # Filter by prefix
+                yield Completion(
+                    session_id,
+                    start_position=-len(arg_text),
+                    display=session_id,
+                    display_meta=description,
+                )
 
 
 class PluginCommandCompleter(Completer):
