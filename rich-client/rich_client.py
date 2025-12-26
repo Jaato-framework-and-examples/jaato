@@ -2219,6 +2219,283 @@ class RichClient:
             self.permission_plugin.shutdown()
 
 
+# =============================================================================
+# IPC Client Mode
+# =============================================================================
+
+async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str = ".env",
+                       initial_prompt: Optional[str] = None, single_prompt: Optional[str] = None):
+    """Run the client in IPC mode, connecting to a server.
+
+    This is a simplified terminal-based IPC mode. Full PTDisplay integration
+    can be added in a future version.
+
+    Args:
+        socket_path: Path to the Unix domain socket.
+        auto_start: Whether to auto-start the server if not running.
+        env_file: Path to .env file for auto-started server.
+        initial_prompt: Optional initial prompt to send.
+        single_prompt: Optional single prompt (non-interactive mode).
+    """
+    import asyncio
+    from ipc_client import IPCClient
+    from server.events import (
+        Event,
+        EventType,
+        AgentOutputEvent,
+        AgentStatusChangedEvent,
+        PermissionRequestedEvent,
+        ClarificationQuestionEvent,
+        PlanUpdatedEvent,
+        PlanClearedEvent,
+        ToolCallStartEvent,
+        ToolCallEndEvent,
+        ContextUpdatedEvent,
+        TurnCompletedEvent,
+        SystemMessageEvent,
+        ErrorEvent,
+        SessionListEvent,
+    )
+
+    # ANSI color codes for terminal output
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    RED = "\033[31m"
+    CYAN = "\033[36m"
+
+    def print_system(msg: str) -> None:
+        print(f"{DIM}[system] {msg}{RESET}")
+
+    def print_error(msg: str) -> None:
+        print(f"{RED}[error] {msg}{RESET}")
+
+    def print_output(text: str, source: str = "model", end: str = "\n") -> None:
+        if source == "model":
+            print(text, end=end, flush=True)
+        elif source == "tool":
+            print(f"{DIM}{text}{RESET}", end=end, flush=True)
+        else:
+            print(f"{CYAN}[{source}]{RESET} {text}", end=end, flush=True)
+
+    # Create IPC client
+    client = IPCClient(
+        socket_path=socket_path,
+        auto_start=auto_start,
+        env_file=env_file,
+    )
+
+    # State tracking
+    pending_permission_request: Optional[dict] = None
+    pending_clarification_request: Optional[dict] = None
+    model_running = False
+    should_exit = False
+    current_output_source = ""
+
+    # Connect to server
+    try:
+        print_system(f"Connecting to server at {socket_path}...")
+        await client.connect()
+        print_system("Connected!")
+
+        # Request default session
+        await client.get_default_session()
+
+    except ConnectionError as e:
+        print_error(f"Connection failed: {e}")
+        return
+
+    async def handle_events():
+        """Handle events from the server."""
+        nonlocal pending_permission_request, pending_clarification_request
+        nonlocal model_running, should_exit, current_output_source
+
+        async for event in client.events():
+            if isinstance(event, AgentOutputEvent):
+                # Display agent output
+                if event.mode == "write":
+                    if current_output_source and current_output_source != event.source:
+                        print()  # Newline between sources
+                    current_output_source = event.source
+                    print_output(event.text, source=event.source, end="")
+                else:
+                    print(event.text, end="", flush=True)
+
+            elif isinstance(event, PermissionRequestedEvent):
+                # Show permission request
+                print()  # Ensure we're on a new line
+                pending_permission_request = {
+                    "request_id": event.request_id,
+                    "options": event.response_options,
+                }
+                for line in event.prompt_lines:
+                    print(f"{YELLOW}{line}{RESET}")
+                print(f"{BOLD}Options: {', '.join(event.response_options)}{RESET}")
+
+            elif isinstance(event, ClarificationQuestionEvent):
+                # Show clarification question
+                print()
+                pending_clarification_request = {
+                    "request_id": event.request_id,
+                }
+                print(f"{YELLOW}{event.question}{RESET}")
+
+            elif isinstance(event, PlanUpdatedEvent):
+                # Show plan update
+                print(f"\n{BLUE}[Plan]{RESET}")
+                for line in event.plan_lines[:5]:  # Show first 5 lines
+                    print(f"  {line}")
+                if len(event.plan_lines) > 5:
+                    print(f"  ... ({len(event.plan_lines) - 5} more)")
+
+            elif isinstance(event, ToolCallStartEvent):
+                print(f"\n{DIM}→ {event.tool_name}...{RESET}", end="", flush=True)
+
+            elif isinstance(event, ToolCallEndEvent):
+                if event.error:
+                    print(f" {RED}error: {event.error}{RESET}")
+                else:
+                    print(f" {GREEN}done{RESET}")
+
+            elif isinstance(event, TurnCompletedEvent):
+                print()  # Ensure newline after output
+                model_running = False
+                current_output_source = ""
+
+            elif isinstance(event, AgentStatusChangedEvent):
+                if event.status == "active":
+                    model_running = True
+                elif event.status in ("done", "error"):
+                    model_running = False
+
+            elif isinstance(event, SystemMessageEvent):
+                print_system(event.message)
+
+            elif isinstance(event, ErrorEvent):
+                print_error(f"{event.error_type}: {event.error}")
+
+            elif isinstance(event, SessionListEvent):
+                print_system("Available sessions:")
+                for s in event.sessions:
+                    print(f"  {s.get('id', 'unknown')}: {s.get('name', '')}")
+
+    async def handle_input():
+        """Handle user input."""
+        nonlocal pending_permission_request, pending_clarification_request
+        nonlocal model_running, should_exit
+
+        # Handle initial/single prompt
+        if single_prompt:
+            await client.send_message(single_prompt)
+            # Wait for turn to complete
+            while model_running or not should_exit:
+                await asyncio.sleep(0.1)
+                # Check if we got a response
+                if not model_running:
+                    await asyncio.sleep(0.5)  # Wait a bit for final events
+                    break
+            should_exit = True
+            return
+        elif initial_prompt:
+            await client.send_message(initial_prompt)
+
+        # Main input loop
+        while not should_exit:
+            try:
+                # Get input from user
+                prompt = "> " if not pending_permission_request and not pending_clarification_request else "? "
+
+                # Use run_in_executor for non-blocking input
+                try:
+                    text = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: input(prompt)
+                    )
+                except EOFError:
+                    should_exit = True
+                    break
+
+                text = text.strip()
+                if not text:
+                    continue
+
+                # Handle exit commands
+                if text.lower() in ("/exit", "/quit", "/q"):
+                    should_exit = True
+                    break
+
+                # Handle permission response
+                if pending_permission_request:
+                    await client.respond_to_permission(
+                        pending_permission_request["request_id"],
+                        text
+                    )
+                    pending_permission_request = None
+                    continue
+
+                # Handle clarification response
+                if pending_clarification_request:
+                    await client.respond_to_clarification(
+                        pending_clarification_request["request_id"],
+                        text
+                    )
+                    pending_clarification_request = None
+                    continue
+
+                # Handle commands
+                if text.startswith("/"):
+                    cmd_parts = text[1:].split(None, 1)
+                    cmd = cmd_parts[0] if cmd_parts else ""
+                    args = cmd_parts[1] if len(cmd_parts) > 1 else ""
+
+                    if cmd == "stop":
+                        await client.stop()
+                    elif cmd == "sessions":
+                        await client.list_sessions()
+                    elif cmd == "help":
+                        print_system("Commands: /exit, /quit, /stop, /sessions, /help")
+                    else:
+                        await client.execute_command(cmd, args.split() if args else [])
+                    continue
+
+                # Send message
+                model_running = True
+                await client.send_message(text)
+
+            except asyncio.CancelledError:
+                break
+            except KeyboardInterrupt:
+                print()
+                if model_running:
+                    print_system("Stopping...")
+                    await client.stop()
+                else:
+                    should_exit = True
+            except Exception as e:
+                print_error(f"Error: {e}")
+
+    # Run event handler and input handler concurrently
+    try:
+        event_task = asyncio.create_task(handle_events())
+        input_task = asyncio.create_task(handle_input())
+
+        # Wait for input task to complete (user exits)
+        await input_task
+
+        # Cancel event task
+        event_task.cancel()
+        try:
+            await event_task
+        except asyncio.CancelledError:
+            pass
+
+    finally:
+        await client.disconnect()
+        print_system("Disconnected.")
+
+
 def main():
     import argparse
 
@@ -2290,14 +2567,17 @@ Server Mode:
             "Use simple-client for non-TTY environments."
         )
 
-    # Connection mode (future: connect to server via IPC)
+    # Connection mode: connect to server via IPC
     if args.connect:
-        print(f"[Note] --connect mode is experimental and not yet fully implemented.")
-        print(f"       Running in legacy (embedded) mode for now.")
-        # TODO: Implement IPC client mode
-        # from ipc_client import IPCClient
-        # client = IPCClient(args.connect, auto_start=not args.no_auto_start)
-        # ... run with IPC client
+        import asyncio
+        asyncio.run(run_ipc_mode(
+            socket_path=args.connect,
+            auto_start=not args.no_auto_start,
+            env_file=args.env_file,
+            initial_prompt=args.initial_prompt,
+            single_prompt=args.prompt,
+        ))
+        return
 
     # Legacy mode: embedded JaatoClient (current behavior)
     client = RichClient(
