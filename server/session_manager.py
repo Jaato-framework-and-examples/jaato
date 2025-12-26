@@ -155,8 +155,12 @@ class SessionManager:
 
     def _emit_to_client(self, client_id: str, event: Event) -> None:
         """Emit an event to a specific client."""
+        logger.info(f"_emit_to_client: {client_id} <- {type(event).__name__}")
         if self._event_callback:
+            logger.info(f"  calling event_callback")
             self._event_callback(client_id, event)
+        else:
+            logger.warning(f"  NO event_callback set!")
 
     def _emit_to_session(self, session_id: str, event: Event) -> None:
         """Emit an event to all clients attached to a session."""
