@@ -2622,6 +2622,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
             elif isinstance(event, SessionListEvent):
                 # Store sessions for completion AND display
+                nonlocal available_sessions
                 available_sessions = event.sessions
 
                 # Format session list for display with pager
@@ -2659,7 +2660,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
             elif isinstance(event, SessionInfoEvent):
                 # Store state snapshot for local use (completion, display)
-                nonlocal available_sessions, available_tools, available_models
+                # Note: available_sessions already declared nonlocal in SessionListEvent handler
+                nonlocal available_tools, available_models
                 if event.sessions:
                     available_sessions = event.sessions
                 if event.tools:
