@@ -2334,12 +2334,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         print(f"Connection failed: {e}")
         return
 
-    # Load release name and show welcome message
+    # Load release name for welcome message (shown when main agent is created)
     release_name = "Jaato Rich TUI Client"
     release_file = pathlib.Path(__file__).parent / "release_name.txt"
     if release_file.exists():
         release_name = release_file.read_text().strip()
-    display.add_system_message(release_name, style="bold cyan")
 
     async def handle_events():
         """Handle events from the server."""
@@ -2364,6 +2363,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     parent_agent_id=event.parent_agent_id,
                     icon_lines=event.icon_lines,
                 )
+                # Show welcome message when main agent is created (now in correct buffer)
+                if event.agent_id == "main":
+                    display.add_system_message(release_name, style="bold cyan")
                 display.refresh()
 
             elif isinstance(event, AgentStatusChangedEvent):
