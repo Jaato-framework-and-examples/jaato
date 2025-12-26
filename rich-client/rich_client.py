@@ -6,9 +6,14 @@ This client provides a terminal UI experience with:
 - Scrolling output panel below for model responses and tool output
 - Full-screen alternate buffer for immersive experience
 
+Supports two modes via Backend abstraction:
+- Direct mode: Local JaatoClient (non-IPC)
+- IPC mode: Connection to jaato server daemon
+
 Requires an interactive TTY. For non-TTY environments, use simple-client.
 """
 
+import asyncio
 import os
 import sys
 import pathlib
@@ -50,6 +55,9 @@ from plan_reporter import create_live_reporter
 from agent_registry import AgentRegistry
 from keybindings import load_keybindings, detect_terminal, list_available_profiles
 
+# Backend abstraction for mode-agnostic operation
+from backend import Backend, DirectBackend, IPCBackend
+
 
 class RichClient:
     """Rich TUI client with sticky plan display.
@@ -63,11 +71,25 @@ class RichClient:
     while model output scrolls naturally below.
     """
 
-    def __init__(self, env_file: str = ".env", verbose: bool = True, provider: Optional[str] = None):
+    def __init__(
+        self,
+        env_file: str = ".env",
+        verbose: bool = True,
+        provider: Optional[str] = None,
+        backend: Optional[Backend] = None,
+    ):
         self.verbose = verbose
         self.env_file = env_file
         self._provider = provider  # CLI override for provider
-        self._jaato: Optional[JaatoClient] = None
+
+        # Backend abstraction - supports both direct and IPC modes
+        self._backend: Optional[Backend] = backend
+        self._jaato: Optional[JaatoClient] = None  # For direct mode compatibility
+        self._is_ipc_mode = backend is not None and isinstance(backend, IPCBackend)
+
+        # Async event loop for backend calls from threads
+        self._async_loop: Optional[asyncio.AbstractEventLoop] = None
+
         self.registry: Optional[PluginRegistry] = None
         self.permission_plugin: Optional[PermissionPlugin] = None
         self.todo_plugin: Optional[TodoPlugin] = None
@@ -111,6 +133,19 @@ class RichClient:
         if self.verbose and self._display:
             self._display.add_system_message(msg, style="cyan")
 
+    def _run_async(self, coro):
+        """Run an async coroutine from sync context.
+
+        Uses the stored event loop if available, otherwise creates a new one.
+        """
+        if self._async_loop and self._async_loop.is_running():
+            # Submit to running loop from another thread
+            future = asyncio.run_coroutine_threadsafe(coro, self._async_loop)
+            return future.result(timeout=30)
+        else:
+            # No running loop, create one
+            return asyncio.run(coro)
+
     def _create_output_callback(self,
                                   suppress_sources: Optional[set] = None) -> Callable[[str, str, str], None]:
         """Create callback for real-time output to display.
@@ -138,10 +173,10 @@ class RichClient:
 
     def _try_execute_plugin_command(self, user_input: str) -> Optional[Any]:
         """Try to execute user input as a plugin-provided command."""
-        if not self._jaato:
+        if not self._backend:
             return None
 
-        user_commands = self._jaato.get_user_commands()
+        user_commands = self._run_async(self._backend.get_user_commands())
         if not user_commands:
             return None
 
@@ -164,7 +199,9 @@ class RichClient:
             args["user_inputs"] = self._original_inputs.copy()
 
         try:
-            result, shared = self._jaato.execute_user_command(command.name, args)
+            result, shared = self._run_async(
+                self._backend.execute_user_command(command.name, args)
+            )
             self._display_command_result(command.name, result, shared)
 
             # Update status bar if model was changed
@@ -230,7 +267,35 @@ class RichClient:
             self.log(f"Restored {count} inputs to prompt history")
 
     def initialize(self) -> bool:
-        """Initialize the client."""
+        """Initialize the client.
+
+        For direct mode: Creates JaatoClient and DirectBackend.
+        For IPC mode: Uses provided backend (server handles plugins).
+        """
+        # IPC mode - backend already provided, minimal local setup
+        if self._is_ipc_mode:
+            return self._initialize_ipc_mode()
+
+        # Direct mode - full local initialization
+        return self._initialize_direct_mode()
+
+    def _initialize_ipc_mode(self) -> bool:
+        """Initialize for IPC mode (server connection)."""
+        # In IPC mode, the server handles:
+        # - Model connection
+        # - Plugin registry
+        # - Permission handling
+        # - Tool configuration
+        # - Session management
+
+        # We just need to set up local UI components
+        self._model_name = self._backend.model_name
+        self._model_provider = self._backend.provider_name
+
+        return True
+
+    def _initialize_direct_mode(self) -> bool:
+        """Initialize for direct mode (local JaatoClient)."""
         # Load environment from CWD or explicit --env-file path
         load_dotenv(self.env_file)
 
@@ -264,6 +329,9 @@ class RichClient:
         except Exception as e:
             print(f"Error: Failed to connect: {e}")
             return False
+
+        # Create DirectBackend wrapping the JaatoClient
+        self._backend = DirectBackend(self._jaato)
 
         # Store model info for status bar (from jaato client)
         self._model_name = self._jaato.model_name or model_name
@@ -308,13 +376,13 @@ class RichClient:
         })
 
         # Configure tools
-        self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
+        self._backend.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
         # Load GC configuration from .jaato/gc.json if present
         gc_result = load_gc_from_file()
         if gc_result:
             gc_plugin, gc_config = gc_result
-            self._jaato.set_gc_plugin(gc_plugin, gc_config)
+            self._backend.set_gc_plugin(gc_plugin, gc_config)
 
         # Setup session plugin
         self._setup_session_plugin()
@@ -1055,8 +1123,8 @@ class RichClient:
 
     def clear_history(self) -> None:
         """Clear conversation history."""
-        if self._jaato:
-            self._jaato.reset_session()
+        if self._backend:
+            self._run_async(self._backend.reset_session())
         self._original_inputs = []
         if self._display:
             self._display.clear_output()
@@ -1207,8 +1275,8 @@ class RichClient:
 
         # Set up stop callbacks for Ctrl-C handling
         self._display.set_stop_callbacks(
-            stop_callback=lambda: self._jaato.stop() if self._jaato else False,
-            is_running_callback=lambda: self._jaato.is_processing if self._jaato else False
+            stop_callback=lambda: self._run_async(self._backend.stop()) if self._backend else False,
+            is_running_callback=lambda: self._backend.is_processing if self._backend else False
         )
 
         # Set up the live reporter and queue channels
@@ -1873,8 +1941,8 @@ class RichClient:
 
         # For main agent, also get turn boundaries
         turn_boundaries = []
-        if selected_agent.agent_id == "main" and self._jaato:
-            turn_boundaries = self._jaato.get_turn_boundaries()
+        if selected_agent.agent_id == "main" and self._backend:
+            turn_boundaries = self._run_async(self._backend.get_turn_boundaries())
 
         count = len(history)
         total_turns = len(turn_accounting) if turn_accounting else len(turn_boundaries)
@@ -2105,13 +2173,13 @@ class RichClient:
 
     def _export_session(self, filename: str) -> None:
         """Export session to YAML file."""
-        if not self._display or not self._jaato:
+        if not self._display or not self._backend:
             return
 
         try:
             from session_exporter import SessionExporter
             exporter = SessionExporter()
-            history = self._jaato.get_history()
+            history = self._run_async(self._backend.get_history())
             result = exporter.export_to_yaml(history, self._original_inputs, filename)
 
             if result.get('success'):
