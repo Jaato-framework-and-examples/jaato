@@ -2226,7 +2226,8 @@ class RichClient:
 # =============================================================================
 
 async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str = ".env",
-                       initial_prompt: Optional[str] = None, single_prompt: Optional[str] = None):
+                       initial_prompt: Optional[str] = None, single_prompt: Optional[str] = None,
+                       new_session: bool = False):
     """Run the client in IPC mode, connecting to a server.
 
     Uses full PTDisplay for rich TUI experience with plan panel, scrolling output,
@@ -2238,6 +2239,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         env_file: Path to .env file for auto-started server.
         initial_prompt: Optional initial prompt to send.
         single_prompt: Optional single prompt (non-interactive mode).
+        new_session: Whether to start a new session instead of resuming default.
     """
     import asyncio
     from ipc_client import IPCClient
@@ -2549,8 +2551,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         nonlocal pending_permission_request, pending_clarification_request
         nonlocal model_running, should_exit
 
-        # Request default session
-        await client.get_default_session()
+        # Request session - new or default
+        if new_session:
+            await client.create_session()
+        else:
+            await client.get_default_session()
 
         # Request available commands for tab completion
         await client.request_command_list()
@@ -2742,6 +2747,11 @@ Server Mode:
         action="store_true",
         help="Don't auto-start server if not running (only with --connect)"
     )
+    parser.add_argument(
+        "--new-session",
+        action="store_true",
+        help="Start with a new session instead of resuming the default (only with --connect)"
+    )
 
     args = parser.parse_args()
 
@@ -2761,6 +2771,7 @@ Server Mode:
             env_file=args.env_file,
             initial_prompt=args.initial_prompt,
             single_prompt=args.prompt,
+            new_session=args.new_session,
         ))
         return
 
