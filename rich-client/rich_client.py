@@ -2331,6 +2331,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         SystemMessageEvent,
         ErrorEvent,
         SessionListEvent,
+        SessionDataEvent,
         SessionInfoEvent,
         CommandListEvent,
         ToolStatusEvent,
@@ -2381,7 +2382,6 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     should_exit = False
     server_commands: list = []  # Commands from server for help display
     available_sessions: list = []  # Sessions from server for completion
-    suppress_session_list_display = False  # Set True before silent session.list requests
 
     # Queue for input from PTDisplay to async handler
     input_queue: asyncio.Queue[str] = asyncio.Queue()
@@ -2619,15 +2619,14 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     style="bold red"
                 )
 
-            elif isinstance(event, SessionListEvent):
-                # Store sessions for completion
-                nonlocal available_sessions, suppress_session_list_display
+            elif isinstance(event, SessionDataEvent):
+                # Silent data update - store for completion, no display
+                nonlocal available_sessions
                 available_sessions = event.sessions
 
-                # Skip display if this was a silent request (e.g., for completion)
-                if suppress_session_list_display:
-                    suppress_session_list_display = False
-                    continue
+            elif isinstance(event, SessionListEvent):
+                # Store sessions for completion AND display
+                available_sessions = event.sessions
 
                 # Format session list for display with pager
                 sessions = event.sessions
@@ -2800,10 +2799,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         # Request available commands for tab completion
         await client.request_command_list()
 
-        # Request session list for completion (silent - don't display)
-        nonlocal suppress_session_list_display
-        suppress_session_list_display = True
-        await client.execute_command("session.list", [])
+        # Request session data for completion (silent - no display)
+        await client.execute_command("session.data", [])
 
         # Handle single prompt mode
         if single_prompt:
