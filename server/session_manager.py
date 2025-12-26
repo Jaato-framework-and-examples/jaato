@@ -673,10 +673,35 @@ class SessionManager:
 
         elif isinstance(event, CommandRequest):
             result = server.execute_command(event.command, event.args)
-            self._emit_to_client(client_id, SystemMessageEvent(
-                message=str(result),
-                style="info",
-            ))
+            # Format result properly
+            if isinstance(result, dict):
+                if "error" in result:
+                    # Error result
+                    self._emit_to_client(client_id, SystemMessageEvent(
+                        message=result["error"],
+                        style="error",
+                    ))
+                elif "result" in result:
+                    # Simple result - show the text directly
+                    self._emit_to_client(client_id, SystemMessageEvent(
+                        message=result["result"],
+                        style="info",
+                    ))
+                else:
+                    # Dict result with multiple keys - format each
+                    lines = []
+                    for key, value in result.items():
+                        if not key.startswith('_'):
+                            lines.append(f"{key}: {value}")
+                    self._emit_to_client(client_id, SystemMessageEvent(
+                        message="\n".join(lines) if lines else str(result),
+                        style="info",
+                    ))
+            else:
+                self._emit_to_client(client_id, SystemMessageEvent(
+                    message=str(result),
+                    style="info",
+                ))
 
         else:
             self._emit_to_client(client_id, ErrorEvent(
