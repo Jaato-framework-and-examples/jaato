@@ -404,27 +404,34 @@ class JaatoDaemon:
         ]
         commands.extend(tools_commands)
 
-        # Model commands (handled per-session)
-        model_commands = [
-            {"name": "model list", "description": "Show available models"},
-            {"name": "model select", "description": "Switch to a model"},
-        ]
-        commands.extend(model_commands)
-
         # Get commands from any active session
+        # (includes model command from session, plugin commands with subcommands)
         if self._session_manager:
             sessions = self._session_manager.list_sessions()
             for session_info in sessions:
                 if session_info.is_loaded:
                     session = self._session_manager.get_session(session_info.session_id)
                     if session and session.server:
-                        # Get commands from server
+                        # Get commands from server (with model subcommand expansion)
                         server_cmds = session.server.get_available_commands()
                         for name, description in server_cmds.items():
-                            commands.append({
-                                "name": name,
-                                "description": description or "",
-                            })
+                            # Special handling for model command - expand subcommands
+                            if name == "model" and hasattr(session.server, '_jaato'):
+                                jaato = session.server._jaato
+                                if jaato and hasattr(jaato, 'get_model_completions'):
+                                    model_subs = jaato.get_model_completions([])
+                                    for sub in model_subs:
+                                        commands.append({
+                                            "name": f"model {sub.value}",
+                                            "description": sub.description or "",
+                                        })
+                                else:
+                                    commands.append({"name": name, "description": description or ""})
+                            else:
+                                commands.append({
+                                    "name": name,
+                                    "description": description or "",
+                                })
 
                         # Get commands from registry plugins (with subcommand expansion)
                         if session.server.registry:
