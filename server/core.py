@@ -1041,6 +1041,12 @@ class JaatoServer:
             return self._agents[agent_id].history
         return []
 
+    def get_turn_accounting(self, agent_id: str = "main") -> List[Dict]:
+        """Get turn accounting for an agent."""
+        if agent_id in self._agents:
+            return self._agents[agent_id].turn_accounting
+        return []
+
     def get_context_usage(self, agent_id: str = "main") -> Dict[str, Any]:
         """Get context usage for an agent."""
         if agent_id in self._agents:
