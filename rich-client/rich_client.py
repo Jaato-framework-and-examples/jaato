@@ -2378,9 +2378,18 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     parent_agent_id=event.parent_agent_id,
                     icon_lines=event.icon_lines,
                 )
-                # Show welcome message when main agent is created (now in correct buffer)
+                # Show welcome messages when main agent is created (now in correct buffer)
                 if event.agent_id == "main":
                     display.add_system_message(release_name, style="bold cyan")
+                    if input_handler.has_completion:
+                        display.add_system_message(
+                            "Tab completion enabled. Use @file to reference files, /command for slash commands.",
+                            style="dim"
+                        )
+                    display.add_system_message(
+                        "Type 'help' for commands, 'quit' to exit, Esc+Esc to clear input",
+                        style="dim"
+                    )
                 display.refresh()
 
             elif isinstance(event, AgentStatusChangedEvent):
