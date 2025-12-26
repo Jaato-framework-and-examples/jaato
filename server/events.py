@@ -63,6 +63,7 @@ class EventType(str, Enum):
 
     # Session management (Server -> Client)
     SESSION_LIST = "session.list"
+    SESSION_INFO = "session.info"
 
     # Client requests (Client -> Server)
     SEND_MESSAGE = "message.send"
@@ -304,6 +305,16 @@ class SessionListEvent(Event):
     type: EventType = field(default=EventType.SESSION_LIST)
     sessions: List[Dict[str, Any]] = field(default_factory=list)
     # ^ List of {id: str, name: str, created_at: str, last_active: str, ...}
+
+
+@dataclass
+class SessionInfoEvent(Event):
+    """Session information including model details."""
+    type: EventType = field(default=EventType.SESSION_INFO)
+    session_id: str = ""
+    session_name: str = ""
+    model_provider: str = ""
+    model_name: str = ""
 
 
 # =============================================================================

@@ -2259,6 +2259,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         SystemMessageEvent,
         ErrorEvent,
         SessionListEvent,
+        SessionInfoEvent,
     )
 
     # Load keybindings
@@ -2332,6 +2333,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     except ConnectionError as e:
         print(f"Connection failed: {e}")
         return
+
+    # Load release name and show welcome message
+    release_name = "Jaato Rich TUI Client"
+    release_file = pathlib.Path(__file__).parent / "release_name.txt"
+    if release_file.exists():
+        release_name = release_file.read_text().strip()
+    display.add_system_message(release_name, style="bold cyan")
 
     async def handle_events():
         """Handle events from the server."""
@@ -2460,6 +2468,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         f"  {s.get('id', 'unknown')}: {s.get('name', '')}\n",
                         "write"
                     )
+
+            elif isinstance(event, SessionInfoEvent):
+                # Update status bar with model info
+                display.set_model_info(event.model_provider, event.model_name)
+                display.refresh()
 
     async def handle_input():
         """Handle user input from the queue."""
