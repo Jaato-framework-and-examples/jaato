@@ -2306,6 +2306,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     pending_clarification_request: Optional[dict] = None
     model_running = False
     should_exit = False
+    server_commands: list = []  # Commands from server for help display
 
     # Queue for input from PTDisplay to async handler
     input_queue: asyncio.Queue[str] = asyncio.Queue()
@@ -2537,14 +2538,16 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
             elif isinstance(event, CommandListEvent):
                 # Register server/plugin commands for tab completion
+                nonlocal server_commands
                 ipc_trace(f"  CommandListEvent: {len(event.commands)} commands")
-                server_commands = [
+                server_commands = event.commands  # Store for help display
+                cmd_tuples = [
                     (cmd.get("name", ""), cmd.get("description", ""))
                     for cmd in event.commands
                 ]
-                if server_commands:
-                    input_handler.add_commands(server_commands)
-                    ipc_trace(f"    Registered {len(server_commands)} commands")
+                if cmd_tuples:
+                    input_handler.add_commands(cmd_tuples)
+                    ipc_trace(f"    Registered {len(cmd_tuples)} commands")
 
     async def handle_input():
         """Handle user input from the queue."""
@@ -2625,13 +2628,76 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     display.clear_output()
                     continue
                 elif text_lower == "help":
-                    display.add_system_message(
-                        "Client: exit, stop, clear, help"
-                    )
-                    display.add_system_message(
-                        "Server: session list|create|attach|delete, reset, and plugin commands",
-                        style="dim"
-                    )
+                    # Show full help with pager
+                    help_lines = [
+                        ("Commands (auto-complete as you type):", "bold"),
+                        ("  help              - Show this help message", "dim"),
+                        ("  tools [subcmd]    - Manage tools available to the model", "dim"),
+                        ("                        tools list          - List all tools with status", "dim"),
+                        ("                        tools enable <n>    - Enable a tool (or 'all')", "dim"),
+                        ("                        tools disable <n>   - Disable a tool (or 'all')", "dim"),
+                        ("  session [subcmd]  - Manage sessions", "dim"),
+                        ("                        session list        - List all sessions", "dim"),
+                        ("                        session new         - Create a new session", "dim"),
+                        ("                        session attach <id> - Attach to a session", "dim"),
+                        ("                        session delete <id> - Delete a session", "dim"),
+                        ("  reset             - Clear conversation history", "dim"),
+                        ("  clear             - Clear output panel", "dim"),
+                        ("  stop              - Stop current model generation", "dim"),
+                        ("  quit              - Exit the client", "dim"),
+                        ("", "dim"),
+                    ]
+
+                    # Add server/plugin commands
+                    if server_commands:
+                        help_lines.append(("Server/plugin commands:", "bold"))
+                        for cmd in server_commands:
+                            name = cmd.get("name", "")
+                            desc = cmd.get("description", "")
+                            # Skip session commands (already shown above)
+                            if name.startswith("session "):
+                                continue
+                            padding = max(2, 18 - len(name))
+                            help_lines.append((f"  {name}{' ' * padding}- {desc}", "dim"))
+                        help_lines.append(("", "dim"))
+
+                    help_lines.extend([
+                        ("When the model tries to use a tool, you'll see a permission prompt:", "bold"),
+                        ("  [y]es     - Allow this execution", "dim"),
+                        ("  [n]o      - Deny this execution", "dim"),
+                        ("  [a]lways  - Allow and remember for this session", "dim"),
+                        ("  [never]   - Deny and block for this session", "dim"),
+                        ("  [once]    - Allow just this once", "dim"),
+                        ("", "dim"),
+                        ("File references:", "bold"),
+                        ("  Use @path/to/file to include file contents in your prompt.", "dim"),
+                        ("  - @src/main.py      - Reference a file (contents included)", "dim"),
+                        ("  - @./config.json    - Reference with explicit relative path", "dim"),
+                        ("  - @~/documents/     - Reference with home directory", "dim"),
+                        ("", "dim"),
+                        ("Slash commands:", "bold"),
+                        ("  Use /command_name [args...] to invoke slash commands from .jaato/commands/.", "dim"),
+                        ("  - Type / to see available commands with descriptions", "dim"),
+                        ("", "dim"),
+                        ("Keyboard shortcuts:", "bold"),
+                        ("  ↑/↓       - Navigate prompt history (or completion menu)", "dim"),
+                        ("  ←/→       - Move cursor within line", "dim"),
+                        ("  Ctrl+Y    - Yank (copy) last response to clipboard", "dim"),
+                        ("  TAB/Enter - Accept selected completion", "dim"),
+                        ("  Escape    - Dismiss completion menu", "dim"),
+                        ("  Esc+Esc   - Clear input", "dim"),
+                        ("  PgUp/PgDn - Scroll output up/down", "dim"),
+                        ("  Home/End  - Scroll to top/bottom of output", "dim"),
+                    ])
+
+                    display.show_lines(help_lines)
+                    continue
+
+                # Tools command - forward to server
+                elif cmd == "tools":
+                    subcmd = args[0] if args else "list"
+                    subargs = args[1:] if len(args) > 1 else []
+                    await client.execute_command(f"tools.{subcmd}", subargs)
                     continue
 
                 # Session subcommands - forward to server as session.<subcommand>

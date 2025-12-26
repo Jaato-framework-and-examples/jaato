@@ -303,6 +303,64 @@ class JaatoDaemon:
                     self._ipc_server.set_client_session(client_id, default_session_id)
                 return
 
+            elif cmd == "session.delete":
+                if event.args:
+                    session_id_to_delete = event.args[0]
+                    if self._session_manager.delete_session(session_id_to_delete):
+                        from server.events import SystemMessageEvent
+                        self._route_event(client_id, SystemMessageEvent(
+                            message=f"Session '{session_id_to_delete}' deleted.",
+                            style="info",
+                        ))
+                    else:
+                        from server.events import SystemMessageEvent
+                        self._route_event(client_id, SystemMessageEvent(
+                            message=f"Session '{session_id_to_delete}' not found.",
+                            style="warning",
+                        ))
+                return
+
+            # Tools commands - handled per-session
+            elif cmd.startswith("tools."):
+                # Get the client's session
+                session = self._session_manager.get_client_session(client_id)
+                if not session or not session.server:
+                    from server.events import SystemMessageEvent
+                    self._route_event(client_id, SystemMessageEvent(
+                        message="No active session. Use 'session attach' first.",
+                        style="warning",
+                    ))
+                    return
+
+                tools_subcmd = cmd.split(".", 1)[1] if "." in cmd else "list"
+                from server.events import SystemMessageEvent
+
+                if tools_subcmd == "list":
+                    # Get tool status from session's server
+                    lines = self._format_tools_list(session.server)
+                    self._route_event(client_id, SystemMessageEvent(
+                        message="\n".join(lines),
+                        style="info",
+                    ))
+                elif tools_subcmd == "enable" and event.args:
+                    result = self._tools_enable(session.server, event.args[0])
+                    self._route_event(client_id, SystemMessageEvent(
+                        message=result,
+                        style="info",
+                    ))
+                elif tools_subcmd == "disable" and event.args:
+                    result = self._tools_disable(session.server, event.args[0])
+                    self._route_event(client_id, SystemMessageEvent(
+                        message=result,
+                        style="info",
+                    ))
+                else:
+                    self._route_event(client_id, SystemMessageEvent(
+                        message="Usage: tools list | tools enable <name> | tools disable <name>",
+                        style="dim",
+                    ))
+                return
+
         # Route to session
         self._session_manager.handle_request(client_id, session_id, event)
 
@@ -328,6 +386,14 @@ class JaatoDaemon:
             {"name": "session delete", "description": "Delete a session"},
         ]
         commands.extend(session_commands)
+
+        # Static tools commands (handled by daemon)
+        tools_commands = [
+            {"name": "tools list", "description": "List all tools with status"},
+            {"name": "tools enable", "description": "Enable a tool (or 'all')"},
+            {"name": "tools disable", "description": "Disable a tool (or 'all')"},
+        ]
+        commands.extend(tools_commands)
 
         # Get commands from any active session
         if self._session_manager:
@@ -377,6 +443,115 @@ class JaatoDaemon:
                 unique_commands.append(cmd)
 
         return unique_commands
+
+    def _format_tools_list(self, server) -> list:
+        """Format tools list for display.
+
+        Args:
+            server: JaatoServer instance.
+
+        Returns:
+            List of formatted lines.
+        """
+        tool_status = []
+
+        # Get registry tools with status
+        if server.registry:
+            tool_status.extend(server.registry.get_tool_status())
+
+        # Add permission plugin tools (always enabled)
+        if server.permission_plugin:
+            for schema in server.permission_plugin.get_tool_schemas():
+                tool_status.append({
+                    'name': schema.name,
+                    'description': schema.description,
+                    'enabled': True,
+                    'plugin': 'permission',
+                })
+
+        if not tool_status:
+            return ["No tools available."]
+
+        # Group tools by plugin
+        by_plugin = {}
+        for tool in tool_status:
+            plugin = tool.get('plugin', 'unknown')
+            if plugin not in by_plugin:
+                by_plugin[plugin] = []
+            by_plugin[plugin].append(tool)
+
+        # Count enabled/disabled
+        enabled_count = sum(1 for t in tool_status if t.get('enabled', True))
+        disabled_count = len(tool_status) - enabled_count
+
+        lines = [
+            f"Tools ({enabled_count} enabled, {disabled_count} disabled):",
+            "  Use 'tools enable <name>' or 'tools disable <name>' to toggle",
+            "",
+        ]
+
+        for plugin_name in sorted(by_plugin.keys()):
+            tools = by_plugin[plugin_name]
+            lines.append(f"  [{plugin_name}]")
+
+            for tool in sorted(tools, key=lambda t: t['name']):
+                name = tool['name']
+                desc = tool.get('description', '')[:50]  # Truncate long descriptions
+                enabled = tool.get('enabled', True)
+                status = "✓" if enabled else "○"
+                lines.append(f"    {status} {name}: {desc}")
+
+        return lines
+
+    def _tools_enable(self, server, tool_name: str) -> str:
+        """Enable a tool.
+
+        Args:
+            server: JaatoServer instance.
+            tool_name: Tool name or 'all'.
+
+        Returns:
+            Result message.
+        """
+        if not server.registry:
+            return "No registry available."
+
+        if tool_name.lower() == "all":
+            count = 0
+            for status in server.registry.get_tool_status():
+                if not status.get('enabled', True):
+                    server.registry.enable_tool(status['name'])
+                    count += 1
+            return f"Enabled {count} tools."
+
+        if server.registry.enable_tool(tool_name):
+            return f"Enabled tool: {tool_name}"
+        return f"Tool not found or already enabled: {tool_name}"
+
+    def _tools_disable(self, server, tool_name: str) -> str:
+        """Disable a tool.
+
+        Args:
+            server: JaatoServer instance.
+            tool_name: Tool name or 'all'.
+
+        Returns:
+            Result message.
+        """
+        if not server.registry:
+            return "No registry available."
+
+        if tool_name.lower() == "all":
+            count = 0
+            for status in server.registry.get_tool_status():
+                if status.get('enabled', True):
+                    server.registry.disable_tool(status['name'])
+                    count += 1
+            return f"Disabled {count} tools."
+
+        if server.registry.disable_tool(tool_name):
+            return f"Disabled tool: {tool_name}"
+        return f"Tool not found or already disabled: {tool_name}"
 
 
 def daemonize(log_file: str = DEFAULT_LOG_FILE) -> None:
