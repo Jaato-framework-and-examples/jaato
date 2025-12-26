@@ -2273,6 +2273,23 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     # Create input handler for completions
     input_handler = InputHandler()
 
+    # Add IPC mode client-side commands for completion
+    # Server commands (session.list, etc.) are forwarded via execute_command
+    client_commands = [
+        ("help", "Show available commands"),
+        ("exit", "Exit the client"),
+        ("quit", "Exit the client"),
+        ("stop", "Stop current model generation"),
+        ("reset", "Reset session history"),
+        ("clear", "Clear output display"),
+        # Server session commands (use server syntax)
+        ("session.list", "List all sessions"),
+        ("session.create", "Create a new session"),
+        ("session.attach", "Attach to an existing session"),
+        ("session.delete", "Delete a session"),
+    ]
+    input_handler.add_commands(client_commands)
+
     # Create display with full features
     display = PTDisplay(
         keybinding_config=keybindings,
@@ -2576,19 +2593,19 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     )
                     continue
 
-                # Handle commands (without slash, matching non-IPC mode)
+                # Handle commands
                 text_lower = text.lower()
+                cmd_parts = text.split()
+                cmd = cmd_parts[0].lower() if cmd_parts else ""
+                args = cmd_parts[1:] if len(cmd_parts) > 1 else []
 
-                # Simple commands - match entire input
+                # Client-side commands
                 if text_lower in ("exit", "quit", "q"):
                     should_exit = True
                     display.stop()
                     break
                 elif text_lower == "stop":
                     await client.stop()
-                    continue
-                elif text_lower == "sessions":
-                    await client.list_sessions()
                     continue
                 elif text_lower == "reset":
                     await client.execute_command("reset", [])
@@ -2598,19 +2615,17 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     continue
                 elif text_lower == "help":
                     display.add_system_message(
-                        "Commands: exit, quit, stop, sessions, new [name], reset, clear, help"
+                        "Commands: exit, stop, reset, clear, help"
+                    )
+                    display.add_system_message(
+                        "Session: session.list, session.create [name], session.attach <id>, session.delete <id>",
+                        style="dim"
                     )
                     continue
 
-                # Commands with arguments - match first word
-                cmd_parts = text.split(None, 1)
-                cmd = cmd_parts[0].lower() if cmd_parts else ""
-                args = cmd_parts[1] if len(cmd_parts) > 1 else ""
-
-                if cmd == "new":
-                    # Create new session with optional name
-                    await client.execute_command("session.create", args.split() if args else [])
-                    display.add_system_message("Creating new session...", style="dim")
+                # Server commands (session.*, etc.) - forward to server
+                elif cmd.startswith("session."):
+                    await client.execute_command(cmd, args)
                     continue
 
                 # Send message to model
