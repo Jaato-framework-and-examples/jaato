@@ -727,9 +727,15 @@ class PermissionResponseCompleter(Completer):
         # Use plugin-provided options if available, otherwise use defaults
         if self._options:
             for opt in self._options:
-                short = opt.short
-                full = opt.full
-                description = opt.description
+                # Handle both dict and object options
+                if isinstance(opt, dict):
+                    short = opt.get('key', opt.get('short', ''))
+                    full = opt.get('label', opt.get('full', ''))
+                    description = opt.get('description', '')
+                else:
+                    short = getattr(opt, 'short', getattr(opt, 'key', ''))
+                    full = getattr(opt, 'full', getattr(opt, 'label', ''))
+                    description = getattr(opt, 'description', '')
                 # Match against both short and full forms
                 if not text or short.lower().startswith(text) or full.lower().startswith(text):
                     yield Completion(
