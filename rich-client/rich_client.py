@@ -137,14 +137,45 @@ class RichClient:
         """Run an async coroutine from sync context.
 
         Uses the stored event loop if available, otherwise creates a new one.
+        Handles being called from within an already-running event loop (e.g., prompt_toolkit).
         """
         if self._async_loop and self._async_loop.is_running():
             # Submit to running loop from another thread
             future = asyncio.run_coroutine_threadsafe(coro, self._async_loop)
             return future.result(timeout=30)
         else:
-            # No running loop, create one
-            return asyncio.run(coro)
+            # Check if we're inside a running event loop (e.g., prompt_toolkit)
+            try:
+                asyncio.get_running_loop()
+                # We're inside a running loop - run coroutine in a separate thread
+                # with its own event loop. We need to create a new loop in that thread.
+                import threading
+                result = None
+                exception = None
+
+                def run_in_thread():
+                    nonlocal result, exception
+                    try:
+                        # Create a new event loop for this thread
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            result = loop.run_until_complete(coro)
+                        finally:
+                            loop.close()
+                    except Exception as e:
+                        exception = e
+
+                thread = threading.Thread(target=run_in_thread)
+                thread.start()
+                thread.join(timeout=30)
+
+                if exception:
+                    raise exception
+                return result
+            except RuntimeError:
+                # No running loop, create one
+                return asyncio.run(coro)
 
     def _create_output_callback(self,
                                   suppress_sources: Optional[set] = None,
