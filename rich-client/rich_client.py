@@ -2084,11 +2084,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     # Create agent registry for multi-agent support
     agent_registry = AgentRegistry()
 
-    # Create input handler for completions with client-side commands
-    # In IPC mode, we use CLIENT_COMMANDS instead of DEFAULT_COMMANDS
-    # Server/plugin commands are added when CommandListEvent is received
-    from shared.client_commands import CLIENT_COMMANDS
-    input_handler = InputHandler(commands=list(CLIENT_COMMANDS))
+    # Create input handler for completions - use default commands like direct mode
+    # Server/plugin commands are added dynamically when CommandListEvent is received
+    input_handler = InputHandler()
 
     # Session provider will be set after state variables are defined (below)
 
