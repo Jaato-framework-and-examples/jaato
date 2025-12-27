@@ -793,7 +793,14 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("toggle_tools"))
         def handle_ctrl_t(event):
-            """Handle Ctrl+T - enter/exit tool navigation mode."""
+            """Handle Ctrl+T - toggle tool view between collapsed/expanded."""
+            buffer = self._get_active_buffer()
+            buffer.toggle_tools_expanded()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("tool_nav_enter"))
+        def handle_tool_nav_enter(event):
+            """Handle Ctrl+N - enter/exit tool navigation mode."""
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
                 # Already in nav mode - exit
@@ -801,9 +808,6 @@ class PTDisplay:
             elif buffer._active_tools:
                 # Enter navigation mode (auto-expands view)
                 buffer.enter_tool_navigation()
-            else:
-                # No tools - just toggle global expand state
-                buffer.toggle_tools_expanded()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("yank"))
