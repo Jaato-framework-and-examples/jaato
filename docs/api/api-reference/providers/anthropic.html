@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Anthropic Provider - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="github-models.html">GitHub Models</a></li>
+          <li><a href="anthropic.html" class="active">Anthropic</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/mcp.html">MCP</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Anthropic Provider</h1>
+          <p class="lead">
+            Access Claude models (Claude 3.5, Claude 4, Claude Opus 4.5) through
+            Anthropic's API with support for extended thinking, prompt caching,
+            and function calling.
+          </p>
+
+          <table>
+            <tbody>
+              <tr>
+                <td><strong>Name</strong></td>
+                <td><code>anthropic</code></td>
+              </tr>
+              <tr>
+                <td><strong>SDK</strong></td>
+                <td><code>anthropic</code></td>
+              </tr>
+              <tr>
+                <td><strong>Models</strong></td>
+                <td>Claude 3.5, Claude 4, Claude Opus 4.5</td>
+              </tr>
+              <tr>
+                <td><strong>Max Context</strong></td>
+                <td>200K tokens (all models)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h2 id="models">Available Models</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Context</th>
+                <th>Extended Thinking</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>claude-opus-4-5-20251101</strong></td>
+                <td>200K</td>
+                <td>Yes</td>
+              </tr>
+              <tr>
+                <td><strong>claude-sonnet-4-20250514</strong></td>
+                <td>200K</td>
+                <td>Yes</td>
+              </tr>
+              <tr>
+                <td><strong>claude-haiku-4-20250414</strong></td>
+                <td>200K</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td><strong>claude-3-5-sonnet-20241022</strong></td>
+                <td>200K</td>
+                <td>Yes</td>
+              </tr>
+              <tr>
+                <td><strong>claude-3-5-haiku-20241022</strong></td>
+                <td>200K</td>
+                <td>No</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick start</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import load_provider, ProviderConfig
+
+provider = load_provider("anthropic")
+
+# Initialize with API key
+provider.initialize(ProviderConfig(
+    api_key="sk-ant-...",  # or from ANTHROPIC_API_KEY env
+))
+
+# Connect to a model
+provider.connect("claude-sonnet-4-20250514")
+
+# Start chatting
+provider.create_session(
+    system_instruction="You are helpful."
+)
+response = provider.send_message("Hello!")
+print(response.text)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">With extended thinking</div>
+          <div class="code-block">
+            <pre><code class="language-python">provider.initialize(ProviderConfig(
+    api_key="sk-ant-...",
+    extra={
+        'enable_thinking': True,
+        'thinking_budget': 10000
+    }
+))
+
+# Response includes reasoning
+response = provider.send_message("Complex question")
+print(f"Thinking: {response.thinking}")
+print(f"Answer: {response.text}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Extended Thinking -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="thinking">Extended Thinking</h2>
+          <p>
+            Extended thinking allows Claude to show its reasoning process before
+            generating a response. This is useful for complex problems, debugging
+            model behavior, or when you want transparency into the reasoning.
+          </p>
+
+          <h3>When to Use Extended Thinking</h3>
+          <ul>
+            <li><strong>Complex reasoning</strong> - Math, logic, multi-step problems</li>
+            <li><strong>Code analysis</strong> - Understanding large codebases</li>
+            <li><strong>Decision making</strong> - Weighing pros and cons</li>
+            <li><strong>Debugging</strong> - Understanding why the model chose an answer</li>
+          </ul>
+
+          <h3>Configuration Options</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Option</th>
+                <th>Type</th>
+                <th>Default</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>enable_thinking</code></td>
+                <td>bool</td>
+                <td>False</td>
+                <td>Enable extended thinking</td>
+              </tr>
+              <tr>
+                <td><code>thinking_budget</code></td>
+                <td>int</td>
+                <td>10000</td>
+                <td>Max tokens for thinking</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Thinking Budget</div>
+            The thinking budget limits how many tokens Claude can use for internal
+            reasoning. Higher values allow more thorough analysis but increase
+            latency and cost. Start with 10,000 and adjust based on task complexity.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Enable extended thinking</div>
+          <div class="code-block">
+            <pre><code class="language-python">provider.initialize(ProviderConfig(
+    api_key="sk-ant-...",
+    extra={
+        'enable_thinking': True,
+        'thinking_budget': 15000  # More tokens for complex tasks
+    }
+))</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Access thinking in response</div>
+          <div class="code-block">
+            <pre><code class="language-python">response = provider.send_message(
+    "Explain the trade-offs between microservices and monolith"
+)
+
+# Check if thinking is present
+if response.has_thinking:
+    print("=== Claude's reasoning ===")
+    print(response.thinking)
+    print()
+
+print("=== Final answer ===")
+print(response.text)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Example thinking output</div>
+          <div class="code-block">
+            <pre><code class="language-text">=== Claude's reasoning ===
+Let me think through the key trade-offs:
+
+For microservices:
+- Pros: Independent deployment, technology flexibility...
+- Cons: Distributed systems complexity, network latency...
+
+For monolith:
+- Pros: Simpler to develop initially, no network overhead...
+- Cons: Deployment coupling, scaling limitations...
+
+I should structure this by category: development, deployment,
+scaling, and operations...
+
+=== Final answer ===
+Here are the key trade-offs between microservices and monolith architectures:
+...</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Prompt Caching -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="caching">Prompt Caching</h2>
+          <p>
+            Prompt caching reduces cost by up to <strong>90%</strong> and improves
+            latency by up to <strong>85%</strong> for repeated prompts. It's
+            automatically applied to system instructions and tool definitions.
+          </p>
+
+          <h3>How It Works</h3>
+          <ul>
+            <li>Cached content is stored for 5 minutes (refreshed on each use)</li>
+            <li>Cached reads cost 0.1x the normal input price</li>
+            <li>Cache writes cost 1.25x but only happen once</li>
+            <li>System instructions and tools are automatically cached</li>
+          </ul>
+
+          <h3>Best Use Cases</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Scenario</th>
+                <th>Savings</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Long system instructions</td>
+                <td>High - reused every message</td>
+              </tr>
+              <tr>
+                <td>Many tool definitions</td>
+                <td>High - reused every message</td>
+              </tr>
+              <tr>
+                <td>Document analysis</td>
+                <td>High - document cached across questions</td>
+              </tr>
+              <tr>
+                <td>Simple conversations</td>
+                <td>Low - little to cache</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Automatic Caching</div>
+            When caching is enabled, the provider automatically adds
+            <code>cache_control</code> to system instructions and tool definitions.
+            No manual configuration needed.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Enable prompt caching</div>
+          <div class="code-block">
+            <pre><code class="language-python">provider.initialize(ProviderConfig(
+    api_key="sk-ant-...",
+    extra={
+        'enable_caching': True
+    }
+))</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Cost comparison (100K token prompt)</div>
+          <div class="code-block">
+            <pre><code class="language-text">Without caching:
+  100K tokens × $3.00/MTok = $0.30 per request
+
+With caching:
+  First request: $0.375 (1.25x write cost)
+  Subsequent:    $0.03  (0.1x read cost)
+
+After 2 requests: 75% savings
+After 10 requests: 90% savings</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Caching with tools</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import ToolSchema
+
+tools = [
+    ToolSchema(name='search', description='...', parameters={...}),
+    ToolSchema(name='execute', description='...', parameters={...}),
+    ToolSchema(name='read_file', description='...', parameters={...}),
+    # ... many more tools
+]
+
+provider.create_session(
+    system_instruction="You are an AI assistant...",
+    tools=tools  # Tools and system cached automatically
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Function Calling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="tools">Function Calling</h2>
+          <p>
+            Claude supports function calling (tool use) for interacting with
+            external systems. Tools are defined using JSON Schema and automatically
+            converted to Anthropic's format.
+          </p>
+
+          <h3>Tool Schema Differences</h3>
+          <p>
+            Anthropic uses <code>input_schema</code> instead of <code>parameters</code>.
+            The provider handles this conversion automatically.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>jaato Format</th>
+                <th>Anthropic Format</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>parameters</code></td>
+                <td><code>input_schema</code></td>
+              </tr>
+              <tr>
+                <td><code>function_call</code></td>
+                <td><code>tool_use</code> block</td>
+              </tr>
+              <tr>
+                <td><code>function_response</code></td>
+                <td><code>tool_result</code> block</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Automatic Conversion</div>
+            You don't need to handle Anthropic-specific formats. Use the standard
+            <code>ToolSchema</code> type and the provider converts automatically.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Define and use tools</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import ToolSchema, ToolResult
+
+# Define tool with standard ToolSchema
+tools = [ToolSchema(
+    name='get_weather',
+    description='Get current weather for a location',
+    parameters={
+        "type": "object",
+        "properties": {
+            "location": {"type": "string", "description": "City name"}
+        },
+        "required": ["location"]
+    }
+)]
+
+# Create session with tools
+provider.create_session(
+    system_instruction="You are a weather assistant.",
+    tools=tools
+)
+
+# Model may request tool use
+response = provider.send_message("What's the weather in Tokyo?")
+
+if response.function_calls:
+    fc = response.function_calls[0]
+    print(f"Tool: {fc.name}, Args: {fc.args}")
+    # Tool: get_weather, Args: {'location': 'Tokyo'}
+
+    # Send result back
+    result = ToolResult(
+        call_id=fc.id,
+        name=fc.name,
+        result={"temp": 22, "condition": "sunny"}
+    )
+    response = provider.send_tool_results([result])
+    print(response.text)
+    # "The weather in Tokyo is 22°C and sunny!"</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Authentication -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="authentication">Authentication</h2>
+          <p>
+            Anthropic uses API key authentication. Get your key from the
+            <a href="https://console.anthropic.com/" target="_blank">Anthropic Console</a>.
+          </p>
+
+          <h3>API Key Setup</h3>
+          <ol>
+            <li>Go to <a href="https://console.anthropic.com/" target="_blank">console.anthropic.com</a></li>
+            <li>Navigate to API Keys section</li>
+            <li>Click "Create Key"</li>
+            <li>Copy the key (starts with <code>sk-ant-</code>)</li>
+            <li>Set as environment variable</li>
+          </ol>
+
+          <h3>Environment Variable</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Variable</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>ANTHROPIC_API_KEY</code></td>
+                <td>Anthropic API key (required)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Keep Your Key Secret</div>
+            Never commit your API key to version control. Use environment
+            variables or a <code>.env</code> file (added to <code>.gitignore</code>).
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Set environment variable</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># In .env file (add to .gitignore)
+ANTHROPIC_API_KEY=sk-ant-api03-...
+
+# Or export directly (session only)
+export ANTHROPIC_API_KEY=sk-ant-api03-...</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Auto-detect from environment</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import load_provider
+
+provider = load_provider("anthropic")
+provider.initialize()  # Uses ANTHROPIC_API_KEY</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Explicit API key</div>
+          <div class="code-block">
+            <pre><code class="language-python">provider.initialize(ProviderConfig(
+    api_key="sk-ant-api03-..."
+))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error Handling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="errors">Error Handling</h2>
+          <p>
+            The provider throws specific exceptions with actionable error messages
+            for common failure scenarios.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Exception</th>
+                <th>Cause</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>APIKeyNotFoundError</code></td>
+                <td>No API key in env or config</td>
+              </tr>
+              <tr>
+                <td><code>APIKeyInvalidError</code></td>
+                <td>API key rejected (401)</td>
+              </tr>
+              <tr>
+                <td><code>RateLimitError</code></td>
+                <td>Too many requests (429)</td>
+              </tr>
+              <tr>
+                <td><code>OverloadedError</code></td>
+                <td>Anthropic API overloaded (529)</td>
+              </tr>
+              <tr>
+                <td><code>ContextLimitError</code></td>
+                <td>Context window exceeded</td>
+              </tr>
+              <tr>
+                <td><code>ModelNotFoundError</code></td>
+                <td>Invalid model ID</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Handle errors</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.anthropic.errors import (
+    APIKeyNotFoundError,
+    APIKeyInvalidError,
+    RateLimitError,
+    OverloadedError,
+)
+
+try:
+    provider.initialize(config)
+    provider.send_message("Hello")
+except APIKeyNotFoundError:
+    print("Set ANTHROPIC_API_KEY environment variable")
+except APIKeyInvalidError:
+    print("Check your API key at console.anthropic.com")
+except RateLimitError:
+    print("Too many requests, retry later")
+except OverloadedError:
+    print("Anthropic API is busy, retry in a moment")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration Summary -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="config">Configuration Summary</h2>
+
+          <h3>Environment Variables</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Variable</th>
+                <th>Required</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>ANTHROPIC_API_KEY</code></td>
+                <td>Yes</td>
+                <td>Anthropic API key</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>ProviderConfig.extra Options</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th>Type</th>
+                <th>Default</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>enable_caching</code></td>
+                <td>bool</td>
+                <td>False</td>
+                <td>Enable prompt caching</td>
+              </tr>
+              <tr>
+                <td><code>enable_thinking</code></td>
+                <td>bool</td>
+                <td>False</td>
+                <td>Enable extended thinking</td>
+              </tr>
+              <tr>
+                <td><code>thinking_budget</code></td>
+                <td>int</td>
+                <td>10000</td>
+                <td>Max thinking tokens</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Full configuration example</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import load_provider, ProviderConfig
+
+provider = load_provider("anthropic")
+provider.initialize(ProviderConfig(
+    api_key="sk-ant-...",  # Or use ANTHROPIC_API_KEY env
+    extra={
+        'enable_caching': True,     # 90% cost reduction
+        'enable_thinking': True,    # Reasoning traces
+        'thinking_budget': 15000,   # Max thinking tokens
+    }
+))
+
+provider.connect("claude-sonnet-4-20250514")
+
+# Create session
+provider.create_session(
+    system_instruction="You are a helpful assistant.",
+    tools=[...]  # Optional tools
+)
+
+# Chat
+response = provider.send_message("Explain quantum computing")
+print(f"Thinking: {response.thinking}")
+print(f"Answer: {response.text}")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">.env file example</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env
+ANTHROPIC_API_KEY=sk-ant-api03-...
+JAATO_PROVIDER=anthropic
+MODEL_NAME=claude-sonnet-4-20250514</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>

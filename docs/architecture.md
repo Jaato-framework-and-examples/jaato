@@ -788,7 +788,8 @@ All plugins use internal types defined in `shared/plugins/model_provider/types.p
 #### Available Providers
 
 - **google_genai** - Google GenAI SDK (Vertex AI, Gemini models)
-- **anthropic** - (Future) Anthropic SDK (Claude models)
+- **github_models** - GitHub Models API (multi-provider via Azure AI Inference)
+- **anthropic** - Anthropic SDK (Claude models with extended thinking & prompt caching)
 
 ### Prompt Enrichment Pipeline
 
@@ -1312,9 +1313,16 @@ shared/
     │   ├── __init__.py      # Exports, discovery functions
     │   ├── base.py          # ModelProviderPlugin protocol
     │   ├── types.py         # ToolSchema, Message, Part, ProviderResponse
-    │   └── google_genai/    # Google GenAI implementation
-    │       ├── provider.py  # GoogleGenAIProvider
-    │       └── converters.py # Type conversion utilities
+    │   ├── google_genai/    # Google GenAI implementation
+    │   │   ├── provider.py  # GoogleGenAIProvider
+    │   │   └── converters.py # Type conversion utilities
+    │   ├── github_models/   # GitHub Models implementation
+    │   │   ├── provider.py  # GitHubModelsProvider
+    │   │   └── converters.py # Type conversion utilities
+    │   └── anthropic/       # Anthropic Claude implementation
+    │       ├── provider.py  # AnthropicProvider (extended thinking, caching)
+    │       ├── converters.py # Type conversion utilities
+    │       └── errors.py    # Custom error types
     │
     │   # Tool Plugins (PLUGIN_KIND = "tool")
     ├── background/          # BackgroundPlugin (orchestrator + protocol)

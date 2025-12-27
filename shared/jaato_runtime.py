@@ -168,14 +168,18 @@ class JaatoRuntime:
         # Get enabled tool schemas (respects disabled tools set)
         self._all_tool_schemas = self._registry.get_enabled_tool_schemas()
 
-        # Add permission plugin schemas if available
+        # Add permission plugin schemas if available (but avoid duplicates)
+        # Permission plugin may already be exposed via registry.expose_tool("permission")
         if self._permission_plugin:
-            self._all_tool_schemas.extend(self._permission_plugin.get_tool_schemas())
+            existing_names = {s.name for s in self._all_tool_schemas}
+            for schema in self._permission_plugin.get_tool_schemas():
+                if schema.name not in existing_names:
+                    self._all_tool_schemas.append(schema)
 
         # Get enabled executors (respects disabled tools set)
         self._all_executors = dict(self._registry.get_enabled_executors())
 
-        # Add permission plugin executors
+        # Add permission plugin executors (dict update handles duplicates)
         if self._permission_plugin:
             for name, fn in self._permission_plugin.get_executors().items():
                 self._all_executors[name] = fn
