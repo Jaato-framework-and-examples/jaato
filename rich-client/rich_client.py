@@ -2351,14 +2351,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     # Create agent registry for multi-agent support
     agent_registry = AgentRegistry()
 
-    # Create input handler for completions
-    input_handler = InputHandler()
-
-    # Client-only commands for completion
-    # Use shared client commands for completion
-    # Server/plugin commands (session, reset, etc.) are fetched from server
+    # Create input handler for completions with client-side commands
+    # In IPC mode, we use CLIENT_COMMANDS instead of DEFAULT_COMMANDS
+    # Server/plugin commands are added when CommandListEvent is received
     from shared.client_commands import CLIENT_COMMANDS
-    input_handler.add_commands(CLIENT_COMMANDS)
+    input_handler = InputHandler(commands=list(CLIENT_COMMANDS))
 
     # Session provider will be set after state variables are defined (below)
 
@@ -2997,6 +2994,101 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 # History command - request from server
                 elif cmd == "history":
                     await client.request_history()
+                    continue
+
+                # Keybindings command - handle locally
+                elif cmd == "keybindings":
+                    subcmd = args[0].lower() if args else "list"
+                    if subcmd in ("list", "keybindings"):
+                        # Show keybindings
+                        from keybindings import DEFAULT_KEYBINDINGS
+                        config = display._keybinding_config
+                        lines = [
+                            ("─" * 50, "dim"),
+                            ("Current Keybindings:", "bold"),
+                        ]
+                        for action, default_key in DEFAULT_KEYBINDINGS.items():
+                            current = config.get(action, default_key)
+                            if isinstance(current, list):
+                                current = " ".join(current)
+                            lines.append((f"  {action}: {current}", "dim"))
+                        lines.append(("─" * 50, "dim"))
+                        display.show_lines(lines)
+                    elif subcmd == "reload":
+                        try:
+                            display.reload_keybindings()
+                            display.show_lines([
+                                ("[Keybindings reloaded successfully]", "green"),
+                            ])
+                        except Exception as e:
+                            display.show_lines([
+                                (f"[Error reloading keybindings: {e}]", "red"),
+                            ])
+                    elif subcmd == "profile":
+                        from keybindings import detect_terminal, list_available_profiles
+                        detected = detect_terminal()
+                        profiles = list_available_profiles()
+                        if len(args) > 1:
+                            # Switch profile
+                            new_profile = args[1]
+                            from keybindings import load_keybindings
+                            try:
+                                new_config = load_keybindings(profile=new_profile)
+                                display._keybinding_config = new_config
+                                display._build_app()
+                                display.show_lines([
+                                    (f"[Switched to profile: {new_profile}]", "green"),
+                                ])
+                            except Exception as e:
+                                display.show_lines([
+                                    (f"[Error switching profile: {e}]", "red"),
+                                ])
+                        else:
+                            # Show profiles
+                            lines = [
+                                ("─" * 50, "dim"),
+                                (f"Current profile: {detected}", "bold"),
+                                ("Available profiles:", ""),
+                            ]
+                            for p in profiles:
+                                marker = " *" if p == detected else ""
+                                lines.append((f"  {p}{marker}", "dim"))
+                            lines.append(("─" * 50, "dim"))
+                            display.show_lines(lines)
+                    elif subcmd == "set":
+                        if len(args) < 3:
+                            display.show_lines([
+                                ("Usage: keybindings set <action> <key> [--save]", "yellow"),
+                            ])
+                        else:
+                            action = args[1]
+                            key = args[2]
+                            save = "--save" in args
+                            from keybindings import DEFAULT_KEYBINDINGS
+                            if action not in DEFAULT_KEYBINDINGS:
+                                display.show_lines([
+                                    (f"Unknown action: {action}", "red"),
+                                    (f"Valid actions: {', '.join(DEFAULT_KEYBINDINGS.keys())}", "dim"),
+                                ])
+                            else:
+                                config = display._keybinding_config
+                                config.set(action, key)
+                                display._build_app()
+                                lines = [(f"[Set {action} = {key}]", "green")]
+                                if save:
+                                    if config.save_to_file():
+                                        lines.append(("  Saved to .jaato/keybindings.json", "cyan"))
+                                    else:
+                                        lines.append(("  [Warning: Failed to save]", "yellow"))
+                                display.show_lines(lines)
+                    else:
+                        display.show_lines([
+                            (f"Unknown subcommand: {subcmd}", "yellow"),
+                            ("  keybindings list    - Show keybindings", "dim"),
+                            ("  keybindings set     - Set a keybinding", "dim"),
+                            ("  keybindings profile - Show/switch profiles", "dim"),
+                            ("  keybindings reload  - Reload from config", "dim"),
+                        ])
                     continue
 
                 # Other server commands (reset, plugin commands) - forward directly
