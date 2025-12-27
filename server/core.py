@@ -493,7 +493,11 @@ class JaatoServer:
                     parent_agent_id=parent_agent_id,
                 )
                 if created_at:
-                    agent.created_at = created_at
+                    # Convert datetime to isoformat string if needed
+                    if hasattr(created_at, 'isoformat'):
+                        agent.created_at = created_at.isoformat()
+                    else:
+                        agent.created_at = str(created_at)
                 server._agents[agent_id] = agent
 
                 server.emit(AgentCreatedEvent(
@@ -525,11 +529,18 @@ class JaatoServer:
 
             def on_agent_completed(self, agent_id, completed_at, success,
                                    token_usage=None, turns_used=None):
+                # Convert datetime to isoformat string if needed
+                completed_at_str = completed_at
+                if completed_at and hasattr(completed_at, 'isoformat'):
+                    completed_at_str = completed_at.isoformat()
+                elif completed_at:
+                    completed_at_str = str(completed_at)
+
                 if agent_id in server._agents:
-                    server._agents[agent_id].completed_at = completed_at
+                    server._agents[agent_id].completed_at = completed_at_str
                 server.emit(AgentCompletedEvent(
                     agent_id=agent_id,
-                    completed_at=completed_at,
+                    completed_at=completed_at_str,
                     success=success,
                     token_usage=token_usage,
                     turns_used=turns_used,
