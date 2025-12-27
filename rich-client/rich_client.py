@@ -2546,15 +2546,15 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 # Display permission prompt
                 buffer = agent_registry.get_selected_buffer()
                 if buffer:
-                    buffer.append_text("\n", source="system", mode="write")
+                    buffer.append("system", "\n", "write")
                     for line in event.prompt_lines:
-                        buffer.append_text(line + "\n", source="system", mode="append")
+                        buffer.append("system", line + "\n", "append")
                     # Format options: key=label pairs
                     options_str = ", ".join(
                         f"{opt.get('key', '?')}={opt.get('label', '?')}"
                         for opt in event.response_options
                     )
-                    buffer.append_text(f"[{options_str}]: ", source="system", mode="append")
+                    buffer.append("system", f"[{options_str}]: ", "append")
                 display.refresh()
                 # Enable permission input mode
                 display.set_waiting_for_channel_input(True, event.response_options)
@@ -2590,13 +2590,24 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.clear_plan(agent_id)
 
             elif isinstance(event, ToolCallStartEvent):
-                display.append_output("tool", f"→ {event.tool_name}...", "write")
+                # Use tool tree visualization (same as direct mode)
+                buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.add_active_tool(event.tool_name, event.tool_args, call_id=event.call_id)
+                    display.refresh()
 
             elif isinstance(event, ToolCallEndEvent):
-                if event.error:
-                    display.append_output("tool", f" error: {event.error}\n", "append")
-                else:
-                    display.append_output("tool", " done\n", "append")
+                # Use tool tree visualization (same as direct mode)
+                buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.mark_tool_completed(
+                        event.tool_name,
+                        event.success,
+                        event.duration_seconds,
+                        event.error_message,
+                        call_id=event.call_id
+                    )
+                    display.refresh()
 
             elif isinstance(event, ContextUpdatedEvent):
                 # Update context usage in status bar
