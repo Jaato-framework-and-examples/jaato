@@ -170,6 +170,28 @@ class SessionManager:
                 for client_id in session.attached_clients:
                     self._emit_to_client(client_id, event)
 
+    def _apply_client_config(self, client_id: str, event: 'ClientConfigRequest') -> None:
+        """Apply client configuration settings.
+
+        Updates environment and plugin settings based on client's config.
+        This allows clients to use their own .env settings (like JAATO_TRACE_LOG)
+        even when connecting to a shared server.
+
+        Args:
+            client_id: The requesting client.
+            event: The client config event with settings.
+        """
+        import os
+
+        # Apply trace log paths if provided
+        if event.trace_log_path:
+            os.environ['JAATO_TRACE_LOG'] = event.trace_log_path
+            logger.info(f"Client {client_id} set JAATO_TRACE_LOG={event.trace_log_path}")
+
+        if event.provider_trace_log:
+            os.environ['PROVIDER_TRACE_LOG'] = event.provider_trace_log
+            logger.info(f"Client {client_id} set PROVIDER_TRACE_LOG={event.provider_trace_log}")
+
     # =========================================================================
     # Session Lifecycle
     # =========================================================================
@@ -705,6 +727,13 @@ class SessionManager:
             session_id: The target session.
             event: The request event.
         """
+        from .events import ClientConfigRequest
+
+        # Handle client config before session lookup (doesn't require session)
+        if isinstance(event, ClientConfigRequest):
+            self._apply_client_config(client_id, event)
+            return
+
         session = self.get_session(session_id)
         if not session:
             self._emit_to_client(client_id, ErrorEvent(

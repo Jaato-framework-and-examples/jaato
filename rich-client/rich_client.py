@@ -732,6 +732,13 @@ class RichClient:
                     if display:
                         display.refresh()
 
+            def on_tool_output(self, agent_id, call_id, chunk):
+                buffer = registry.get_buffer(agent_id)
+                if buffer and call_id:
+                    buffer.append_tool_output(call_id, chunk)
+                    if display:
+                        display.refresh()
+
         hooks = RichClientHooks()
 
         # Store hooks reference for direct calls (e.g., when user sends input)
@@ -2135,6 +2142,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         PlanClearedEvent,
         ToolCallStartEvent,
         ToolCallEndEvent,
+        ToolOutputEvent,
         ContextUpdatedEvent,
         TurnCompletedEvent,
         SystemMessageEvent,
@@ -2345,18 +2353,27 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     "request_id": event.request_id,
                     "options": event.response_options,
                 }
-                # Build prompt lines using shared utility (consistent with direct mode)
-                from shared.ui_utils import build_permission_prompt_lines
-                prompt_lines = build_permission_prompt_lines(
-                    tool_args=event.tool_args,
-                    response_options=event.response_options,
-                    include_tool_name=False,  # Tool name already shown in tool tree
-                )
+
+                # Use pre-formatted prompt lines from server if available (includes diff)
+                if event.prompt_lines:
+                    prompt_lines = event.prompt_lines
+                else:
+                    # Fall back to building prompt lines locally
+                    from shared.ui_utils import build_permission_prompt_lines
+                    prompt_lines = build_permission_prompt_lines(
+                        tool_args=event.tool_args,
+                        response_options=event.response_options,
+                        include_tool_name=False,  # Tool name already shown in tool tree
+                    )
 
                 # Integrate into tool tree (same as direct mode)
                 buffer = agent_registry.get_selected_buffer()
                 if buffer:
-                    buffer.set_tool_permission_pending(event.tool_name, prompt_lines)
+                    buffer.set_tool_permission_pending(
+                        event.tool_name,
+                        prompt_lines,
+                        format_hint=event.format_hint
+                    )
                 display.refresh()
                 # Enable permission input mode
                 display.set_waiting_for_channel_input(True, event.response_options)
@@ -2457,6 +2474,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         call_id=event.call_id
                     )
                     buffer.scroll_to_bottom()  # Auto-scroll when tool tree updates
+                    display.refresh()
+
+            elif isinstance(event, ToolOutputEvent):
+                # Live output chunk from running tool (tail -f style preview)
+                buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
+                if buffer and event.call_id:
+                    buffer.append_tool_output(event.call_id, event.chunk)
                     display.refresh()
 
             elif isinstance(event, ContextUpdatedEvent):

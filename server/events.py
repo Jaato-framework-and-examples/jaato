@@ -37,6 +37,7 @@ class EventType(str, Enum):
     # Tool execution (Server -> Client)
     TOOL_CALL_START = "tool.call_start"
     TOOL_CALL_END = "tool.call_end"
+    TOOL_OUTPUT = "tool.output"  # Live output chunk from running tool
 
     # Permission flow (Server <-> Client)
     PERMISSION_REQUESTED = "permission.requested"
@@ -80,6 +81,9 @@ class EventType(str, Enum):
     # History (Client <-> Server)
     HISTORY_REQUEST = "history.request"
     HISTORY = "history"
+
+    # Client configuration (Client -> Server)
+    CLIENT_CONFIG = "client.config"
 
 
 # =============================================================================
@@ -183,6 +187,15 @@ class ToolCallEndEvent(Event):
 
 
 @dataclass
+class ToolOutputEvent(Event):
+    """Live output chunk from a running tool (tail -f style)."""
+    type: EventType = field(default=EventType.TOOL_OUTPUT)
+    agent_id: str = ""
+    call_id: str = ""  # Required to correlate with specific tool call
+    chunk: str = ""  # Output text chunk (may contain newlines)
+
+
+@dataclass
 class PermissionResponseOption:
     """A valid response option for permission prompts."""
     key: str  # Single char like "y", "n", "a"
@@ -195,7 +208,7 @@ class PermissionResponseOption:
 class PermissionRequestedEvent(Event):
     """Permission is requested for a tool execution.
 
-    Sends structured data - client is responsible for formatting display.
+    Includes pre-formatted prompt lines (with diff for file edits) when available.
     """
     type: EventType = field(default=EventType.PERMISSION_REQUESTED)
     request_id: str = ""
@@ -203,6 +216,8 @@ class PermissionRequestedEvent(Event):
     tool_args: Dict[str, Any] = field(default_factory=dict)
     response_options: List[Dict[str, str]] = field(default_factory=list)
     # ^ List of {key, label, action, description?}
+    prompt_lines: Optional[List[str]] = None  # Pre-formatted prompt (with diff)
+    format_hint: Optional[str] = None  # "diff" for colored diff display
 
 
 @dataclass
@@ -434,6 +449,19 @@ class HistoryEvent(Event):
     # ^ List of {prompt, output, total} per turn
 
 
+@dataclass
+class ClientConfigRequest(Event):
+    """Client sends its configuration to the server.
+
+    Sent after connection to apply client-specific settings like trace paths.
+    The server applies these settings to the session/plugins.
+    """
+    type: EventType = field(default=EventType.CLIENT_CONFIG)
+    # Environment overrides from client's .env
+    trace_log_path: Optional[str] = None  # JAATO_TRACE_LOG
+    provider_trace_log: Optional[str] = None  # PROVIDER_TRACE_LOG
+
+
 # =============================================================================
 # Serialization Helpers
 # =============================================================================
@@ -447,6 +475,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.AGENT_COMPLETED.value: AgentCompletedEvent,
     EventType.TOOL_CALL_START.value: ToolCallStartEvent,
     EventType.TOOL_CALL_END.value: ToolCallEndEvent,
+    EventType.TOOL_OUTPUT.value: ToolOutputEvent,
     EventType.PERMISSION_REQUESTED.value: PermissionRequestedEvent,
     EventType.PERMISSION_RESOLVED.value: PermissionResolvedEvent,
     EventType.CLARIFICATION_REQUESTED.value: ClarificationRequestedEvent,
@@ -470,6 +499,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.TOOL_STATUS.value: ToolStatusEvent,
     EventType.HISTORY_REQUEST.value: HistoryRequest,
     EventType.HISTORY.value: HistoryEvent,
+    EventType.CLIENT_CONFIG.value: ClientConfigRequest,
 }
 
 

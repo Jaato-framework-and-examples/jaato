@@ -29,6 +29,7 @@ from .events import (
     AgentCompletedEvent,
     ToolCallStartEvent,
     ToolCallEndEvent,
+    ToolOutputEvent,
     PermissionRequestedEvent,
     PermissionResolvedEvent,
     ClarificationRequestedEvent,
@@ -48,6 +49,7 @@ from .events import (
     ClarificationResponseRequest,
     StopRequest,
     CommandRequest,
+    ClientConfigRequest,
     # Serialization
     serialize_event,
     deserialize_event,
@@ -70,6 +72,7 @@ __all__ = [
     "AgentCompletedEvent",
     "ToolCallStartEvent",
     "ToolCallEndEvent",
+    "ToolOutputEvent",
     "PermissionRequestedEvent",
     "PermissionResolvedEvent",
     "ClarificationRequestedEvent",
@@ -88,6 +91,7 @@ __all__ = [
     "ClarificationResponseRequest",
     "StopRequest",
     "CommandRequest",
+    "ClientConfigRequest",
     "serialize_event",
     "deserialize_event",
 ]

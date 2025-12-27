@@ -64,6 +64,7 @@ from .events import (
     AgentCompletedEvent,
     ToolCallStartEvent,
     ToolCallEndEvent,
+    ToolOutputEvent,
     PermissionRequestedEvent,
     PermissionResolvedEvent,
     ClarificationRequestedEvent,
@@ -612,6 +613,13 @@ class JaatoServer:
                     error_message=error_message,
                 ))
 
+            def on_tool_output(self, agent_id, call_id, chunk):
+                server.emit(ToolOutputEvent(
+                    agent_id=agent_id,
+                    call_id=call_id,
+                    chunk=chunk,
+                ))
+
         logger.debug("  _setup_agent_hooks: class defined, creating instance...")
         hooks = ServerAgentHooks()
         logger.debug("  _setup_agent_hooks: calling jaato.set_ui_hooks...")
@@ -655,11 +663,24 @@ class JaatoServer:
                     opt_dict["description"] = opt.description
                 options_dicts.append(opt_dict)
 
+            # Get formatted prompt lines (with diff for file edits)
+            prompt_lines = None
+            format_hint = None
+            if hasattr(server.permission_plugin, 'get_formatted_prompt'):
+                try:
+                    prompt_lines, format_hint = server.permission_plugin.get_formatted_prompt(
+                        tool_name, tool_args or {}, "ipc"
+                    )
+                except Exception:
+                    pass  # Fall back to client-side formatting
+
             server.emit(PermissionRequestedEvent(
                 request_id=request_id,
                 tool_name=tool_name,
                 tool_args=tool_args or {},
                 response_options=options_dicts,
+                prompt_lines=prompt_lines,
+                format_hint=format_hint,
             ))
 
         def on_permission_resolved(tool_name: str, request_id: str,

@@ -40,6 +40,7 @@ class ActiveToolCall:
     permission_method: Optional[str] = None  # "yes", "always", "once", "never", "whitelist", "blacklist"
     permission_prompt_lines: Optional[List[str]] = None  # Expanded prompt while pending
     permission_truncated: bool = False  # True if prompt is truncated
+    permission_format_hint: Optional[str] = None  # "diff" for colored diff display
     # Clarification tracking (per-question progressive display)
     clarification_state: Optional[str] = None  # None, "pending", "resolved"
     clarification_prompt_lines: Optional[List[str]] = None  # Current question lines
@@ -47,6 +48,9 @@ class ActiveToolCall:
     clarification_current_question: int = 0  # Current question index (1-based)
     clarification_total_questions: int = 0  # Total number of questions
     clarification_answered: Optional[List[Tuple[int, str]]] = None  # List of (question_index, answer_summary)
+    # Live output tracking (tail -f style preview)
+    output_lines: Optional[List[str]] = None  # Rolling buffer of recent output lines
+    output_max_lines: int = 5  # Max lines to keep in buffer
 
 
 class OutputBuffer:
@@ -353,6 +357,33 @@ class OutputBuffer:
                 tool.error_message = error_message
                 return
 
+    def append_tool_output(self, call_id: str, chunk: str) -> None:
+        """Append output chunk to a running tool's output buffer.
+
+        Used for live "tail -f" style output preview in the tool tree.
+
+        Args:
+            call_id: Unique identifier for the tool call.
+            chunk: Output text chunk (may contain newlines).
+        """
+        for tool in self._active_tools:
+            if tool.call_id == call_id and not tool.completed:
+                # Initialize output_lines if needed
+                if tool.output_lines is None:
+                    tool.output_lines = []
+
+                # Split chunk by newlines and add to buffer
+                lines = chunk.splitlines()
+                for line in lines:
+                    # Skip empty lines from split
+                    if line or chunk == "\n":
+                        tool.output_lines.append(line)
+
+                # Trim to max size (keep most recent lines)
+                if len(tool.output_lines) > tool.output_max_lines:
+                    tool.output_lines = tool.output_lines[-tool.output_max_lines:]
+                return
+
     def remove_active_tool(self, tool_name: str) -> None:
         """Remove a tool from the active tools list (legacy, now marks as completed).
 
@@ -454,17 +485,24 @@ class OutputBuffer:
         """Get list of currently active tools."""
         return list(self._active_tools)
 
-    def set_tool_permission_pending(self, tool_name: str, prompt_lines: List[str]) -> None:
+    def set_tool_permission_pending(
+        self,
+        tool_name: str,
+        prompt_lines: List[str],
+        format_hint: Optional[str] = None
+    ) -> None:
         """Mark a tool as awaiting permission with the prompt to display.
 
         Args:
             tool_name: Name of the tool awaiting permission.
             prompt_lines: Lines of the permission prompt to display.
+            format_hint: Optional hint for display format ("diff" for colored diff).
         """
         for tool in self._active_tools:
             if tool.name == tool_name and not tool.completed:
                 tool.permission_state = "pending"
                 tool.permission_prompt_lines = prompt_lines
+                tool.permission_format_hint = format_hint
                 # Scroll to bottom to show the prompt
                 self._scroll_offset = 0
                 return
@@ -671,6 +709,10 @@ class OutputBuffer:
 
                 for tool in self._active_tools:
                     height += 1  # Tool line
+
+                    # Output preview lines (persists after tool completes)
+                    if tool.output_lines:
+                        height += len(tool.output_lines)
 
                     # Permission denied message
                     if tool.permission_state == "denied" and tool.permission_method:
@@ -1063,6 +1105,20 @@ class OutputBuffer:
                     # Show duration if available
                     if tool.completed and tool.duration_seconds is not None:
                         output.append(f" ({tool.duration_seconds:.1f}s)", style="dim")
+
+                    # Show output preview (persists after tool completes)
+                    if tool.output_lines:
+                        continuation = "   " if is_last else "│  "
+                        for output_line in tool.output_lines:
+                            output.append("\n")
+                            output.append(f"    {continuation}   ", style="dim")
+                            # Truncate long lines
+                            max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
+                            if len(output_line) > max_line_width:
+                                display_line = output_line[:max_line_width - 3] + "..."
+                            else:
+                                display_line = output_line
+                            output.append(display_line, style="dim italic")
 
                     # Show permission denied info (when permission was denied)
                     if tool.permission_state == "denied" and tool.permission_method:

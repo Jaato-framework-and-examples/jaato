@@ -16,6 +16,10 @@ from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
 from shared.token_accounting import TokenLedger
 from shared.plugins.base import OutputCallback
 
+# Callback for streaming tool output during execution
+# (chunk: str) -> None - simplified since call_id is known at call site
+ToolOutputCallback = Callable[[str], None]
+
 if TYPE_CHECKING:
     from shared.plugins.registry import PluginRegistry
     from shared.plugins.permission import PermissionPlugin
@@ -51,6 +55,10 @@ class ToolExecutor:
 
         # Output callback for real-time output from plugins
         self._output_callback: Optional[OutputCallback] = None
+
+        # Tool-specific output callback for streaming during execution
+        # Set per-tool to route output to the correct tool tree entry
+        self._tool_output_callback: Optional[ToolOutputCallback] = None
 
         # Auto-background support
         self._auto_background_enabled = auto_background_enabled
@@ -127,6 +135,33 @@ class ToolExecutor:
             The current OutputCallback, or None if not set.
         """
         return self._output_callback
+
+    def set_tool_output_callback(self, callback: Optional[ToolOutputCallback]) -> None:
+        """Set the callback for streaming tool output during execution.
+
+        This callback is set per-tool-call to route output to the correct
+        tool tree entry. The session sets this before each tool execution
+        with a closure that includes the call_id.
+
+        Args:
+            callback: ToolOutputCallback function (chunk: str) -> None, or None to clear.
+        """
+        self._tool_output_callback = callback
+
+        # Forward to exposed plugins that support it
+        if self._registry:
+            for plugin_name in self._registry.list_exposed():
+                plugin = self._registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'set_tool_output_callback'):
+                    plugin.set_tool_output_callback(callback)
+
+    def get_tool_output_callback(self) -> Optional[ToolOutputCallback]:
+        """Get the current tool output callback.
+
+        Returns:
+            The current ToolOutputCallback, or None if not set.
+        """
+        return self._tool_output_callback
 
     def _get_auto_background_pool(self) -> ThreadPoolExecutor:
         """Get or create the thread pool for auto-background execution."""
