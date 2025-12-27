@@ -611,6 +611,9 @@ class RichClient:
 
             def on_agent_status_changed(self, agent_id, status, error=None):
                 registry.update_status(agent_id, status)
+                # Auto-select the active agent so status bar shows its context
+                if status == "active":
+                    registry.select_agent(agent_id)
                 # Start/stop spinner for this agent's buffer based on status
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
@@ -2248,12 +2251,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 if event.status == "active":
                     model_running = True
                     agent_registry.update_status(event.agent_id, "active")
+                    # Auto-select the active agent so status bar shows its context
+                    agent_registry.select_agent(event.agent_id)
                     # Start spinner on agent's buffer
                     buffer = agent_registry.get_buffer(event.agent_id)
                     if buffer:
                         buffer.start_spinner()
-                        if event.agent_id == agent_registry.get_selected_agent_id():
-                            display.ensure_spinner_timer_running()
+                        display.ensure_spinner_timer_running()
                 elif event.status in ("done", "error"):
                     model_running = False
                     agent_registry.update_status(event.agent_id, event.status)

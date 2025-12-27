@@ -147,6 +147,21 @@ class AgentRegistry:
         with self._lock:
             return self._agents.get(self._selected_agent_id)
 
+    def select_agent(self, agent_id: str) -> bool:
+        """Select an agent by ID.
+
+        Args:
+            agent_id: Agent ID to select.
+
+        Returns:
+            True if agent was selected, False if agent doesn't exist.
+        """
+        with self._lock:
+            if agent_id in self._agents:
+                self._selected_agent_id = agent_id
+                return True
+            return False
+
     def cycle_selection(self) -> Optional[str]:
         """Cycle to next agent in list (for cycle_agents keybinding).
 
