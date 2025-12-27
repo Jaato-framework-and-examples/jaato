@@ -1133,6 +1133,9 @@ class OutputBuffer:
                                 output.append(display_line, style="red")
                             elif display_line.startswith('@@'):
                                 output.append(display_line, style="cyan")
+                            # Color options line (contains [y]es, [n]o, etc.)
+                            elif display_line.strip().startswith('[') and ']' in display_line:
+                                output.append(display_line, style="cyan")
                             else:
                                 output.append(display_line)
                             output.append(" " * max(0, padding) + " │", style="dim")
