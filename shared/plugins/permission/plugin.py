@@ -108,10 +108,10 @@ class PermissionPlugin:
 
         Args:
             on_requested: Called when permission prompt is shown.
-                Signature: (tool_name, request_id, prompt_lines, response_options) -> None
+                Signature: (tool_name, request_id, tool_args, response_options) -> None
                 - tool_name: Name of the tool requesting permission
                 - request_id: Unique identifier for this request
-                - prompt_lines: Lines of text to display in the prompt
+                - tool_args: Raw arguments dict passed to the tool (client formats display)
                 - response_options: List of valid PermissionResponseOption objects
                   that can be used for autocompletion. Each option has:
                   - short: Short form (e.g., "y")
@@ -732,11 +732,10 @@ If permission is denied, do not attempt to proceed with that action."""
                 context=request_context,
             )
 
-            # Emit permission requested hook with prompt lines and response options
+            # Emit permission requested hook with raw args (client formats display)
             if self._on_permission_requested:
-                prompt_lines = self._build_prompt_lines(tool_name, args, display_info, request.response_options)
                 self._on_permission_requested(
-                    tool_name, request.request_id, prompt_lines, request.response_options
+                    tool_name, request.request_id, args, request.response_options
                 )
 
             response = self._channel.request_permission(request)

@@ -694,19 +694,38 @@ class RichClient:
         registry = self._agent_registry
         display = self._display
 
-        def on_permission_requested(tool_name: str, request_id: str, prompt_lines: list, response_options: list):
+        def on_permission_requested(tool_name: str, request_id: str, tool_args: dict, response_options: list):
             """Called when permission prompt is shown.
 
             Args:
                 tool_name: Name of the tool requesting permission.
                 request_id: Unique identifier for this request.
-                prompt_lines: Lines of text to display in the prompt.
+                tool_args: Arguments passed to the tool (client formats display).
                 response_options: List of PermissionResponseOption objects
                     that define valid responses for autocompletion.
             """
             # Store the response options for the prompt_callback to use
             # This makes the permission plugin the single source of truth
             self._pending_response_options = response_options
+
+            # Build prompt lines from raw data (client-side formatting)
+            prompt_lines = [f"Tool: {tool_name}"]
+            if tool_args:
+                args_str = str(tool_args)
+                if len(args_str) > 100:
+                    args_str = args_str[:97] + "..."
+                prompt_lines.append(f"Args: {args_str}")
+            prompt_lines.append("")
+            # Format options: [y]es [n]o [a]lways [once] [never] [all]
+            options_parts = []
+            for opt in response_options:
+                short = getattr(opt, 'short', getattr(opt, 'key', '?'))
+                full = getattr(opt, 'full', getattr(opt, 'label', '?'))
+                if short != full and full.startswith(short):
+                    options_parts.append(f"[{short}]{full[len(short):]}")
+                else:
+                    options_parts.append(f"[{full}]")
+            prompt_lines.append(" ".join(options_parts))
 
             # Update the tool in the main agent's buffer
             buffer = registry.get_buffer("main")
@@ -2543,12 +2562,28 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     "request_id": event.request_id,
                     "options": event.response_options,
                 }
-                # Display permission prompt (prompt_lines already includes formatted options)
+                # Format and display permission prompt (client handles formatting)
                 buffer = agent_registry.get_selected_buffer()
                 if buffer:
                     buffer.append("system", "\n", "write")
-                    for line in event.prompt_lines:
-                        buffer.append("system", line + "\n", "append")
+                    # Tool name and args
+                    buffer.append("system", f"Tool: {event.tool_name}\n", "append")
+                    if event.tool_args:
+                        args_str = str(event.tool_args)
+                        if len(args_str) > 100:
+                            args_str = args_str[:97] + "..."
+                        buffer.append("system", f"Args: {args_str}\n", "append")
+                    buffer.append("system", "\n", "append")
+                    # Format options: [y]es [n]o [a]lways [once] [never] [all]
+                    options_parts = []
+                    for opt in event.response_options:
+                        key = opt.get('key', '?')
+                        label = opt.get('label', '?')
+                        if key != label and label.startswith(key):
+                            options_parts.append(f"[{key}]{label[len(key):]}")
+                        else:
+                            options_parts.append(f"[{label}]")
+                    buffer.append("system", " ".join(options_parts) + "\n", "append")
                 display.refresh()
                 # Enable permission input mode
                 display.set_waiting_for_channel_input(True, event.response_options)

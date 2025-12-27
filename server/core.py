@@ -577,7 +577,7 @@ class JaatoServer:
         server = self
 
         def on_permission_requested(tool_name: str, request_id: str,
-                                    prompt_lines: list, response_options: list):
+                                    tool_args: dict, response_options: list):
             server._pending_permission_request_id = request_id
             server._waiting_for_channel_input = True
 
@@ -599,7 +599,7 @@ class JaatoServer:
             server.emit(PermissionRequestedEvent(
                 request_id=request_id,
                 tool_name=tool_name,
-                prompt_lines=prompt_lines,
+                tool_args=tool_args or {},
                 response_options=options_dicts,
             ))
 
