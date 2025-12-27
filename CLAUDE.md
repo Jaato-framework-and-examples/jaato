@@ -41,7 +41,105 @@ python3 -m venv .venv
 .venv/bin/python test_vertex.py
 ```
 
+### Running the Server (Multi-Client Mode)
+```bash
+# Start server as daemon with IPC socket
+.venv/bin/python -m server --ipc-socket /tmp/jaato.sock --daemon
+
+# Start server with both IPC and WebSocket
+.venv/bin/python -m server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
+
+# Check server status
+.venv/bin/python -m server --status
+
+# Stop server
+.venv/bin/python -m server --stop
+
+# Connect TUI client to running server
+.venv/bin/python rich-client/rich_client.py --connect /tmp/jaato.sock
+```
+
 ## Architecture
+
+### Server-First Architecture (`server/`)
+
+The framework uses a server-first architecture where the server runs as a daemon and clients connect via IPC or WebSocket:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         JaatoDaemon                                  │
+│  python -m server --ipc-socket /tmp/jaato.sock --web-socket :8080   │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────────┐  │
+│  │ IPC Server  │    │  WS Server  │    │    SessionManager       │  │
+│  │ (Unix sock) │    │ (WebSocket) │    │  ┌─────────────────┐    │  │
+│  └──────┬──────┘    └──────┬──────┘    │  │ Session "main"  │    │  │
+│         │                  │           │  │ ┌─────────────┐ │    │  │
+│         └──────────────────┴───────────│  │ │ JaatoServer │ │    │  │
+│                    │                   │  │ └─────────────┘ │    │  │
+│                    ▼                   │  └─────────────────┘    │  │
+│         ┌──────────────────────┐       │  ┌─────────────────┐    │  │
+│         │    Event Router      │◄──────┤  │ Session "dev"   │    │  │
+│         │  (broadcast events)  │       │  └─────────────────┘    │  │
+│         └──────────────────────┘       └─────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
+         ▲              ▲              ▲
+         │              │              │
+    ┌────┴────┐    ┌────┴────┐    ┌────┴────┐
+    │   TUI   │    │   Web   │    │   IDE   │
+    │ Client  │    │ Client  │    │ Plugin  │
+    └─────────┘    └─────────┘    └─────────┘
+```
+
+**Server Components:**
+
+- **`server/__main__.py`**: Entry point with daemon mode, PID management
+  - `--ipc-socket PATH`: Unix domain socket for local clients
+  - `--web-socket [HOST:]PORT`: WebSocket for remote clients
+  - `--daemon`: Run as background process
+  - `--status`: Check if server is running
+  - `--stop`: Stop running daemon
+
+- **`server/core.py`**: `JaatoServer` - UI-agnostic core logic
+  - Wraps `JaatoClient` with event emission instead of callbacks
+  - Emits typed events for all UI interactions
+  - Handles permission requests, tool execution, streaming
+
+- **`server/events.py`**: Event protocol (25+ typed events)
+  - Server→Client: `AgentOutputEvent`, `PermissionRequestedEvent`, `PlanUpdatedEvent`, etc.
+  - Client→Server: `SendMessageRequest`, `PermissionResponseRequest`, `StopRequest`, etc.
+  - `serialize_event()`, `deserialize_event()` for JSON transport
+
+- **`server/session_manager.py`**: Multi-session orchestration
+  - Manages multiple named sessions with on-demand loading
+  - Integrates with `SessionPlugin` for disk persistence
+  - Tracks client→session mappings for event routing
+
+- **`server/ipc.py`**: Unix domain socket server
+  - Length-prefixed framing (4-byte header + JSON)
+  - Fast, secure local communication
+
+- **`server/websocket.py`**: WebSocket server
+  - Remote client support via `websockets` library
+  - Same event protocol as IPC
+
+**Client Connection:**
+
+```python
+from rich_client.ipc_client import IPCClient
+
+client = IPCClient("/tmp/jaato.sock", auto_start=True)
+await client.connect()
+
+# Send message
+await client.send_message("Hello, world!")
+
+# Receive events
+async for event in client.events():
+    if isinstance(event, AgentOutputEvent):
+        print(event.text)
+```
 
 ### Core Components (`shared/`)
 
@@ -395,5 +493,6 @@ Use the `/keybindings reload` command to reload keybindings without restarting:
 
 ## Additional Documentation
 
+- [Architecture Overview](docs/architecture.md) - Server-first architecture, event protocol, component diagrams
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI
 - [ModLog Training README](modlog-training-set-test/README.md) - COBOL training set generation

@@ -951,6 +951,33 @@ class PTDisplay:
 
         self._app.run()
 
+    async def run_input_loop_async(
+        self,
+        on_input: Callable[[str], None],
+        initial_prompt: Optional[str] = None
+    ) -> None:
+        """Run the input loop asynchronously.
+
+        This is an async version of run_input_loop that can be used with asyncio.
+        The on_input callback is called each time the user presses Enter.
+
+        Args:
+            on_input: Callback called with user input text.
+            initial_prompt: Optional prompt to auto-submit once event loop is running.
+        """
+        self._input_callback = on_input
+
+        if initial_prompt:
+            # Pre-fill the input buffer and schedule auto-submit
+            self.set_input_text(initial_prompt)
+
+            def auto_submit():
+                self.submit_input()
+
+            self._app.pre_run_callables = [auto_submit]
+
+        await self._app.run_async()
+
     # Status bar methods
 
     def set_model_info(self, provider: str, model: str) -> None:
@@ -1378,12 +1405,17 @@ class PTDisplay:
         """
         prefixes = {''}  # Empty string is always valid (nothing typed yet)
         for option in response_options:
+            # Handle both object attributes and dict keys
+            if isinstance(option, dict):
+                short = option.get('key', option.get('short', '')).lower()
+                full = option.get('label', option.get('full', '')).lower()
+            else:
+                short = getattr(option, 'short', getattr(option, 'key', '')).lower()
+                full = getattr(option, 'full', getattr(option, 'label', '')).lower()
             # Add all prefixes of short form (e.g., "y", "a", "n")
-            short = option.short.lower()
             for i in range(1, len(short) + 1):
                 prefixes.add(short[:i])
             # Add all prefixes of full form (e.g., "yes", "ye", "y")
-            full = option.full.lower()
             for i in range(1, len(full) + 1):
                 prefixes.add(full[:i])
         return prefixes

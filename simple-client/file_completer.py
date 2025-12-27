@@ -108,8 +108,10 @@ class CommandCompleter(Completer):
     ) -> Iterable[Completion]:
         """Get command completions for the current document.
 
-        Handles both single-word commands (help, reset) and multi-word
-        commands with subcommands (tools list, tools enable).
+        Handles progressive completion of multi-word commands:
+        - Typing "se" -> shows "session" (base command)
+        - Typing "session " -> shows "list", "new", "attach" (subcommands)
+        - Typing "session l" -> shows "list"
         """
         raw_text = document.text_before_cursor
         text = raw_text.strip()
@@ -121,37 +123,116 @@ class CommandCompleter(Completer):
         # Get the full text being typed (lowercase for matching)
         full_text = text.lower()
 
-        # Check if user has trailing space (typing arguments, not the command)
+        # Check if user has trailing space (indicating they finished a word)
         has_trailing_space = raw_text.endswith(' ') and text
 
+        # Parse what user has typed so far
+        parts = full_text.split()
+
+        # Build set of base commands and their subcommands
+        base_commands = {}  # base -> {subcommand -> description}
+        single_commands = {}  # command -> description
+
         for cmd_name, cmd_desc in self.commands:
-            cmd_lower = cmd_name.lower()
+            cmd_parts = cmd_name.split()
+            if len(cmd_parts) == 1:
+                single_commands[cmd_name.lower()] = (cmd_name, cmd_desc)
+            else:
+                base = cmd_parts[0].lower()
+                rest = ' '.join(cmd_parts[1:])
+                if base not in base_commands:
+                    base_commands[base] = {}
+                base_commands[base][rest.lower()] = (rest, cmd_desc)
 
-            # If user typed a command exactly and added a space, they're now
-            # typing arguments - don't offer that command as completion
-            if has_trailing_space and full_text == cmd_lower:
-                continue
+        if not parts:
+            # Empty input - show all base commands and single commands
+            seen = set()
+            for base in base_commands:
+                if base not in seen:
+                    seen.add(base)
+                    # Get description from first subcommand or generic
+                    desc = f"{base} [subcommand]"
+                    yield Completion(base, start_position=0, display=base, display_meta=desc)
+            for cmd_lower, (cmd_name, cmd_desc) in single_commands.items():
+                if cmd_lower not in seen:
+                    seen.add(cmd_lower)
+                    yield Completion(cmd_name, start_position=0, display=cmd_name, display_meta=cmd_desc)
+            return
 
-            # Check if this command matches what the user is typing
-            if cmd_lower.startswith(full_text):
-                # Full command matches prefix - offer completion
-                yield Completion(
-                    cmd_name,
-                    start_position=-len(text),
-                    display=cmd_name,
-                    display_meta=cmd_desc,
-                )
-            elif ' ' in cmd_name and full_text:
-                # Multi-word command: check if user is typing a partial subcommand
-                # e.g., full_text="tools l", cmd_name="tools list"
-                base_cmd = cmd_name.split()[0].lower()
-                if full_text.startswith(base_cmd) and cmd_lower.startswith(full_text):
-                    yield Completion(
-                        cmd_name,
-                        start_position=-len(text),
-                        display=cmd_name,
-                        display_meta=cmd_desc,
-                    )
+        first_word = parts[0]
+
+        if len(parts) == 1 and not has_trailing_space:
+            # User is typing the first word - complete base commands and single commands
+            seen = set()
+            for base in base_commands:
+                if base.startswith(first_word) and base not in seen:
+                    seen.add(base)
+                    desc = f"{base} [subcommand]"
+                    yield Completion(base, start_position=-len(text), display=base, display_meta=desc)
+            for cmd_lower, (cmd_name, cmd_desc) in single_commands.items():
+                if cmd_lower.startswith(first_word) and cmd_lower not in seen:
+                    seen.add(cmd_lower)
+                    yield Completion(cmd_name, start_position=-len(text), display=cmd_name, display_meta=cmd_desc)
+            return
+
+        # User has typed at least one word and space - check for subcommands
+        if first_word in base_commands:
+            subcommands = base_commands[first_word]
+
+            if len(parts) == 1 and has_trailing_space:
+                # User typed base command + space - show first word of each subcommand (deduplicated)
+                seen_first_words = set()
+                for sub_lower, (sub_name, sub_desc) in subcommands.items():
+                    first_sub_word = sub_lower.split()[0]
+                    if first_sub_word not in seen_first_words:
+                        seen_first_words.add(first_sub_word)
+                        # Get description from the single-word entry if it exists
+                        if first_sub_word in subcommands:
+                            _, desc = subcommands[first_sub_word]
+                        else:
+                            desc = sub_desc
+                        display_word = sub_name.split()[0]
+                        yield Completion(display_word, start_position=0, display=display_word, display_meta=desc)
+
+            elif len(parts) == 2 and not has_trailing_space:
+                # User is typing a subcommand - filter by first word only (deduplicated)
+                partial_sub = parts[1]
+                seen_first_words = set()
+                for sub_lower, (sub_name, sub_desc) in subcommands.items():
+                    first_sub_word = sub_lower.split()[0]
+                    if first_sub_word.startswith(partial_sub) and first_sub_word not in seen_first_words:
+                        seen_first_words.add(first_sub_word)
+                        # Get description from the single-word entry if it exists
+                        if first_sub_word in subcommands:
+                            _, desc = subcommands[first_sub_word]
+                        else:
+                            desc = sub_desc
+                        display_word = sub_name.split()[0]
+                        start_pos = -len(partial_sub)
+                        yield Completion(display_word, start_position=start_pos, display=display_word, display_meta=desc)
+
+            elif len(parts) == 2 and has_trailing_space:
+                # User typed "base sub " - show 3rd level words if available
+                second_word = parts[1]
+                for sub_lower, (sub_name, sub_desc) in subcommands.items():
+                    sub_parts = sub_lower.split()
+                    if len(sub_parts) >= 2 and sub_parts[0] == second_word:
+                        # This is a 3rd level entry - show the remaining words
+                        third_part = ' '.join(sub_name.split()[1:])
+                        yield Completion(third_part, start_position=0, display=third_part, display_meta=sub_desc)
+
+            elif len(parts) >= 3 and not has_trailing_space:
+                # User is typing 3rd word - filter matches
+                second_word = parts[1]
+                partial_third = ' '.join(parts[2:])
+                for sub_lower, (sub_name, sub_desc) in subcommands.items():
+                    sub_parts = sub_lower.split()
+                    if len(sub_parts) >= 2 and sub_parts[0] == second_word:
+                        third_part_lower = ' '.join(sub_parts[1:])
+                        if third_part_lower.startswith(partial_third):
+                            third_part = ' '.join(sub_name.split()[1:])
+                            start_pos = -len(partial_third)
+                            yield Completion(third_part, start_position=start_pos, display=third_part, display_meta=sub_desc)
 
 
 class AtFileCompleter(Completer):
@@ -685,9 +766,15 @@ class PermissionResponseCompleter(Completer):
         # Use plugin-provided options if available, otherwise use defaults
         if self._options:
             for opt in self._options:
-                short = opt.short
-                full = opt.full
-                description = opt.description
+                # Handle both dict and object options
+                if isinstance(opt, dict):
+                    short = opt.get('key', opt.get('short', ''))
+                    full = opt.get('label', opt.get('full', ''))
+                    description = opt.get('description', '')
+                else:
+                    short = getattr(opt, 'short', getattr(opt, 'key', ''))
+                    full = getattr(opt, 'full', getattr(opt, 'label', ''))
+                    description = getattr(opt, 'description', '')
                 # Match against both short and full forms
                 if not text or short.lower().startswith(text) or full.lower().startswith(text):
                     yield Completion(
@@ -712,14 +799,16 @@ class SessionIdCompleter(Completer):
     """Complete session IDs for session commands.
 
     Triggers completion when user types session commands followed by a space:
-    - "delete-session " -> completes with available session IDs
+    - "session attach " -> completes with available session IDs
+    - "session delete " -> completes with available session IDs
+    - "delete-session " -> completes with available session IDs (legacy)
     - "resume " -> completes with available session IDs
 
     Supports both full session IDs and numeric indexes.
     """
 
-    # Commands that accept session ID arguments
-    SESSION_COMMANDS = ['delete-session', 'resume']
+    # Commands that accept session ID arguments (single-word and multi-word)
+    SESSION_COMMANDS = ['delete-session', 'resume', 'session attach', 'session delete']
 
     def __init__(self, session_provider: Optional[Callable[[], list]] = None):
         """Initialize the session ID completer.
@@ -771,45 +860,27 @@ class SessionIdCompleter(Completer):
         if not sessions:
             return
 
-        # Provide completions - prefer numeric indexes, show session IDs only when typed
-        for i, session in enumerate(sessions, 1):
+        # Provide completions - show session IDs directly
+        for session in sessions:
             session_id = getattr(session, 'session_id', str(session))
             description = getattr(session, 'description', None) or '(unnamed)'
-            index_str = str(i)
 
             if not arg_text:
-                # No input yet - show only numeric indexes (cleaner UX)
+                # No input yet - show all session IDs
                 yield Completion(
-                    index_str,
+                    session_id,
                     start_position=0,
-                    display=f"{index_str}",
-                    display_meta=f"{session_id} - {description}",
+                    display=session_id,
+                    display_meta=description,
                 )
-            elif arg_text.isdigit():
-                # User typing a number - could be index or start of session_id
-                if index_str.startswith(arg_text):
-                    yield Completion(
-                        index_str,
-                        start_position=-len(arg_text),
-                        display=f"{index_str}",
-                        display_meta=f"{session_id} - {description}",
-                    )
-                if session_id.startswith(arg_text):
-                    yield Completion(
-                        session_id,
-                        start_position=-len(arg_text),
-                        display=session_id,
-                        display_meta=description,
-                    )
-            else:
-                # User typing non-numeric - must be session_id
-                if session_id.startswith(arg_text):
-                    yield Completion(
-                        session_id,
-                        start_position=-len(arg_text),
-                        display=session_id,
-                        display_meta=description,
-                    )
+            elif session_id.startswith(arg_text):
+                # Filter by prefix
+                yield Completion(
+                    session_id,
+                    start_position=-len(arg_text),
+                    display=session_id,
+                    display_meta=description,
+                )
 
 
 class PluginCommandCompleter(Completer):

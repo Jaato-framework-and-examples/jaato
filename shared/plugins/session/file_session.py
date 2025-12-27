@@ -619,16 +619,15 @@ class FileSessionPlugin:
         """Return tools that should be auto-approved without permission prompts.
 
         Includes both the model tool (session_describe) and user commands
-        (save, resume, sessions, delete-session). User commands are invoked
-        directly by the user, so they should never require permission prompts.
+        (save, resume, backtoturn). User commands are invoked directly by
+        the user, so they should never require permission prompts.
         """
         return [
             "session_describe",
             # User commands - these are invoked directly by the user
             "save",
             "resume",
-            "sessions",
-            "delete-session",
+            "backtoturn",
         ]
 
     def get_user_commands(self) -> List[UserCommand]:
@@ -644,19 +643,10 @@ class FileSessionPlugin:
             ),
             UserCommand(
                 "resume",
-                "Resume a saved session",
+                "Resume a saved session (alias for 'session attach')",
                 share_with_model=False,
                 parameters=[
                     CommandParameter("session_id", "Session ID to resume", required=True),
-                ],
-            ),
-            UserCommand("sessions", "List available sessions", share_with_model=False),
-            UserCommand(
-                "delete-session",
-                "Delete a saved session",
-                share_with_model=False,
-                parameters=[
-                    CommandParameter("session_id", "Session ID to delete", required=True),
                 ],
             ),
             UserCommand(
