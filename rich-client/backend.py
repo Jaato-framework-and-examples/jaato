@@ -451,6 +451,7 @@ class IPCBackend(Backend):
         self._history: List[Any] = []
         self._context_usage: Dict[str, Any] = {}
         self._context_limit: int = 0
+        self._available_models: List[str] = []  # Models from server for completion
 
         # Event handlers for async responses
         self._pending_history: Optional[asyncio.Future] = None
@@ -495,6 +496,10 @@ class IPCBackend(Backend):
             )
             for cmd in commands
         }
+
+    def set_models(self, models: List[str]) -> None:
+        """Set available models from server event."""
+        self._available_models = models
 
     async def connect(
         self,
@@ -541,8 +546,9 @@ class IPCBackend(Backend):
         return {}, False
 
     async def get_model_completions(self, args: List[str]) -> List[Any]:
-        # Model completions should be fetched from commands list
-        return []
+        # Return models from server state snapshot
+        # Format: (model_name, description) tuples for completion
+        return [(model, "") for model in self._available_models]
 
     async def get_history(self) -> List[Any]:
         # Request history from server
