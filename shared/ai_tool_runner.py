@@ -150,15 +150,10 @@ class ToolExecutor:
 
         # Forward to exposed plugins that support it
         if self._registry:
-            exposed = self._registry.list_exposed()
-            for plugin_name in exposed:
+            for plugin_name in self._registry.list_exposed():
                 plugin = self._registry.get_plugin(plugin_name)
                 if plugin and hasattr(plugin, 'set_tool_output_callback'):
                     plugin.set_tool_output_callback(callback)
-        else:
-            # Debug: registry not set
-            import sys
-            print(f"[DEBUG] set_tool_output_callback: no registry set!", file=sys.stderr)
 
     def get_tool_output_callback(self) -> Optional[ToolOutputCallback]:
         """Get the current tool output callback.
