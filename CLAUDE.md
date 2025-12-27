@@ -185,6 +185,7 @@ async for event in client.events():
   - `base.py`: `ModelProviderPlugin` protocol definition
   - `google_genai/`: Google GenAI/Vertex AI implementation
   - `github_models/`: GitHub Models API implementation (uses `azure-ai-inference` SDK)
+  - `anthropic/`: Anthropic Claude implementation (uses `anthropic` SDK)
 
 - **mcp_context_manager.py**: Multi-server MCP client manager
   - `MCPClientManager`: Manages persistent connections to multiple MCP servers
@@ -418,6 +419,59 @@ Key types in `shared/plugins/model_provider/types.py`:
 | `JAATO_GITHUB_ORGANIZATION` | Organization for billing attribution |
 | `JAATO_GITHUB_ENTERPRISE` | Enterprise name (for context) |
 | `JAATO_GITHUB_ENDPOINT` | Override API endpoint URL |
+
+### Anthropic Claude
+| Variable | Purpose |
+|----------|---------|
+| `ANTHROPIC_API_KEY` | Anthropic API key (uses API credits) |
+| `ANTHROPIC_AUTH_TOKEN` | OAuth token for Claude Pro/Max subscription (experimental) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Alternative OAuth token env var (Claude Code CLI) |
+
+**Authentication Options (in priority order):**
+
+1. **PKCE OAuth Login** (recommended for subscription): Interactive browser-based OAuth
+2. **OAuth Token** (`sk-ant-oat01-...`): From `claude setup-token` (experimental)
+3. **API Key** (`sk-ant-api03-...`): Uses API credits from console.anthropic.com
+
+**Option 1: PKCE OAuth Login (Interactive)**
+```python
+from shared.plugins.model_provider.anthropic import oauth_login
+
+# Run once - opens browser for Claude Pro/Max login
+oauth_login()
+
+# Tokens are stored in ~/.config/jaato/anthropic_oauth.json
+# Provider will automatically use stored tokens
+```
+
+**Option 2: OAuth Token from claude setup-token (Experimental)**
+```bash
+# Install Claude Code CLI
+npm install -g @anthropic/claude-code
+
+# Generate OAuth token (valid for 1 year)
+claude setup-token
+
+# Set the token
+export ANTHROPIC_AUTH_TOKEN='sk-ant-oat01-...'
+```
+
+> **⚠️ OAuth Warning:** OAuth tokens may be restricted by Anthropic to official
+> Claude Code clients. If you see "This credential is only authorized for use
+> with Claude Code", try the PKCE OAuth login option above.
+
+**Option 3: API Key**
+```bash
+export ANTHROPIC_API_KEY='sk-ant-api03-...'
+```
+
+Configuration options via `ProviderConfig.extra`:
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `oauth_token` | str | None | OAuth token (alternative to env var) |
+| `enable_caching` | bool | False | Enable prompt caching (90% cost reduction) |
+| `enable_thinking` | bool | False | Enable extended thinking (reasoning traces) |
+| `thinking_budget` | int | 10000 | Max thinking tokens when enabled |
 
 ### General
 | Variable | Purpose |

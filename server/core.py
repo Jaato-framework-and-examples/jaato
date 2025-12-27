@@ -1013,6 +1013,40 @@ class JaatoServer:
 
         self._channel_input_queue.put(response)
 
+    def _find_plugin_for_command(self, command: str) -> Any:
+        """Find the plugin that provides a user command.
+
+        Args:
+            command: The command name to find.
+
+        Returns:
+            The plugin instance or None if not found.
+        """
+        if not self._jaato:
+            return None
+
+        runtime = self._jaato.get_runtime()
+        registry = runtime.registry
+        if not registry:
+            return None
+
+        # Search exposed plugins for the command
+        for plugin_name in registry.list_exposed():
+            plugin = registry.get_plugin(plugin_name)
+            if plugin and hasattr(plugin, 'get_user_commands'):
+                for cmd in plugin.get_user_commands():
+                    if cmd.name == command:
+                        return plugin
+
+        # Also check permission plugin
+        perm = runtime.permission_plugin
+        if perm and hasattr(perm, 'get_user_commands'):
+            for cmd in perm.get_user_commands():
+                if cmd.name == command:
+                    return perm
+
+        return None
+
     def stop(self) -> bool:
         """Stop current operation.
 
@@ -1048,6 +1082,18 @@ class JaatoServer:
         if command.lower() == "save":
             parsed_args["user_inputs"] = self._original_inputs.copy()
 
+        # Find and configure plugin output callback for real-time output
+        plugin = self._find_plugin_for_command(command)
+        if plugin and hasattr(plugin, 'set_output_callback'):
+            # Create callback that emits events
+            def output_callback(source: str, text: str, mode: str) -> None:
+                self.emit(AgentOutputEvent(
+                    text=text,
+                    source=source,
+                    mode=mode,
+                ))
+            plugin.set_output_callback(output_callback)
+
         try:
             result, shared = self._jaato.execute_user_command(command, parsed_args)
 
@@ -1064,6 +1110,11 @@ class JaatoServer:
 
         except Exception as e:
             return {"error": str(e)}
+
+        finally:
+            # Clear output callback
+            if plugin and hasattr(plugin, 'set_output_callback'):
+                plugin.set_output_callback(None)
 
     def clear_history(self) -> None:
         """Clear conversation history."""

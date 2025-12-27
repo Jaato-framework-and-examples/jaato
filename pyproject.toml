@@ -57,6 +57,7 @@ permission = "shared.plugins.permission:create_plugin"
 references = "shared.plugins.references:create_plugin"
 template = "shared.plugins.template:create_plugin"
 todo = "shared.plugins.todo:create_plugin"
+anthropic_auth = "shared.plugins.anthropic_auth:create_plugin"
 
 # Entry points for GC strategy plugins
 # GC plugins implement context window garbage collection strategies

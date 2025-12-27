@@ -1005,6 +1005,35 @@ class JaatoSession:
             # Note: Don't send on_output here - the explicit checks above already do
             return "[Generation cancelled]"
 
+        except Exception as exc:
+            # Route provider errors through output callback before re-raising
+            # This ensures errors appear in the UI (queue channel) instead of raw console
+            exc_name = type(exc).__name__
+            exc_module = type(exc).__module__
+
+            # Check if this is a known provider error (from model_provider plugins)
+            is_provider_error = 'model_provider' in exc_module or exc_name in (
+                # Anthropic errors
+                'AnthropicProviderError', 'APIKeyNotFoundError', 'APIKeyInvalidError',
+                'RateLimitError', 'ContextLimitError', 'ModelNotFoundError',
+                'OverloadedError', 'UsageLimitError',
+                # GitHub Models errors
+                'GitHubModelsError', 'TokenNotFoundError', 'TokenInvalidError',
+                'TokenPermissionError', 'ModelsDisabledError',
+                # Google GenAI errors
+                'JaatoAuthError', 'CredentialsNotFoundError', 'CredentialsInvalidError',
+                'CredentialsPermissionError', 'ProjectConfigurationError',
+            )
+
+            if is_provider_error and on_output:
+                # Format error message nicely for the UI
+                error_msg = f"[Error] {exc_name}: {str(exc)}"
+                on_output("error", error_msg, "write")
+                self._trace(f"PROVIDER_ERROR routed to callback: {exc_name}")
+
+            # Re-raise so caller can also handle if needed
+            raise
+
         finally:
             # Record turn end time
             turn_end = datetime.now()
@@ -1613,6 +1642,28 @@ class JaatoSession:
                 on_output("model", response.text, "write")
 
             return response.text or ''
+
+        except Exception as exc:
+            # Route provider errors through output callback before re-raising
+            exc_name = type(exc).__name__
+            exc_module = type(exc).__module__
+
+            is_provider_error = 'model_provider' in exc_module or exc_name in (
+                'AnthropicProviderError', 'APIKeyNotFoundError', 'APIKeyInvalidError',
+                'RateLimitError', 'ContextLimitError', 'ModelNotFoundError',
+                'OverloadedError', 'UsageLimitError',
+                'GitHubModelsError', 'TokenNotFoundError', 'TokenInvalidError',
+                'TokenPermissionError', 'ModelsDisabledError',
+                'JaatoAuthError', 'CredentialsNotFoundError', 'CredentialsInvalidError',
+                'CredentialsPermissionError', 'ProjectConfigurationError',
+            )
+
+            if is_provider_error and on_output:
+                error_msg = f"[Error] {exc_name}: {str(exc)}"
+                on_output("error", error_msg, "write")
+                self._trace(f"PROVIDER_ERROR routed to callback: {exc_name}")
+
+            raise
 
         finally:
             turn_end = datetime.now()

@@ -203,12 +203,16 @@ class ProviderResponse:
         structured_output: Parsed JSON when response_schema was requested.
             This is populated when the model returns structured JSON output
             conforming to a requested schema.
+        thinking: Extended thinking/reasoning content (Anthropic-specific).
+            When extended thinking is enabled, this contains the model's
+            internal reasoning process before generating the response.
     """
     parts: List[Part] = field(default_factory=list)
     usage: TokenUsage = field(default_factory=TokenUsage)
     finish_reason: FinishReason = FinishReason.UNKNOWN
     raw: Any = None
     structured_output: Optional[Dict[str, Any]] = None
+    thinking: Optional[str] = None
 
     def get_text(self) -> str:
         """Extract concatenated text from all text parts."""
@@ -226,6 +230,11 @@ class ProviderResponse:
     def has_structured_output(self) -> bool:
         """Check if the response contains structured output."""
         return self.structured_output is not None
+
+    @property
+    def has_thinking(self) -> bool:
+        """Check if the response contains extended thinking."""
+        return self.thinking is not None
 
 
 class CancelledException(Exception):

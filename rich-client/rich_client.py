@@ -137,21 +137,55 @@ class RichClient:
         """Run an async coroutine from sync context.
 
         Uses the stored event loop if available, otherwise creates a new one.
+        Handles being called from within an already-running event loop (e.g., prompt_toolkit).
         """
         if self._async_loop and self._async_loop.is_running():
             # Submit to running loop from another thread
             future = asyncio.run_coroutine_threadsafe(coro, self._async_loop)
             return future.result(timeout=30)
         else:
-            # No running loop, create one
-            return asyncio.run(coro)
+            # Check if we're inside a running event loop (e.g., prompt_toolkit)
+            try:
+                asyncio.get_running_loop()
+                # We're inside a running loop - run coroutine in a separate thread
+                # with its own event loop. We need to create a new loop in that thread.
+                import threading
+                result = None
+                exception = None
+
+                def run_in_thread():
+                    nonlocal result, exception
+                    try:
+                        # Create a new event loop for this thread
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            result = loop.run_until_complete(coro)
+                        finally:
+                            loop.close()
+                    except Exception as e:
+                        exception = e
+
+                thread = threading.Thread(target=run_in_thread)
+                thread.start()
+                thread.join(timeout=30)
+
+                if exception:
+                    raise exception
+                return result
+            except RuntimeError:
+                # No running loop, create one
+                return asyncio.run(coro)
 
     def _create_output_callback(self,
-                                  suppress_sources: Optional[set] = None) -> Callable[[str, str, str], None]:
+                                  suppress_sources: Optional[set] = None,
+                                  force_display: bool = False) -> Callable[[str, str, str], None]:
         """Create callback for real-time output to display.
 
         Args:
             suppress_sources: Set of source names to suppress (e.g., {"permission"})
+            force_display: If True, always display output even when agent_registry is active.
+                          Use this for user commands that don't go through agent hooks.
         """
         suppress = suppress_sources or set()
 
@@ -166,7 +200,8 @@ class RichClient:
                 # Skip ALL sources when UI hooks are active - the hooks handle
                 # routing all output (model, system, plugin) to the correct buffer
                 # via on_agent_output. Without this, output gets duplicated.
-                if self._agent_registry:
+                # Exception: force_display=True bypasses this for user commands.
+                if self._agent_registry and not force_display:
                     return
                 self._display.append_output(source, text, mode)
         return callback
@@ -198,6 +233,25 @@ class RichClient:
         if command.name.lower() == "save":
             args["user_inputs"] = self._original_inputs.copy()
 
+        # Find the plugin that provides this command and set output callback
+        plugin = None
+        if self.registry:
+            for plugin_name in self.registry.list_exposed():
+                p = self.registry.get_plugin(plugin_name)
+                if p and hasattr(p, 'get_user_commands'):
+                    for cmd in p.get_user_commands():
+                        if cmd.name == command.name:
+                            plugin = p
+                            break
+                if plugin:
+                    break
+
+        # Set output callback on plugin if it supports it
+        # Use force_display=True since user commands don't go through agent hooks
+        if plugin and hasattr(plugin, 'set_output_callback') and self._display:
+            output_callback = self._create_output_callback(force_display=True)
+            plugin.set_output_callback(output_callback)
+
         try:
             result, shared = self._run_async(
                 self._backend.execute_user_command(command.name, args)
@@ -223,6 +277,11 @@ class RichClient:
                 self._display.show_lines([(f"Error: {e}", "red")])
             return {"error": str(e)}
 
+        finally:
+            # Clear output callback after execution
+            if plugin and hasattr(plugin, 'set_output_callback'):
+                plugin.set_output_callback(None)
+
     def _display_command_result(
         self,
         command_name: str,
@@ -235,6 +294,10 @@ class RichClient:
 
         # For plan command, the sticky panel handles display
         if command_name == "plan":
+            return
+
+        # Skip pager for empty results (command handles its own output via callback)
+        if result is None or result == "":
             return
 
         lines = [(f"[{command_name}]", "bold")]
