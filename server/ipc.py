@@ -40,6 +40,7 @@ from .events import (
     StopRequest,
     CommandRequest,
     CommandListRequest,
+    ClientConfigRequest,
 )
 
 
@@ -311,9 +312,9 @@ class JaatoIPCServer:
                     client.session_id = session_id
 
         # Route to session handler
-        # CommandRequest is allowed without session_id (for session.create, session.default, etc.)
+        # CommandRequest and ClientConfigRequest are allowed without session_id
         if self._on_session_request:
-            if session_id or isinstance(event, CommandRequest):
+            if session_id or isinstance(event, (CommandRequest, ClientConfigRequest)):
                 self._on_session_request(client_id, session_id or "", event)
             else:
                 await self._send_error(

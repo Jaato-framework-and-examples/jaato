@@ -896,6 +896,31 @@ If permission is denied, do not attempt to proceed with that action."""
 
         return lines
 
+    def get_formatted_prompt(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        channel_type: str = "ipc"
+    ) -> Tuple[List[str], Optional[str]]:
+        """Get formatted prompt lines for a permission request.
+
+        This is used by the server to include pre-formatted prompts
+        (including diffs for file edits) in permission events.
+
+        Args:
+            tool_name: Name of the tool
+            args: Arguments passed to the tool
+            channel_type: Type of channel ("console", "ipc", etc.)
+
+        Returns:
+            Tuple of (prompt_lines, format_hint).
+            format_hint is "diff" for colored diff display, None otherwise.
+        """
+        display_info = self._get_display_info(tool_name, args, channel_type)
+        lines = self._build_prompt_lines(tool_name, args, display_info)
+        format_hint = display_info.format_hint if display_info else None
+        return lines, format_hint
+
     def get_execution_log(self) -> List[Dict[str, Any]]:
         """Get the log of permission decisions."""
         return self._execution_log.copy()

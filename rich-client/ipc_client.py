@@ -50,6 +50,7 @@ from server.events import (
     ErrorEvent,
     HistoryRequest,
     HistoryEvent,
+    ClientConfigRequest,
 )
 
 
@@ -170,6 +171,8 @@ class IPCClient:
                         command="set_workspace",
                         args=[cwd],
                     ))
+                    # Send client config with env overrides
+                    await self._send_client_config()
                     return True
         except Exception as e:
             await self.disconnect()
@@ -192,6 +195,32 @@ class IPCClient:
         self._writer = None
         self._session_id = None
         self._client_id = None
+
+    async def _send_client_config(self) -> None:
+        """Send client configuration to the server.
+
+        Loads the client's .env file and sends relevant settings
+        (like JAATO_TRACE_LOG, PROVIDER_TRACE_LOG) to the server so plugins use client paths.
+        """
+        import os
+        from dotenv import dotenv_values
+
+        # Load client's .env file (without modifying os.environ)
+        env_path = Path(self.env_file)
+        if env_path.exists():
+            client_env = dotenv_values(env_path)
+        else:
+            client_env = {}
+
+        # Also check current environment (in case set via shell)
+        trace_log = client_env.get("JAATO_TRACE_LOG") or os.environ.get("JAATO_TRACE_LOG")
+        provider_trace = client_env.get("PROVIDER_TRACE_LOG") or os.environ.get("PROVIDER_TRACE_LOG")
+
+        # Send config to server
+        await self._send_event(ClientConfigRequest(
+            trace_log_path=trace_log,
+            provider_trace_log=provider_trace,
+        ))
 
     async def _start_server(self) -> bool:
         """Auto-start the server.

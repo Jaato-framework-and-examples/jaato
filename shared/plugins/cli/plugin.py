@@ -90,6 +90,8 @@ class CLIToolPlugin(BackgroundCapableMixin):
         self._initialized = False
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
+        # Callback for streaming output during execution (tail -f style)
+        self._tool_output_callback: Optional[Callable[[str], None]] = None
 
     @property
     def name(self) -> str:
@@ -136,6 +138,18 @@ class CLIToolPlugin(BackgroundCapableMixin):
                 self._bg_max_workers = config['background_max_workers']
         self._initialized = True
         self._trace(f"initialize: extra_paths={self._extra_paths}, max_output={self._max_output_chars}, auto_bg_threshold={self._auto_background_threshold}")
+
+    def set_tool_output_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Set the callback for streaming output during execution.
+
+        When set, the plugin will stream output lines to the callback during
+        command execution, enabling live "tail -f" style preview in the UI.
+
+        Args:
+            callback: Function that accepts output chunks, or None to disable.
+        """
+        self._tool_output_callback = callback
+        self._trace(f"set_tool_output_callback: callback={'SET' if callback else 'CLEARED'}")
 
     def shutdown(self) -> None:
         """Shutdown the CLI plugin."""
@@ -387,22 +401,10 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # Check if the command requires shell interpretation
             use_shell = self._requires_shell(command)
 
-            if use_shell:
-                # Shell mode: pass command string directly to shell
-                # Required for pipes, redirections, command chaining, etc.
-                proc = subprocess.run(
-                    command,
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    check=False,
-                    env=env,
-                    shell=True
-                )
-            else:
+            # Prepare command/argv for execution
+            argv: Optional[List[str]] = None
+            if not use_shell:
                 # Non-shell mode: parse into argv list for safer execution
-                argv: List[str] = []
                 if arg_list:
                     # Model passed command as executable name and args separately
                     argv = [command] + arg_list
@@ -425,20 +427,71 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                         'hint': 'Configure extra_paths or provide full path to the executable.'
                     }
 
-                proc = subprocess.run(
-                    argv,
-                    capture_output=True,
+            # Use streaming execution if callback is set
+            self._trace(f"execute: streaming={'YES' if self._tool_output_callback else 'NO'}")
+            if self._tool_output_callback:
+                # Streaming mode with Popen for live output
+                cmd = command if use_shell else argv
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
                     encoding='utf-8',
                     errors='replace',
-                    check=False,
                     env=env,
-                    shell=False
+                    shell=use_shell
                 )
 
+                # Read output line by line and stream to callback
+                stdout_lines = []
+                stderr_lines = []
+
+                # Read stdout with streaming callback
+                if proc.stdout:
+                    for line in proc.stdout:
+                        stdout_lines.append(line)
+                        # Call the callback with the line (strip newline for display)
+                        self._tool_output_callback(line.rstrip('\n\r'))
+
+                # Read remaining stderr (non-streaming for simplicity)
+                if proc.stderr:
+                    stderr_lines = proc.stderr.readlines()
+
+                proc.wait()
+                stdout = ''.join(stdout_lines)
+                stderr = ''.join(stderr_lines)
+                returncode = proc.returncode
+            else:
+                # Non-streaming mode with subprocess.run
+                if use_shell:
+                    # Shell mode: pass command string directly to shell
+                    proc = subprocess.run(
+                        command,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        check=False,
+                        env=env,
+                        shell=True
+                    )
+                else:
+                    proc = subprocess.run(
+                        argv,
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        check=False,
+                        env=env,
+                        shell=False
+                    )
+                stdout = proc.stdout
+                stderr = proc.stderr
+                returncode = proc.returncode
+
             # Truncate large outputs to prevent context window overflow
-            stdout = proc.stdout
-            stderr = proc.stderr
             truncated = False
 
             if len(stdout) > self._max_output_chars:
@@ -449,7 +502,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 stderr = stderr[:self._max_output_chars]
                 truncated = True
 
-            result = {'stdout': stdout, 'stderr': stderr, 'returncode': proc.returncode}
+            result = {'stdout': stdout, 'stderr': stderr, 'returncode': returncode}
 
             if truncated:
                 result['truncated'] = True

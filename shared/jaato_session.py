@@ -1082,7 +1082,20 @@ class JaatoSession:
 
             fc_start = datetime.now()
             if self._executor:
+                # Set up tool output callback for streaming output during execution
+                if self._ui_hooks and fc.id:
+                    def tool_output_callback(chunk: str, _call_id=fc.id) -> None:
+                        self._ui_hooks.on_tool_output(
+                            agent_id=self._agent_id,
+                            call_id=_call_id,
+                            chunk=chunk
+                        )
+                    self._executor.set_tool_output_callback(tool_output_callback)
+
                 executor_result = self._executor.execute(name, args)
+
+                # Clear the callback after execution
+                self._executor.set_tool_output_callback(None)
             else:
                 executor_result = (False, {"error": f"No executor registered for {name}"})
             fc_end = datetime.now()
@@ -1591,7 +1604,20 @@ class JaatoSession:
 
                     fc_start = datetime.now()
                     if self._executor:
+                        # Set up tool output callback for streaming output during execution
+                        if self._ui_hooks and fc.id:
+                            def tool_output_callback(chunk: str, _call_id=fc.id) -> None:
+                                self._ui_hooks.on_tool_output(
+                                    agent_id=self._agent_id,
+                                    call_id=_call_id,
+                                    chunk=chunk
+                                )
+                            self._executor.set_tool_output_callback(tool_output_callback)
+
                         executor_result = self._executor.execute(name, args)
+
+                        # Clear the callback after execution
+                        self._executor.set_tool_output_callback(None)
                     else:
                         executor_result = (False, {"error": f"No executor registered for {name}"})
                     fc_end = datetime.now()
