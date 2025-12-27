@@ -49,6 +49,7 @@ from .events import (
     ClarificationResponseRequest,
     StopRequest,
     CommandRequest,
+    ClientConfigRequest,
     # Serialization
     serialize_event,
     deserialize_event,
@@ -90,6 +91,7 @@ __all__ = [
     "ClarificationResponseRequest",
     "StopRequest",
     "CommandRequest",
+    "ClientConfigRequest",
     "serialize_event",
     "deserialize_event",
 ]

@@ -82,6 +82,9 @@ class EventType(str, Enum):
     HISTORY_REQUEST = "history.request"
     HISTORY = "history"
 
+    # Client configuration (Client -> Server)
+    CLIENT_CONFIG = "client.config"
+
 
 # =============================================================================
 # Base Event
@@ -444,6 +447,19 @@ class HistoryEvent(Event):
     # ^ List of {prompt, output, total} per turn
 
 
+@dataclass
+class ClientConfigRequest(Event):
+    """Client sends its configuration to the server.
+
+    Sent after connection to apply client-specific settings like trace paths.
+    The server applies these settings to the session/plugins.
+    """
+    type: EventType = field(default=EventType.CLIENT_CONFIG)
+    # Environment overrides from client's .env
+    trace_log_path: Optional[str] = None  # JAATO_TRACE_LOG
+    # Future: other client-specific settings can be added here
+
+
 # =============================================================================
 # Serialization Helpers
 # =============================================================================
@@ -481,6 +497,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.TOOL_STATUS.value: ToolStatusEvent,
     EventType.HISTORY_REQUEST.value: HistoryRequest,
     EventType.HISTORY.value: HistoryEvent,
+    EventType.CLIENT_CONFIG.value: ClientConfigRequest,
 }
 
 
