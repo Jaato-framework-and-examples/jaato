@@ -144,7 +144,8 @@ DEFAULT_KEYBINDINGS = {
     "yank": "c-y",
     "view_full": "v",
 
-    # Tool navigation (contextual - active only when in tool nav mode)
+    # Tool navigation
+    "tool_nav_enter": "c-n",  # Enter tool navigation mode
     "tool_toggle": "space",   # Toggle expand/collapse on selected tool
     "tool_exit": "escape",    # Exit tool navigation mode
 }
@@ -304,7 +305,8 @@ class KeybindingConfig:
     yank: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["yank"])
     view_full: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["view_full"])
 
-    # Tool navigation (contextual)
+    # Tool navigation
+    tool_nav_enter: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_nav_enter"])
     tool_toggle: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_toggle"])
     tool_exit: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_exit"])
 
@@ -489,6 +491,7 @@ class KeybindingConfig:
             "cycle_agents": self.cycle_agents,
             "yank": self.yank,
             "view_full": self.view_full,
+            "tool_nav_enter": self.tool_nav_enter,
             "tool_toggle": self.tool_toggle,
             "tool_exit": self.tool_exit,
         }
@@ -662,6 +665,7 @@ def generate_example_config() -> str:
         "yank": "c-y",
         "view_full": "v",
 
+        "tool_nav_enter": "c-n",
         "tool_toggle": "space",
         "tool_exit": "escape",
     }
