@@ -208,7 +208,7 @@ class PermissionResponseOption:
 class PermissionRequestedEvent(Event):
     """Permission is requested for a tool execution.
 
-    Sends structured data - client is responsible for formatting display.
+    Includes pre-formatted prompt lines (with diff for file edits) when available.
     """
     type: EventType = field(default=EventType.PERMISSION_REQUESTED)
     request_id: str = ""
@@ -216,6 +216,8 @@ class PermissionRequestedEvent(Event):
     tool_args: Dict[str, Any] = field(default_factory=dict)
     response_options: List[Dict[str, str]] = field(default_factory=list)
     # ^ List of {key, label, action, description?}
+    prompt_lines: Optional[List[str]] = None  # Pre-formatted prompt (with diff)
+    format_hint: Optional[str] = None  # "diff" for colored diff display
 
 
 @dataclass

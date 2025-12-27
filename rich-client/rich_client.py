@@ -2290,18 +2290,27 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     "request_id": event.request_id,
                     "options": event.response_options,
                 }
-                # Build prompt lines using shared utility (consistent with direct mode)
-                from shared.ui_utils import build_permission_prompt_lines
-                prompt_lines = build_permission_prompt_lines(
-                    tool_args=event.tool_args,
-                    response_options=event.response_options,
-                    include_tool_name=False,  # Tool name already shown in tool tree
-                )
+
+                # Use pre-formatted prompt lines from server if available (includes diff)
+                if event.prompt_lines:
+                    prompt_lines = event.prompt_lines
+                else:
+                    # Fall back to building prompt lines locally
+                    from shared.ui_utils import build_permission_prompt_lines
+                    prompt_lines = build_permission_prompt_lines(
+                        tool_args=event.tool_args,
+                        response_options=event.response_options,
+                        include_tool_name=False,  # Tool name already shown in tool tree
+                    )
 
                 # Integrate into tool tree (same as direct mode)
                 buffer = agent_registry.get_selected_buffer()
                 if buffer:
-                    buffer.set_tool_permission_pending(event.tool_name, prompt_lines)
+                    buffer.set_tool_permission_pending(
+                        event.tool_name,
+                        prompt_lines,
+                        format_hint=event.format_hint
+                    )
                 display.refresh()
                 # Enable permission input mode
                 display.set_waiting_for_channel_input(True, event.response_options)

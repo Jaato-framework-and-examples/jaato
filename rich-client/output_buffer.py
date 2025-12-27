@@ -40,6 +40,7 @@ class ActiveToolCall:
     permission_method: Optional[str] = None  # "yes", "always", "once", "never", "whitelist", "blacklist"
     permission_prompt_lines: Optional[List[str]] = None  # Expanded prompt while pending
     permission_truncated: bool = False  # True if prompt is truncated
+    permission_format_hint: Optional[str] = None  # "diff" for colored diff display
     # Clarification tracking (per-question progressive display)
     clarification_state: Optional[str] = None  # None, "pending", "resolved"
     clarification_prompt_lines: Optional[List[str]] = None  # Current question lines
@@ -484,17 +485,24 @@ class OutputBuffer:
         """Get list of currently active tools."""
         return list(self._active_tools)
 
-    def set_tool_permission_pending(self, tool_name: str, prompt_lines: List[str]) -> None:
+    def set_tool_permission_pending(
+        self,
+        tool_name: str,
+        prompt_lines: List[str],
+        format_hint: Optional[str] = None
+    ) -> None:
         """Mark a tool as awaiting permission with the prompt to display.
 
         Args:
             tool_name: Name of the tool awaiting permission.
             prompt_lines: Lines of the permission prompt to display.
+            format_hint: Optional hint for display format ("diff" for colored diff).
         """
         for tool in self._active_tools:
             if tool.name == tool_name and not tool.completed:
                 tool.permission_state = "pending"
                 tool.permission_prompt_lines = prompt_lines
+                tool.permission_format_hint = format_hint
                 # Scroll to bottom to show the prompt
                 self._scroll_offset = 0
                 return
