@@ -2216,7 +2216,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 ipc_trace(f"  AgentOutputEvent: agent={event.agent_id}, source={event.source}, mode={event.mode}, len={len(event.text)}")
                 buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
                 if buffer:
-                    buffer.append_output(event.source, event.text, event.mode)
+                    buffer.append(event.source, event.text, event.mode)
                     display.refresh()
 
             elif isinstance(event, AgentCreatedEvent):
