@@ -183,12 +183,14 @@ class SessionManager:
         """
         import os
 
-        # Apply trace log path if provided
+        # Apply trace log paths if provided
         if event.trace_log_path:
             os.environ['JAATO_TRACE_LOG'] = event.trace_log_path
             logger.info(f"Client {client_id} set JAATO_TRACE_LOG={event.trace_log_path}")
 
-        # Future: Apply other client-specific settings here
+        if event.provider_trace_log:
+            os.environ['PROVIDER_TRACE_LOG'] = event.provider_trace_log
+            logger.info(f"Client {client_id} set PROVIDER_TRACE_LOG={event.provider_trace_log}")
 
     # =========================================================================
     # Session Lifecycle

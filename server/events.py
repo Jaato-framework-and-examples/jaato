@@ -457,7 +457,7 @@ class ClientConfigRequest(Event):
     type: EventType = field(default=EventType.CLIENT_CONFIG)
     # Environment overrides from client's .env
     trace_log_path: Optional[str] = None  # JAATO_TRACE_LOG
-    # Future: other client-specific settings can be added here
+    provider_trace_log: Optional[str] = None  # PROVIDER_TRACE_LOG
 
 
 # =============================================================================
