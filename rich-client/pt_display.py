@@ -1405,12 +1405,17 @@ class PTDisplay:
         """
         prefixes = {''}  # Empty string is always valid (nothing typed yet)
         for option in response_options:
+            # Handle both object attributes and dict keys
+            if isinstance(option, dict):
+                short = option.get('key', option.get('short', '')).lower()
+                full = option.get('label', option.get('full', '')).lower()
+            else:
+                short = getattr(option, 'short', getattr(option, 'key', '')).lower()
+                full = getattr(option, 'full', getattr(option, 'label', '')).lower()
             # Add all prefixes of short form (e.g., "y", "a", "n")
-            short = option.short.lower()
             for i in range(1, len(short) + 1):
                 prefixes.add(short[:i])
             # Add all prefixes of full form (e.g., "yes", "ye", "y")
-            full = option.full.lower()
             for i in range(1, len(full) + 1):
                 prefixes.add(full[:i])
         return prefixes

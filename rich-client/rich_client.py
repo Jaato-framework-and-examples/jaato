@@ -2457,20 +2457,20 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     if release_file.exists():
         release_name = release_file.read_text().strip()
 
+    # IPC event tracing - use JAATO_TRACE_LOG if set
+    from datetime import datetime as dt
+    trace_file = os.environ.get("JAATO_TRACE_LOG")
+    def ipc_trace(msg: str):
+        if not trace_file:
+            return  # Tracing disabled
+        with open(trace_file, "a") as f:
+            ts = dt.now().strftime("%H:%M:%S.%f")[:-3]
+            f.write(f"[{ts}] [IPC] {msg}\n")
+
     async def handle_events():
         """Handle events from the server."""
         nonlocal pending_permission_request, pending_clarification_request
         nonlocal model_running, should_exit
-
-        # IPC event tracing - use JAATO_TRACE_LOG if set
-        from datetime import datetime as dt
-        trace_file = os.environ.get("JAATO_TRACE_LOG")
-        def ipc_trace(msg: str):
-            if not trace_file:
-                return  # Tracing disabled
-            with open(trace_file, "a") as f:
-                ts = dt.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] [IPC] {msg}\n")
 
         ipc_trace("Event handler starting")
         event_count = 0
@@ -2543,18 +2543,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     "request_id": event.request_id,
                     "options": event.response_options,
                 }
-                # Display permission prompt
+                # Display permission prompt (prompt_lines already includes formatted options)
                 buffer = agent_registry.get_selected_buffer()
                 if buffer:
                     buffer.append("system", "\n", "write")
                     for line in event.prompt_lines:
                         buffer.append("system", line + "\n", "append")
-                    # Format options: key=label pairs
-                    options_str = ", ".join(
-                        f"{opt.get('key', '?')}={opt.get('label', '?')}"
-                        for opt in event.response_options
-                    )
-                    buffer.append("system", f"[{options_str}]: ", "append")
                 display.refresh()
                 # Enable permission input mode
                 display.set_waiting_for_channel_input(True, event.response_options)

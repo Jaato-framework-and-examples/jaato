@@ -585,10 +585,13 @@ class JaatoServer:
             options_dicts = []
             for opt in response_options:
                 opt_dict = {
-                    "key": getattr(opt, 'key', str(opt)),
-                    "label": getattr(opt, 'label', str(opt)),
-                    "action": getattr(opt, 'action', 'unknown'),
+                    "key": getattr(opt, 'short', getattr(opt, 'key', str(opt))),
+                    "label": getattr(opt, 'full', getattr(opt, 'label', str(opt))),
+                    "action": getattr(opt, 'decision', getattr(opt, 'action', 'unknown')),
                 }
+                # Convert enum to string if needed
+                if hasattr(opt_dict["action"], 'value'):
+                    opt_dict["action"] = opt_dict["action"].value
                 if hasattr(opt, 'description') and opt.description:
                     opt_dict["description"] = opt.description
                 options_dicts.append(opt_dict)
