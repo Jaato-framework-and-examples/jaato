@@ -200,7 +200,7 @@ class IPCClient:
         """Send client configuration to the server.
 
         Loads the client's .env file and sends relevant settings
-        (like JAATO_TRACE_LOG) to the server so plugins use client paths.
+        (like JAATO_TRACE_LOG, PROVIDER_TRACE_LOG) to the server so plugins use client paths.
         """
         import os
         from dotenv import dotenv_values
@@ -214,10 +214,12 @@ class IPCClient:
 
         # Also check current environment (in case set via shell)
         trace_log = client_env.get("JAATO_TRACE_LOG") or os.environ.get("JAATO_TRACE_LOG")
+        provider_trace = client_env.get("PROVIDER_TRACE_LOG") or os.environ.get("PROVIDER_TRACE_LOG")
 
         # Send config to server
         await self._send_event(ClientConfigRequest(
             trace_log_path=trace_log,
+            provider_trace_log=provider_trace,
         ))
 
     async def _start_server(self) -> bool:
