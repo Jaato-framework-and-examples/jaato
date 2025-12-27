@@ -2731,6 +2731,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         # Handle initial prompt
         if initial_prompt:
             model_running = True
+            display.add_to_history(initial_prompt)  # Add to command history
             await client.send_message(initial_prompt)
 
         # Main input loop - get input from queue
