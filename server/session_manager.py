@@ -77,6 +77,7 @@ class Session:
     attached_clients: Set[str] = field(default_factory=set)
     description: Optional[str] = None
     is_dirty: bool = False  # True if has unsaved changes
+    workspace_path: Optional[str] = None  # Client's working directory
 
 
 class SessionManager:
@@ -177,12 +178,14 @@ class SessionManager:
         self,
         client_id: str,
         session_name: Optional[str] = None,
+        workspace_path: Optional[str] = None,
     ) -> str:
         """Create a new session and attach the client.
 
         Args:
             client_id: The requesting client.
             session_name: Optional name (auto-generated if not provided).
+            workspace_path: Client's working directory for file operations.
 
         Returns:
             The session ID (empty string on failure).
@@ -206,6 +209,7 @@ class SessionManager:
             env_file=self._env_file,
             provider=self._provider,
             on_event=lambda e: self._emit_to_session(session_id, e),
+            workspace_path=workspace_path,
         )
 
         # Initialize the server
@@ -226,6 +230,7 @@ class SessionManager:
             created_at=timestamp.isoformat(),
             description=None,
             is_dirty=True,  # New session needs saving
+            workspace_path=workspace_path,
         )
 
         with self._lock:
@@ -258,6 +263,7 @@ class SessionManager:
         self,
         client_id: str,
         session_id: str,
+        workspace_path: Optional[str] = None,
     ) -> bool:
         """Attach a client to an existing session.
 
@@ -266,6 +272,7 @@ class SessionManager:
         Args:
             client_id: The requesting client.
             session_id: The session to attach to.
+            workspace_path: Client's working directory for file operations.
 
         Returns:
             True if attached successfully.
@@ -306,6 +313,11 @@ class SessionManager:
             # Attach to new session
             session.attached_clients.add(client_id)
             self._client_to_session[client_id] = session_id
+
+            # Update workspace path if provided
+            if workspace_path:
+                session.workspace_path = workspace_path
+                session.server.workspace_path = workspace_path
 
         logger.info(f"Client {client_id} attached to session {session_id}")
 
@@ -510,7 +522,11 @@ class SessionManager:
         logger.info(f"Session deleted: {session_id}")
         return deleted or session is not None
 
-    def get_or_create_default(self, client_id: str) -> str:
+    def get_or_create_default(
+        self,
+        client_id: str,
+        workspace_path: Optional[str] = None,
+    ) -> str:
         """Get the most recent session, or create a new one.
 
         Attaches to the most recently used session (by updated_at).
@@ -518,11 +534,12 @@ class SessionManager:
 
         Args:
             client_id: The requesting client.
+            workspace_path: Client's working directory for file operations.
 
         Returns:
             The session ID.
         """
-        logger.debug(f"get_or_create_default called for client {client_id}")
+        logger.debug(f"get_or_create_default called for client {client_id}, workspace={workspace_path}")
 
         # Check in-memory sessions first - find most recently updated
         with self._lock:
@@ -533,6 +550,10 @@ class SessionManager:
                 logger.debug(f"  found in-memory session: {session.session_id}")
                 session.attached_clients.add(client_id)
                 self._client_to_session[client_id] = session.session_id
+                # Update workspace path if provided (client may be from different dir)
+                if workspace_path:
+                    session.workspace_path = workspace_path
+                    session.server.workspace_path = workspace_path
                 # Emit current agent state to the newly attached client (skip SessionInfo, we'll send our own)
                 session.server.emit_current_state(
                     lambda e: self._emit_to_client(client_id, e),
@@ -551,12 +572,12 @@ class SessionManager:
             # Use the most recent one (first in the list)
             most_recent = persisted[0]
             logger.debug(f"  attaching to most recent session: {most_recent.session_id}")
-            if self.attach_session(client_id, most_recent.session_id):
+            if self.attach_session(client_id, most_recent.session_id, workspace_path):
                 return most_recent.session_id
 
         # No sessions exist - create a new one
         logger.debug(f"  creating new session...")
-        return self.create_session(client_id)
+        return self.create_session(client_id, workspace_path=workspace_path)
 
     # =========================================================================
     # Session Queries
