@@ -563,19 +563,22 @@ class TodoPlugin:
     def _execute_get_plan_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the getPlanStatus tool."""
         plan_id = args.get("plan_id")
-        self._trace(f"getPlanStatus: plan_id={plan_id}")
+        self._trace(f"getPlanStatus: plan_id={plan_id}, agent_name={self._agent_name}")
 
-        # Get plan (specified, current, or most recent)
+        # Get plan by explicit ID or current plan for this agent
         if plan_id and self._storage:
             plan = self._storage.get_plan(plan_id)
         else:
+            # Only get this agent's current plan - don't fall back to other agents' plans
             plan = self._get_current_plan()
-            # Fall back to most recent plan if no current plan
-            if not plan:
-                plan = self._get_most_recent_plan()
 
         if not plan:
-            return {"error": "No plan found. Create a plan first with createPlan."}
+            # Provide helpful context about why no plan was found
+            agent_context = f" (agent: {self._agent_name})" if self._agent_name else ""
+            return {
+                "error": f"No plan found for this agent{agent_context}. "
+                         f"Create a plan first with createPlan."
+            }
 
         return {
             "plan_id": plan.plan_id,
