@@ -261,7 +261,9 @@ class OutputBuffer:
             style: Rich style for the message.
         """
         self._flush_current_block()
-        self._add_line("system", message, style)
+        # Handle multi-line messages
+        for line in message.split('\n'):
+            self._add_line("system", line, style)
 
     def clear(self) -> None:
         """Clear all output."""
