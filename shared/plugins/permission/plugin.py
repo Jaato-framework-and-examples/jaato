@@ -24,6 +24,7 @@ from .channels import (
     get_default_permission_options,
 )
 from ..base import UserCommand, CommandCompletion, PermissionDisplayInfo, OutputCallback
+from ...ui_utils import format_permission_options, format_tool_args_summary
 
 # Import TYPE_CHECKING to avoid circular imports
 from typing import TYPE_CHECKING
@@ -886,23 +887,12 @@ If permission is denied, do not attempt to proceed with that action."""
             # Default: show tool name and args
             lines.append(f"Tool: {tool_name}")
             if args:
-                args_str = str(args)
-                if len(args_str) > 100:
-                    args_str = args_str[:97] + "..."
-                lines.append(f"Args: {args_str}")
+                lines.append(f"Args: {format_tool_args_summary(args, max_length=100)}")
 
-        # Add options line built from response_options
+        # Add options line using shared utility
         lines.append("")
         options = response_options or get_default_permission_options()
-        options_parts = []
-        for opt in options:
-            if opt.short != opt.full:
-                # Format: [y]es
-                options_parts.append(f"[{opt.short}]{opt.full[len(opt.short):]}")
-            else:
-                # Format: [once]
-                options_parts.append(f"[{opt.full}]")
-        lines.append(" ".join(options_parts))
+        lines.append(format_permission_options(options))
 
         return lines
 
