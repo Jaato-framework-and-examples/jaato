@@ -672,8 +672,11 @@ class OutputBuffer:
                 for tool in self._active_tools:
                     height += 1  # Tool line
 
-                    # Error message (if failed and has error)
-                    if tool.completed and not tool.success and tool.error_message:
+                    # Permission denied message
+                    if tool.permission_state == "denied" and tool.permission_method:
+                        height += 1
+                    # Error message (if failed and has error, but not permission denied)
+                    elif tool.completed and not tool.success and tool.error_message:
                         height += 1
             else:
                 # Collapsed view: just one summary line
@@ -1044,12 +1047,19 @@ class OutputBuffer:
                     if tool.completed and tool.duration_seconds is not None:
                         output.append(f" ({tool.duration_seconds:.1f}s)", style="dim")
 
-                    # Show error message if failed
-                    if tool.completed and not tool.success and tool.error_message:
+                    # Show permission denied info (when permission was denied)
+                    if tool.permission_state == "denied" and tool.permission_method:
                         output.append("\n")
                         continuation = "   " if is_last else "│  "
                         output.append(f"    {continuation} ", style="dim")
-                        output.append(f"  ⚠ {tool.error_message[:60]}", style="red dim")
+                        output.append(f"  ⊘ Permission denied: User chose: {tool.permission_method}", style="red dim")
+                    # Show error message if failed (but not for permission denied - already shown above)
+                    elif tool.completed and not tool.success and tool.error_message:
+                        output.append("\n")
+                        continuation = "   " if is_last else "│  "
+                        output.append(f"    {continuation} ", style="dim")
+                        # Show full error message without truncation
+                        output.append(f"  ⚠ {tool.error_message}", style="red dim")
             else:
                 # Collapsed view - all tools on one line
                 tool_summaries = []
