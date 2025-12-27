@@ -2344,16 +2344,17 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.set_waiting_for_channel_input(False)
 
             elif isinstance(event, PlanUpdatedEvent):
-                # Update plan display - convert event steps to dict format expected by PTDisplay
+                # Update plan display - convert event steps to dict format expected by PlanPanel
                 plan_data = {
                     "title": event.plan_name or "Plan",
                     "steps": [
                         {
-                            "text": step.get("content", ""),
+                            "description": step.get("content", ""),
                             "status": step.get("status", "pending"),
                             "active_form": step.get("active_form"),
+                            "sequence": i + 1,  # 1-based for display
                         }
-                        for step in event.steps
+                        for i, step in enumerate(event.steps)
                     ],
                     "progress": {"current": 0, "total": len(event.steps)},
                 }
