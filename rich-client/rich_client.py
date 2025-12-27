@@ -2339,6 +2339,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         AgentCompletedEvent,
         PermissionRequestedEvent,
         PermissionResolvedEvent,
+        ClarificationRequestedEvent,
         ClarificationQuestionEvent,
         ClarificationResolvedEvent,
         PlanUpdatedEvent,
@@ -2563,23 +2564,15 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     "options": event.response_options,
                 }
                 # Build prompt lines from raw data (client-side formatting)
+                # Import shared utility for consistent formatting
+                from shared.ui_utils import format_permission_options, format_tool_args_summary
                 prompt_lines = []
                 if event.tool_args:
-                    args_str = str(event.tool_args)
-                    if len(args_str) > 100:
-                        args_str = args_str[:97] + "..."
-                    prompt_lines.append(f"Args: {args_str}")
+                    args_summary = format_tool_args_summary(event.tool_args, max_length=100)
+                    prompt_lines.append(f"Args: {args_summary}")
                 prompt_lines.append("")
-                # Format options: [y]es [n]o [a]lways [once] [never] [all]
-                options_parts = []
-                for opt in event.response_options:
-                    key = opt.get('key', '?')
-                    label = opt.get('label', '?')
-                    if key != label and label.startswith(key):
-                        options_parts.append(f"[{key}]{label[len(key):]}")
-                    else:
-                        options_parts.append(f"[{label}]")
-                prompt_lines.append(" ".join(options_parts))
+                # Format options using shared utility: [y]es [n]o [a]lways [once] [never] [all]
+                prompt_lines.append(format_permission_options(event.response_options))
 
                 # Integrate into tool tree (same as direct mode)
                 buffer = agent_registry.get_selected_buffer()
@@ -2598,24 +2591,64 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     buffer.set_tool_permission_resolved(event.tool_name, event.granted, event.method)
                     display.refresh()
 
-            elif isinstance(event, ClarificationQuestionEvent):
-                # Show clarification question
+            elif isinstance(event, ClarificationRequestedEvent):
+                ipc_trace(f"  ClarificationRequestedEvent: tool={event.tool_name}, id={event.request_id}")
+                # Initialize clarification in tool tree (same as direct mode)
                 pending_clarification_request = {
                     "request_id": event.request_id,
+                    "tool_name": event.tool_name,
                 }
-                display.append_output("system", f"\n{event.question}\n", "write")
+                buffer = agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.set_tool_clarification_pending(event.tool_name, event.context_lines)
+                display.refresh()
+
+            elif isinstance(event, ClarificationQuestionEvent):
+                ipc_trace(f"  ClarificationQuestionEvent: q{event.question_index}/{event.total_questions}")
+                # Show clarification question in tool tree (same as direct mode)
+                if not pending_clarification_request:
+                    pending_clarification_request = {"request_id": event.request_id}
+                pending_clarification_request["current_question"] = event.question_index
+                pending_clarification_request["total_questions"] = event.total_questions
+
+                # Update tool tree with current question
+                tool_name = pending_clarification_request.get("tool_name", "clarification")
+                buffer = agent_registry.get_selected_buffer()
+                if buffer:
+                    question_lines = event.question_text.split("\n") if event.question_text else []
+                    buffer.set_tool_clarification_question(
+                        tool_name,
+                        event.question_index,
+                        event.total_questions,
+                        question_lines
+                    )
+                display.refresh()
+                # Enable clarification input mode
                 display.set_waiting_for_channel_input(True)
 
             elif isinstance(event, ClarificationResolvedEvent):
+                ipc_trace(f"  ClarificationResolvedEvent: tool={event.tool_name}")
+                # Update tool tree with resolution (same as direct mode)
+                buffer = agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.set_tool_clarification_resolved(event.tool_name)
+                    display.refresh()
                 pending_clarification_request = None
                 display.set_waiting_for_channel_input(False)
 
             elif isinstance(event, PlanUpdatedEvent):
-                # Update plan display - convert list to dict format expected by PTDisplay
+                # Update plan display - convert event steps to dict format expected by PTDisplay
                 plan_data = {
-                    "title": "Plan",
-                    "steps": [{"text": line, "status": "pending"} for line in event.plan_lines],
-                    "progress": {"current": 0, "total": len(event.plan_lines)},
+                    "title": event.plan_name or "Plan",
+                    "steps": [
+                        {
+                            "text": step.get("content", ""),
+                            "status": step.get("status", "pending"),
+                            "active_form": step.get("active_form"),
+                        }
+                        for step in event.steps
+                    ],
+                    "progress": {"current": 0, "total": len(event.steps)},
                 }
                 agent_id = getattr(event, 'agent_id', None)
                 display.update_plan(plan_data, agent_id)
