@@ -436,6 +436,14 @@ class PTDisplay:
 
         return to_formatted_text(ANSI(self._renderer.render(rendered)))
 
+    def _get_active_buffer(self):
+        """Get the active output buffer (selected agent's or main)."""
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if buffer:
+                return buffer
+        return self._output_buffer
+
     def _get_output_content(self):
         """Get rendered output content as ANSI for prompt_toolkit."""
         # Check for terminal resize and update dimensions if needed
@@ -592,10 +600,22 @@ class PTDisplay:
                 event.current_buffer.insert_text('\n')
 
         @kb.add(*keys.get_key_args("clear_input"))
-        def handle_escape(event):
+        def handle_escape_escape(event):
             """Handle Escape+Escape - clear input buffer contents."""
             if not getattr(self, '_pager_active', False):
                 event.current_buffer.reset()
+
+        @kb.add(*keys.get_key_args("tool_exit"))
+        def handle_tool_exit(event):
+            """Handle Escape - exit tool navigation mode if active."""
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                buffer.exit_tool_navigation()
+                self._app.invalidate()
+                # Don't let escape propagate further
+                return
+            # Not in tool nav mode - let other handlers process escape
+            # (escape+enter for newline, escape+escape for clear)
 
         @kb.add(*keys.get_key_args("pager_quit"), eager=True)
         def handle_q(event):
@@ -627,7 +647,13 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("pager_next"), eager=True)
         def handle_space(event):
-            """Handle space key - advance pager if active, otherwise insert space."""
+            """Handle space key - tool toggle, pager advance, or insert space."""
+            # Tool navigation mode - toggle expand/collapse on selected tool
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                buffer.toggle_selected_tool_expanded()
+                self._app.invalidate()
+                return
             if getattr(self, '_pager_active', False):
                 # In pager mode - advance page
                 self._advance_pager_page()
@@ -716,7 +742,13 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("nav_up"))
         def handle_up(event):
-            """Handle Up arrow - scroll popup if visible, otherwise history/completion."""
+            """Handle Up arrow - tool nav, scroll popup, or history/completion."""
+            # Tool navigation mode - select previous tool
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                buffer.select_prev_tool()
+                self._app.invalidate()
+                return
             # If plan popup is visible, scroll it up
             if self._plan_panel.is_popup_visible and self._current_plan_has_data():
                 plan_data = self._get_current_plan_data()
@@ -728,7 +760,13 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("nav_down"))
         def handle_down(event):
-            """Handle Down arrow - scroll popup if visible, otherwise history/completion."""
+            """Handle Down arrow - tool nav, scroll popup, or history/completion."""
+            # Tool navigation mode - select next tool
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                buffer.select_next_tool()
+                self._app.invalidate()
+                return
             # If plan popup is visible, scroll it down
             if self._plan_panel.is_popup_visible and self._current_plan_has_data():
                 plan_data = self._get_current_plan_data()
@@ -755,16 +793,17 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("toggle_tools"))
         def handle_ctrl_t(event):
-            """Handle Ctrl+T - toggle tool view between collapsed/expanded."""
-            # Use selected agent's buffer if registry present
-            if self._agent_registry:
-                buffer = self._agent_registry.get_selected_buffer()
-                if buffer:
-                    buffer.toggle_tools_expanded()
-                else:
-                    self._output_buffer.toggle_tools_expanded()
+            """Handle Ctrl+T - enter/exit tool navigation mode."""
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                # Already in nav mode - exit
+                buffer.exit_tool_navigation()
+            elif buffer._active_tools:
+                # Enter navigation mode (auto-expands view)
+                buffer.enter_tool_navigation()
             else:
-                self._output_buffer.toggle_tools_expanded()
+                # No tools - just toggle global expand state
+                buffer.toggle_tools_expanded()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("yank"))
