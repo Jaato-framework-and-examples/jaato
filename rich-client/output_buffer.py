@@ -50,7 +50,9 @@ class ActiveToolCall:
     clarification_answered: Optional[List[Tuple[int, str]]] = None  # List of (question_index, answer_summary)
     # Live output tracking (tail -f style preview)
     output_lines: Optional[List[str]] = None  # Rolling buffer of recent output lines
-    output_max_lines: int = 5  # Max lines to keep in buffer
+    output_max_lines: int = 30  # Max lines to keep in buffer
+    # Per-tool expand state for navigation
+    expanded: bool = False  # Whether this tool's output is expanded
 
 
 class OutputBuffer:
@@ -83,6 +85,9 @@ class OutputBuffer:
         self._tools_expanded: bool = False  # Toggle between collapsed/expanded tool view
         self._rendering: bool = False  # Guard against flushes during render
         self._agent_type: str = agent_type  # "main" or "subagent" for user label
+        # Tool navigation state
+        self._tool_nav_active: bool = False  # True when navigating tools
+        self._selected_tool_index: Optional[int] = None  # Currently selected tool
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -425,8 +430,10 @@ class OutputBuffer:
         self.mark_tool_completed(tool_name)
 
     def clear_active_tools(self) -> None:
-        """Clear all active tools."""
+        """Clear all active tools and reset navigation state."""
         self._active_tools.clear()
+        self._tool_nav_active = False
+        self._selected_tool_index = None
 
     def toggle_tools_expanded(self) -> bool:
         """Toggle between collapsed and expanded tool view.
@@ -466,6 +473,88 @@ class OutputBuffer:
         # Other methods - no indicator needed
         return None
 
+    # Tool navigation methods
+    def enter_tool_navigation(self) -> bool:
+        """Enter tool navigation mode.
+
+        Returns:
+            True if entered successfully, False if no tools available.
+        """
+        if not self._active_tools:
+            return False
+        self._tool_nav_active = True
+        self._selected_tool_index = 0  # Select first tool
+        self._tools_expanded = True  # Auto-expand when entering nav mode
+        return True
+
+    def exit_tool_navigation(self) -> None:
+        """Exit tool navigation mode."""
+        self._tool_nav_active = False
+        self._selected_tool_index = None
+
+    @property
+    def tool_nav_active(self) -> bool:
+        """Check if tool navigation is active."""
+        return self._tool_nav_active
+
+    @property
+    def selected_tool_index(self) -> Optional[int]:
+        """Get currently selected tool index."""
+        return self._selected_tool_index
+
+    def select_next_tool(self) -> bool:
+        """Select next tool in list.
+
+        Returns:
+            True if selection changed, False if already at end.
+        """
+        if not self._tool_nav_active or not self._active_tools:
+            return False
+        if self._selected_tool_index is None:
+            self._selected_tool_index = 0
+            return True
+        if self._selected_tool_index < len(self._active_tools) - 1:
+            self._selected_tool_index += 1
+            return True
+        return False  # Already at end
+
+    def select_prev_tool(self) -> bool:
+        """Select previous tool in list.
+
+        Returns:
+            True if selection changed, False if already at start.
+        """
+        if not self._tool_nav_active or not self._active_tools:
+            return False
+        if self._selected_tool_index is None:
+            self._selected_tool_index = 0
+            return True
+        if self._selected_tool_index > 0:
+            self._selected_tool_index -= 1
+            return True
+        return False  # Already at start
+
+    def toggle_selected_tool_expanded(self) -> bool:
+        """Toggle expand/collapse for selected tool.
+
+        Returns:
+            New expanded state of the tool, False if no selection.
+        """
+        if self._selected_tool_index is None:
+            return False
+        if 0 <= self._selected_tool_index < len(self._active_tools):
+            tool = self._active_tools[self._selected_tool_index]
+            tool.expanded = not tool.expanded
+            return tool.expanded
+        return False
+
+    def get_selected_tool(self) -> Optional[ActiveToolCall]:
+        """Get the currently selected tool."""
+        if self._selected_tool_index is not None and \
+           0 <= self._selected_tool_index < len(self._active_tools):
+            return self._active_tools[self._selected_tool_index]
+        return None
+
     def finalize_tool_tree(self) -> None:
         """Convert tool tree to stored lines (collapsed or expanded based on setting).
 
@@ -487,6 +576,10 @@ class OutputBuffer:
 
         if not all_completed or any_pending:
             return  # Don't finalize yet
+
+        # Exit navigation mode when finalizing
+        self._tool_nav_active = False
+        self._selected_tool_index = None
 
         tool_count = len(self._active_tools)
 
@@ -1158,9 +1251,14 @@ class OutputBuffer:
         if self._active_tools:
             if lines_to_show:
                 output.append("\n\n")  # Extra blank line for visual separation
-                # Add separator line with toggle hint
-                if self._tools_expanded:
-                    output.append("  ───  Ctrl+T to collapse", style="dim")
+                # Add separator line with toggle/navigation hint
+                if self._tool_nav_active:
+                    # Show navigation hints when in tool nav mode
+                    pos = (self._selected_tool_index or 0) + 1
+                    total = len(self._active_tools)
+                    output.append(f"  ───  ↑/↓ nav, Space expand, [/] scroll, Esc exit [{pos}/{total}]", style="dim")
+                elif self._tools_expanded:
+                    output.append("  ───  Ctrl+T to collapse, Ctrl+N to navigate", style="dim")
                 else:
                     output.append("  ───  Ctrl+T to expand", style="dim")
                 output.append("\n")
@@ -1194,6 +1292,7 @@ class OutputBuffer:
                 # Show each tool on its own line
                 for i, tool in enumerate(self._active_tools):
                     is_last = (i == len(self._active_tools) - 1)
+                    is_selected = (self._tool_nav_active and i == self._selected_tool_index)
                     connector = "└─" if is_last else "├─"
 
                     if tool.completed:
@@ -1203,11 +1302,26 @@ class OutputBuffer:
                         status_icon = "○"
                         status_style = "dim"
 
+                    # Determine expand indicator (only in nav mode)
+                    if self._tool_nav_active:
+                        expand_icon = "▾" if tool.expanded else "▸"
+                    else:
+                        expand_icon = ""
+
+                    # Selection highlight style
+                    if is_selected:
+                        row_style = "reverse"
+                    else:
+                        row_style = "dim"
+
                     output.append("\n")
-                    output.append(f"    {connector} ", style="dim")
-                    output.append(tool.name, style="dim")
+                    if self._tool_nav_active:
+                        output.append(f"  {expand_icon} {connector} ", style=row_style)
+                    else:
+                        output.append(f"    {connector} ", style=row_style)
+                    output.append(tool.name, style=row_style)
                     if tool.args_summary:
-                        output.append(f"({tool.args_summary})", style="dim")
+                        output.append(f"({tool.args_summary})", style=row_style)
                     output.append(f" {status_icon}", style=status_style)
 
                     # Show approval indicator for granted permissions
@@ -1220,12 +1334,17 @@ class OutputBuffer:
                     if tool.completed and tool.duration_seconds is not None:
                         output.append(f" ({tool.duration_seconds:.1f}s)", style="dim")
 
-                    # Show output preview (persists after tool completes)
-                    if tool.output_lines:
+                    # Show output only if:
+                    # - In nav mode: tool.expanded is True
+                    # - Not in nav mode: always show (legacy behavior)
+                    show_output = tool.expanded if self._tool_nav_active else True
+
+                    if show_output and tool.output_lines:
                         continuation = "   " if is_last else "│  "
                         for output_line in tool.output_lines:
                             output.append("\n")
-                            output.append(f"    {continuation}   ", style="dim")
+                            prefix = "    " if self._tool_nav_active else "    "
+                            output.append(f"{prefix}{continuation}   ", style="dim")
                             # Truncate long lines
                             max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
                             if len(output_line) > max_line_width:

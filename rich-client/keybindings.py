@@ -143,6 +143,10 @@ DEFAULT_KEYBINDINGS = {
     "cycle_agents": "c-a",
     "yank": "c-y",
     "view_full": "v",
+
+    # Tool navigation (contextual - active only when in tool nav mode)
+    "tool_toggle": "space",   # Toggle expand/collapse on selected tool
+    "tool_exit": "escape",    # Exit tool navigation mode
 }
 
 
@@ -299,6 +303,10 @@ class KeybindingConfig:
     cycle_agents: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["cycle_agents"])
     yank: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["yank"])
     view_full: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["view_full"])
+
+    # Tool navigation (contextual)
+    tool_toggle: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_toggle"])
+    tool_exit: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_exit"])
 
     # Profile metadata (not a keybinding)
     _profile: str = field(default="default")
@@ -481,6 +489,8 @@ class KeybindingConfig:
             "cycle_agents": self.cycle_agents,
             "yank": self.yank,
             "view_full": self.view_full,
+            "tool_toggle": self.tool_toggle,
+            "tool_exit": self.tool_exit,
         }
 
     def set_binding(self, action: str, key: KeyBinding) -> bool:
@@ -651,5 +661,8 @@ def generate_example_config() -> str:
         "cycle_agents": "c-a",
         "yank": "c-y",
         "view_full": "v",
+
+        "tool_toggle": "space",
+        "tool_exit": "escape",
     }
     return json.dumps(example, indent=2)
