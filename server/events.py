@@ -37,6 +37,7 @@ class EventType(str, Enum):
     # Tool execution (Server -> Client)
     TOOL_CALL_START = "tool.call_start"
     TOOL_CALL_END = "tool.call_end"
+    TOOL_OUTPUT = "tool.output"  # Live output chunk from running tool
 
     # Permission flow (Server <-> Client)
     PERMISSION_REQUESTED = "permission.requested"
@@ -180,6 +181,15 @@ class ToolCallEndEvent(Event):
     success: bool = True
     duration_seconds: float = 0.0
     error_message: Optional[str] = None
+
+
+@dataclass
+class ToolOutputEvent(Event):
+    """Live output chunk from a running tool (tail -f style)."""
+    type: EventType = field(default=EventType.TOOL_OUTPUT)
+    agent_id: str = ""
+    call_id: str = ""  # Required to correlate with specific tool call
+    chunk: str = ""  # Output text chunk (may contain newlines)
 
 
 @dataclass
@@ -447,6 +457,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.AGENT_COMPLETED.value: AgentCompletedEvent,
     EventType.TOOL_CALL_START.value: ToolCallStartEvent,
     EventType.TOOL_CALL_END.value: ToolCallEndEvent,
+    EventType.TOOL_OUTPUT.value: ToolOutputEvent,
     EventType.PERMISSION_REQUESTED.value: PermissionRequestedEvent,
     EventType.PERMISSION_RESOLVED.value: PermissionResolvedEvent,
     EventType.CLARIFICATION_REQUESTED.value: ClarificationRequestedEvent,

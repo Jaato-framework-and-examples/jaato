@@ -64,6 +64,7 @@ from .events import (
     AgentCompletedEvent,
     ToolCallStartEvent,
     ToolCallEndEvent,
+    ToolOutputEvent,
     PermissionRequestedEvent,
     PermissionResolvedEvent,
     ClarificationRequestedEvent,
@@ -610,6 +611,13 @@ class JaatoServer:
                     success=success,
                     duration_seconds=duration_seconds,
                     error_message=error_message,
+                ))
+
+            def on_tool_output(self, agent_id, call_id, chunk):
+                server.emit(ToolOutputEvent(
+                    agent_id=agent_id,
+                    call_id=call_id,
+                    chunk=chunk,
                 ))
 
         logger.debug("  _setup_agent_hooks: class defined, creating instance...")
