@@ -679,14 +679,34 @@ class JaatoServer:
         class PlanReporter:
             """Plan reporter that emits events."""
 
-            def report_plan(self, plan_data: dict, agent_name: Optional[str] = None):
+            def _get_agent_id(self, agent_name: Optional[str]) -> str:
+                """Get agent ID from agent name."""
                 agent_id = "main" if agent_name is None else agent_name
-                # Look up actual agent_id if needed
                 for aid, agent in server._agents.items():
                     if agent.profile_name == agent_name:
                         agent_id = aid
                         break
+                return agent_id
 
+            def _emit_plan_event(self, plan, agent_name: Optional[str] = None):
+                """Emit a PlanUpdatedEvent from a TodoPlan object."""
+                agent_id = self._get_agent_id(agent_name)
+                steps = []
+                for step in plan.steps:
+                    steps.append({
+                        'content': step.description,
+                        'status': step.status.value if hasattr(step.status, 'value') else str(step.status),
+                        'active_form': getattr(step, 'active_form', None),
+                    })
+                server.emit(PlanUpdatedEvent(
+                    agent_id=agent_id,
+                    plan_name=plan.title,
+                    steps=steps,
+                ))
+
+            def report_plan(self, plan_data: dict, agent_name: Optional[str] = None):
+                """Report plan from dict format (legacy)."""
+                agent_id = self._get_agent_id(agent_name)
                 steps = []
                 for step in plan_data.get('steps', []):
                     steps.append({
@@ -694,19 +714,26 @@ class JaatoServer:
                         'status': step.get('status', 'pending'),
                         'active_form': step.get('activeForm'),
                     })
-
                 server.emit(PlanUpdatedEvent(
                     agent_id=agent_id,
                     plan_name=plan_data.get('name', 'Plan'),
                     steps=steps,
                 ))
 
+            def report_plan_created(self, plan, agent_id: Optional[str] = None):
+                """Report new plan creation."""
+                self._emit_plan_event(plan, agent_id)
+
+            def report_step_update(self, plan, step, agent_id: Optional[str] = None):
+                """Report step status change."""
+                self._emit_plan_event(plan, agent_id)
+
+            def report_plan_completed(self, plan, agent_id: Optional[str] = None):
+                """Report plan completion."""
+                self._emit_plan_event(plan, agent_id)
+
             def clear_plan(self, agent_name: Optional[str] = None):
-                agent_id = "main" if agent_name is None else agent_name
-                for aid, agent in server._agents.items():
-                    if agent.profile_name == agent_name:
-                        agent_id = aid
-                        break
+                agent_id = self._get_agent_id(agent_name)
                 server.emit(PlanClearedEvent(agent_id=agent_id))
 
             def report_output(self, source: str, text: str, mode: str):
