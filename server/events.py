@@ -193,11 +193,14 @@ class PermissionResponseOption:
 
 @dataclass
 class PermissionRequestedEvent(Event):
-    """Permission is requested for a tool execution."""
+    """Permission is requested for a tool execution.
+
+    Sends structured data - client is responsible for formatting display.
+    """
     type: EventType = field(default=EventType.PERMISSION_REQUESTED)
     request_id: str = ""
     tool_name: str = ""
-    prompt_lines: List[str] = field(default_factory=list)
+    tool_args: Dict[str, Any] = field(default_factory=dict)
     response_options: List[Dict[str, str]] = field(default_factory=list)
     # ^ List of {key, label, action, description?}
 
