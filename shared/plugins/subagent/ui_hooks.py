@@ -214,3 +214,21 @@ class AgentUIHooks(Protocol):
             call_id: Unique identifier for this tool call (for correlation).
         """
         ...
+
+    def on_tool_output(
+        self,
+        agent_id: str,
+        call_id: str,
+        chunk: str
+    ) -> None:
+        """Called when a tool emits output during execution.
+
+        Enables live "tail -f" style output preview in the tool tree.
+        Plugins should call this repeatedly during execution to stream output.
+
+        Args:
+            agent_id: Which agent's tool is producing output.
+            call_id: Unique identifier for the tool call (required for correlation).
+            chunk: Output text chunk (may contain newlines).
+        """
+        ...

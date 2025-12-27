@@ -2072,6 +2072,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         PlanClearedEvent,
         ToolCallStartEvent,
         ToolCallEndEvent,
+        ToolOutputEvent,
         ContextUpdatedEvent,
         TurnCompletedEvent,
         SystemMessageEvent,
@@ -2394,6 +2395,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         call_id=event.call_id
                     )
                     buffer.scroll_to_bottom()  # Auto-scroll when tool tree updates
+                    display.refresh()
+
+            elif isinstance(event, ToolOutputEvent):
+                # Live output chunk from running tool (tail -f style preview)
+                buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
+                if buffer and event.call_id:
+                    buffer.append_tool_output(event.call_id, event.chunk)
                     display.refresh()
 
             elif isinstance(event, ContextUpdatedEvent):
