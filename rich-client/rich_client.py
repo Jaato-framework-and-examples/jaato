@@ -2657,7 +2657,18 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     display.refresh()
 
             elif isinstance(event, ContextUpdatedEvent):
-                # Update context usage in status bar
+                # Update context usage in agent registry (status bar reads from here)
+                agent_id = event.agent_id or agent_registry.get_selected_agent_id()
+                if agent_id:
+                    agent_registry.update_context_usage(
+                        agent_id=agent_id,
+                        total_tokens=event.total_tokens,
+                        prompt_tokens=event.prompt_tokens,
+                        output_tokens=event.output_tokens,
+                        turns=0,  # Not provided in event
+                        percent_used=event.percent_used,
+                    )
+                # Also update display (fallback if no registry)
                 usage = {
                     "prompt_tokens": event.prompt_tokens,
                     "output_tokens": event.output_tokens,
@@ -2947,6 +2958,26 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     from shared.client_commands import build_full_help_text
                     help_lines = build_full_help_text(server_commands)
                     display.show_lines(help_lines)
+                    continue
+                elif text_lower == "context":
+                    # Show context usage (client-side, from agent registry)
+                    selected_agent = agent_registry.get_selected_agent()
+                    if not selected_agent:
+                        display.show_lines([("Context tracking not available", "yellow")])
+                    else:
+                        usage = selected_agent.context_usage
+                        lines = [
+                            ("─" * 50, "dim"),
+                            (f"Context Usage: {selected_agent.name}", "bold"),
+                            (f"  Agent: {selected_agent.agent_id}", "dim"),
+                            (f"  Total tokens: {usage.get('total_tokens', 0)}", "dim"),
+                            (f"  Prompt tokens: {usage.get('prompt_tokens', 0)}", "dim"),
+                            (f"  Output tokens: {usage.get('output_tokens', 0)}", "dim"),
+                            (f"  Turns: {usage.get('turns', 0)}", "dim"),
+                            (f"  Percent used: {usage.get('percent_used', 0):.1f}%", "dim"),
+                            ("─" * 50, "dim"),
+                        ]
+                        display.show_lines(lines)
                     continue
 
                 # Tools command - forward to server
