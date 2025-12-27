@@ -2399,6 +2399,18 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     # Set up session provider for completion
     input_handler.set_session_provider(get_sessions_for_completion)
 
+    # Set up command completion provider for model command
+    def model_completion_provider(command: str, args: list) -> list:
+        """Provide completions for model command."""
+        if command == "model":
+            return [(model, "") for model in available_models]
+        return []
+
+    input_handler.set_command_completion_provider(
+        model_completion_provider,
+        {"model"}  # Commands that need subcommand completion
+    )
+
     def on_input(text: str) -> None:
         """Callback when user submits input in PTDisplay."""
         try:
