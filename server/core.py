@@ -28,6 +28,10 @@ SIMPLE_CLIENT = ROOT / "simple-client"
 if str(SIMPLE_CLIENT) not in sys.path:
     sys.path.insert(0, str(SIMPLE_CLIENT))
 
+RICH_CLIENT = ROOT / "rich-client"
+if str(RICH_CLIENT) not in sys.path:
+    sys.path.insert(0, str(RICH_CLIENT))
+
 from dotenv import load_dotenv
 
 from shared import (
@@ -44,6 +48,9 @@ from shared.plugins.gc import load_gc_from_file
 
 # Reuse input handling from simple-client
 from input_handler import InputHandler
+
+# Reuse plan reporter from rich-client (already generic with callbacks)
+from plan_reporter import create_live_reporter
 
 # Import events
 from .events import (
@@ -676,75 +683,51 @@ class JaatoServer:
 
         server = self
 
-        class PlanReporter:
-            """Plan reporter that emits events."""
+        def _get_agent_id(agent_name: Optional[str]) -> str:
+            """Get agent ID from agent name."""
+            agent_id = "main" if agent_name is None else agent_name
+            for aid, agent in server._agents.items():
+                if agent.profile_name == agent_name:
+                    agent_id = aid
+                    break
+            return agent_id
 
-            def _get_agent_id(self, agent_name: Optional[str]) -> str:
-                """Get agent ID from agent name."""
-                agent_id = "main" if agent_name is None else agent_name
-                for aid, agent in server._agents.items():
-                    if agent.profile_name == agent_name:
-                        agent_id = aid
-                        break
-                return agent_id
+        def update_callback(plan_data: dict, agent_name: Optional[str] = None):
+            """Emit PlanUpdatedEvent from plan data."""
+            agent_id = _get_agent_id(agent_name)
+            steps = []
+            for step in plan_data.get('steps', []):
+                steps.append({
+                    'content': step.get('description', ''),
+                    'status': step.get('status', 'pending'),
+                    'active_form': step.get('active_form'),
+                })
+            server.emit(PlanUpdatedEvent(
+                agent_id=agent_id,
+                plan_name=plan_data.get('title', 'Plan'),
+                steps=steps,
+            ))
 
-            def _emit_plan_event(self, plan, agent_name: Optional[str] = None):
-                """Emit a PlanUpdatedEvent from a TodoPlan object."""
-                agent_id = self._get_agent_id(agent_name)
-                steps = []
-                for step in plan.steps:
-                    steps.append({
-                        'content': step.description,
-                        'status': step.status.value if hasattr(step.status, 'value') else str(step.status),
-                        'active_form': getattr(step, 'active_form', None),
-                    })
-                server.emit(PlanUpdatedEvent(
-                    agent_id=agent_id,
-                    plan_name=plan.title,
-                    steps=steps,
-                ))
+        def clear_callback(agent_name: Optional[str] = None):
+            """Emit PlanClearedEvent."""
+            agent_id = _get_agent_id(agent_name)
+            server.emit(PlanClearedEvent(agent_id=agent_id))
 
-            def report_plan(self, plan_data: dict, agent_name: Optional[str] = None):
-                """Report plan from dict format (legacy)."""
-                agent_id = self._get_agent_id(agent_name)
-                steps = []
-                for step in plan_data.get('steps', []):
-                    steps.append({
-                        'content': step.get('content', ''),
-                        'status': step.get('status', 'pending'),
-                        'active_form': step.get('activeForm'),
-                    })
-                server.emit(PlanUpdatedEvent(
-                    agent_id=agent_id,
-                    plan_name=plan_data.get('name', 'Plan'),
-                    steps=steps,
-                ))
+        def output_callback(source: str, text: str, mode: str):
+            """Emit AgentOutputEvent for plan messages."""
+            server.emit(AgentOutputEvent(
+                agent_id="main",
+                source=source,
+                text=text,
+                mode=mode,
+            ))
 
-            def report_plan_created(self, plan, agent_id: Optional[str] = None):
-                """Report new plan creation."""
-                self._emit_plan_event(plan, agent_id)
-
-            def report_step_update(self, plan, step, agent_id: Optional[str] = None):
-                """Report step status change."""
-                self._emit_plan_event(plan, agent_id)
-
-            def report_plan_completed(self, plan, agent_id: Optional[str] = None):
-                """Report plan completion."""
-                self._emit_plan_event(plan, agent_id)
-
-            def clear_plan(self, agent_name: Optional[str] = None):
-                agent_id = self._get_agent_id(agent_name)
-                server.emit(PlanClearedEvent(agent_id=agent_id))
-
-            def report_output(self, source: str, text: str, mode: str):
-                server.emit(AgentOutputEvent(
-                    agent_id="main",
-                    source=source,
-                    text=text,
-                    mode=mode,
-                ))
-
-        reporter = PlanReporter()
+        # Reuse LivePlanReporter from rich-client with event-emitting callbacks
+        reporter = create_live_reporter(
+            update_callback=update_callback,
+            clear_callback=clear_callback,
+            output_callback=output_callback,
+        )
 
         if hasattr(self.todo_plugin, '_reporter'):
             self.todo_plugin._reporter = reporter
