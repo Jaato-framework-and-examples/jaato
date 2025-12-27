@@ -106,3 +106,71 @@ def format_percent(value: float, decimals: int = 1) -> str:
         Formatted string like "75.5%".
     """
     return f"{value:.{decimals}f}%"
+
+
+def build_permission_prompt_lines(
+    tool_args: Optional[Dict[str, Any]],
+    response_options: List[Union[Dict[str, Any], Any]],
+    include_tool_name: bool = False,
+    tool_name: Optional[str] = None,
+) -> List[str]:
+    """Build permission prompt lines for display in tool tree.
+
+    This function creates a consistent format for permission prompts
+    that works for both IPC mode and direct mode.
+
+    Args:
+        tool_args: Arguments passed to the tool.
+        response_options: List of valid response options.
+        include_tool_name: Whether to include "Tool: <name>" line.
+        tool_name: Tool name (required if include_tool_name is True).
+
+    Returns:
+        List of prompt lines for display.
+    """
+    lines = []
+
+    # Optionally include tool name (usually redundant since tool tree shows it)
+    if include_tool_name and tool_name:
+        lines.append(f"Tool: {tool_name}")
+
+    # Add args summary
+    if tool_args:
+        lines.append(f"Args: {format_tool_args_summary(tool_args, max_length=100)}")
+
+    # Blank line before options
+    lines.append("")
+
+    # Add formatted options
+    lines.append(format_permission_options(response_options))
+
+    return lines
+
+
+def build_clarification_prompt_lines(
+    question_text: str,
+    question_index: Optional[int] = None,
+    total_questions: Optional[int] = None,
+) -> List[str]:
+    """Build clarification prompt lines for display in tool tree.
+
+    Args:
+        question_text: The question text (may contain newlines).
+        question_index: Current question number (1-based).
+        total_questions: Total number of questions.
+
+    Returns:
+        List of prompt lines for display.
+    """
+    lines = []
+
+    # Add progress header if we have question count
+    if question_index is not None and total_questions is not None:
+        lines.append(f"Question {question_index}/{total_questions}")
+        lines.append("")
+
+    # Split question text into lines
+    if question_text:
+        lines.extend(question_text.split("\n"))
+
+    return lines
