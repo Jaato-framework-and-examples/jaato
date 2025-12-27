@@ -654,6 +654,7 @@ class RichClient:
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
                     buffer.add_active_tool(tool_name, tool_args, call_id=call_id)
+                    buffer.scroll_to_bottom()  # Auto-scroll when tool tree grows
                     if display:
                         display.refresh()
 
@@ -664,6 +665,7 @@ class RichClient:
                     buffer.mark_tool_completed(
                         tool_name, success, duration_seconds, error_message, call_id=call_id
                     )
+                    buffer.scroll_to_bottom()  # Auto-scroll when tool tree updates
                     if display:
                         display.refresh()
 
@@ -2377,6 +2379,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
                 if buffer:
                     buffer.add_active_tool(event.tool_name, event.tool_args, call_id=event.call_id)
+                    buffer.scroll_to_bottom()  # Auto-scroll when tool tree grows
                     display.refresh()
 
             elif isinstance(event, ToolCallEndEvent):
@@ -2390,6 +2393,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         event.error_message,
                         call_id=event.call_id
                     )
+                    buffer.scroll_to_bottom()  # Auto-scroll when tool tree updates
                     display.refresh()
 
             elif isinstance(event, ContextUpdatedEvent):
