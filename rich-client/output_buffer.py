@@ -838,12 +838,29 @@ class OutputBuffer:
 
         # Define wrap_text helper before the loops
         def wrap_text(text: str, prefix_width: int = 0) -> List[str]:
-            """Wrap text to console width, accounting for prefix."""
+            """Wrap text to console width, accounting for prefix.
+
+            Handles multi-line text by splitting on newlines first,
+            then wrapping each line individually.
+            """
             available = max(20, wrap_width - prefix_width)
-            if len(text) <= available:
-                return [text]
-            # Use textwrap for clean word-based wrapping
-            return textwrap.wrap(text, width=available, break_long_words=True, break_on_hyphens=False)
+
+            # Handle literal \n in text (escaped newlines) - convert to actual newlines
+            text = text.replace('\\n', '\n')
+
+            # Split on actual newlines first, then wrap each line
+            result = []
+            for paragraph in text.split('\n'):
+                if not paragraph.strip():
+                    # Preserve empty lines (paragraph breaks)
+                    result.append('')
+                elif len(paragraph) <= available:
+                    result.append(paragraph)
+                else:
+                    # Use textwrap for clean word-based wrapping
+                    wrapped = textwrap.wrap(paragraph, width=available, break_long_words=True, break_on_hyphens=False)
+                    result.extend(wrapped)
+            return result if result else ['']
 
         # Render lines (model intent text appears before tool tree)
         for i, line in enumerate(lines_to_show):
