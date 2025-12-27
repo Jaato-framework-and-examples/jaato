@@ -708,24 +708,14 @@ class RichClient:
             # This makes the permission plugin the single source of truth
             self._pending_response_options = response_options
 
-            # Build prompt lines from raw data (client-side formatting)
-            prompt_lines = [f"Tool: {tool_name}"]
-            if tool_args:
-                args_str = str(tool_args)
-                if len(args_str) > 100:
-                    args_str = args_str[:97] + "..."
-                prompt_lines.append(f"Args: {args_str}")
-            prompt_lines.append("")
-            # Format options: [y]es [n]o [a]lways [once] [never] [all]
-            options_parts = []
-            for opt in response_options:
-                short = getattr(opt, 'short', getattr(opt, 'key', '?'))
-                full = getattr(opt, 'full', getattr(opt, 'label', '?'))
-                if short != full and full.startswith(short):
-                    options_parts.append(f"[{short}]{full[len(short):]}")
-                else:
-                    options_parts.append(f"[{full}]")
-            prompt_lines.append(" ".join(options_parts))
+            # Build prompt lines using shared utility (consistent with IPC mode)
+            from shared.ui_utils import build_permission_prompt_lines
+            prompt_lines = build_permission_prompt_lines(
+                tool_args=tool_args,
+                response_options=response_options,
+                include_tool_name=True,  # Direct mode includes tool name
+                tool_name=tool_name,
+            )
 
             # Update the tool in the main agent's buffer
             buffer = registry.get_buffer("main")
@@ -2223,6 +2213,15 @@ class RichClient:
         if not self._display:
             return
 
+        # Import shared help builders
+        from shared.client_commands import (
+            build_permission_help_text,
+            build_file_reference_help_text,
+            build_slash_command_help_text,
+            build_keyboard_shortcuts_help_text,
+        )
+
+        # Direct mode has more detailed command help (keybindings, plugins, etc.)
         help_lines = [
             ("Commands (auto-complete as you type):", "bold"),
             ("  help              - Show this help message", "dim"),
@@ -2257,40 +2256,29 @@ class RichClient:
                     help_lines.append((f"    {cmd.name}{' ' * padding}- {cmd.description}{shared_marker}", "dim"))
             help_lines.append(("", "dim"))
 
+        # Use shared help sections for common content
+        help_lines.extend(build_permission_help_text())
+        help_lines.extend(build_file_reference_help_text())
+        # Add extra file reference detail for direct mode
+        help_lines.insert(-1, ("  Completions appear automatically as you type after @.", "dim"))
+
+        help_lines.extend(build_slash_command_help_text())
+        # Add extra slash command detail for direct mode
+        help_lines.insert(-1, ("  - Pass arguments after the command name: /review file.py", "dim"))
+
+        # Direct mode extra sections
         help_lines.extend([
-            ("When the model tries to use a tool, you'll see a permission prompt:", "bold"),
-            ("  [y]es     - Allow this execution", "dim"),
-            ("  [n]o      - Deny this execution", "dim"),
-            ("  [a]lways  - Allow and remember for this session", "dim"),
-            ("  [never]   - Deny and block for this session", "dim"),
-            ("  [once]    - Allow just this once", "dim"),
-            ("", "dim"),
-            ("File references:", "bold"),
-            ("  Use @path/to/file to include file contents in your prompt.", "dim"),
-            ("  - @src/main.py      - Reference a file (contents included)", "dim"),
-            ("  - @./config.json    - Reference with explicit relative path", "dim"),
-            ("  - @~/documents/     - Reference with home directory", "dim"),
-            ("  Completions appear automatically as you type after @.", "dim"),
-            ("", "dim"),
-            ("Slash commands:", "bold"),
-            ("  Use /command_name [args...] to invoke slash commands from .jaato/commands/.", "dim"),
-            ("  - Type / to see available commands with descriptions", "dim"),
-            ("  - Pass arguments after the command name: /review file.py", "dim"),
-            ("", "dim"),
             ("Multi-turn conversation:", "bold"),
             ("  The model remembers previous exchanges in this session.", "dim"),
             ("  Use 'reset' to start a fresh conversation.", "dim"),
             ("", "dim"),
-            ("Keyboard shortcuts:", "bold"),
-            ("  ↑/↓       - Navigate prompt history (or completion menu)", "dim"),
-            ("  ←/→       - Move cursor within line", "dim"),
-            ("  Ctrl+A/E  - Jump to start/end of line", "dim"),
-            ("  Ctrl+Y    - Yank (copy) last response to clipboard", "dim"),
-            ("  TAB/Enter - Accept selected completion", "dim"),
-            ("  Escape    - Dismiss completion menu", "dim"),
-            ("  Esc+Esc   - Clear input", "dim"),
-            ("  PgUp/PgDn - Scroll output up/down", "dim"),
-            ("  Home/End  - Scroll to top/bottom of output", "dim"),
+        ])
+
+        help_lines.extend(build_keyboard_shortcuts_help_text())
+        # Add extra keyboard shortcut for direct mode
+        help_lines.insert(-1, ("  Ctrl+A/E  - Jump to start/end of line", "dim"))
+
+        help_lines.extend([
             ("", "dim"),
             ("Display:", "bold"),
             ("  The plan panel at top shows current plan status.", "dim"),
@@ -2367,16 +2355,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     input_handler = InputHandler()
 
     # Client-only commands for completion
-    # Server/plugin commands (session, reset, etc.) should be fetched from server
-    client_only_commands = [
-        ("help", "Show available commands"),
-        ("history", "Show conversation history"),
-        ("exit", "Exit the client"),
-        ("quit", "Exit the client"),
-        ("stop", "Stop current model generation"),
-        ("clear", "Clear output display"),
-    ]
-    input_handler.add_commands(client_only_commands)
+    # Use shared client commands for completion
+    # Server/plugin commands (session, reset, etc.) are fetched from server
+    from shared.client_commands import CLIENT_COMMANDS
+    input_handler.add_commands(CLIENT_COMMANDS)
 
     # Session provider will be set after state variables are defined (below)
 
@@ -2563,16 +2545,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     "request_id": event.request_id,
                     "options": event.response_options,
                 }
-                # Build prompt lines from raw data (client-side formatting)
-                # Import shared utility for consistent formatting
-                from shared.ui_utils import format_permission_options, format_tool_args_summary
-                prompt_lines = []
-                if event.tool_args:
-                    args_summary = format_tool_args_summary(event.tool_args, max_length=100)
-                    prompt_lines.append(f"Args: {args_summary}")
-                prompt_lines.append("")
-                # Format options using shared utility: [y]es [n]o [a]lways [once] [never] [all]
-                prompt_lines.append(format_permission_options(event.response_options))
+                # Build prompt lines using shared utility (consistent with direct mode)
+                from shared.ui_utils import build_permission_prompt_lines
+                prompt_lines = build_permission_prompt_lines(
+                    tool_args=event.tool_args,
+                    response_options=event.response_options,
+                    include_tool_name=False,  # Tool name already shown in tool tree
+                )
 
                 # Integrate into tool tree (same as direct mode)
                 buffer = agent_registry.get_selected_buffer()
@@ -2964,68 +2943,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     display.clear_output()
                     continue
                 elif text_lower == "help":
-                    # Show full help with pager
-                    help_lines = [
-                        ("Commands (auto-complete as you type):", "bold"),
-                        ("  help              - Show this help message", "dim"),
-                        ("  tools [subcmd]    - Manage tools available to the model", "dim"),
-                        ("                        tools list          - List all tools with status", "dim"),
-                        ("                        tools enable <n>    - Enable a tool (or 'all')", "dim"),
-                        ("                        tools disable <n>   - Disable a tool (or 'all')", "dim"),
-                        ("  session [subcmd]  - Manage sessions", "dim"),
-                        ("                        session list        - List all sessions", "dim"),
-                        ("                        session new         - Create a new session", "dim"),
-                        ("                        session attach <id> - Attach to a session", "dim"),
-                        ("                        session delete <id> - Delete a session", "dim"),
-                        ("  reset             - Clear conversation history", "dim"),
-                        ("  clear             - Clear output panel", "dim"),
-                        ("  stop              - Stop current model generation", "dim"),
-                        ("  quit              - Exit the client", "dim"),
-                        ("", "dim"),
-                    ]
-
-                    # Add server/plugin commands
-                    if server_commands:
-                        help_lines.append(("Server/plugin commands:", "bold"))
-                        for cmd in server_commands:
-                            name = cmd.get("name", "")
-                            desc = cmd.get("description", "")
-                            # Skip session commands (already shown above)
-                            if name.startswith("session "):
-                                continue
-                            padding = max(2, 18 - len(name))
-                            help_lines.append((f"  {name}{' ' * padding}- {desc}", "dim"))
-                        help_lines.append(("", "dim"))
-
-                    help_lines.extend([
-                        ("When the model tries to use a tool, you'll see a permission prompt:", "bold"),
-                        ("  [y]es     - Allow this execution", "dim"),
-                        ("  [n]o      - Deny this execution", "dim"),
-                        ("  [a]lways  - Allow and remember for this session", "dim"),
-                        ("  [never]   - Deny and block for this session", "dim"),
-                        ("  [once]    - Allow just this once", "dim"),
-                        ("", "dim"),
-                        ("File references:", "bold"),
-                        ("  Use @path/to/file to include file contents in your prompt.", "dim"),
-                        ("  - @src/main.py      - Reference a file (contents included)", "dim"),
-                        ("  - @./config.json    - Reference with explicit relative path", "dim"),
-                        ("  - @~/documents/     - Reference with home directory", "dim"),
-                        ("", "dim"),
-                        ("Slash commands:", "bold"),
-                        ("  Use /command_name [args...] to invoke slash commands from .jaato/commands/.", "dim"),
-                        ("  - Type / to see available commands with descriptions", "dim"),
-                        ("", "dim"),
-                        ("Keyboard shortcuts:", "bold"),
-                        ("  ↑/↓       - Navigate prompt history (or completion menu)", "dim"),
-                        ("  ←/→       - Move cursor within line", "dim"),
-                        ("  Ctrl+Y    - Yank (copy) last response to clipboard", "dim"),
-                        ("  TAB/Enter - Accept selected completion", "dim"),
-                        ("  Escape    - Dismiss completion menu", "dim"),
-                        ("  Esc+Esc   - Clear input", "dim"),
-                        ("  PgUp/PgDn - Scroll output up/down", "dim"),
-                        ("  Home/End  - Scroll to top/bottom of output", "dim"),
-                    ])
-
+                    # Show full help with pager using shared help text
+                    from shared.client_commands import build_full_help_text
+                    help_lines = build_full_help_text(server_commands)
                     display.show_lines(help_lines)
                     continue
 
