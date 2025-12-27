@@ -1,0 +1,834 @@
+"""Session Manager for multi-session support.
+
+This module manages multiple named sessions, each with its own
+JaatoServer instance and conversation state.
+
+Sessions are:
+- Persisted to disk via the Session Plugin
+- Loaded on-demand when clients attach
+- Saved periodically and on shutdown
+- Identified by consistent IDs across memory and disk
+
+Integration with Session Plugin:
+- SessionManager uses SessionPlugin for persistence
+- SessionState from the plugin is used for save/load
+- Session IDs are consistent between runtime and storage
+"""
+
+import logging
+import sys
+import pathlib
+import threading
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional, Set
+
+# Add project root to path
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from shared.plugins.session import (
+    create_plugin as create_session_plugin,
+    load_session_config,
+    SessionPlugin,
+    SessionState,
+    SessionConfig,
+    SessionInfo as PluginSessionInfo,
+)
+
+from .core import JaatoServer
+from .events import (
+    Event,
+    EventType,
+    SystemMessageEvent,
+    ErrorEvent,
+    SessionInfoEvent,
+)
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RuntimeSessionInfo:
+    """Metadata about a session (runtime + persisted)."""
+    session_id: str
+    name: str
+    description: Optional[str]
+    created_at: str
+    last_activity: str
+    model_provider: str
+    model_name: str
+    is_processing: bool
+    is_loaded: bool  # True if currently in memory
+    client_count: int
+    turn_count: int
+
+
+@dataclass
+class Session:
+    """A managed session with its JaatoServer."""
+    session_id: str
+    name: str
+    server: JaatoServer
+    created_at: str
+    last_activity: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    attached_clients: Set[str] = field(default_factory=set)
+    description: Optional[str] = None
+    is_dirty: bool = False  # True if has unsaved changes
+    workspace_path: Optional[str] = None  # Client's working directory
+
+
+class SessionManager:
+    """Manages multiple named sessions with persistence.
+
+    Integrates with the Session Plugin to provide:
+    - Persistent storage of session history
+    - Load sessions on-demand from disk
+    - Save sessions periodically and on shutdown
+    - Unified view of in-memory and on-disk sessions
+
+    Each session has its own JaatoServer with isolated:
+    - Conversation history
+    - Agent state
+    - Plugin state
+    - Token accounting
+
+    Clients can:
+    - Create new sessions
+    - Attach to existing sessions (loads from disk if needed)
+    - List all sessions (memory + disk)
+    - Save/checkpoint sessions
+    """
+
+    def __init__(
+        self,
+        env_file: str = ".env",
+        provider: Optional[str] = None,
+        storage_path: Optional[str] = None,
+    ):
+        """Initialize the session manager.
+
+        Args:
+            env_file: Path to .env file.
+            provider: Model provider override.
+            storage_path: Override for session storage path.
+        """
+        self._env_file = env_file
+        self._provider = provider
+
+        # Initialize session plugin for persistence
+        self._session_plugin: SessionPlugin = create_session_plugin()
+        self._session_config: SessionConfig = load_session_config()
+
+        if storage_path:
+            self._session_config.storage_path = storage_path
+
+        self._session_plugin.initialize({
+            'storage_path': self._session_config.storage_path
+        })
+
+        # In-memory session storage
+        self._sessions: Dict[str, Session] = {}
+        # Use RLock (reentrant) because initialize() may emit events during session load
+        self._lock = threading.RLock()
+
+        # Client to session mapping
+        self._client_to_session: Dict[str, str] = {}
+
+        # Event routing callback
+        self._event_callback: Optional[Callable[[str, Event], None]] = None
+
+        logger.info(f"SessionManager initialized with storage: {self._session_config.storage_path}")
+
+    def set_event_callback(
+        self,
+        callback: Callable[[str, Event], None],
+    ) -> None:
+        """Set callback for routing events to clients.
+
+        Args:
+            callback: Called with (client_id, event) for each event.
+        """
+        self._event_callback = callback
+
+    def _emit_to_client(self, client_id: str, event: Event) -> None:
+        """Emit an event to a specific client."""
+        logger.debug(f"_emit_to_client: {client_id} <- {type(event).__name__}")
+        if self._event_callback:
+            logger.debug(f"  calling event_callback")
+            self._event_callback(client_id, event)
+        else:
+            logger.warning(f"  NO event_callback set!")
+
+    def _emit_to_session(self, session_id: str, event: Event) -> None:
+        """Emit an event to all clients attached to a session."""
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session:
+                for client_id in session.attached_clients:
+                    self._emit_to_client(client_id, event)
+
+    # =========================================================================
+    # Session Lifecycle
+    # =========================================================================
+
+    def create_session(
+        self,
+        client_id: str,
+        session_name: Optional[str] = None,
+        workspace_path: Optional[str] = None,
+    ) -> str:
+        """Create a new session and attach the client.
+
+        Args:
+            client_id: The requesting client.
+            session_name: Optional name (auto-generated if not provided).
+            workspace_path: Client's working directory for file operations.
+
+        Returns:
+            The session ID (empty string on failure).
+        """
+        # Generate session ID (matches Session Plugin format)
+        timestamp = datetime.utcnow()
+        session_id = timestamp.strftime("%Y%m%d_%H%M%S")
+        name = session_name or f"Session {timestamp.strftime('%Y-%m-%d %H:%M')}"
+
+        # Check for collision with existing session
+        existing = self._get_persisted_sessions()
+        existing_ids = {s.session_id for s in existing}
+        counter = 0
+        original_id = session_id
+        while session_id in existing_ids or session_id in self._sessions:
+            counter += 1
+            session_id = f"{original_id}_{counter}"
+
+        # Create JaatoServer for this session
+        server = JaatoServer(
+            env_file=self._env_file,
+            provider=self._provider,
+            on_event=lambda e: self._emit_to_session(session_id, e),
+            workspace_path=workspace_path,
+        )
+
+        # Initialize the server
+        if not server.initialize():
+            self._emit_to_client(client_id, ErrorEvent(
+                error="Failed to initialize session",
+                error_type="SessionError",
+            ))
+            return ""
+
+        logger.info(f"Server initialized successfully for session {session_id}")
+
+        # Create session object
+        session = Session(
+            session_id=session_id,
+            name=name,
+            server=server,
+            created_at=timestamp.isoformat(),
+            description=None,
+            is_dirty=True,  # New session needs saving
+            workspace_path=workspace_path,
+        )
+
+        with self._lock:
+            self._sessions[session_id] = session
+            session.attached_clients.add(client_id)
+            self._client_to_session[client_id] = session_id
+
+        # Save initial state to disk
+        self._save_session(session)
+
+        logger.info(f"Session created: {session_id} ({name})")
+
+        # Emit current agent state to the newly attached client (skip SessionInfo, we'll send our own)
+        server.emit_current_state(
+            lambda e: self._emit_to_client(client_id, e),
+            skip_session_info=True
+        )
+
+        # Send complete SessionInfoEvent with state snapshot
+        self._emit_to_client(client_id, self._build_session_info_event(session))
+
+        self._emit_to_client(client_id, SystemMessageEvent(
+            message=f"Session created: {name} ({session_id})",
+            style="info",
+        ))
+
+        return session_id
+
+    def attach_session(
+        self,
+        client_id: str,
+        session_id: str,
+        workspace_path: Optional[str] = None,
+    ) -> bool:
+        """Attach a client to an existing session.
+
+        If the session is not in memory, attempts to load from disk.
+
+        Args:
+            client_id: The requesting client.
+            session_id: The session to attach to.
+            workspace_path: Client's working directory for file operations.
+
+        Returns:
+            True if attached successfully.
+        """
+        with self._lock:
+            # Check if session is in memory
+            session = self._sessions.get(session_id)
+
+            if not session:
+                # Try to load from disk
+                logger.debug(f"attach_session: session {session_id} not in memory, loading from disk...")
+                try:
+                    session = self._load_session(session_id)
+                    logger.debug(f"attach_session: _load_session returned {session is not None}")
+                except Exception as e:
+                    logger.error(f"attach_session: _load_session raised: {type(e).__name__}: {e}")
+                    import traceback
+                    logger.error(f"attach_session: traceback:\n{traceback.format_exc()}")
+                    session = None
+                if session:
+                    self._sessions[session_id] = session
+
+            if not session:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error=f"Session not found: {session_id}",
+                    error_type="SessionError",
+                ))
+                return False
+
+            # Detach from current session if any
+            current = self._client_to_session.get(client_id)
+            if current and current in self._sessions:
+                old_session = self._sessions[current]
+                old_session.attached_clients.discard(client_id)
+                # Consider unloading if no clients
+                self._maybe_unload_session(current)
+
+            # Attach to new session
+            session.attached_clients.add(client_id)
+            self._client_to_session[client_id] = session_id
+
+            # Update workspace path if provided
+            if workspace_path:
+                session.workspace_path = workspace_path
+                session.server.workspace_path = workspace_path
+
+        logger.info(f"Client {client_id} attached to session {session_id}")
+
+        # Emit current agent state to the newly attached client (skip SessionInfo, we'll send our own)
+        session.server.emit_current_state(
+            lambda e: self._emit_to_client(client_id, e),
+            skip_session_info=True
+        )
+
+        # Send complete SessionInfoEvent with state snapshot
+        self._emit_to_client(client_id, self._build_session_info_event(session))
+
+        self._emit_to_client(client_id, SystemMessageEvent(
+            message=f"Attached to session: {session.name} ({session_id})",
+            style="info",
+        ))
+
+        return True
+
+    def _load_session(self, session_id: str) -> Optional[Session]:
+        """Load a session from disk.
+
+        Args:
+            session_id: The session ID to load.
+
+        Returns:
+            The loaded Session, or None if not found.
+        """
+        logger.debug(f"_load_session: attempting to load {session_id}")
+        try:
+            state = self._session_plugin.load(session_id)
+            logger.debug(f"_load_session: loaded state for {session_id}")
+        except FileNotFoundError:
+            logger.debug(f"_load_session: session {session_id} not found on disk")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to load session {session_id}: {e}")
+            return None
+
+        # Create JaatoServer and restore state
+        logger.debug(f"_load_session: creating JaatoServer for {session_id}...")
+        server = JaatoServer(
+            env_file=self._env_file,
+            provider=self._provider,
+            on_event=lambda e: self._emit_to_session(session_id, e),
+        )
+        logger.debug(f"_load_session: JaatoServer created, calling initialize()...")
+
+        try:
+            init_result = server.initialize()
+            logger.debug(f"_load_session: initialize() returned {init_result}")
+            if not init_result:
+                logger.error(f"Failed to initialize server for session {session_id}")
+                return None
+        except Exception as e:
+            logger.error(f"_load_session: initialize() raised exception: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(f"_load_session: traceback:\n{traceback.format_exc()}")
+            return None
+
+        logger.debug(f"_load_session: server initialized for {session_id}")
+
+        # Restore history to the server's JaatoClient
+        if state.history and server._jaato:
+            server._jaato.reset_session(state.history)
+            logger.debug(f"Restored {len(state.history)} messages for session {session_id}")
+
+        session = Session(
+            session_id=session_id,
+            name=state.description or f"Session {session_id}",
+            server=server,
+            created_at=state.created_at.isoformat(),
+            last_activity=state.updated_at.isoformat(),
+            description=state.description,
+            is_dirty=False,
+        )
+
+        logger.info(f"Loaded session from disk: {session_id}")
+        return session
+
+    def _save_session(self, session: Session) -> bool:
+        """Save a session to disk.
+
+        Args:
+            session: The session to save.
+
+        Returns:
+            True if saved successfully.
+        """
+        try:
+            # Get history from server
+            history = session.server.get_history() if session.server else []
+            turn_accounting = []
+
+            if session.server and "main" in session.server._agents:
+                turn_accounting = session.server._agents["main"].turn_accounting
+
+            # Create SessionState
+            state = SessionState(
+                session_id=session.session_id,
+                history=history,
+                created_at=datetime.fromisoformat(session.created_at),
+                updated_at=datetime.utcnow(),
+                description=session.description or session.name,
+                turn_count=len(history) // 2,  # Approximate
+                turn_accounting=turn_accounting,
+                model=session.server.model_name if session.server else None,
+            )
+
+            self._session_plugin.save(state)
+            session.is_dirty = False
+
+            logger.debug(f"Saved session: {session.session_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to save session {session.session_id}: {e}")
+            return False
+
+    def _maybe_unload_session(self, session_id: str) -> None:
+        """Unload a session from memory if no clients attached.
+
+        Saves to disk first if dirty.
+
+        Args:
+            session_id: The session to potentially unload.
+        """
+        session = self._sessions.get(session_id)
+        if not session:
+            return
+
+        if session.attached_clients:
+            return  # Still has clients
+
+        # Save before unloading
+        if session.is_dirty:
+            self._save_session(session)
+
+        # Shutdown server and remove from memory
+        session.server.shutdown()
+        del self._sessions[session_id]
+        logger.info(f"Unloaded session: {session_id}")
+
+    def detach_client(self, client_id: str) -> None:
+        """Detach a client from its current session.
+
+        Args:
+            client_id: The client to detach.
+        """
+        with self._lock:
+            session_id = self._client_to_session.pop(client_id, None)
+            if session_id and session_id in self._sessions:
+                session = self._sessions[session_id]
+                session.attached_clients.discard(client_id)
+                logger.info(f"Client {client_id} detached from session {session_id}")
+
+                # Maybe unload if no more clients
+                self._maybe_unload_session(session_id)
+
+    def save_session(self, session_id: str) -> bool:
+        """Explicitly save a session to disk.
+
+        Args:
+            session_id: The session to save.
+
+        Returns:
+            True if saved successfully.
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return False
+            return self._save_session(session)
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a session from memory and disk.
+
+        Args:
+            session_id: The session to delete.
+
+        Returns:
+            True if deleted.
+        """
+        with self._lock:
+            # Remove from memory
+            session = self._sessions.pop(session_id, None)
+            if session:
+                # Notify attached clients
+                for client_id in session.attached_clients:
+                    self._emit_to_client(client_id, SystemMessageEvent(
+                        message=f"Session deleted: {session.name}",
+                        style="warning",
+                    ))
+                    self._client_to_session.pop(client_id, None)
+
+                # Shutdown the server
+                session.server.shutdown()
+
+        # Delete from disk
+        deleted = self._session_plugin.delete(session_id)
+
+        logger.info(f"Session deleted: {session_id}")
+        return deleted or session is not None
+
+    def get_or_create_default(
+        self,
+        client_id: str,
+        workspace_path: Optional[str] = None,
+    ) -> str:
+        """Get the most recent session, or create a new one.
+
+        Attaches to the most recently used session (by updated_at).
+        Creates a new session if none exist.
+
+        Args:
+            client_id: The requesting client.
+            workspace_path: Client's working directory for file operations.
+
+        Returns:
+            The session ID.
+        """
+        logger.debug(f"get_or_create_default called for client {client_id}, workspace={workspace_path}")
+
+        # Check in-memory sessions first - find most recently updated
+        with self._lock:
+            if self._sessions:
+                # Sort by name (which is the session description) to find most recent
+                # In-memory sessions don't have updated_at, so use the first one
+                session = next(iter(self._sessions.values()))
+                logger.debug(f"  found in-memory session: {session.session_id}")
+                session.attached_clients.add(client_id)
+                self._client_to_session[client_id] = session.session_id
+                # Update workspace path if provided (client may be from different dir)
+                if workspace_path:
+                    session.workspace_path = workspace_path
+                    session.server.workspace_path = workspace_path
+                # Emit current agent state to the newly attached client (skip SessionInfo, we'll send our own)
+                session.server.emit_current_state(
+                    lambda e: self._emit_to_client(client_id, e),
+                    skip_session_info=True
+                )
+                # Send complete SessionInfoEvent with state snapshot
+                self._emit_to_client(client_id, self._build_session_info_event(session))
+                return session.session_id
+
+        # Check persisted sessions (already sorted by updated_at descending)
+        logger.debug(f"  checking persisted sessions...")
+        persisted = self._get_persisted_sessions()
+        logger.debug(f"  found {len(persisted)} persisted session(s)")
+
+        if persisted:
+            # Use the most recent one (first in the list)
+            most_recent = persisted[0]
+            logger.debug(f"  attaching to most recent session: {most_recent.session_id}")
+            if self.attach_session(client_id, most_recent.session_id, workspace_path):
+                return most_recent.session_id
+
+        # No sessions exist - create a new one
+        logger.debug(f"  creating new session...")
+        return self.create_session(client_id, workspace_path=workspace_path)
+
+    # =========================================================================
+    # Session Queries
+    # =========================================================================
+
+    def _get_persisted_sessions(self) -> List[PluginSessionInfo]:
+        """Get list of sessions from disk."""
+        try:
+            return self._session_plugin.list_sessions()
+        except Exception as e:
+            logger.error(f"Failed to list persisted sessions: {e}")
+            return []
+
+    def list_sessions(self) -> List[RuntimeSessionInfo]:
+        """List all sessions (in-memory and on-disk).
+
+        Returns merged view with runtime status for loaded sessions.
+        """
+        result: Dict[str, RuntimeSessionInfo] = {}
+
+        # Add persisted sessions first
+        for info in self._get_persisted_sessions():
+            result[info.session_id] = RuntimeSessionInfo(
+                session_id=info.session_id,
+                name=info.description or info.session_id,
+                description=info.description,
+                created_at=info.created_at.isoformat(),
+                last_activity=info.updated_at.isoformat(),
+                model_provider="",
+                model_name=info.model or "",
+                is_processing=False,
+                is_loaded=False,
+                client_count=0,
+                turn_count=info.turn_count,
+            )
+
+        # Overlay in-memory sessions (have more current info)
+        with self._lock:
+            for session in self._sessions.values():
+                result[session.session_id] = RuntimeSessionInfo(
+                    session_id=session.session_id,
+                    name=session.name,
+                    description=session.description,
+                    created_at=session.created_at,
+                    last_activity=session.last_activity,
+                    model_provider=session.server.model_provider,
+                    model_name=session.server.model_name,
+                    is_processing=session.server.is_processing,
+                    is_loaded=True,
+                    client_count=len(session.attached_clients),
+                    turn_count=len(session.server.get_history()) // 2,
+                )
+
+        # Sort by last activity
+        sessions = list(result.values())
+        sessions.sort(key=lambda s: s.last_activity, reverse=True)
+        return sessions
+
+    def _build_session_info_event(self, session: "Session") -> SessionInfoEvent:
+        """Build a complete SessionInfoEvent with state snapshot.
+
+        Includes current session info plus:
+        - sessions: All available sessions for completion/display
+        - tools: All tools with enabled status
+        - models: Available model names
+        """
+        # Get sessions list
+        sessions_data = [{
+            "id": s.session_id,
+            "name": s.name or "",
+            "model_provider": s.model_provider or "",
+            "model_name": s.model_name or "",
+            "is_loaded": s.is_loaded,
+            "client_count": s.client_count,
+            "turn_count": s.turn_count,
+        } for s in self.list_sessions()]
+
+        # Get tools list from the session's server
+        tools_data = []
+        if session.server:
+            tools_data = session.server.get_tool_status()
+
+        # Get models list from the session's server
+        models_data = []
+        if session.server:
+            models_data = session.server.get_available_models()
+
+        return SessionInfoEvent(
+            session_id=session.session_id,
+            session_name=session.name,
+            model_provider=session.server.model_provider if session.server else "",
+            model_name=session.server.model_name if session.server else "",
+            sessions=sessions_data,
+            tools=tools_data,
+            models=models_data,
+        )
+
+    def get_session(self, session_id: str) -> Optional[Session]:
+        """Get a session by ID (in-memory only)."""
+        with self._lock:
+            return self._sessions.get(session_id)
+
+    def get_client_session(self, client_id: str) -> Optional[Session]:
+        """Get the session a client is attached to."""
+        with self._lock:
+            session_id = self._client_to_session.get(client_id)
+            if session_id:
+                return self._sessions.get(session_id)
+        return None
+
+    # =========================================================================
+    # Request Routing
+    # =========================================================================
+
+    def handle_request(
+        self,
+        client_id: str,
+        session_id: str,
+        event: Event,
+    ) -> None:
+        """Route a request to the appropriate session.
+
+        Args:
+            client_id: The requesting client.
+            session_id: The target session.
+            event: The request event.
+        """
+        session = self.get_session(session_id)
+        if not session:
+            self._emit_to_client(client_id, ErrorEvent(
+                error=f"Session not found: {session_id}",
+                error_type="SessionError",
+            ))
+            return
+
+        # Update activity timestamp
+        session.last_activity = datetime.utcnow().isoformat()
+        session.is_dirty = True
+
+        # Route to session's server
+        server = session.server
+
+        from .events import (
+            SendMessageRequest,
+            PermissionResponseRequest,
+            ClarificationResponseRequest,
+            StopRequest,
+            CommandRequest,
+        )
+
+        if isinstance(event, SendMessageRequest):
+            # Run in thread to not block
+            def run_message():
+                server.send_message(
+                    event.text,
+                    event.attachments if event.attachments else None
+                )
+                # Auto-save after turn
+                self._save_session(session)
+
+            threading.Thread(target=run_message, daemon=True).start()
+
+        elif isinstance(event, PermissionResponseRequest):
+            server.respond_to_permission(event.request_id, event.response)
+
+        elif isinstance(event, ClarificationResponseRequest):
+            server.respond_to_clarification(event.request_id, event.response)
+
+        elif isinstance(event, StopRequest):
+            server.stop()
+
+        elif isinstance(event, CommandRequest):
+            result = server.execute_command(event.command, event.args)
+            # Format result properly
+            if isinstance(result, dict):
+                if "error" in result:
+                    # Error result
+                    self._emit_to_client(client_id, SystemMessageEvent(
+                        message=result["error"],
+                        style="error",
+                    ))
+                elif "result" in result:
+                    # Simple result - show the text directly
+                    self._emit_to_client(client_id, SystemMessageEvent(
+                        message=result["result"],
+                        style="info",
+                    ))
+                else:
+                    # Dict result with multiple keys - format each
+                    lines = []
+                    for key, value in result.items():
+                        if not key.startswith('_'):
+                            if isinstance(value, list):
+                                # Format lists nicely
+                                if value:
+                                    lines.append(f"{key}:")
+                                    for item in value:
+                                        # Extract short name for model paths
+                                        if isinstance(item, str) and '/' in item:
+                                            item = item.split('/')[-1]
+                                        lines.append(f"  • {item}")
+                                else:
+                                    lines.append(f"{key}: (none)")
+                            else:
+                                lines.append(f"{key}: {value}")
+                    self._emit_to_client(client_id, SystemMessageEvent(
+                        message="\n".join(lines) if lines else str(result),
+                        style="info",
+                    ))
+            else:
+                self._emit_to_client(client_id, SystemMessageEvent(
+                    message=str(result),
+                    style="info",
+                ))
+
+        else:
+            self._emit_to_client(client_id, ErrorEvent(
+                error=f"Unknown request type: {type(event).__name__}",
+                error_type="RequestError",
+            ))
+
+    # =========================================================================
+    # Cleanup
+    # =========================================================================
+
+    def save_all(self) -> int:
+        """Save all dirty sessions to disk.
+
+        Returns:
+            Number of sessions saved.
+        """
+        saved = 0
+        with self._lock:
+            for session in self._sessions.values():
+                if session.is_dirty:
+                    if self._save_session(session):
+                        saved += 1
+        return saved
+
+    def shutdown(self) -> None:
+        """Shutdown all sessions, saving to disk first."""
+        logger.info("SessionManager shutting down...")
+
+        with self._lock:
+            # Save all sessions
+            for session in self._sessions.values():
+                self._save_session(session)
+                session.server.shutdown()
+
+            self._sessions.clear()
+            self._client_to_session.clear()
+
+        self._session_plugin.shutdown()
+        logger.info("SessionManager shutdown complete")

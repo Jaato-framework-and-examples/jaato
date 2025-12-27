@@ -1,0 +1,497 @@
+"""IPC Client for connecting to Jaato Server.
+
+This module provides a client for connecting to the Jaato server
+via Unix domain socket (IPC).
+
+Usage:
+    from ipc_client import IPCClient
+
+    client = IPCClient("/tmp/jaato.sock")
+    await client.connect()
+
+    # Send a message
+    await client.send_message("Hello, world!")
+
+    # Receive events
+    async for event in client.events():
+        print(event)
+"""
+
+import asyncio
+import json
+import logging
+import struct
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, AsyncIterator, Callable, Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+# Add project root to path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from server.events import (
+    Event,
+    EventType,
+    serialize_event,
+    deserialize_event,
+    SendMessageRequest,
+    PermissionResponseRequest,
+    ClarificationResponseRequest,
+    StopRequest,
+    CommandRequest,
+    CommandListRequest,
+    CommandListEvent,
+    ConnectedEvent,
+    ErrorEvent,
+    HistoryRequest,
+    HistoryEvent,
+)
+
+
+# Message framing: 4-byte length prefix (big-endian) + JSON payload
+HEADER_SIZE = 4
+MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB max
+
+# Default socket path
+DEFAULT_SOCKET_PATH = "/tmp/jaato.sock"
+DEFAULT_PID_FILE = "/tmp/jaato.pid"
+
+
+class IPCClient:
+    """Client for connecting to Jaato server via IPC.
+
+    Provides async methods for:
+    - Connecting to server
+    - Sending messages and commands
+    - Receiving events
+    - Auto-starting server if not running
+    """
+
+    def __init__(
+        self,
+        socket_path: str = DEFAULT_SOCKET_PATH,
+        auto_start: bool = True,
+        env_file: str = ".env",
+    ):
+        """Initialize the IPC client.
+
+        Args:
+            socket_path: Path to the Unix domain socket.
+            auto_start: Whether to auto-start server if not running.
+            env_file: Path to .env file for auto-started server.
+        """
+        self.socket_path = socket_path
+        self.auto_start = auto_start
+        self.env_file = env_file
+
+        self._reader: Optional[asyncio.StreamReader] = None
+        self._writer: Optional[asyncio.StreamWriter] = None
+        self._connected = False
+        self._session_id: Optional[str] = None
+        self._client_id: Optional[str] = None
+
+        # Event callback
+        self._on_event: Optional[Callable[[Event], None]] = None
+
+    @property
+    def is_connected(self) -> bool:
+        """Check if connected to server."""
+        return self._connected and self._writer is not None
+
+    @property
+    def session_id(self) -> Optional[str]:
+        """Get the current session ID."""
+        return self._session_id
+
+    @property
+    def client_id(self) -> Optional[str]:
+        """Get the client ID assigned by server."""
+        return self._client_id
+
+    def set_event_callback(self, callback: Callable[[Event], None]) -> None:
+        """Set callback for received events.
+
+        Args:
+            callback: Function called with each received event.
+        """
+        self._on_event = callback
+
+    # =========================================================================
+    # Connection Management
+    # =========================================================================
+
+    async def connect(self, timeout: float = 5.0) -> bool:
+        """Connect to the server.
+
+        Args:
+            timeout: Connection timeout in seconds.
+
+        Returns:
+            True if connected successfully.
+        """
+        socket_file = Path(self.socket_path)
+
+        # Check if socket exists
+        if not socket_file.exists():
+            if self.auto_start:
+                if not await self._start_server():
+                    return False
+            else:
+                raise ConnectionError(f"Socket not found: {self.socket_path}")
+
+        # Connect to socket
+        try:
+            self._reader, self._writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(self.socket_path),
+                timeout=timeout,
+            )
+            self._connected = True
+        except asyncio.TimeoutError:
+            raise ConnectionError(f"Connection timeout: {self.socket_path}")
+        except Exception as e:
+            raise ConnectionError(f"Connection failed: {e}")
+
+        # Wait for connected event
+        try:
+            message = await self._read_message()
+            if message:
+                event = deserialize_event(message)
+                if isinstance(event, ConnectedEvent):
+                    self._client_id = event.server_info.get("client_id")
+                    # Send our working directory to the server
+                    import os
+                    cwd = os.getcwd()
+                    await self._send_event(CommandRequest(
+                        command="set_workspace",
+                        args=[cwd],
+                    ))
+                    return True
+        except Exception as e:
+            await self.disconnect()
+            raise ConnectionError(f"Handshake failed: {e}")
+
+        return False
+
+    async def disconnect(self) -> None:
+        """Disconnect from the server."""
+        self._connected = False
+
+        if self._writer:
+            try:
+                self._writer.close()
+                await self._writer.wait_closed()
+            except Exception:
+                pass
+
+        self._reader = None
+        self._writer = None
+        self._session_id = None
+        self._client_id = None
+
+    async def _start_server(self) -> bool:
+        """Auto-start the server.
+
+        Returns:
+            True if server started successfully.
+        """
+        # Check if server is already running
+        pid = self._check_server_running()
+        if pid:
+            # Server is running, just wait for socket
+            return await self._wait_for_socket()
+
+        # Start server as daemon
+        print(f"Starting Jaato server...")
+
+        cmd = [
+            sys.executable, "-m", "server",
+            "--ipc-socket", self.socket_path,
+            "--env-file", self.env_file,
+            "--daemon",
+        ]
+
+        try:
+            subprocess.run(cmd, check=True, cwd=str(ROOT))
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to start server: {e}")
+            return False
+
+        # Wait for socket to appear
+        return await self._wait_for_socket()
+
+    async def _wait_for_socket(self, timeout: float = 10.0) -> bool:
+        """Wait for the socket file to appear.
+
+        Args:
+            timeout: Maximum time to wait.
+
+        Returns:
+            True if socket appeared.
+        """
+        socket_file = Path(self.socket_path)
+        start = time.time()
+
+        while time.time() - start < timeout:
+            if socket_file.exists():
+                # Give server a moment to start listening
+                await asyncio.sleep(0.1)
+                return True
+            await asyncio.sleep(0.1)
+
+        return False
+
+    def _check_server_running(self) -> Optional[int]:
+        """Check if server is already running.
+
+        Returns:
+            PID if running, None otherwise.
+        """
+        import os
+
+        pid_file = Path(DEFAULT_PID_FILE)
+        if not pid_file.exists():
+            return None
+
+        try:
+            with open(pid_file, 'r') as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 0)  # Check if process exists
+            return pid
+        except (ValueError, ProcessLookupError, PermissionError):
+            return None
+
+    # =========================================================================
+    # Message I/O
+    # =========================================================================
+
+    async def _read_message(self) -> Optional[str]:
+        """Read a length-prefixed message from the socket.
+
+        Returns:
+            The message string, or None if connection closed.
+        """
+        if not self._reader:
+            return None
+
+        # Read length header
+        header = await self._reader.read(HEADER_SIZE)
+        if len(header) < HEADER_SIZE:
+            return None
+
+        length = struct.unpack(">I", header)[0]
+        if length > MAX_MESSAGE_SIZE:
+            raise ValueError(f"Message too large: {length}")
+
+        # Read payload
+        payload = await self._reader.read(length)
+        if len(payload) < length:
+            return None
+
+        return payload.decode("utf-8")
+
+    async def _write_message(self, message: str) -> None:
+        """Write a length-prefixed message to the socket."""
+        if not self._writer:
+            raise ConnectionError("Not connected")
+
+        payload = message.encode("utf-8")
+        header = struct.pack(">I", len(payload))
+        self._writer.write(header + payload)
+        await self._writer.drain()
+
+    async def _send_event(self, event: Event) -> None:
+        """Send an event to the server."""
+        await self._write_message(serialize_event(event))
+
+    # =========================================================================
+    # Session Management
+    # =========================================================================
+
+    async def create_session(self, name: Optional[str] = None) -> Optional[str]:
+        """Create a new session.
+
+        Args:
+            name: Optional session name.
+
+        Returns:
+            The session ID, or None on failure.
+        """
+        args = [name] if name else []
+        await self._send_event(CommandRequest(
+            command="session.create",
+            args=args,
+        ))
+
+        # Wait for session created confirmation
+        # The session ID will be sent in a system message
+        # For now, return None and let events handle it
+        return None
+
+    async def attach_session(self, session_id: str) -> bool:
+        """Attach to an existing session.
+
+        Args:
+            session_id: The session to attach to.
+
+        Returns:
+            True if attached successfully.
+        """
+        await self._send_event(CommandRequest(
+            command="session.attach",
+            args=[session_id],
+        ))
+        self._session_id = session_id
+        return True
+
+    async def get_default_session(self) -> None:
+        """Get or create the default session."""
+        await self._send_event(CommandRequest(
+            command="session.default",
+            args=[],
+        ))
+
+    async def list_sessions(self) -> None:
+        """Request list of sessions (response via events)."""
+        await self._send_event(CommandRequest(
+            command="session.list",
+            args=[],
+        ))
+
+    # =========================================================================
+    # Requests
+    # =========================================================================
+
+    async def send_message(
+        self,
+        text: str,
+        attachments: Optional[list] = None,
+    ) -> None:
+        """Send a message to the model.
+
+        Args:
+            text: The message text.
+            attachments: Optional file attachments.
+        """
+        await self._send_event(SendMessageRequest(
+            text=text,
+            attachments=attachments or [],
+        ))
+
+    async def respond_to_permission(
+        self,
+        request_id: str,
+        response: str,
+    ) -> None:
+        """Respond to a permission request.
+
+        Args:
+            request_id: The permission request ID.
+            response: The response (y, n, a, never, etc.).
+        """
+        await self._send_event(PermissionResponseRequest(
+            request_id=request_id,
+            response=response,
+        ))
+
+    async def respond_to_clarification(
+        self,
+        request_id: str,
+        response: str,
+    ) -> None:
+        """Respond to a clarification question.
+
+        Args:
+            request_id: The clarification request ID.
+            response: The user's answer.
+        """
+        await self._send_event(ClarificationResponseRequest(
+            request_id=request_id,
+            response=response,
+        ))
+
+    async def stop(self) -> None:
+        """Stop current operation."""
+        await self._send_event(StopRequest())
+
+    async def execute_command(
+        self,
+        command: str,
+        args: Optional[list] = None,
+    ) -> None:
+        """Execute a command.
+
+        Args:
+            command: Command name.
+            args: Command arguments.
+        """
+        await self._send_event(CommandRequest(
+            command=command,
+            args=args or [],
+        ))
+
+    async def request_command_list(self) -> None:
+        """Request the list of available commands from server.
+
+        The response will arrive as a CommandListEvent via the event stream.
+        """
+        await self._send_event(CommandListRequest())
+
+    async def request_history(self, agent_id: str = "main") -> None:
+        """Request conversation history from server.
+
+        The response will arrive as a HistoryEvent via the event stream.
+
+        Args:
+            agent_id: Which agent's history to request.
+        """
+        await self._send_event(HistoryRequest(agent_id=agent_id))
+
+    # =========================================================================
+    # Event Stream
+    # =========================================================================
+
+    async def events(self) -> AsyncIterator[Event]:
+        """Async iterator for receiving events.
+
+        Yields:
+            Events from the server.
+        """
+        logger.debug("events(): starting event loop")
+        while self._connected:
+            try:
+                message = await self._read_message()
+                if message is None:
+                    logger.debug("events(): received None message, breaking")
+                    break
+
+                event = deserialize_event(message)
+                logger.debug(f"events(): received {type(event).__name__}")
+
+                # Call callback if set
+                if self._on_event:
+                    self._on_event(event)
+
+                yield event
+
+            except asyncio.CancelledError:
+                logger.debug("events(): cancelled")
+                break
+            except Exception as e:
+                logger.error(f"events(): error: {e}")
+                yield ErrorEvent(
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
+
+    async def receive_events(self) -> None:
+        """Receive events and call the callback.
+
+        Runs until disconnected. Use set_event_callback() first.
+        """
+        async for event in self.events():
+            pass  # Callback is called in events()

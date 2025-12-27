@@ -261,7 +261,9 @@ class OutputBuffer:
             style: Rich style for the message.
         """
         self._flush_current_block()
-        self._add_line("system", message, style)
+        # Handle multi-line messages
+        for line in message.split('\n'):
+            self._add_line("system", line, style)
 
     def clear(self) -> None:
         """Clear all output."""
@@ -670,8 +672,11 @@ class OutputBuffer:
                 for tool in self._active_tools:
                     height += 1  # Tool line
 
-                    # Error message (if failed and has error)
-                    if tool.completed and not tool.success and tool.error_message:
+                    # Permission denied message
+                    if tool.permission_state == "denied" and tool.permission_method:
+                        height += 1
+                    # Error message (if failed and has error, but not permission denied)
+                    elif tool.completed and not tool.success and tool.error_message:
                         height += 1
             else:
                 # Collapsed view: just one summary line
@@ -833,12 +838,29 @@ class OutputBuffer:
 
         # Define wrap_text helper before the loops
         def wrap_text(text: str, prefix_width: int = 0) -> List[str]:
-            """Wrap text to console width, accounting for prefix."""
+            """Wrap text to console width, accounting for prefix.
+
+            Handles multi-line text by splitting on newlines first,
+            then wrapping each line individually.
+            """
             available = max(20, wrap_width - prefix_width)
-            if len(text) <= available:
-                return [text]
-            # Use textwrap for clean word-based wrapping
-            return textwrap.wrap(text, width=available, break_long_words=True, break_on_hyphens=False)
+
+            # Handle literal \n in text (escaped newlines) - convert to actual newlines
+            text = text.replace('\\n', '\n')
+
+            # Split on actual newlines first, then wrap each line
+            result = []
+            for paragraph in text.split('\n'):
+                if not paragraph.strip():
+                    # Preserve empty lines (paragraph breaks)
+                    result.append('')
+                elif len(paragraph) <= available:
+                    result.append(paragraph)
+                else:
+                    # Use textwrap for clean word-based wrapping
+                    wrapped = textwrap.wrap(paragraph, width=available, break_long_words=True, break_on_hyphens=False)
+                    result.extend(wrapped)
+            return result if result else ['']
 
         # Render lines (model intent text appears before tool tree)
         for i, line in enumerate(lines_to_show):
@@ -1042,12 +1064,19 @@ class OutputBuffer:
                     if tool.completed and tool.duration_seconds is not None:
                         output.append(f" ({tool.duration_seconds:.1f}s)", style="dim")
 
-                    # Show error message if failed
-                    if tool.completed and not tool.success and tool.error_message:
+                    # Show permission denied info (when permission was denied)
+                    if tool.permission_state == "denied" and tool.permission_method:
                         output.append("\n")
                         continuation = "   " if is_last else "│  "
                         output.append(f"    {continuation} ", style="dim")
-                        output.append(f"  ⚠ {tool.error_message[:60]}", style="red dim")
+                        output.append(f"  ⊘ Permission denied: User chose: {tool.permission_method}", style="red dim")
+                    # Show error message if failed (but not for permission denied - already shown above)
+                    elif tool.completed and not tool.success and tool.error_message:
+                        output.append("\n")
+                        continuation = "   " if is_last else "│  "
+                        output.append(f"    {continuation} ", style="dim")
+                        # Show full error message without truncation
+                        output.append(f"  ⚠ {tool.error_message}", style="red dim")
             else:
                 # Collapsed view - all tools on one line
                 tool_summaries = []
@@ -1088,30 +1117,43 @@ class OutputBuffer:
                     # Limit lines to show (keep options visible at end)
                     max_prompt_lines = 18
                     prompt_lines = tool.permission_prompt_lines
-                    total_lines = len(prompt_lines)
                     truncated = False
                     hidden_count = 0
-
-                    if total_lines > max_prompt_lines:
-                        # Show first (max - 2) lines, then "...N more...", then last line (options)
-                        truncated = True
-                        tool.permission_truncated = True
-                        hidden_count = total_lines - max_prompt_lines + 1
-                        # First part + placeholder + last line
-                        lines_to_render = prompt_lines[:max_prompt_lines - 2]
-                    else:
-                        tool.permission_truncated = False
-                        lines_to_render = prompt_lines
 
                     # Draw box around permission prompt
                     # Box prefix is ~18 chars ("       │       │ "), leave room for border
                     max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
                     box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
                     content_width = box_width - 4  # Space for "│ " and " │"
+
+                    # Count lines after wrapping to properly truncate
+                    wrapped_line_count = 0
+                    for line in prompt_lines:
+                        if len(line) > content_width:
+                            wrapped = textwrap.wrap(line, width=content_width, break_long_words=True)
+                            wrapped_line_count += len(wrapped) if wrapped else 1
+                        else:
+                            wrapped_line_count += 1
+
+                    if wrapped_line_count > max_prompt_lines:
+                        truncated = True
+                        tool.permission_truncated = True
+                        hidden_count = wrapped_line_count - max_prompt_lines + 1
+                    else:
+                        tool.permission_truncated = False
+
                     output.append("\n")
                     output.append(f"  {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
 
-                    for prompt_line in lines_to_render:
+                    # Track rendered lines to enforce truncation
+                    rendered_lines = 0
+                    truncation_triggered = False
+                    # Reserve space for truncation message and last line (options)
+                    max_lines_before_truncation = max_prompt_lines - 3 if truncated else max_prompt_lines
+
+                    for prompt_line in prompt_lines[:-1] if truncated else prompt_lines:
+                        if truncation_triggered:
+                            break
                         # Wrap long lines instead of truncating
                         if len(prompt_line) > content_width:
                             wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
@@ -1121,6 +1163,9 @@ class OutputBuffer:
                             wrapped = [prompt_line]
 
                         for display_line in wrapped:
+                            if rendered_lines >= max_lines_before_truncation:
+                                truncation_triggered = True
+                                break
                             output.append("\n")
                             padding = box_width - len(display_line) - 4
                             output.append(f"  {continuation}     │ ", style="dim")
@@ -1131,9 +1176,13 @@ class OutputBuffer:
                                 output.append(display_line, style="red")
                             elif display_line.startswith('@@'):
                                 output.append(display_line, style="cyan")
+                            # Color options line (contains [y]es, [n]o, etc.)
+                            elif display_line.strip().startswith('[') and ']' in display_line:
+                                output.append(display_line, style="cyan")
                             else:
                                 output.append(display_line)
                             output.append(" " * max(0, padding) + " │", style="dim")
+                            rendered_lines += 1
 
                     # Show truncation indicator if needed
                     if truncated:
@@ -1189,23 +1238,38 @@ class OutputBuffer:
                         truncated = False
                         hidden_count = 0
 
-                        if total_lines > max_prompt_lines:
-                            truncated = True
-                            tool.clarification_truncated = True
-                            hidden_count = total_lines - max_prompt_lines + 1
-                            lines_to_render = prompt_lines[:max_prompt_lines - 2]
-                        else:
-                            tool.clarification_truncated = False
-                            lines_to_render = prompt_lines
-
-                        # Draw box around current question
+                        # Pre-calculate total rendered lines after wrapping
                         max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
                         box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
                         content_width = box_width - 4
+
+                        # Count lines after wrapping
+                        wrapped_line_count = 0
+                        for line in prompt_lines:
+                            if len(line) > content_width:
+                                wrapped = textwrap.wrap(line, width=content_width, break_long_words=True)
+                                wrapped_line_count += len(wrapped) if wrapped else 1
+                            else:
+                                wrapped_line_count += 1
+
+                        if wrapped_line_count > max_prompt_lines:
+                            truncated = True
+                            tool.clarification_truncated = True
+                            hidden_count = wrapped_line_count - max_prompt_lines + 1
+                        else:
+                            tool.clarification_truncated = False
+
+                        # Draw box around current question
                         output.append("\n")
                         output.append(f"  {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
 
-                        for prompt_line in lines_to_render:
+                        # Track rendered lines to enforce truncation
+                        rendered_lines = 0
+                        truncation_triggered = False
+
+                        for prompt_line in prompt_lines:
+                            if truncation_triggered:
+                                break
                             # Wrap long lines
                             if len(prompt_line) > content_width:
                                 wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
@@ -1214,11 +1278,15 @@ class OutputBuffer:
                             else:
                                 wrapped = [prompt_line]
                             for display_line in wrapped:
+                                if truncated and rendered_lines >= max_prompt_lines - 2:
+                                    truncation_triggered = True
+                                    break
                                 output.append("\n")
                                 padding = box_width - len(display_line) - 4
                                 output.append(f"  {continuation}     │ ", style="dim")
                                 output.append(display_line)
                                 output.append(" " * max(0, padding) + " │", style="dim")
+                                rendered_lines += 1
 
                         # Show truncation indicator if needed
                         if truncated:

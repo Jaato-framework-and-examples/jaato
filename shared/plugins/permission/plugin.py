@@ -24,6 +24,7 @@ from .channels import (
     get_default_permission_options,
 )
 from ..base import UserCommand, CommandCompletion, PermissionDisplayInfo, OutputCallback
+from ...ui_utils import format_permission_options, format_tool_args_summary
 
 # Import TYPE_CHECKING to avoid circular imports
 from typing import TYPE_CHECKING
@@ -108,10 +109,10 @@ class PermissionPlugin:
 
         Args:
             on_requested: Called when permission prompt is shown.
-                Signature: (tool_name, request_id, prompt_lines, response_options) -> None
+                Signature: (tool_name, request_id, tool_args, response_options) -> None
                 - tool_name: Name of the tool requesting permission
                 - request_id: Unique identifier for this request
-                - prompt_lines: Lines of text to display in the prompt
+                - tool_args: Raw arguments dict passed to the tool (client formats display)
                 - response_options: List of valid PermissionResponseOption objects
                   that can be used for autocompletion. Each option has:
                   - short: Short form (e.g., "y")
@@ -732,11 +733,10 @@ If permission is denied, do not attempt to proceed with that action."""
                 context=request_context,
             )
 
-            # Emit permission requested hook with prompt lines and response options
+            # Emit permission requested hook with raw args (client formats display)
             if self._on_permission_requested:
-                prompt_lines = self._build_prompt_lines(tool_name, args, display_info, request.response_options)
                 self._on_permission_requested(
-                    tool_name, request.request_id, prompt_lines, request.response_options
+                    tool_name, request.request_id, args, request.response_options
                 )
 
             response = self._channel.request_permission(request)
@@ -887,23 +887,12 @@ If permission is denied, do not attempt to proceed with that action."""
             # Default: show tool name and args
             lines.append(f"Tool: {tool_name}")
             if args:
-                args_str = str(args)
-                if len(args_str) > 100:
-                    args_str = args_str[:97] + "..."
-                lines.append(f"Args: {args_str}")
+                lines.append(f"Args: {format_tool_args_summary(args, max_length=100)}")
 
-        # Add options line built from response_options
+        # Add options line using shared utility
         lines.append("")
         options = response_options or get_default_permission_options()
-        options_parts = []
-        for opt in options:
-            if opt.short != opt.full:
-                # Format: [y]es
-                options_parts.append(f"[{opt.short}]{opt.full[len(opt.short):]}")
-            else:
-                # Format: [once]
-                options_parts.append(f"[{opt.full}]")
-        lines.append(" ".join(options_parts))
+        lines.append(format_permission_options(options))
 
         return lines
 

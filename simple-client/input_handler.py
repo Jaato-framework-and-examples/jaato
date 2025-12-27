@@ -41,10 +41,19 @@ class InputHandler:
     prompt_toolkit with rich completions or standard readline.
     """
 
-    def __init__(self):
-        """Initialize the input handler."""
+    def __init__(self, commands: list[tuple[str, str]] = None):
+        """Initialize the input handler.
+
+        Args:
+            commands: Optional list of (command_name, description) tuples.
+                     If provided, replaces DEFAULT_COMMANDS for completion.
+                     If None, uses DEFAULT_COMMANDS from file_completer.
+        """
         self._pt_history = InMemoryHistory() if HAS_PROMPT_TOOLKIT else None
-        self._completer = CombinedCompleter() if (HAS_PROMPT_TOOLKIT and HAS_FILE_COMPLETER) else None
+        if HAS_PROMPT_TOOLKIT and HAS_FILE_COMPLETER:
+            self._completer = CombinedCompleter(commands=commands)
+        else:
+            self._completer = None
         self._file_processor = FileReferenceProcessor() if HAS_FILE_COMPLETER else None
 
         # Prompt style for completion menu and status bar

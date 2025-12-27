@@ -6,9 +6,14 @@ This client provides a terminal UI experience with:
 - Scrolling output panel below for model responses and tool output
 - Full-screen alternate buffer for immersive experience
 
+Supports two modes via Backend abstraction:
+- Direct mode: Local JaatoClient (non-IPC)
+- IPC mode: Connection to jaato server daemon
+
 Requires an interactive TTY. For non-TTY environments, use simple-client.
 """
 
+import asyncio
 import os
 import sys
 import pathlib
@@ -50,6 +55,9 @@ from plan_reporter import create_live_reporter
 from agent_registry import AgentRegistry
 from keybindings import load_keybindings, detect_terminal, list_available_profiles
 
+# Backend abstraction for mode-agnostic operation
+from backend import Backend, DirectBackend, IPCBackend
+
 
 class RichClient:
     """Rich TUI client with sticky plan display.
@@ -63,11 +71,25 @@ class RichClient:
     while model output scrolls naturally below.
     """
 
-    def __init__(self, env_file: str = ".env", verbose: bool = True, provider: Optional[str] = None):
+    def __init__(
+        self,
+        env_file: str = ".env",
+        verbose: bool = True,
+        provider: Optional[str] = None,
+        backend: Optional[Backend] = None,
+    ):
         self.verbose = verbose
         self.env_file = env_file
         self._provider = provider  # CLI override for provider
-        self._jaato: Optional[JaatoClient] = None
+
+        # Backend abstraction - supports both direct and IPC modes
+        self._backend: Optional[Backend] = backend
+        self._jaato: Optional[JaatoClient] = None  # For direct mode compatibility
+        self._is_ipc_mode = backend is not None and isinstance(backend, IPCBackend)
+
+        # Async event loop for backend calls from threads
+        self._async_loop: Optional[asyncio.AbstractEventLoop] = None
+
         self.registry: Optional[PluginRegistry] = None
         self.permission_plugin: Optional[PermissionPlugin] = None
         self.todo_plugin: Optional[TodoPlugin] = None
@@ -111,6 +133,19 @@ class RichClient:
         if self.verbose and self._display:
             self._display.add_system_message(msg, style="cyan")
 
+    def _run_async(self, coro):
+        """Run an async coroutine from sync context.
+
+        Uses the stored event loop if available, otherwise creates a new one.
+        """
+        if self._async_loop and self._async_loop.is_running():
+            # Submit to running loop from another thread
+            future = asyncio.run_coroutine_threadsafe(coro, self._async_loop)
+            return future.result(timeout=30)
+        else:
+            # No running loop, create one
+            return asyncio.run(coro)
+
     def _create_output_callback(self,
                                   suppress_sources: Optional[set] = None) -> Callable[[str, str, str], None]:
         """Create callback for real-time output to display.
@@ -138,10 +173,10 @@ class RichClient:
 
     def _try_execute_plugin_command(self, user_input: str) -> Optional[Any]:
         """Try to execute user input as a plugin-provided command."""
-        if not self._jaato:
+        if not self._backend:
             return None
 
-        user_commands = self._jaato.get_user_commands()
+        user_commands = self._run_async(self._backend.get_user_commands())
         if not user_commands:
             return None
 
@@ -164,7 +199,9 @@ class RichClient:
             args["user_inputs"] = self._original_inputs.copy()
 
         try:
-            result, shared = self._jaato.execute_user_command(command.name, args)
+            result, shared = self._run_async(
+                self._backend.execute_user_command(command.name, args)
+            )
             self._display_command_result(command.name, result, shared)
 
             # Update status bar if model was changed
@@ -230,7 +267,35 @@ class RichClient:
             self.log(f"Restored {count} inputs to prompt history")
 
     def initialize(self) -> bool:
-        """Initialize the client."""
+        """Initialize the client.
+
+        For direct mode: Creates JaatoClient and DirectBackend.
+        For IPC mode: Uses provided backend (server handles plugins).
+        """
+        # IPC mode - backend already provided, minimal local setup
+        if self._is_ipc_mode:
+            return self._initialize_ipc_mode()
+
+        # Direct mode - full local initialization
+        return self._initialize_direct_mode()
+
+    def _initialize_ipc_mode(self) -> bool:
+        """Initialize for IPC mode (server connection)."""
+        # In IPC mode, the server handles:
+        # - Model connection
+        # - Plugin registry
+        # - Permission handling
+        # - Tool configuration
+        # - Session management
+
+        # We just need to set up local UI components
+        self._model_name = self._backend.model_name
+        self._model_provider = self._backend.provider_name
+
+        return True
+
+    def _initialize_direct_mode(self) -> bool:
+        """Initialize for direct mode (local JaatoClient)."""
         # Load environment from CWD or explicit --env-file path
         load_dotenv(self.env_file)
 
@@ -264,6 +329,9 @@ class RichClient:
         except Exception as e:
             print(f"Error: Failed to connect: {e}")
             return False
+
+        # Create DirectBackend wrapping the JaatoClient
+        self._backend = DirectBackend(self._jaato)
 
         # Store model info for status bar (from jaato client)
         self._model_name = self._jaato.model_name or model_name
@@ -308,13 +376,13 @@ class RichClient:
         })
 
         # Configure tools
-        self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
+        self._backend.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
         # Load GC configuration from .jaato/gc.json if present
         gc_result = load_gc_from_file()
         if gc_result:
             gc_plugin, gc_config = gc_result
-            self._jaato.set_gc_plugin(gc_plugin, gc_config)
+            self._backend.set_gc_plugin(gc_plugin, gc_config)
 
         # Setup session plugin
         self._setup_session_plugin()
@@ -381,7 +449,9 @@ class RichClient:
     def _trace(self, msg: str) -> None:
         """Write trace message to file for debugging."""
         import datetime
-        trace_path = os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        trace_path = os.environ.get("JAATO_TRACE_LOG")
+        if not trace_path:
+            return  # Tracing disabled
         with open(trace_path, "a") as f:
             ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
             f.write(f"[{ts}] {msg}\n")
@@ -417,8 +487,8 @@ class RichClient:
         # Create a cancel token provider that checks the session's current token
         def get_cancel_token():
             """Get the current cancel token from the session, if any."""
-            if self._jaato:
-                session = self._jaato.get_session()
+            if self._backend:
+                session = self._backend.get_session()
                 if session and hasattr(session, '_cancel_token'):
                     return session._cancel_token
             return None
@@ -478,11 +548,7 @@ class RichClient:
         Routes retry notifications through the output callback system instead
         of printing directly to console, so they appear in the output panel.
         """
-        if not self._jaato:
-            return
-
-        session = self._jaato.get_session()
-        if not session:
+        if not self._backend:
             return
 
         # Create output callback for retry messages
@@ -493,7 +559,7 @@ class RichClient:
             # Use source="retry" so UI can style appropriately
             output_callback("retry", message, "write")
 
-        session.set_retry_callback(on_retry)
+        self._backend.set_retry_callback(on_retry)
         self._trace("Retry callback configured for output panel")
 
         # Also set callback on subagent plugin so subagent sessions use it
@@ -505,7 +571,7 @@ class RichClient:
 
     def _setup_agent_hooks(self) -> None:
         """Set up agent lifecycle hooks for UI integration."""
-        if not self._jaato or not self._agent_registry:
+        if not self._backend or not self._agent_registry:
             return
 
         # Import the protocol
@@ -545,6 +611,9 @@ class RichClient:
 
             def on_agent_status_changed(self, agent_id, status, error=None):
                 registry.update_status(agent_id, status)
+                # Auto-select the active agent so status bar shows its context
+                if status == "active":
+                    registry.select_agent(agent_id)
                 # Start/stop spinner for this agent's buffer based on status
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
@@ -585,6 +654,7 @@ class RichClient:
                 buffer = registry.get_buffer(agent_id)
                 if buffer:
                     buffer.add_active_tool(tool_name, tool_args, call_id=call_id)
+                    buffer.scroll_to_bottom()  # Auto-scroll when tool tree grows
                     if display:
                         display.refresh()
 
@@ -595,6 +665,7 @@ class RichClient:
                     buffer.mark_tool_completed(
                         tool_name, success, duration_seconds, error_message, call_id=call_id
                     )
+                    buffer.scroll_to_bottom()  # Auto-scroll when tool tree updates
                     if display:
                         display.refresh()
 
@@ -603,10 +674,11 @@ class RichClient:
         # Store hooks reference for direct calls (e.g., when user sends input)
         self._ui_hooks = hooks
 
-        # Register hooks with JaatoClient (main agent)
-        self._jaato.set_ui_hooks(hooks)
+        # Register hooks with backend (main agent)
+        if self._backend:
+            self._backend.set_ui_hooks(hooks)
 
-        # Register hooks with SubagentPlugin if present
+        # Register hooks with SubagentPlugin if present (direct mode only)
         if self.registry:
             subagent_plugin = self.registry.get_plugin("subagent")
             if subagent_plugin and hasattr(subagent_plugin, 'set_ui_hooks'):
@@ -627,19 +699,28 @@ class RichClient:
         registry = self._agent_registry
         display = self._display
 
-        def on_permission_requested(tool_name: str, request_id: str, prompt_lines: list, response_options: list):
+        def on_permission_requested(tool_name: str, request_id: str, tool_args: dict, response_options: list):
             """Called when permission prompt is shown.
 
             Args:
                 tool_name: Name of the tool requesting permission.
                 request_id: Unique identifier for this request.
-                prompt_lines: Lines of text to display in the prompt.
+                tool_args: Arguments passed to the tool (client formats display).
                 response_options: List of PermissionResponseOption objects
                     that define valid responses for autocompletion.
             """
             # Store the response options for the prompt_callback to use
             # This makes the permission plugin the single source of truth
             self._pending_response_options = response_options
+
+            # Build prompt lines using shared utility (consistent with IPC mode)
+            from shared.ui_utils import build_permission_prompt_lines
+            prompt_lines = build_permission_prompt_lines(
+                tool_args=tool_args,
+                response_options=response_options,
+                include_tool_name=True,  # Direct mode includes tool name
+                tool_name=tool_name,
+            )
 
             # Update the tool in the main agent's buffer
             buffer = registry.get_buffer("main")
@@ -723,14 +804,14 @@ class RichClient:
 
     def _setup_session_plugin(self) -> None:
         """Set up session persistence plugin."""
-        if not self._jaato:
+        if not self._backend:
             return
 
         try:
             session_config = load_session_config()
             session_plugin = create_session_plugin()
             session_plugin.initialize({'storage_path': session_config.storage_path})
-            self._jaato.set_session_plugin(session_plugin, session_config)
+            self._backend.set_session_plugin(session_plugin, session_config)
 
             if self.registry:
                 self.registry.register_plugin(session_plugin, enrichment_only=True)
@@ -760,8 +841,8 @@ class RichClient:
             if commands:
                 commands_by_plugin[self.permission_plugin.name] = commands
 
-        if self._jaato:
-            user_commands = self._jaato.get_user_commands()
+        if self._backend:
+            user_commands = self._run_async(self._backend.get_user_commands())
             session_cmds = [cmd for name, cmd in user_commands.items()
                            if name in ('save', 'resume', 'sessions', 'delete-session', 'backtoturn')]
             if session_cmds:
@@ -771,20 +852,20 @@ class RichClient:
 
     def _register_plugin_commands(self) -> None:
         """Register plugin commands for autocompletion."""
-        if not self._jaato:
+        if not self._backend:
             return
 
-        user_commands = self._jaato.get_user_commands()
+        user_commands = self._run_async(self._backend.get_user_commands())
         if not user_commands:
             return
 
         completer_cmds = [(cmd.name, cmd.description) for cmd in user_commands.values()]
         self._input_handler.add_commands(completer_cmds)
 
-        if hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
-            session_plugin = self._jaato._session_plugin
-            if hasattr(session_plugin, 'list_sessions'):
-                self._input_handler.set_session_provider(session_plugin.list_sessions)
+        # Session provider - direct mode only (uses plugin directly)
+        session_plugin = self._backend.get_session_plugin()
+        if session_plugin and hasattr(session_plugin, 'list_sessions'):
+            self._input_handler.set_session_provider(session_plugin.list_sessions)
 
         # Set up plugin command argument completion
         self._setup_command_completion_provider()
@@ -803,12 +884,11 @@ class RichClient:
                     for cmd in plugin.get_user_commands():
                         command_to_plugin[cmd.name] = plugin
 
-        if hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
-            session_plugin = self._jaato._session_plugin
-            if hasattr(session_plugin, 'get_command_completions'):
-                if hasattr(session_plugin, 'get_user_commands'):
-                    for cmd in session_plugin.get_user_commands():
-                        command_to_plugin[cmd.name] = session_plugin
+        session_plugin = self._backend.get_session_plugin() if self._backend else None
+        if session_plugin and hasattr(session_plugin, 'get_command_completions'):
+            if hasattr(session_plugin, 'get_user_commands'):
+                for cmd in session_plugin.get_user_commands():
+                    command_to_plugin[cmd.name] = session_plugin
 
         if self.permission_plugin and hasattr(self.permission_plugin, 'get_command_completions'):
             if hasattr(self.permission_plugin, 'get_user_commands'):
@@ -823,8 +903,8 @@ class RichClient:
 
         def completion_provider(command: str, args: list) -> list:
             # Handle built-in model command
-            if command == "model" and self._jaato:
-                return self._jaato.get_model_completions(args)
+            if command == "model" and self._backend:
+                return self._run_async(self._backend.get_model_completions(args))
 
             # Handle tools enable/disable completions
             if command == 'tools enable':
@@ -863,11 +943,13 @@ class RichClient:
         This is used for single-prompt (non-interactive) mode only.
         For interactive mode, use _start_model_thread instead.
         """
-        if not self._jaato:
+        if not self._backend:
             return "Error: Client not initialized"
 
         try:
-            response = self._jaato.send_message(prompt, on_output=lambda s, t, m: print(f"[{s}] {t}"))
+            response = self._run_async(
+                self._backend.send_message(prompt, on_output=lambda s, t, m: print(f"[{s}] {t}"))
+            )
             return response if response else "(No response)"
         except Exception as e:
             return f"Error: {e}"
@@ -879,7 +961,7 @@ class RichClient:
         which is necessary for handling permission/clarification prompts.
         The model thread will update the display via callbacks.
         """
-        if not self._jaato:
+        if not self._backend:
             if self._display:
                 self._display.add_system_message("Error: Client not initialized", style="red")
             return
@@ -943,13 +1025,13 @@ class RichClient:
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [rich_client_callback] display={self._display is not None} jaato={self._jaato is not None}\n")
+                    f.write(f"[{ts}] [rich_client_callback] display={self._display is not None} backend={self._backend is not None}\n")
                     f.flush()
             except Exception:
                 pass
-            if self._display and self._jaato:
+            if self._display and self._backend:
                 # Get context limit for percentage calculation
-                context_limit = self._jaato.get_context_limit()
+                context_limit = self._run_async(self._backend.get_context_limit())
                 total_tokens = max_tokens_seen['total']
                 percent_used = (total_tokens / context_limit * 100) if context_limit > 0 else 0
                 tokens_remaining = max(0, context_limit - total_tokens)
@@ -1005,17 +1087,20 @@ class RichClient:
             self._model_running = True
             try:
                 self._trace("[model_thread] calling send_message...")
-                self._jaato.send_message(
-                    prompt,
-                    on_output=output_callback,
-                    on_usage_update=usage_update_callback,
-                    on_gc_threshold=gc_threshold_callback
-                )
+                # For direct mode, get the underlying sync client
+                client = self._backend.get_client() if self._backend else None
+                if client and hasattr(client, 'send_message'):
+                    client.send_message(
+                        prompt,
+                        on_output=output_callback,
+                        on_usage_update=usage_update_callback,
+                        on_gc_threshold=gc_threshold_callback
+                    )
                 self._trace(f"[model_thread] send_message returned")
 
                 # Update context usage in status bar
-                if self._display and self._jaato:
-                    usage = self._jaato.get_context_usage()
+                if self._display and self._backend:
+                    usage = self._run_async(self._backend.get_context_usage())
                     self._display.update_context_usage(usage)
 
                 # Add separator after model finishes
@@ -1053,8 +1138,8 @@ class RichClient:
 
     def clear_history(self) -> None:
         """Clear conversation history."""
-        if self._jaato:
-            self._jaato.reset_session()
+        if self._backend:
+            self._run_async(self._backend.reset_session())
         self._original_inputs = []
         if self._display:
             self._display.clear_output()
@@ -1205,8 +1290,8 @@ class RichClient:
 
         # Set up stop callbacks for Ctrl-C handling
         self._display.set_stop_callbacks(
-            stop_callback=lambda: self._jaato.stop() if self._jaato else False,
-            is_running_callback=lambda: self._jaato.is_processing if self._jaato else False
+            stop_callback=lambda: self._run_async(self._backend.stop()) if self._backend else False,
+            is_running_callback=lambda: self._backend.is_processing if self._backend else False
         )
 
         # Set up the live reporter and queue channels
@@ -1267,9 +1352,9 @@ class RichClient:
             all_decls.extend(self.registry.get_exposed_tool_schemas())
         if self.permission_plugin:
             all_decls.extend(self.permission_plugin.get_tool_schemas())
-        if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
-            if hasattr(self._jaato._session_plugin, 'get_tool_schemas'):
-                all_decls.extend(self._jaato._session_plugin.get_tool_schemas())
+        session_plugin = self._backend.get_session_plugin() if self._backend else None
+        if session_plugin and hasattr(session_plugin, 'get_tool_schemas'):
+            all_decls.extend(session_plugin.get_tool_schemas())
         return all_decls
 
     def _handle_tools_command(self, user_input: str) -> None:
@@ -1330,280 +1415,13 @@ class RichClient:
     def _handle_keybindings_command(self, user_input: str) -> None:
         """Handle the keybindings command with subcommands.
 
-        Subcommands:
-            keybindings              - Show current keybindings
-            keybindings list         - Show current keybindings
-            keybindings reload       - Reload keybindings from config files
-            keybindings set <action> <key> [--save]  - Set a keybinding
-            keybindings profile      - Show/switch terminal profiles
+        Delegates to the shared implementation in ui_utils.
 
         Args:
             user_input: The full user input string starting with 'keybindings'.
         """
-        if not self._display:
-            return
-
-        parts = user_input.strip().split()
-        subcommand = parts[1].lower() if len(parts) > 1 else "list"
-
-        if subcommand == "list" or subcommand == "keybindings":
-            self._show_keybindings()
-            return
-
-        if subcommand == "reload":
-            self._reload_keybindings()
-            return
-
-        if subcommand == "set":
-            self._set_keybinding(parts[2:])
-            return
-
-        if subcommand == "profile":
-            self._handle_profile_command(parts[2:])
-            return
-
-        # Unknown subcommand - show help
-        self._display.show_lines([
-            (f"[Unknown subcommand: {subcommand}]", "yellow"),
-            ("  Available subcommands:", ""),
-            ("    keybindings list              - Show current keybindings", "dim"),
-            ("    keybindings set <action> <key> [--save]", "dim"),
-            ("                                  - Set a keybinding (optionally persist)", "dim"),
-            ("    keybindings profile           - Show current terminal profile", "dim"),
-            ("    keybindings profile <name>    - Switch to a different profile", "dim"),
-            ("    keybindings reload            - Reload keybindings from config", "dim"),
-        ])
-
-    def _show_keybindings(self) -> None:
-        """Show current keybinding configuration."""
-        if not self._display:
-            return
-
-        config = self._display._keybinding_config
-        bindings = config.to_dict()
-
-        # Show profile info first
-        detected = detect_terminal()
-        lines = [
-            ("Current Keybindings:", "bold"),
-            (f"  Profile: {config.profile}", "cyan"),
-            (f"  Terminal: {detected}", "dim"),
-            (f"  Source: {config.profile_source}", "dim"),
-            ("", ""),
-        ]
-
-        # Group by category
-        categories = {
-            "Input": ["submit", "newline", "clear_input"],
-            "Exit/Cancel": ["cancel", "exit"],
-            "Scrolling": ["scroll_up", "scroll_down", "scroll_top", "scroll_bottom"],
-            "Navigation": ["nav_up", "nav_down"],
-            "Pager": ["pager_quit", "pager_next"],
-            "Features": ["toggle_plan", "toggle_tools", "cycle_agents", "yank", "view_full"],
-        }
-
-        for category, keys in categories.items():
-            lines.append((f"  {category}:", "cyan"))
-            for key in keys:
-                if key in bindings:
-                    value = bindings[key]
-                    if isinstance(value, list):
-                        value_str = " ".join(value)
-                    else:
-                        value_str = value
-                    padding = max(2, 16 - len(key))
-                    lines.append((f"    {key}{' ' * padding}{value_str}", "dim"))
-            lines.append(("", ""))
-
-        lines.extend([
-            ("Profile-specific config files:", "bold"),
-            (f"  .jaato/keybindings.{detected}.json (terminal-specific)", "dim"),
-            ("  .jaato/keybindings.json (base)", "dim"),
-            ("  Environment: JAATO_KEYBINDING_PROFILE=<name>", "dim"),
-            ("", ""),
-            ("Use 'keybindings profile' to view/switch profiles.", "italic"),
-        ])
-
-        self._display.show_lines(lines)
-
-    def _reload_keybindings(self) -> None:
-        """Reload keybindings from configuration files."""
-        if not self._display:
-            return
-
-        try:
-            self._display.reload_keybindings()
-            self._display.show_lines([
-                ("[Keybindings reloaded successfully]", "green"),
-                ("New keybindings are now active.", "dim"),
-            ])
-        except Exception as e:
-            self._display.show_lines([
-                (f"[Error reloading keybindings: {e}]", "red"),
-            ])
-
-    def _set_keybinding(self, args: list) -> None:
-        """Set a keybinding for an action.
-
-        Args:
-            args: List of arguments: <action> <key> [--save]
-        """
-        if not self._display:
-            return
-
-        from keybindings import DEFAULT_KEYBINDINGS
-
-        # Parse arguments
-        save_to_file = "--save" in args
-        args = [a for a in args if a != "--save"]
-
-        if len(args) < 2:
-            self._display.show_lines([
-                ("[Error: Missing arguments]", "red"),
-                ("  Usage: keybindings set <action> <key> [--save]", "dim"),
-                ("", ""),
-                ("  Examples:", "bold"),
-                ("    keybindings set yank c-shift-y", "dim"),
-                ("    keybindings set toggle_plan f1 --save", "dim"),
-                ("    keybindings set newline escape enter", "dim"),
-                ("", ""),
-                ("  Available actions:", "bold"),
-            ])
-            # Show available actions
-            actions = list(DEFAULT_KEYBINDINGS.keys())
-            for i in range(0, len(actions), 4):
-                chunk = actions[i:i+4]
-                self._display.show_lines([
-                    ("    " + ", ".join(chunk), "dim"),
-                ])
-            return
-
-        action = args[0].lower()
-        # Key can be multiple words for multi-key sequences (e.g., "escape enter")
-        key = " ".join(args[1:])
-
-        # Validate action
-        if action not in DEFAULT_KEYBINDINGS:
-            self._display.show_lines([
-                (f"[Error: Unknown action '{action}']", "red"),
-                ("", ""),
-                ("  Available actions:", "bold"),
-            ])
-            actions = list(DEFAULT_KEYBINDINGS.keys())
-            for i in range(0, len(actions), 4):
-                chunk = actions[i:i+4]
-                self._display.show_lines([
-                    ("    " + ", ".join(chunk), "dim"),
-                ])
-            return
-
-        # Get current config and set the binding
-        config = self._display._keybinding_config
-        old_value = getattr(config, action)
-        if isinstance(old_value, list):
-            old_str = " ".join(old_value)
-        else:
-            old_str = old_value
-
-        # Set the new binding
-        if not config.set_binding(action, key):
-            self._display.show_lines([
-                (f"[Error: Failed to set binding for '{action}']", "red"),
-            ])
-            return
-
-        # Rebuild the app with new keybindings
-        self._display._build_app()
-
-        # Get the normalized key for display
-        new_value = getattr(config, action)
-        if isinstance(new_value, list):
-            new_str = " ".join(new_value)
-        else:
-            new_str = new_value
-
-        lines = [
-            (f"[Keybinding updated: {action}]", "green"),
-            (f"  {old_str} → {new_str}", "dim"),
-        ]
-
-        # Save to file if requested
-        if save_to_file:
-            if config.save_to_file():
-                lines.append(("  Saved to .jaato/keybindings.json", "cyan"))
-            else:
-                lines.append(("  [Warning: Failed to save to file]", "yellow"))
-        else:
-            lines.append(("  (session only - use --save to persist)", "dim italic"))
-
-        self._display.show_lines(lines)
-
-    def _handle_profile_command(self, args: list) -> None:
-        """Handle the keybindings profile subcommand.
-
-        Args:
-            args: List of arguments after 'keybindings profile'
-        """
-        if not self._display:
-            return
-
-        config = self._display._keybinding_config
-        detected = detect_terminal()
-        available = list_available_profiles()
-
-        # No args - show current profile and available profiles
-        if not args:
-            lines = [
-                ("Keybinding Profiles:", "bold"),
-                ("", ""),
-                (f"  Detected terminal: {detected}", "cyan"),
-                (f"  Current profile:   {config.profile}", "green"),
-                (f"  Source:            {config.profile_source}", "dim"),
-                ("", ""),
-                ("  Available profiles:", "bold"),
-            ]
-
-            for profile in available:
-                marker = " (active)" if profile == config.profile else ""
-                marker2 = " (detected)" if profile == detected and profile != config.profile else ""
-                lines.append((f"    - {profile}{marker}{marker2}", "dim"))
-
-            lines.extend([
-                ("", ""),
-                ("  To switch profiles:", "bold"),
-                ("    keybindings profile <name>     - Switch to a profile", "dim"),
-                ("    JAATO_KEYBINDING_PROFILE=name  - Override via env var", "dim"),
-                ("", ""),
-                ("  To create a profile:", "bold"),
-                (f"    Create .jaato/keybindings.{detected}.json", "dim"),
-            ])
-
-            self._display.show_lines(lines)
-            return
-
-        # Switch to specified profile
-        new_profile = args[0].lower()
-
-        # Load with new profile
-        try:
-            new_config = load_keybindings(profile=new_profile)
-            self._display._keybinding_config = new_config
-            self._display._build_app()
-
-            lines = [
-                (f"[Switched to profile: {new_profile}]", "green"),
-                (f"  Source: {new_config.profile_source}", "dim"),
-            ]
-
-            if new_profile not in available:
-                lines.append((f"  (no config file found, using defaults)", "yellow"))
-
-            self._display.show_lines(lines)
-
-        except Exception as e:
-            self._display.show_lines([
-                (f"[Error switching profile: {e}]", "red"),
-            ])
+        from shared.ui_utils import handle_keybindings_command
+        handle_keybindings_command(user_input, self._display)
 
     def _get_tool_status(self) -> list:
         """Get status of all tools including enabled/disabled state."""
@@ -1624,16 +1442,15 @@ class RichClient:
                 })
 
         # Add session plugin tools (always enabled)
-        if self._jaato and hasattr(self._jaato, '_session_plugin') and self._jaato._session_plugin:
-            session_plugin = self._jaato._session_plugin
-            if hasattr(session_plugin, 'get_tool_schemas'):
-                for schema in session_plugin.get_tool_schemas():
-                    status.append({
-                        'name': schema.name,
-                        'description': schema.description,
-                        'enabled': True,
-                        'plugin': 'session',
-                    })
+        session_plugin = self._backend.get_session_plugin() if self._backend else None
+        if session_plugin and hasattr(session_plugin, 'get_tool_schemas'):
+            for schema in session_plugin.get_tool_schemas():
+                status.append({
+                    'name': schema.name,
+                    'description': schema.description,
+                    'enabled': True,
+                    'plugin': 'session',
+                })
 
         return status
 
@@ -1760,8 +1577,8 @@ class RichClient:
 
     def _refresh_session_tools(self) -> None:
         """Refresh the session's tools after enabling/disabling."""
-        if self._jaato and hasattr(self._jaato, '_session') and self._jaato._session:
-            self._jaato._session.refresh_tools()
+        if self._backend:
+            self._run_async(self._backend.refresh_tools())
             self.log("[client] Session tools refreshed")
 
     def _show_plugins(self) -> None:
@@ -1871,8 +1688,8 @@ class RichClient:
 
         # For main agent, also get turn boundaries
         turn_boundaries = []
-        if selected_agent.agent_id == "main" and self._jaato:
-            turn_boundaries = self._jaato.get_turn_boundaries()
+        if selected_agent.agent_id == "main" and self._backend:
+            turn_boundaries = self._run_async(self._backend.get_turn_boundaries())
 
         count = len(history)
         total_turns = len(turn_accounting) if turn_accounting else len(turn_boundaries)
@@ -2103,13 +1920,13 @@ class RichClient:
 
     def _export_session(self, filename: str) -> None:
         """Export session to YAML file."""
-        if not self._display or not self._jaato:
+        if not self._display or not self._backend:
             return
 
         try:
             from session_exporter import SessionExporter
             exporter = SessionExporter()
-            history = self._jaato.get_history()
+            history = self._run_async(self._backend.get_history())
             result = exporter.export_to_yaml(history, self._original_inputs, filename)
 
             if result.get('success'):
@@ -2134,6 +1951,15 @@ class RichClient:
         if not self._display:
             return
 
+        # Import shared help builders
+        from shared.client_commands import (
+            build_permission_help_text,
+            build_file_reference_help_text,
+            build_slash_command_help_text,
+            build_keyboard_shortcuts_help_text,
+        )
+
+        # Direct mode has more detailed command help (keybindings, plugins, etc.)
         help_lines = [
             ("Commands (auto-complete as you type):", "bold"),
             ("  help              - Show this help message", "dim"),
@@ -2168,40 +1994,29 @@ class RichClient:
                     help_lines.append((f"    {cmd.name}{' ' * padding}- {cmd.description}{shared_marker}", "dim"))
             help_lines.append(("", "dim"))
 
+        # Use shared help sections for common content
+        help_lines.extend(build_permission_help_text())
+        help_lines.extend(build_file_reference_help_text())
+        # Add extra file reference detail for direct mode
+        help_lines.insert(-1, ("  Completions appear automatically as you type after @.", "dim"))
+
+        help_lines.extend(build_slash_command_help_text())
+        # Add extra slash command detail for direct mode
+        help_lines.insert(-1, ("  - Pass arguments after the command name: /review file.py", "dim"))
+
+        # Direct mode extra sections
         help_lines.extend([
-            ("When the model tries to use a tool, you'll see a permission prompt:", "bold"),
-            ("  [y]es     - Allow this execution", "dim"),
-            ("  [n]o      - Deny this execution", "dim"),
-            ("  [a]lways  - Allow and remember for this session", "dim"),
-            ("  [never]   - Deny and block for this session", "dim"),
-            ("  [once]    - Allow just this once", "dim"),
-            ("", "dim"),
-            ("File references:", "bold"),
-            ("  Use @path/to/file to include file contents in your prompt.", "dim"),
-            ("  - @src/main.py      - Reference a file (contents included)", "dim"),
-            ("  - @./config.json    - Reference with explicit relative path", "dim"),
-            ("  - @~/documents/     - Reference with home directory", "dim"),
-            ("  Completions appear automatically as you type after @.", "dim"),
-            ("", "dim"),
-            ("Slash commands:", "bold"),
-            ("  Use /command_name [args...] to invoke slash commands from .jaato/commands/.", "dim"),
-            ("  - Type / to see available commands with descriptions", "dim"),
-            ("  - Pass arguments after the command name: /review file.py", "dim"),
-            ("", "dim"),
             ("Multi-turn conversation:", "bold"),
             ("  The model remembers previous exchanges in this session.", "dim"),
             ("  Use 'reset' to start a fresh conversation.", "dim"),
             ("", "dim"),
-            ("Keyboard shortcuts:", "bold"),
-            ("  ↑/↓       - Navigate prompt history (or completion menu)", "dim"),
-            ("  ←/→       - Move cursor within line", "dim"),
-            ("  Ctrl+A/E  - Jump to start/end of line", "dim"),
-            ("  Ctrl+Y    - Yank (copy) last response to clipboard", "dim"),
-            ("  TAB/Enter - Accept selected completion", "dim"),
-            ("  Escape    - Dismiss completion menu", "dim"),
-            ("  Esc+Esc   - Clear input", "dim"),
-            ("  PgUp/PgDn - Scroll output up/down", "dim"),
-            ("  Home/End  - Scroll to top/bottom of output", "dim"),
+        ])
+
+        help_lines.extend(build_keyboard_shortcuts_help_text())
+        # Add extra keyboard shortcut for direct mode
+        help_lines.insert(-1, ("  Ctrl+A/E  - Jump to start/end of line", "dim"))
+
+        help_lines.extend([
             ("", "dim"),
             ("Display:", "bold"),
             ("  The plan panel at top shows current plan status.", "dim"),
@@ -2219,6 +2034,797 @@ class RichClient:
             self.permission_plugin.shutdown()
 
 
+# =============================================================================
+# IPC Client Mode
+# =============================================================================
+
+async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str = ".env",
+                       initial_prompt: Optional[str] = None, single_prompt: Optional[str] = None,
+                       new_session: bool = False):
+    """Run the client in IPC mode, connecting to a server.
+
+    Uses full PTDisplay for rich TUI experience with plan panel, scrolling output,
+    and integrated input prompt.
+
+    Args:
+        socket_path: Path to the Unix domain socket.
+        auto_start: Whether to auto-start the server if not running.
+        env_file: Path to .env file for auto-started server.
+        initial_prompt: Optional initial prompt to send.
+        single_prompt: Optional single prompt (non-interactive mode).
+        new_session: Whether to start a new session instead of resuming default.
+    """
+    import asyncio
+    from ipc_client import IPCClient
+    from server.events import (
+        Event,
+        EventType,
+        AgentOutputEvent,
+        AgentCreatedEvent,
+        AgentStatusChangedEvent,
+        AgentCompletedEvent,
+        PermissionRequestedEvent,
+        PermissionResolvedEvent,
+        ClarificationRequestedEvent,
+        ClarificationQuestionEvent,
+        ClarificationResolvedEvent,
+        PlanUpdatedEvent,
+        PlanClearedEvent,
+        ToolCallStartEvent,
+        ToolCallEndEvent,
+        ContextUpdatedEvent,
+        TurnCompletedEvent,
+        SystemMessageEvent,
+        ErrorEvent,
+        SessionListEvent,
+        SessionInfoEvent,
+        CommandListEvent,
+        ToolStatusEvent,
+        HistoryEvent,
+    )
+
+    # Load keybindings
+    keybindings = load_keybindings()
+
+    # Create agent registry for multi-agent support
+    agent_registry = AgentRegistry()
+
+    # Create input handler for completions - use default commands like direct mode
+    # Server/plugin commands are added dynamically when CommandListEvent is received
+    input_handler = InputHandler()
+
+    # Session provider will be set after state variables are defined (below)
+
+    # Create display with full features
+    display = PTDisplay(
+        keybinding_config=keybindings,
+        agent_registry=agent_registry,
+        input_handler=input_handler,
+    )
+
+    # Create IPC client
+    client = IPCClient(
+        socket_path=socket_path,
+        auto_start=auto_start,
+        env_file=env_file,
+    )
+
+    # State tracking
+    pending_permission_request: Optional[dict] = None
+    pending_clarification_request: Optional[dict] = None
+    model_running = False
+    should_exit = False
+    server_commands: list = []  # Commands from server for help display
+    available_sessions: list = []  # Sessions from server for completion
+    available_tools: list = []  # Tools from server for completion
+    available_models: list = []  # Models from server for completion
+
+    # Queue for input from PTDisplay to async handler
+    input_queue: asyncio.Queue[str] = asyncio.Queue()
+
+    def get_sessions_for_completion():
+        """Provider for session ID completion."""
+        # Return session objects with session_id and description attributes
+        class SessionInfo:
+            def __init__(self, session_id, description=""):
+                self.session_id = session_id
+                self.description = description
+        return [SessionInfo(s.get('id', ''), s.get('name', '')) for s in available_sessions]
+
+    # Set up session provider for completion
+    input_handler.set_session_provider(get_sessions_for_completion)
+
+    # Set up command completion provider for model command
+    def model_completion_provider(command: str, args: list) -> list:
+        """Provide completions for model command."""
+        if command == "model":
+            return [(model, "") for model in available_models]
+        return []
+
+    input_handler.set_command_completion_provider(
+        model_completion_provider,
+        {"model"}  # Commands that need subcommand completion
+    )
+
+    def on_input(text: str) -> None:
+        """Callback when user submits input in PTDisplay."""
+        try:
+            # Schedule putting the text in the queue
+            asyncio.get_event_loop().call_soon_threadsafe(
+                lambda: input_queue.put_nowait(text)
+            )
+        except Exception:
+            pass
+
+    # Set up stop callback for Ctrl-C handling
+    def on_stop() -> bool:
+        """Handle stop request from display."""
+        if model_running:
+            try:
+                asyncio.get_event_loop().call_soon_threadsafe(
+                    lambda: asyncio.create_task(client.stop())
+                )
+            except Exception:
+                pass
+            return True
+        return False
+
+    def is_running() -> bool:
+        """Check if model is currently running."""
+        return model_running
+
+    display.set_stop_callbacks(on_stop, is_running)
+
+    # Connect to server before starting display
+    print(f"Connecting to server at {socket_path}...")
+
+    try:
+        await client.connect()
+        print("Connected!")
+
+    except ConnectionError as e:
+        print(f"Connection failed: {e}")
+        return
+
+    # Load release name for welcome message (shown when main agent is created)
+    release_name = "Jaato Rich TUI Client"
+    release_file = pathlib.Path(__file__).parent / "release_name.txt"
+    if release_file.exists():
+        release_name = release_file.read_text().strip()
+
+    # IPC event tracing - use JAATO_TRACE_LOG if set
+    from datetime import datetime as dt
+    trace_file = os.environ.get("JAATO_TRACE_LOG")
+    def ipc_trace(msg: str):
+        if not trace_file:
+            return  # Tracing disabled
+        with open(trace_file, "a") as f:
+            ts = dt.now().strftime("%H:%M:%S.%f")[:-3]
+            f.write(f"[{ts}] [IPC] {msg}\n")
+
+    async def handle_events():
+        """Handle events from the server."""
+        nonlocal pending_permission_request, pending_clarification_request
+        nonlocal model_running, should_exit
+
+        ipc_trace("Event handler starting")
+        event_count = 0
+        async for event in client.events():
+            event_count += 1
+            ipc_trace(f"<- [{event_count}] {type(event).__name__}")
+            if should_exit:
+                ipc_trace("  should_exit=True, breaking")
+                break
+
+            if isinstance(event, AgentOutputEvent):
+                # Route output to the correct agent's buffer
+                ipc_trace(f"  AgentOutputEvent: agent={event.agent_id}, source={event.source}, mode={event.mode}, len={len(event.text)}")
+                buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.append(event.source, event.text, event.mode)
+                    display.refresh()
+
+            elif isinstance(event, AgentCreatedEvent):
+                # Register new agent
+                agent_registry.create_agent(
+                    agent_id=event.agent_id,
+                    agent_type=event.agent_type,
+                    name=event.agent_name,
+                    profile_name=event.profile_name,
+                    parent_agent_id=event.parent_agent_id,
+                    icon_lines=event.icon_lines,
+                )
+                # Show welcome messages when main agent is created (now in correct buffer)
+                if event.agent_id == "main":
+                    display.add_system_message(release_name, style="bold cyan")
+                    if input_handler.has_completion:
+                        display.add_system_message(
+                            "Tab completion enabled. Use @file to reference files, /command for slash commands.",
+                            style="dim"
+                        )
+                    display.add_system_message(
+                        "Type 'help' for commands, 'quit' to exit",
+                        style="dim"
+                    )
+                display.refresh()
+
+            elif isinstance(event, AgentStatusChangedEvent):
+                ipc_trace(f"  AgentStatusChangedEvent: status={event.status}")
+                if event.status == "active":
+                    model_running = True
+                    agent_registry.update_status(event.agent_id, "active")
+                    # Auto-select the active agent so status bar shows its context
+                    agent_registry.select_agent(event.agent_id)
+                    # Start spinner on agent's buffer
+                    buffer = agent_registry.get_buffer(event.agent_id)
+                    if buffer:
+                        buffer.start_spinner()
+                        display.ensure_spinner_timer_running()
+                elif event.status in ("done", "error"):
+                    model_running = False
+                    agent_registry.update_status(event.agent_id, event.status)
+                    # Stop spinner on agent's buffer
+                    buffer = agent_registry.get_buffer(event.agent_id)
+                    if buffer:
+                        buffer.stop_spinner()
+                ipc_trace("  calling display.refresh()...")
+                display.refresh()
+                ipc_trace("  display.refresh() done, continuing loop...")
+
+            elif isinstance(event, AgentCompletedEvent):
+                agent_registry.mark_completed(event.agent_id)
+                display.refresh()
+
+            elif isinstance(event, PermissionRequestedEvent):
+                ipc_trace(f"  PermissionRequestedEvent: tool={event.tool_name}, id={event.request_id}")
+                # Show permission request
+                pending_permission_request = {
+                    "request_id": event.request_id,
+                    "options": event.response_options,
+                }
+                # Build prompt lines using shared utility (consistent with direct mode)
+                from shared.ui_utils import build_permission_prompt_lines
+                prompt_lines = build_permission_prompt_lines(
+                    tool_args=event.tool_args,
+                    response_options=event.response_options,
+                    include_tool_name=False,  # Tool name already shown in tool tree
+                )
+
+                # Integrate into tool tree (same as direct mode)
+                buffer = agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.set_tool_permission_pending(event.tool_name, prompt_lines)
+                display.refresh()
+                # Enable permission input mode
+                display.set_waiting_for_channel_input(True, event.response_options)
+
+            elif isinstance(event, PermissionResolvedEvent):
+                pending_permission_request = None
+                display.set_waiting_for_channel_input(False)
+                # Update tool tree with permission result
+                buffer = agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.set_tool_permission_resolved(event.tool_name, event.granted, event.method)
+                    display.refresh()
+
+            elif isinstance(event, ClarificationRequestedEvent):
+                ipc_trace(f"  ClarificationRequestedEvent: tool={event.tool_name}, id={event.request_id}")
+                # Initialize clarification in tool tree (same as direct mode)
+                pending_clarification_request = {
+                    "request_id": event.request_id,
+                    "tool_name": event.tool_name,
+                }
+                buffer = agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.set_tool_clarification_pending(event.tool_name, event.context_lines)
+                display.refresh()
+
+            elif isinstance(event, ClarificationQuestionEvent):
+                ipc_trace(f"  ClarificationQuestionEvent: q{event.question_index}/{event.total_questions}")
+                # Show clarification question in tool tree (same as direct mode)
+                if not pending_clarification_request:
+                    pending_clarification_request = {"request_id": event.request_id}
+                pending_clarification_request["current_question"] = event.question_index
+                pending_clarification_request["total_questions"] = event.total_questions
+
+                # Update tool tree with current question
+                tool_name = pending_clarification_request.get("tool_name", "clarification")
+                buffer = agent_registry.get_selected_buffer()
+                if buffer:
+                    question_lines = event.question_text.split("\n") if event.question_text else []
+                    buffer.set_tool_clarification_question(
+                        tool_name,
+                        event.question_index,
+                        event.total_questions,
+                        question_lines
+                    )
+                display.refresh()
+                # Enable clarification input mode
+                display.set_waiting_for_channel_input(True)
+
+            elif isinstance(event, ClarificationResolvedEvent):
+                ipc_trace(f"  ClarificationResolvedEvent: tool={event.tool_name}")
+                # Update tool tree with resolution (same as direct mode)
+                buffer = agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.set_tool_clarification_resolved(event.tool_name)
+                    display.refresh()
+                pending_clarification_request = None
+                display.set_waiting_for_channel_input(False)
+
+            elif isinstance(event, PlanUpdatedEvent):
+                # Update plan display - convert event steps to dict format expected by PlanPanel
+                plan_data = {
+                    "title": event.plan_name or "Plan",
+                    "steps": [
+                        {
+                            "description": step.get("content", ""),
+                            "status": step.get("status", "pending"),
+                            "active_form": step.get("active_form"),
+                            "sequence": i + 1,  # 1-based for display
+                        }
+                        for i, step in enumerate(event.steps)
+                    ],
+                    "progress": {"current": 0, "total": len(event.steps)},
+                }
+                agent_id = getattr(event, 'agent_id', None)
+                display.update_plan(plan_data, agent_id)
+
+            elif isinstance(event, PlanClearedEvent):
+                agent_id = getattr(event, 'agent_id', None)
+                display.clear_plan(agent_id)
+
+            elif isinstance(event, ToolCallStartEvent):
+                # Use tool tree visualization (same as direct mode)
+                buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.add_active_tool(event.tool_name, event.tool_args, call_id=event.call_id)
+                    buffer.scroll_to_bottom()  # Auto-scroll when tool tree grows
+                    display.refresh()
+
+            elif isinstance(event, ToolCallEndEvent):
+                # Use tool tree visualization (same as direct mode)
+                buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.mark_tool_completed(
+                        event.tool_name,
+                        event.success,
+                        event.duration_seconds,
+                        event.error_message,
+                        call_id=event.call_id
+                    )
+                    buffer.scroll_to_bottom()  # Auto-scroll when tool tree updates
+                    display.refresh()
+
+            elif isinstance(event, ContextUpdatedEvent):
+                # Update context usage in agent registry (status bar reads from here)
+                agent_id = event.agent_id or agent_registry.get_selected_agent_id()
+                if agent_id:
+                    agent_registry.update_context_usage(
+                        agent_id=agent_id,
+                        total_tokens=event.total_tokens,
+                        prompt_tokens=event.prompt_tokens,
+                        output_tokens=event.output_tokens,
+                        turns=0,  # Not provided in event
+                        percent_used=event.percent_used,
+                    )
+                # Also update display (fallback if no registry)
+                usage = {
+                    "prompt_tokens": event.prompt_tokens,
+                    "output_tokens": event.output_tokens,
+                    "total_tokens": event.total_tokens,
+                    "context_size": event.context_limit,
+                    "percent_used": event.percent_used,
+                }
+                display.update_context_usage(usage)
+
+            elif isinstance(event, TurnCompletedEvent):
+                model_running = False
+                display.refresh()
+
+            elif isinstance(event, SystemMessageEvent):
+                # Map style to actual prompt_toolkit style
+                style = event.style if event.style else ""
+                if style == "error":
+                    style = "bold red"
+                elif style == "warning":
+                    style = "yellow"
+                elif style == "success":
+                    style = "green"
+                elif style == "info":
+                    style = "cyan"
+                display.add_system_message(event.message, style=style)
+
+            elif isinstance(event, ErrorEvent):
+                display.add_system_message(
+                    f"Error: {event.error_type}: {event.error}",
+                    style="bold red"
+                )
+
+            elif isinstance(event, SessionListEvent):
+                # Store sessions for completion AND display
+                nonlocal available_sessions
+                available_sessions = event.sessions
+
+                # Format session list for display with pager
+                sessions = event.sessions
+
+                if not sessions:
+                    display.show_lines([
+                        ("No sessions available.", "yellow"),
+                        ("Use 'session new' to create one.", "dim"),
+                    ])
+                else:
+                    lines = [
+                        ("Sessions:", "bold"),
+                        ("  Use 'session attach <id>' to switch sessions", "dim"),
+                        ("", ""),
+                    ]
+
+                    for s in sessions:
+                        status = "●" if s.get('is_loaded') else "○"
+                        sid = s.get('id', 'unknown')
+                        name = s.get('name', '')
+                        name_part = f" ({name})" if name else ""
+                        provider = s.get('model_provider', '')
+                        model = s.get('model_name', '')
+                        model_part = f" [{provider}/{model}]" if provider else ""
+                        clients = s.get('client_count', 0)
+                        clients_part = f", {clients} client(s)" if clients else ""
+                        turns = s.get('turn_count', 0)
+                        turns_part = f", {turns} turns" if turns else ""
+
+                        status_style = "green" if s.get('is_loaded') else "dim"
+                        lines.append((f"  {status} {sid}{name_part}{model_part}{clients_part}{turns_part}", status_style))
+
+                    display.show_lines(lines)
+
+            elif isinstance(event, SessionInfoEvent):
+                # Store state snapshot for local use (completion, display)
+                # Note: available_sessions already declared nonlocal in SessionListEvent handler
+                nonlocal available_tools, available_models
+                if event.sessions:
+                    available_sessions = event.sessions
+                if event.tools:
+                    available_tools = event.tools
+                if event.models:
+                    available_models = event.models
+                # Update status bar with model info
+                display.set_model_info(event.model_provider, event.model_name)
+                display.refresh()
+
+            elif isinstance(event, CommandListEvent):
+                # Register server/plugin commands for tab completion
+                nonlocal server_commands
+                ipc_trace(f"  CommandListEvent: {len(event.commands)} commands")
+                server_commands = event.commands  # Store for help display
+                cmd_tuples = [
+                    (cmd.get("name", ""), cmd.get("description", ""))
+                    for cmd in event.commands
+                ]
+                if cmd_tuples:
+                    input_handler.add_commands(cmd_tuples)
+                    ipc_trace(f"    Registered {len(cmd_tuples)} commands")
+
+            elif isinstance(event, ToolStatusEvent):
+                # Format tools list for display with pager
+                tool_status = event.tools
+                ipc_trace(f"  ToolStatusEvent: {len(tool_status)} tools")
+
+                if not tool_status:
+                    display.show_lines([("No tools available.", "yellow")])
+                else:
+                    # Group tools by plugin
+                    by_plugin = {}
+                    for tool in tool_status:
+                        plugin = tool.get('plugin', 'unknown')
+                        if plugin not in by_plugin:
+                            by_plugin[plugin] = []
+                        by_plugin[plugin].append(tool)
+
+                    # Count enabled/disabled
+                    enabled_count = sum(1 for t in tool_status if t.get('enabled', True))
+                    disabled_count = len(tool_status) - enabled_count
+
+                    lines = [
+                        (f"Tools ({enabled_count} enabled, {disabled_count} disabled):", "bold"),
+                        ("  Use 'tools enable <name>' or 'tools disable <name>' to toggle", "dim"),
+                        ("", ""),
+                    ]
+
+                    # Show result message if present
+                    if event.message:
+                        lines.insert(0, (event.message, "green"))
+                        lines.insert(1, ("", ""))
+
+                    for plugin_name in sorted(by_plugin.keys()):
+                        tools = by_plugin[plugin_name]
+                        lines.append((f"  [{plugin_name}]", "cyan"))
+
+                        for tool in sorted(tools, key=lambda t: t['name']):
+                            name = tool['name']
+                            desc = tool.get('description', '')
+                            enabled = tool.get('enabled', True)
+                            status = "✓" if enabled else "○"
+                            status_style = "green" if enabled else "red"
+                            lines.append((f"    {status} {name}: {desc}", status_style if not enabled else "dim"))
+
+                    display.show_lines(lines)
+
+            elif isinstance(event, HistoryEvent):
+                # Format and display conversation history
+                ipc_trace(f"  HistoryEvent: {len(event.history)} messages")
+
+                if not event.history:
+                    display.show_lines([("No conversation history.", "yellow")])
+                else:
+                    turn_accounting = event.turn_accounting or []
+                    lines = [
+                        (f"Conversation History ({len(event.history)} messages, {len(turn_accounting)} turns):", "bold"),
+                        ("", ""),
+                    ]
+
+                    turn_index = 0
+                    for i, msg in enumerate(event.history):
+                        role = msg.get('role', 'unknown')
+                        parts = msg.get('parts', [])
+
+                        # Format role header
+                        if role == 'user':
+                            lines.append((f"[User]", "cyan bold"))
+                        elif role == 'model':
+                            lines.append((f"[Model]", "green bold"))
+                        else:
+                            lines.append((f"[{role}]", "yellow bold"))
+
+                        # Format parts
+                        for part in parts:
+                            part_type = part.get('type', 'unknown')
+                            if part_type == 'text':
+                                text = part.get('text', '')
+                                # Truncate long text
+                                if len(text) > 500:
+                                    text = text[:500] + "..."
+                                lines.append((f"  {text}", ""))
+                            elif part_type == 'function_call':
+                                name = part.get('name', 'unknown')
+                                lines.append((f"  [Function Call: {name}]", "magenta"))
+                            elif part_type == 'function_response':
+                                name = part.get('name', 'unknown')
+                                lines.append((f"  [Function Response: {name}]", "blue"))
+
+                        # Show turn accounting at end of model turn
+                        is_model = role == 'model'
+                        is_last = (i == len(event.history) - 1)
+                        next_is_user = (not is_last and
+                                       event.history[i + 1].get('role') == 'user')
+
+                        if is_model and (is_last or next_is_user):
+                            if turn_index < len(turn_accounting):
+                                acc = turn_accounting[turn_index]
+                                prompt = acc.get('prompt', 0)
+                                output = acc.get('output', 0)
+                                total = acc.get('total', prompt + output)
+                                lines.append((f"  --- Turn {turn_index + 1}: {total:,} tokens (in: {prompt:,}, out: {output:,}) ---", "dim"))
+                                turn_index += 1
+
+                        lines.append(("", ""))
+
+                    display.show_lines(lines)
+
+    async def handle_input():
+        """Handle user input from the queue."""
+        nonlocal pending_permission_request, pending_clarification_request
+        nonlocal model_running, should_exit
+
+        # Request session - new or default
+        if new_session:
+            await client.create_session()
+        else:
+            await client.get_default_session()
+
+        # Request available commands for tab completion
+        await client.request_command_list()
+
+        # Note: Session data (sessions, tools, models) is received via
+        # SessionInfoEvent on connect - no separate request needed
+
+        # Handle single prompt mode
+        if single_prompt:
+            model_running = True
+            await client.send_message(single_prompt)
+            # Wait for completion
+            while model_running and not should_exit:
+                await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)  # Wait for final events
+            should_exit = True
+            display.stop()
+            return
+
+        # Handle initial prompt
+        if initial_prompt:
+            model_running = True
+            await client.send_message(initial_prompt)
+
+        # Main input loop - get input from queue
+        while not should_exit:
+            try:
+                # Wait for input with timeout to allow checking should_exit
+                try:
+                    text = await asyncio.wait_for(input_queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+
+                text = text.strip()
+                if not text:
+                    continue
+
+                # Handle permission response
+                if pending_permission_request:
+                    ipc_trace(f"Sending permission response: {text} for {pending_permission_request['request_id']}")
+                    await client.respond_to_permission(
+                        pending_permission_request["request_id"],
+                        text
+                    )
+                    continue
+
+                # Handle clarification response
+                if pending_clarification_request:
+                    await client.respond_to_clarification(
+                        pending_clarification_request["request_id"],
+                        text
+                    )
+                    continue
+
+                # Handle commands
+                text_lower = text.lower()
+                cmd_parts = text.split()
+                cmd = cmd_parts[0].lower() if cmd_parts else ""
+                args = cmd_parts[1:] if len(cmd_parts) > 1 else []
+
+                # Client-only commands
+                if text_lower in ("exit", "quit", "q"):
+                    should_exit = True
+                    display.stop()
+                    break
+                elif text_lower == "stop":
+                    await client.stop()
+                    continue
+                elif text_lower == "clear":
+                    display.clear_output()
+                    continue
+                elif text_lower == "help":
+                    # Show full help with pager using shared help text
+                    from shared.client_commands import build_full_help_text
+                    help_lines = build_full_help_text(server_commands)
+                    display.show_lines(help_lines)
+                    continue
+                elif text_lower == "context":
+                    # Show context usage (client-side, from agent registry)
+                    selected_agent = agent_registry.get_selected_agent()
+                    if not selected_agent:
+                        display.show_lines([("Context tracking not available", "yellow")])
+                    else:
+                        usage = selected_agent.context_usage
+                        lines = [
+                            ("─" * 50, "dim"),
+                            (f"Context Usage: {selected_agent.name}", "bold"),
+                            (f"  Agent: {selected_agent.agent_id}", "dim"),
+                            (f"  Total tokens: {usage.get('total_tokens', 0)}", "dim"),
+                            (f"  Prompt tokens: {usage.get('prompt_tokens', 0)}", "dim"),
+                            (f"  Output tokens: {usage.get('output_tokens', 0)}", "dim"),
+                            (f"  Turns: {usage.get('turns', 0)}", "dim"),
+                            (f"  Percent used: {usage.get('percent_used', 0):.1f}%", "dim"),
+                            ("─" * 50, "dim"),
+                        ]
+                        display.show_lines(lines)
+                    continue
+
+                # Tools command - forward to server
+                elif cmd == "tools":
+                    subcmd = args[0] if args else "list"
+                    subargs = args[1:] if len(args) > 1 else []
+                    await client.execute_command(f"tools.{subcmd}", subargs)
+                    continue
+
+                # Session subcommands - forward to server as session.<subcommand>
+                elif cmd == "session":
+                    subcmd = args[0] if args else "list"
+                    subargs = args[1:] if len(args) > 1 else []
+                    await client.execute_command(f"session.{subcmd}", subargs)
+                    continue
+
+                # History command - request from server
+                elif cmd == "history":
+                    await client.request_history()
+                    continue
+
+                # Keybindings command - handle locally using shared function
+                elif cmd == "keybindings":
+                    from shared.ui_utils import handle_keybindings_command
+                    handle_keybindings_command(text, display)
+                    continue
+
+                # Other server commands (reset, plugin commands) - forward directly
+                elif cmd in ("reset",):
+                    await client.execute_command(cmd, args)
+                    continue
+
+                # Check if input matches any server/plugin command
+                # (mcp, permissions, model, save, resume, etc.)
+                # Server expects base command name + args (e.g., "model" + ["list"])
+                matched_base_command = None
+                command_args = []
+                if server_commands:
+                    input_lower = text.lower()
+                    input_parts = text.split()
+
+                    # Try to match input against known commands
+                    # Commands are like "model", "model list", "mcp status", etc.
+                    for srv_cmd in server_commands:
+                        cmd_name = srv_cmd.get("name", "").lower()
+                        cmd_parts = cmd_name.split()
+
+                        if not cmd_parts:
+                            continue
+
+                        base_cmd = cmd_parts[0]  # e.g., "model", "mcp"
+
+                        # Check if input starts with this base command
+                        if input_lower == base_cmd or input_lower.startswith(base_cmd + " "):
+                            matched_base_command = base_cmd
+                            # All parts after base command are args
+                            if len(input_parts) > 1:
+                                command_args = input_parts[1:]
+                            else:
+                                command_args = []
+                            break
+
+                if matched_base_command:
+                    # Forward to server as base command + args
+                    await client.execute_command(matched_base_command, command_args)
+                    continue
+
+                # Send message to model
+                model_running = True
+                display.add_to_history(text)
+                await client.send_message(text)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                display.add_system_message(f"Error: {e}", style="bold red")
+
+    # Run everything concurrently
+    try:
+        # Start event handler
+        event_task = asyncio.create_task(handle_events())
+
+        # Start input handler
+        input_task = asyncio.create_task(handle_input())
+
+        # Run PTDisplay (this is the main UI loop)
+        # Use run_input_loop_async which returns when display.stop() is called
+        await display.run_input_loop_async(on_input, initial_prompt=None)
+
+        # Clean up tasks
+        should_exit = True
+        input_task.cancel()
+        event_task.cancel()
+
+        try:
+            await input_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await event_task
+        except asyncio.CancelledError:
+            pass
+
+    finally:
+        await client.disconnect()
+
+
 def main():
     import argparse
 
@@ -2227,7 +2833,18 @@ def main():
     configure_utf8_output()
 
     parser = argparse.ArgumentParser(
-        description="Rich TUI client with sticky plan display"
+        description="Rich TUI client for Jaato AI assistant",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Server Mode:
+  To run the server separately, use:
+    python -m server --ipc-socket /tmp/jaato.sock
+
+  Then connect with:
+    python rich_client.py --connect /tmp/jaato.sock
+
+  Or let the client auto-start the server (default behavior).
+        """,
     )
     parser.add_argument(
         "--env-file",
@@ -2255,6 +2872,26 @@ def main():
         help="Model provider to use (e.g., 'google_genai', 'github_models'). "
              "Overrides JAATO_PROVIDER env var."
     )
+
+    # Server connection arguments
+    parser.add_argument(
+        "--connect",
+        metavar="SOCKET_PATH",
+        type=str,
+        help="Connect to an existing server via IPC socket. "
+             "If not specified, runs in legacy mode (embedded client)."
+    )
+    parser.add_argument(
+        "--no-auto-start",
+        action="store_true",
+        help="Don't auto-start server if not running (only with --connect)"
+    )
+    parser.add_argument(
+        "--new-session",
+        action="store_true",
+        help="Start with a new session instead of resuming the default (only with --connect)"
+    )
+
     args = parser.parse_args()
 
     # Check TTY before proceeding (except for single prompt mode)
@@ -2264,6 +2901,20 @@ def main():
             "Use simple-client for non-TTY environments."
         )
 
+    # Connection mode: connect to server via IPC
+    if args.connect:
+        import asyncio
+        asyncio.run(run_ipc_mode(
+            socket_path=args.connect,
+            auto_start=not args.no_auto_start,
+            env_file=args.env_file,
+            initial_prompt=args.initial_prompt,
+            single_prompt=args.prompt,
+            new_session=args.new_session,
+        ))
+        return
+
+    # Legacy mode: embedded JaatoClient (current behavior)
     client = RichClient(
         env_file=args.env_file,
         verbose=not args.quiet,
