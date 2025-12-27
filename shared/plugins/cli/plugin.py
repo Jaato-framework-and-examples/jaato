@@ -149,6 +149,7 @@ class CLIToolPlugin(BackgroundCapableMixin):
             callback: Function that accepts output chunks, or None to disable.
         """
         self._tool_output_callback = callback
+        self._trace(f"set_tool_output_callback: callback={'SET' if callback else 'CLEARED'}")
 
     def shutdown(self) -> None:
         """Shutdown the CLI plugin."""
@@ -427,6 +428,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                     }
 
             # Use streaming execution if callback is set
+            self._trace(f"execute: streaming={'YES' if self._tool_output_callback else 'NO'}")
             if self._tool_output_callback:
                 # Streaming mode with Popen for live output
                 cmd = command if use_shell else argv

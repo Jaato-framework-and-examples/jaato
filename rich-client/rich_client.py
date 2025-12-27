@@ -669,6 +669,13 @@ class RichClient:
                     if display:
                         display.refresh()
 
+            def on_tool_output(self, agent_id, call_id, chunk):
+                buffer = registry.get_buffer(agent_id)
+                if buffer and call_id:
+                    buffer.append_tool_output(call_id, chunk)
+                    if display:
+                        display.refresh()
+
         hooks = RichClientHooks()
 
         # Store hooks reference for direct calls (e.g., when user sends input)
