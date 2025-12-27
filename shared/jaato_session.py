@@ -1055,10 +1055,10 @@ class JaatoSession:
             if self._executor:
                 # Set up tool output callback for streaming output during execution
                 if self._ui_hooks and fc.id:
-                    def tool_output_callback(chunk: str) -> None:
+                    def tool_output_callback(chunk: str, _call_id=fc.id) -> None:
                         self._ui_hooks.on_tool_output(
                             agent_id=self._agent_id,
-                            call_id=fc.id,
+                            call_id=_call_id,
                             chunk=chunk
                         )
                     self._executor.set_tool_output_callback(tool_output_callback)
