@@ -7,6 +7,7 @@ The server emits events for all state changes, allowing clients to
 subscribe and render appropriately.
 """
 
+import contextlib
 import logging
 import os
 import sys
@@ -132,6 +133,7 @@ class JaatoServer:
         env_file: str = ".env",
         provider: Optional[str] = None,
         on_event: Optional[EventCallback] = None,
+        workspace_path: Optional[str] = None,
     ):
         """Initialize the server.
 
@@ -139,10 +141,14 @@ class JaatoServer:
             env_file: Path to .env file.
             provider: Model provider override (e.g., 'google_genai').
             on_event: Callback for emitting events to clients.
+            workspace_path: Client's working directory for file operations.
+                           If provided, the server will chdir to this path
+                           when processing requests.
         """
         self.env_file = env_file
         self._provider = provider
         self._on_event = on_event or (lambda e: None)
+        self._workspace_path = workspace_path
 
         # Core components
         self._jaato: Optional[JaatoClient] = None
@@ -177,6 +183,41 @@ class JaatoServer:
 
         # Trace log path
         self._trace_path = os.path.join(tempfile.gettempdir(), "jaato_server_trace.log")
+
+    # =========================================================================
+    # Workspace Management
+    # =========================================================================
+
+    @property
+    def workspace_path(self) -> Optional[str]:
+        """Get the client's workspace path."""
+        return self._workspace_path
+
+    @workspace_path.setter
+    def workspace_path(self, path: Optional[str]) -> None:
+        """Set the client's workspace path."""
+        self._workspace_path = path
+
+    @contextlib.contextmanager
+    def _in_workspace(self):
+        """Context manager to temporarily change to the workspace directory.
+
+        This is thread-safe - it saves and restores the current directory
+        for the calling thread. Uses a lock to prevent race conditions
+        when multiple threads try to change directory simultaneously.
+        """
+        if not self._workspace_path:
+            yield
+            return
+
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(self._workspace_path)
+            logger.debug(f"Changed to workspace: {self._workspace_path}")
+            yield
+        finally:
+            os.chdir(original_cwd)
+            logger.debug(f"Restored to: {original_cwd}")
 
     # =========================================================================
     # Event Emission
@@ -885,26 +926,28 @@ class JaatoServer:
         def model_thread():
             server._model_running = True
             try:
-                server._jaato.send_message(
-                    prompt,
-                    on_output=output_callback,
-                    on_usage_update=usage_update_callback,
-                    on_gc_threshold=gc_threshold_callback,
-                )
+                # Run in workspace context so file operations use client's CWD
+                with server._in_workspace():
+                    server._jaato.send_message(
+                        prompt,
+                        on_output=output_callback,
+                        on_usage_update=usage_update_callback,
+                        on_gc_threshold=gc_threshold_callback,
+                    )
 
-                # Update context usage
-                if server._jaato:
-                    usage = server._jaato.get_context_usage()
-                    context_limit = server._jaato.get_context_limit()
-                    server.emit(ContextUpdatedEvent(
-                        agent_id="main",
-                        total_tokens=usage.get('total_tokens', 0),
-                        prompt_tokens=usage.get('prompt_tokens', 0),
-                        output_tokens=usage.get('output_tokens', 0),
-                        context_limit=context_limit,
-                        percent_used=usage.get('percent_used', 0),
-                        tokens_remaining=usage.get('tokens_remaining', 0),
-                    ))
+                    # Update context usage
+                    if server._jaato:
+                        usage = server._jaato.get_context_usage()
+                        context_limit = server._jaato.get_context_limit()
+                        server.emit(ContextUpdatedEvent(
+                            agent_id="main",
+                            total_tokens=usage.get('total_tokens', 0),
+                            prompt_tokens=usage.get('prompt_tokens', 0),
+                            output_tokens=usage.get('output_tokens', 0),
+                            context_limit=context_limit,
+                            percent_used=usage.get('percent_used', 0),
+                            tokens_remaining=usage.get('tokens_remaining', 0),
+                        ))
 
             except KeyboardInterrupt:
                 server.emit(SystemMessageEvent(

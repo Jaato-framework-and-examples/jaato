@@ -163,6 +163,13 @@ class IPCClient:
                 event = deserialize_event(message)
                 if isinstance(event, ConnectedEvent):
                     self._client_id = event.server_info.get("client_id")
+                    # Send our working directory to the server
+                    import os
+                    cwd = os.getcwd()
+                    await self._send_event(CommandRequest(
+                        command="set_workspace",
+                        args=[cwd],
+                    ))
                     return True
         except Exception as e:
             await self.disconnect()

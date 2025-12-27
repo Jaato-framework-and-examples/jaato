@@ -59,6 +59,7 @@ class IPCClientConnection:
     client_id: str
     session_id: Optional[str]
     connected_at: str
+    workspace_path: Optional[str] = None  # Client's working directory
 
 
 class JaatoIPCServer:
@@ -361,6 +362,28 @@ class JaatoIPCServer:
         """
         if client_id in self._clients:
             self._clients[client_id].session_id = session_id
+
+    def set_client_workspace(self, client_id: str, workspace_path: str) -> None:
+        """Set the workspace path for a client.
+
+        Args:
+            client_id: The client ID.
+            workspace_path: The client's working directory.
+        """
+        if client_id in self._clients:
+            self._clients[client_id].workspace_path = workspace_path
+
+    def get_client_workspace(self, client_id: str) -> Optional[str]:
+        """Get the workspace path for a client.
+
+        Args:
+            client_id: The client ID.
+
+        Returns:
+            The client's working directory, or None if not set.
+        """
+        client = self._clients.get(client_id)
+        return client.workspace_path if client else None
 
     def broadcast_to_session(self, session_id: str, event: Event) -> None:
         """Broadcast an event to all clients attached to a session."""

@@ -8,6 +8,8 @@ from typing import List, Tuple
 
 
 # Client-only commands with descriptions (for completion and help)
+# Note: Commands with subcommands should include both the base command
+# and all subcommands for proper progressive completion.
 CLIENT_COMMANDS: List[Tuple[str, str]] = [
     ("help", "Show available commands"),
     ("history", "Show conversation history"),
@@ -18,7 +20,12 @@ CLIENT_COMMANDS: List[Tuple[str, str]] = [
     ("context", "Show context window usage"),
     ("reset", "Clear conversation history"),
     ("plugins", "Show available plugins"),
-    ("keybindings", "Show/reload keybindings"),
+    # Keybindings command with subcommands
+    ("keybindings", "Manage keyboard shortcuts"),
+    ("keybindings list", "Show current keybinding configuration"),
+    ("keybindings set", "Set a keybinding (usage: keybindings set <action> <key> [--save])"),
+    ("keybindings profile", "Show/switch terminal-specific profiles"),
+    ("keybindings reload", "Reload keybindings from config files"),
     ("export", "Export session to file"),
 ]
 

@@ -256,16 +256,33 @@ class JaatoDaemon:
         if isinstance(event, CommandRequest):
             cmd = event.command.lower()
 
+            # Handle set_workspace command (sent by client on connect)
+            if cmd == "set_workspace":
+                workspace_path = event.args[0] if event.args else None
+                if workspace_path and self._ipc_server:
+                    self._ipc_server.set_client_workspace(client_id, workspace_path)
+                    logger.debug(f"Client {client_id} workspace set to: {workspace_path}")
+                return
+
+            # Get client's workspace path for session operations
+            workspace_path = None
+            if self._ipc_server:
+                workspace_path = self._ipc_server.get_client_workspace(client_id)
+
             if cmd == "session.create":
                 name = event.args[0] if event.args else None
-                new_session_id = self._session_manager.create_session(client_id, name)
+                new_session_id = self._session_manager.create_session(
+                    client_id, name, workspace_path=workspace_path
+                )
                 if self._ipc_server and new_session_id:
                     self._ipc_server.set_client_session(client_id, new_session_id)
                 return
 
             elif cmd == "session.attach":
                 if event.args:
-                    if self._session_manager.attach_session(client_id, event.args[0]):
+                    if self._session_manager.attach_session(
+                        client_id, event.args[0], workspace_path=workspace_path
+                    ):
                         if self._ipc_server:
                             self._ipc_server.set_client_session(client_id, event.args[0])
                 return
@@ -289,7 +306,9 @@ class JaatoDaemon:
                 return
 
             elif cmd == "session.default":
-                default_session_id = self._session_manager.get_or_create_default(client_id)
+                default_session_id = self._session_manager.get_or_create_default(
+                    client_id, workspace_path=workspace_path
+                )
                 if self._ipc_server and default_session_id:
                     self._ipc_server.set_client_session(client_id, default_session_id)
                 return
