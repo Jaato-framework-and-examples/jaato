@@ -702,8 +702,8 @@ class OutputBuffer:
                 for tool in self._active_tools:
                     height += 1  # Tool line
 
-                    # Live output preview lines (for running tools)
-                    if not tool.completed and tool.output_lines:
+                    # Output preview lines (persists after tool completes)
+                    if tool.output_lines:
                         height += len(tool.output_lines)
 
                     # Permission denied message
@@ -1098,8 +1098,8 @@ class OutputBuffer:
                     if tool.completed and tool.duration_seconds is not None:
                         output.append(f" ({tool.duration_seconds:.1f}s)", style="dim")
 
-                    # Show live output preview for running tools (tail -f style)
-                    if not tool.completed and tool.output_lines:
+                    # Show output preview (persists after tool completes)
+                    if tool.output_lines:
                         continuation = "   " if is_last else "│  "
                         for output_line in tool.output_lines:
                             output.append("\n")
