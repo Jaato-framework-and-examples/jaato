@@ -180,20 +180,59 @@ class CommandCompleter(Completer):
             subcommands = base_commands[first_word]
 
             if len(parts) == 1 and has_trailing_space:
-                # User typed base command + space - show all subcommands
+                # User typed base command + space - show first word of each subcommand (deduplicated)
+                seen_first_words = set()
                 for sub_lower, (sub_name, sub_desc) in subcommands.items():
-                    full_cmd = f"{first_word} {sub_name}"
-                    yield Completion(sub_name, start_position=0, display=sub_name, display_meta=sub_desc)
+                    first_sub_word = sub_lower.split()[0]
+                    if first_sub_word not in seen_first_words:
+                        seen_first_words.add(first_sub_word)
+                        # Get description from the single-word entry if it exists
+                        if first_sub_word in subcommands:
+                            _, desc = subcommands[first_sub_word]
+                        else:
+                            desc = sub_desc
+                        display_word = sub_name.split()[0]
+                        yield Completion(display_word, start_position=0, display=display_word, display_meta=desc)
+
             elif len(parts) == 2 and not has_trailing_space:
-                # User is typing a subcommand - filter matches
+                # User is typing a subcommand - filter by first word only (deduplicated)
                 partial_sub = parts[1]
+                seen_first_words = set()
                 for sub_lower, (sub_name, sub_desc) in subcommands.items():
-                    if sub_lower.startswith(partial_sub):
-                        # Calculate start position relative to subcommand portion
+                    first_sub_word = sub_lower.split()[0]
+                    if first_sub_word.startswith(partial_sub) and first_sub_word not in seen_first_words:
+                        seen_first_words.add(first_sub_word)
+                        # Get description from the single-word entry if it exists
+                        if first_sub_word in subcommands:
+                            _, desc = subcommands[first_sub_word]
+                        else:
+                            desc = sub_desc
+                        display_word = sub_name.split()[0]
                         start_pos = -len(partial_sub)
-                        yield Completion(sub_name, start_position=start_pos, display=sub_name, display_meta=sub_desc)
-            # If len(parts) >= 2 and has_trailing_space, user is past subcommand
-            # into argument position - don't show command completions
+                        yield Completion(display_word, start_position=start_pos, display=display_word, display_meta=desc)
+
+            elif len(parts) == 2 and has_trailing_space:
+                # User typed "base sub " - show 3rd level words if available
+                second_word = parts[1]
+                for sub_lower, (sub_name, sub_desc) in subcommands.items():
+                    sub_parts = sub_lower.split()
+                    if len(sub_parts) >= 2 and sub_parts[0] == second_word:
+                        # This is a 3rd level entry - show the remaining words
+                        third_part = ' '.join(sub_name.split()[1:])
+                        yield Completion(third_part, start_position=0, display=third_part, display_meta=sub_desc)
+
+            elif len(parts) >= 3 and not has_trailing_space:
+                # User is typing 3rd word - filter matches
+                second_word = parts[1]
+                partial_third = ' '.join(parts[2:])
+                for sub_lower, (sub_name, sub_desc) in subcommands.items():
+                    sub_parts = sub_lower.split()
+                    if len(sub_parts) >= 2 and sub_parts[0] == second_word:
+                        third_part_lower = ' '.join(sub_parts[1:])
+                        if third_part_lower.startswith(partial_third):
+                            third_part = ' '.join(sub_name.split()[1:])
+                            start_pos = -len(partial_third)
+                            yield Completion(third_part, start_position=start_pos, display=third_part, display_meta=sub_desc)
 
 
 class AtFileCompleter(Completer):
