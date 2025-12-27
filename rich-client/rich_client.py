@@ -2562,28 +2562,29 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     "request_id": event.request_id,
                     "options": event.response_options,
                 }
-                # Format and display permission prompt (client handles formatting)
+                # Build prompt lines from raw data (client-side formatting)
+                prompt_lines = []
+                if event.tool_args:
+                    args_str = str(event.tool_args)
+                    if len(args_str) > 100:
+                        args_str = args_str[:97] + "..."
+                    prompt_lines.append(f"Args: {args_str}")
+                prompt_lines.append("")
+                # Format options: [y]es [n]o [a]lways [once] [never] [all]
+                options_parts = []
+                for opt in event.response_options:
+                    key = opt.get('key', '?')
+                    label = opt.get('label', '?')
+                    if key != label and label.startswith(key):
+                        options_parts.append(f"[{key}]{label[len(key):]}")
+                    else:
+                        options_parts.append(f"[{label}]")
+                prompt_lines.append(" ".join(options_parts))
+
+                # Integrate into tool tree (same as direct mode)
                 buffer = agent_registry.get_selected_buffer()
                 if buffer:
-                    buffer.append("system", "\n", "write")
-                    # Tool name and args
-                    buffer.append("system", f"Tool: {event.tool_name}\n", "append")
-                    if event.tool_args:
-                        args_str = str(event.tool_args)
-                        if len(args_str) > 100:
-                            args_str = args_str[:97] + "..."
-                        buffer.append("system", f"Args: {args_str}\n", "append")
-                    buffer.append("system", "\n", "append")
-                    # Format options: [y]es [n]o [a]lways [once] [never] [all]
-                    options_parts = []
-                    for opt in event.response_options:
-                        key = opt.get('key', '?')
-                        label = opt.get('label', '?')
-                        if key != label and label.startswith(key):
-                            options_parts.append(f"[{key}]{label[len(key):]}")
-                        else:
-                            options_parts.append(f"[{label}]")
-                    buffer.append("system", " ".join(options_parts) + "\n", "append")
+                    buffer.set_tool_permission_pending(event.tool_name, prompt_lines)
                 display.refresh()
                 # Enable permission input mode
                 display.set_waiting_for_channel_input(True, event.response_options)
@@ -2591,6 +2592,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
             elif isinstance(event, PermissionResolvedEvent):
                 pending_permission_request = None
                 display.set_waiting_for_channel_input(False)
+                # Update tool tree with permission result
+                buffer = agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.set_tool_permission_resolved(event.tool_name, event.granted, event.method)
+                    display.refresh()
 
             elif isinstance(event, ClarificationQuestionEvent):
                 # Show clarification question
