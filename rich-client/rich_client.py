@@ -2212,9 +2212,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 break
 
             if isinstance(event, AgentOutputEvent):
-                # Display agent output using PTDisplay's append_output
-                ipc_trace(f"  AgentOutputEvent: source={event.source}, mode={event.mode}, len={len(event.text)}")
-                display.append_output(event.source, event.text, event.mode)
+                # Route output to the correct agent's buffer
+                ipc_trace(f"  AgentOutputEvent: agent={event.agent_id}, source={event.source}, mode={event.mode}, len={len(event.text)}")
+                buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.append_output(event.source, event.text, event.mode)
+                    display.refresh()
 
             elif isinstance(event, AgentCreatedEvent):
                 # Register new agent
