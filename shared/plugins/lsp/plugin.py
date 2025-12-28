@@ -10,13 +10,63 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from ..base import UserCommand, CommandParameter, CommandCompletion
+from ..base import (
+    UserCommand, CommandParameter, CommandCompletion,
+    ToolResultEnrichmentResult
+)
 from ..model_provider.types import ToolSchema
 from ..subagent.config import expand_variables
 from .lsp_client import (
     LSPClient, ServerConfig, Location, Diagnostic, Hover,
     TextEdit, WorkspaceEdit, CodeAction, Range, Position
 )
+
+
+# Tools that write/modify files and should trigger LSP diagnostics
+FILE_WRITING_TOOLS = {
+    'updateFile',
+    'writeNewFile',
+    'lsp_rename_symbol',
+    'lsp_apply_code_action',
+}
+
+# Mapping of file extensions to language IDs for LSP server matching
+EXT_TO_LANGUAGE = {
+    '.py': 'python',
+    '.pyw': 'python',
+    '.pyi': 'python',
+    '.js': 'javascript',
+    '.mjs': 'javascript',
+    '.cjs': 'javascript',
+    '.jsx': 'javascriptreact',
+    '.ts': 'typescript',
+    '.mts': 'typescript',
+    '.cts': 'typescript',
+    '.tsx': 'typescriptreact',
+    '.go': 'go',
+    '.rs': 'rust',
+    '.java': 'java',
+    '.kt': 'kotlin',
+    '.kts': 'kotlin',
+    '.c': 'c',
+    '.h': 'c',
+    '.cpp': 'cpp',
+    '.cc': 'cpp',
+    '.cxx': 'cpp',
+    '.hpp': 'cpp',
+    '.hxx': 'cpp',
+    '.cs': 'csharp',
+    '.rb': 'ruby',
+    '.php': 'php',
+    '.swift': 'swift',
+    '.scala': 'scala',
+    '.lua': 'lua',
+    '.r': 'r',
+    '.R': 'r',
+    '.zig': 'zig',
+    '.vue': 'vue',
+    '.svelte': 'svelte',
+}
 
 
 # Message types for background thread communication
@@ -641,12 +691,15 @@ class LSPToolPlugin:
         }
 
     def get_system_instructions(self) -> Optional[str]:
-        return """## CODE VALIDATION / LINTING (USE THIS!)
+        return """## CODE VALIDATION / LINTING (AUTOMATIC + MANUAL)
 
-**lsp_get_diagnostics(file_path) IS YOUR LINTER AND VALIDATOR.**
+**AUTOMATIC DIAGNOSTICS**: When you use file-writing tools (updateFile, writeNewFile),
+LSP diagnostics are automatically run and appended to the tool result. Look for the
+"LSP Diagnostics (auto-check)" section after file operations - if errors are found,
+fix them immediately before proceeding.
 
-Before reporting that code generation or modification is complete, ALWAYS validate with:
-  lsp_get_diagnostics(file_path="/path/to/file.java")
+**MANUAL DIAGNOSTICS**: For files not covered by automatic checks, or to re-check:
+  lsp_get_diagnostics(file_path="/path/to/file.py")
 
 This returns:
 - Syntax errors
@@ -655,13 +708,13 @@ This returns:
 - Code style issues
 - Any problems the language server detects
 
-DO NOT request a "linter tool" or "validator tool" - you already have one.
-DO NOT skip validation - always check generated code before reporting success.
+**Important**: If you see "❌ Error(s) - MUST FIX" in the automatic diagnostics,
+you MUST fix those errors before reporting success to the user.
 
 **Validation workflow:**
-1. Generate or modify code
-2. Call lsp_get_diagnostics(file_path="...") for each changed file
-3. If errors found, fix them
+1. Generate or modify code (automatic diagnostics will run)
+2. Check the appended "LSP Diagnostics" section for errors
+3. If errors found, fix them immediately
 4. Only report success when diagnostics are clean (or only warnings remain)
 
 ---
@@ -703,6 +756,257 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             "lsp_get_code_actions",  # Read-only: just lists available actions
             "lsp",
         ]
+
+    # ==================== Tool Result Enrichment ====================
+
+    def subscribes_to_tool_result_enrichment(self) -> bool:
+        """Subscribe to tool result enrichment to auto-run diagnostics after file writes.
+
+        When enabled, the LSP plugin will automatically run diagnostics on files
+        that are modified by file-writing tools (updateFile, writeNewFile, etc.)
+        and append diagnostic information to the tool result.
+        """
+        return True
+
+    def get_tool_result_enrichment_priority(self) -> int:
+        """Run after basic file operations but before other enrichment.
+
+        Priority 30 ensures diagnostics are added early in the enrichment chain.
+        """
+        return 30
+
+    def enrich_tool_result(
+        self,
+        tool_name: str,
+        result: str
+    ) -> ToolResultEnrichmentResult:
+        """Enrich file-writing tool results with LSP diagnostics.
+
+        If the tool wrote or modified a file that is supported by an LSP server,
+        this method automatically runs diagnostics on the file and appends the
+        results to the tool output. This enables the model to see any errors
+        immediately and react in the same turn.
+
+        Args:
+            tool_name: Name of the tool that produced the result.
+            result: The tool's output as a string (JSON-serialized dict).
+
+        Returns:
+            ToolResultEnrichmentResult with diagnostics appended if applicable.
+        """
+        # Only process file-writing tools
+        if tool_name not in FILE_WRITING_TOOLS:
+            return ToolResultEnrichmentResult(result=result)
+
+        # Skip if no LSP servers are connected
+        if not self._connected_servers:
+            return ToolResultEnrichmentResult(result=result)
+
+        # Parse the result to extract file paths
+        file_paths = self._extract_file_paths_from_result(tool_name, result)
+        if not file_paths:
+            return ToolResultEnrichmentResult(result=result)
+
+        # Filter to files that have LSP support
+        supported_files = self._filter_supported_files(file_paths)
+        if not supported_files:
+            return ToolResultEnrichmentResult(result=result)
+
+        # Run diagnostics on each file and collect results
+        all_diagnostics = {}
+        for file_path in supported_files:
+            diags = self._get_diagnostics_for_file(file_path)
+            if diags:
+                all_diagnostics[file_path] = diags
+
+        # Build enriched result with diagnostic summary
+        enriched_result = self._build_enriched_result(result, all_diagnostics)
+        metadata = {
+            "files_checked": list(supported_files),
+            "files_with_diagnostics": list(all_diagnostics.keys()),
+            "total_errors": sum(
+                sum(1 for d in diags if d.get("severity") == "Error")
+                for diags in all_diagnostics.values()
+            ),
+            "total_warnings": sum(
+                sum(1 for d in diags if d.get("severity") == "Warning")
+                for diags in all_diagnostics.values()
+            ),
+        }
+
+        return ToolResultEnrichmentResult(result=enriched_result, metadata=metadata)
+
+    def _extract_file_paths_from_result(
+        self,
+        tool_name: str,
+        result: str
+    ) -> List[str]:
+        """Extract file paths from a tool result.
+
+        Different tools return file paths in different formats:
+        - updateFile/writeNewFile: {"path": "...", "success": true}
+        - lsp_rename_symbol: {"files_modified": [...], "changes": [...]}
+        - lsp_apply_code_action: {"files_modified": [...], "changes": [...]}
+
+        Args:
+            tool_name: The tool that produced the result.
+            result: The JSON-serialized result string.
+
+        Returns:
+            List of file paths found in the result.
+        """
+        try:
+            data = json.loads(result)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+        # Check for error result
+        if isinstance(data, dict) and data.get("error"):
+            return []
+
+        file_paths = []
+
+        if tool_name in ('updateFile', 'writeNewFile'):
+            # Single file operations
+            path = data.get("path")
+            if path:
+                file_paths.append(path)
+
+        elif tool_name in ('lsp_rename_symbol', 'lsp_apply_code_action'):
+            # Workspace edit operations - multiple files
+            files_modified = data.get("files_modified", [])
+            file_paths.extend(files_modified)
+
+            # Also check changes array for file paths
+            changes = data.get("changes", [])
+            for change in changes:
+                if isinstance(change, dict) and change.get("file"):
+                    file_paths.append(change["file"])
+
+        return file_paths
+
+    def _filter_supported_files(self, file_paths: List[str]) -> List[str]:
+        """Filter file paths to those supported by connected LSP servers.
+
+        Args:
+            file_paths: List of file paths to check.
+
+        Returns:
+            List of file paths that have LSP support.
+        """
+        supported = []
+        for file_path in file_paths:
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in EXT_TO_LANGUAGE:
+                # Check if we have a server for this language
+                lang = EXT_TO_LANGUAGE[ext]
+                if self._has_server_for_language(lang):
+                    supported.append(file_path)
+        return supported
+
+    def _has_server_for_language(self, language: str) -> bool:
+        """Check if we have a connected LSP server for a language.
+
+        Args:
+            language: Language ID (e.g., 'python', 'typescript').
+
+        Returns:
+            True if a server is connected that supports this language.
+        """
+        for name in self._connected_servers:
+            client = self._clients.get(name)
+            if client:
+                # Check by language_id config
+                if client.config.language_id == language:
+                    return True
+                # Also check by server name
+                if language.lower() in name.lower():
+                    return True
+        return False
+
+    def _get_diagnostics_for_file(self, file_path: str) -> List[Dict[str, Any]]:
+        """Get LSP diagnostics for a file.
+
+        Args:
+            file_path: Path to the file to check.
+
+        Returns:
+            List of diagnostic dictionaries with severity, message, line, etc.
+        """
+        try:
+            result = self._execute_method('get_diagnostics', {'file_path': file_path})
+            if isinstance(result, dict) and result.get("error"):
+                self._trace(f"_get_diagnostics_for_file: error for {file_path}: {result['error']}")
+                return []
+            if isinstance(result, list):
+                return result
+            return []
+        except Exception as e:
+            self._trace(f"_get_diagnostics_for_file: exception for {file_path}: {e}")
+            return []
+
+    def _build_enriched_result(
+        self,
+        original_result: str,
+        diagnostics: Dict[str, List[Dict[str, Any]]]
+    ) -> str:
+        """Build an enriched result string with diagnostic information.
+
+        Args:
+            original_result: The original tool result (JSON string).
+            diagnostics: Dict mapping file paths to their diagnostics.
+
+        Returns:
+            Enriched result string with diagnostic summary appended.
+        """
+        if not diagnostics:
+            return original_result
+
+        # Count by severity
+        errors = []
+        warnings = []
+        infos = []
+
+        for file_path, diags in diagnostics.items():
+            for d in diags:
+                severity = d.get("severity", "Unknown")
+                entry = {
+                    "file": file_path,
+                    "line": d.get("line"),
+                    "message": d.get("message"),
+                    "source": d.get("source"),
+                }
+                if severity == "Error":
+                    errors.append(entry)
+                elif severity == "Warning":
+                    warnings.append(entry)
+                else:
+                    infos.append(entry)
+
+        # Build diagnostic summary
+        lines = [original_result, "\n\n---\n## LSP Diagnostics (auto-check)"]
+
+        if errors:
+            lines.append(f"\n### ❌ {len(errors)} Error(s) - MUST FIX:")
+            for e in errors[:10]:  # Limit to first 10
+                lines.append(f"- {e['file']}:{e['line']}: {e['message']}")
+            if len(errors) > 10:
+                lines.append(f"  ... and {len(errors) - 10} more errors")
+
+        if warnings:
+            lines.append(f"\n### ⚠️ {len(warnings)} Warning(s):")
+            for w in warnings[:5]:  # Limit to first 5
+                lines.append(f"- {w['file']}:{w['line']}: {w['message']}")
+            if len(warnings) > 5:
+                lines.append(f"  ... and {len(warnings) - 5} more warnings")
+
+        if not errors and not warnings:
+            lines.append("\n✅ No errors or warnings detected.")
+
+        if errors:
+            lines.append("\n**ACTION REQUIRED**: Fix the errors above before proceeding.")
+
+        return "\n".join(lines)
 
     def get_user_commands(self) -> List[UserCommand]:
         return [
