@@ -461,7 +461,7 @@ class OutputBuffer:
 
         # Add separator line for visual distinction (no F3 hint for finalized trees)
         self._add_line("system", "", "")
-        self._add_line("system", "  ─ ─ ─", "dim")
+        self._add_line("system", "  ───", "dim")
 
         if self._tools_expanded:
             # Expanded view - each tool on its own line
@@ -1092,9 +1092,9 @@ class OutputBuffer:
                 output.append("\n\n")  # Extra blank line for visual separation
                 # Add separator line with toggle hint
                 if self._tools_expanded:
-                    output.append("  ─ ─ ─  Ctrl+T to collapse", style="dim")
+                    output.append("  ───  Ctrl+T to collapse", style="dim")
                 else:
-                    output.append("  ─ ─ ─  Ctrl+T to expand", style="dim")
+                    output.append("  ───  Ctrl+T to expand", style="dim")
                 output.append("\n")
 
             # Check if waiting for user input (permission or clarification)
