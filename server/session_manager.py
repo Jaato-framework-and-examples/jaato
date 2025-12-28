@@ -137,6 +137,9 @@ class SessionManager:
         # Client to session mapping
         self._client_to_session: Dict[str, str] = {}
 
+        # Per-client configuration (terminal_width, etc.)
+        self._client_config: Dict[str, Dict[str, Any]] = {}
+
         # Event routing callback
         self._event_callback: Optional[Callable[[str, Event], None]] = None
 
@@ -192,6 +195,34 @@ class SessionManager:
             os.environ['PROVIDER_TRACE_LOG'] = event.provider_trace_log
             logger.info(f"Client {client_id} set PROVIDER_TRACE_LOG={event.provider_trace_log}")
 
+        # Store and apply terminal width
+        if event.terminal_width:
+            if client_id not in self._client_config:
+                self._client_config[client_id] = {}
+            self._client_config[client_id]['terminal_width'] = event.terminal_width
+            logger.info(f"Client {client_id} set terminal_width={event.terminal_width}")
+
+            # Apply to current session if client is attached to one
+            session_id = self._client_to_session.get(client_id)
+            if session_id:
+                session = self._sessions.get(session_id)
+                if session and session.server:
+                    session.server.terminal_width = event.terminal_width
+
+    def _apply_client_config_to_server(self, client_id: str, server: 'JaatoServer') -> None:
+        """Apply stored client configuration to a server.
+
+        Called when a client creates or attaches to a session.
+
+        Args:
+            client_id: The client whose config to apply.
+            server: The server to configure.
+        """
+        config = self._client_config.get(client_id, {})
+        if 'terminal_width' in config:
+            server.terminal_width = config['terminal_width']
+            logger.debug(f"Applied terminal_width={config['terminal_width']} to server for client {client_id}")
+
     # =========================================================================
     # Session Lifecycle
     # =========================================================================
@@ -243,6 +274,9 @@ class SessionManager:
             return ""
 
         logger.info(f"Server initialized successfully for session {session_id}")
+
+        # Apply client-specific config (e.g., terminal_width)
+        self._apply_client_config_to_server(client_id, server)
 
         # Create session object
         session = Session(
@@ -342,6 +376,9 @@ class SessionManager:
                 session.server.workspace_path = workspace_path
 
         logger.info(f"Client {client_id} attached to session {session_id}")
+
+        # Apply client-specific config (e.g., terminal_width)
+        self._apply_client_config_to_server(client_id, session.server)
 
         # Emit current agent state to the newly attached client (skip SessionInfo, we'll send our own)
         session.server.emit_current_state(

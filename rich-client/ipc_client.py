@@ -204,6 +204,7 @@ class IPCClient:
         (like JAATO_TRACE_LOG, PROVIDER_TRACE_LOG) to the server so plugins use client paths.
         """
         import os
+        import shutil
         from dotenv import dotenv_values
 
         # Load client's .env file (without modifying os.environ)
@@ -217,10 +218,14 @@ class IPCClient:
         trace_log = client_env.get("JAATO_TRACE_LOG") or os.environ.get("JAATO_TRACE_LOG")
         provider_trace = client_env.get("PROVIDER_TRACE_LOG") or os.environ.get("PROVIDER_TRACE_LOG")
 
+        # Get terminal width for formatting
+        terminal_width, _ = shutil.get_terminal_size()
+
         # Send config to server
         await self._send_event(ClientConfigRequest(
             trace_log_path=trace_log,
             provider_trace_log=provider_trace,
+            terminal_width=terminal_width,
         ))
 
     async def _start_server(self) -> bool:
