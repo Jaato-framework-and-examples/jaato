@@ -1078,10 +1078,13 @@ class OutputBuffer:
                     else:
                         output.append_text(Text.from_ansi(wrapped_line))
             elif line.source == "enrichment":
-                # Enrichment notifications - render dimmed, already formatted with
-                # box drawing chars and proper alignment from enrichment_formatter
-                # Each OutputLine is a single line (split by _flush_current_block)
-                output.append(line.text, style="dim")
+                # Enrichment notifications - render dimmed with proper wrapping
+                # The formatter pre-aligns continuation lines, so we wrap each line
+                wrapped = wrap_text(line.text)
+                for j, wrapped_line in enumerate(wrapped):
+                    if j > 0:
+                        output.append("\n")
+                    output.append(wrapped_line, style="dim")
             else:
                 # Other plugin output - wrap and preserve ANSI codes
                 prefix_width = len(f"[{line.source}] ") if line.is_turn_start else 0
