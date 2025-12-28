@@ -1371,7 +1371,9 @@ Example:
                             client = self._find_client_for_file(args.get('file_path', ''))
 
                         if not client:
-                            self._response_queue.put(('error', 'No LSP server available'))
+                            # Build informative error message
+                            error_msg = self._build_no_server_error(args.get('file_path', ''))
+                            self._response_queue.put(('error', error_msg))
                             continue
 
                         try:
@@ -1457,6 +1459,56 @@ Example:
 
         # Return first available
         return list(self._clients.values())[0] if self._clients else None
+
+    def _build_no_server_error(self, file_path: str) -> str:
+        """Build an informative error message when no LSP server is available.
+
+        This provides helpful context about:
+        - Whether any servers are configured
+        - Which servers failed to start and why
+        - How to resolve the issue
+        """
+        parts = ["No LSP server available"]
+
+        # Check if any servers are configured
+        self._load_config_cache()
+        servers = self._config_cache.get('languageServers', {})
+
+        if not servers:
+            parts.append("No LSP servers configured in .lsp.json")
+            parts.append("Create .lsp.json with server configuration to enable LSP features")
+            return ". ".join(parts)
+
+        # Check for failed servers
+        if self._failed_servers:
+            parts.append(f"{len(self._failed_servers)} server(s) failed to start:")
+            for name, error in self._failed_servers.items():
+                # Simplify common errors
+                if "FileNotFoundError" in error or "No such file" in error:
+                    cmd = servers.get(name, {}).get('command', 'unknown')
+                    parts.append(f"  - {name}: command '{cmd}' not found (not installed?)")
+                elif "timed out" in error.lower():
+                    parts.append(f"  - {name}: connection timed out")
+                else:
+                    parts.append(f"  - {name}: {error}")
+
+        # Suggest file-specific server if applicable
+        if file_path:
+            ext = os.path.splitext(file_path)[1].lower()
+            lang = EXT_TO_LANGUAGE.get(ext)
+            if lang:
+                # Check if there's a configured server for this language
+                matching_servers = [
+                    name for name, spec in servers.items()
+                    if spec.get('languageId') == lang or lang in name.lower()
+                ]
+                if matching_servers:
+                    failed_matching = [s for s in matching_servers if s in self._failed_servers]
+                    if failed_matching:
+                        parts.append(f"Server for {lang} files ({', '.join(failed_matching)}) failed to start")
+                        parts.append("Install the language server or check 'lsp status' for details")
+
+        return ". ".join(parts)
 
     async def _call_lsp_method(self, client: LSPClient, method: str, args: Dict[str, Any]) -> Any:
         """Call an LSP method on the client."""
@@ -1662,7 +1714,8 @@ Example:
 
         if not self._connected_servers:
             self._trace(f"execute: {method} FAILED - no servers connected")
-            return {"error": "No LSP servers connected. Use 'lsp connect <server>' first."}
+            error_msg = self._build_no_server_error(args.get('file_path', ''))
+            return {"error": error_msg}
 
         try:
             self._request_queue.put((MSG_CALL_METHOD, {'method': method, 'args': args}))
