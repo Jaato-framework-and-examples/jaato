@@ -776,6 +776,10 @@ class JaatoSession:
         if self._executor:
             self._executor.set_output_callback(on_output)
 
+        # Set output callback on registry for enrichment notifications
+        if self._runtime.registry and on_output:
+            self._runtime.registry.set_output_callback(on_output)
+
         # Initialize cancellation support
         self._cancel_token = CancelToken()
         self._is_running = True
