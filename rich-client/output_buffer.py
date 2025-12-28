@@ -411,6 +411,30 @@ class OutputBuffer:
         """Check if tool view is currently expanded."""
         return self._tools_expanded
 
+    def _get_approval_indicator(self, method: str) -> Optional[str]:
+        """Convert a permission method to a short display indicator.
+
+        Args:
+            method: The permission method (whitelist, session_whitelist, etc.)
+
+        Returns:
+            Short indicator string like "[pre]", "[once]", "[session]", or None.
+        """
+        # Pre-approved via config whitelist
+        if method in ("whitelist", "policy"):
+            return "[pre]"
+        # Approved for entire session
+        if method in ("session_whitelist", "always"):
+            return "[session]"
+        # User chose to approve all future requests
+        if method == "allow_all":
+            return "[all]"
+        # Single approval by user
+        if method in ("user_approved", "yes", "once"):
+            return "[once]"
+        # Other methods - no indicator needed
+        return None
+
     def finalize_tool_tree(self) -> None:
         """Convert tool tree to stored lines (collapsed or expanded based on setting).
 
@@ -454,13 +478,23 @@ class OutputBuffer:
                 if tool.args_summary:
                     tool_line += f"({tool.args_summary})"
                 tool_line += f" {status_icon}"
+                # Add approval indicator for granted permissions
+                if tool.permission_state == "granted" and tool.permission_method:
+                    indicator = self._get_approval_indicator(tool.permission_method)
+                    if indicator:
+                        tool_line += f" {indicator}"
                 if tool.duration_seconds is not None:
                     tool_line += f" ({tool.duration_seconds:.1f}s)"
 
                 self._add_line("system", tool_line, "dim")
 
-                # Add error message if failed
-                if not tool.success and tool.error_message:
+                # Add permission denied info
+                if tool.permission_state == "denied" and tool.permission_method:
+                    continuation = "   " if is_last else "│  "
+                    denied_line = f"    {continuation}   ⊘ Permission denied: {tool.permission_method}"
+                    self._add_line("system", denied_line, "dim red")
+                # Add error message if failed (but not for permission denied)
+                elif not tool.success and tool.error_message:
                     continuation = "   " if is_last else "│  "
                     error_line = f"    {continuation}   ⚠ {tool.error_message[:60]}"
                     self._add_line("system", error_line, "dim red")
@@ -469,7 +503,13 @@ class OutputBuffer:
             tool_summaries = []
             for tool in self._active_tools:
                 status_icon = "✓" if tool.success else "✗"
-                tool_summaries.append(f"{tool.name} {status_icon}")
+                summary = f"{tool.name} {status_icon}"
+                # Add approval indicator for granted permissions
+                if tool.permission_state == "granted" and tool.permission_method:
+                    indicator = self._get_approval_indicator(tool.permission_method)
+                    if indicator:
+                        summary += f" {indicator}"
+                tool_summaries.append(summary)
 
             summary_line = f"  ▸ {tool_count} tool{'s' if tool_count != 1 else ''}: " + " ".join(tool_summaries)
             self._add_line("system", summary_line, "dim")
@@ -1102,6 +1142,12 @@ class OutputBuffer:
                         output.append(f"({tool.args_summary})", style="dim")
                     output.append(f" {status_icon}", style=status_style)
 
+                    # Show approval indicator for granted permissions
+                    if tool.permission_state == "granted" and tool.permission_method:
+                        indicator = self._get_approval_indicator(tool.permission_method)
+                        if indicator:
+                            output.append(f" {indicator}", style="dim cyan")
+
                     # Show duration if available
                     if tool.completed and tool.duration_seconds is not None:
                         output.append(f" ({tool.duration_seconds:.1f}s)", style="dim")
@@ -1141,7 +1187,13 @@ class OutputBuffer:
                         status_icon = "✓" if tool.success else "✗"
                     else:
                         status_icon = "○"
-                    tool_summaries.append(f"{tool.name} {status_icon}")
+                    summary = f"{tool.name} {status_icon}"
+                    # Add approval indicator for granted permissions
+                    if tool.permission_state == "granted" and tool.permission_method:
+                        indicator = self._get_approval_indicator(tool.permission_method)
+                        if indicator:
+                            summary += f" {indicator}"
+                    tool_summaries.append(summary)
 
                 if pending_tool:
                     output.append("  ⏳ ", style="bold yellow")
