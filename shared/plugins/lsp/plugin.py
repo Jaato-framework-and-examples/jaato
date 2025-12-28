@@ -1528,6 +1528,12 @@ Example:
             locations = await client.goto_definition(
                 file_path, args['line'], args['character']
             )
+            if not locations:
+                return {
+                    "error": f"No definition found at {file_path}:{args['line']+1}:{args['character']}. "
+                             "The LSP server returned no results - the symbol may not be defined "
+                             "or the server may still be indexing."
+                }
             return self._format_locations(locations)
 
         elif method == 'find_references':
@@ -1535,6 +1541,12 @@ Example:
                 file_path, args['line'], args['character'],
                 args.get('include_declaration', True)
             )
+            if not locations:
+                return {
+                    "error": f"No references found at {file_path}:{args['line']+1}:{args['character']}. "
+                             "The LSP server returned no results - there may be no references "
+                             "or the server may still be indexing."
+                }
             return self._format_locations(locations)
 
         elif method == 'hover':
@@ -1553,6 +1565,12 @@ Example:
 
         elif method == 'document_symbols':
             symbols = await client.get_document_symbols(file_path)
+            if not symbols:
+                return {
+                    "error": f"No symbols found in {file_path}. "
+                             "The file may be empty, have no defined symbols, "
+                             "or the LSP server may still be indexing."
+                }
             return [
                 {
                     "name": s.name,
@@ -1563,7 +1581,13 @@ Example:
             ]
 
         elif method == 'workspace_symbols':
-            symbols = await client.workspace_symbols(args['query'])
+            query = args['query']
+            symbols = await client.workspace_symbols(query)
+            if not symbols:
+                return {
+                    "error": f"No symbols matching '{query}' found in the workspace. "
+                             "Try a different query or check if the LSP server has finished indexing."
+                }
             return [
                 {
                     "name": s.name,
@@ -1724,7 +1748,11 @@ Example:
             if status == 'error':
                 self._trace(f"execute: {method} ERROR - {result}")
                 return {"error": result}
-            self._trace(f"execute: {method} OK")
+            # Check if result indicates an error (e.g., no definitions found)
+            if isinstance(result, dict) and 'error' in result:
+                self._trace(f"execute: {method} EMPTY - {result.get('error', 'no results')}")
+            else:
+                self._trace(f"execute: {method} OK")
             return result
         except queue.Empty:
             self._trace(f"execute: {method} TIMEOUT")
