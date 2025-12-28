@@ -195,19 +195,30 @@ class SessionManager:
             os.environ['PROVIDER_TRACE_LOG'] = event.provider_trace_log
             logger.info(f"Client {client_id} set PROVIDER_TRACE_LOG={event.provider_trace_log}")
 
+        # Initialize client config dict if needed
+        if client_id not in self._client_config:
+            self._client_config[client_id] = {}
+
         # Store and apply terminal width
         if event.terminal_width:
-            if client_id not in self._client_config:
-                self._client_config[client_id] = {}
             self._client_config[client_id]['terminal_width'] = event.terminal_width
             logger.info(f"Client {client_id} set terminal_width={event.terminal_width}")
 
-            # Apply to current session if client is attached to one
-            session_id = self._client_to_session.get(client_id)
-            if session_id:
-                session = self._sessions.get(session_id)
-                if session and session.server:
+        # Store and apply working directory
+        if event.working_dir:
+            self._client_config[client_id]['working_dir'] = event.working_dir
+            logger.info(f"Client {client_id} set working_dir={event.working_dir}")
+
+        # Apply to current session if client is attached to one
+        session_id = self._client_to_session.get(client_id)
+        if session_id:
+            session = self._sessions.get(session_id)
+            if session and session.server:
+                if event.terminal_width:
                     session.server.terminal_width = event.terminal_width
+                if event.working_dir:
+                    session.server.workspace_path = event.working_dir
+                    session.workspace_path = event.working_dir
 
     def _apply_client_config_to_server(self, client_id: str, server: 'JaatoServer') -> None:
         """Apply stored client configuration to a server.
@@ -222,6 +233,9 @@ class SessionManager:
         if 'terminal_width' in config:
             server.terminal_width = config['terminal_width']
             logger.debug(f"Applied terminal_width={config['terminal_width']} to server for client {client_id}")
+        if 'working_dir' in config:
+            server.workspace_path = config['working_dir']
+            logger.debug(f"Applied workspace_path={config['working_dir']} to server for client {client_id}")
 
     # =========================================================================
     # Session Lifecycle

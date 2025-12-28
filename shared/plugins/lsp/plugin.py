@@ -341,6 +341,7 @@ class LSPToolPlugin:
         self._initialized = False
         self._config_path: Optional[str] = None  # Explicit config path from plugin_configs
         self._custom_config_path: Optional[str] = None  # User-specified path
+        self._workspace_path: Optional[str] = None  # Client's working directory
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}
@@ -399,6 +400,7 @@ class LSPToolPlugin:
         Args:
             config: Optional configuration dict. Supports:
                 - config_path: Path to .lsp.json file (overrides default search)
+                - workspace_path: Client's working directory for finding .lsp.json
                 - agent_name: Name for trace logging
         """
         if self._initialized:
@@ -410,11 +412,25 @@ class LSPToolPlugin:
         # Extract config values
         self._agent_name = config.get('agent_name')
         self._custom_config_path = config.get('config_path')
+        self._workspace_path = config.get('workspace_path')
 
         self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True
         self._trace(f"initialize: connected_servers={list(self._connected_servers)}")
+
+    def set_workspace_path(self, path: str) -> None:
+        """Set the workspace path for finding config files.
+
+        This should be called when the client's working directory changes.
+        It will trigger a reload of the config file from the new location.
+        """
+        if path != self._workspace_path:
+            self._workspace_path = path
+            self._trace(f"workspace_path changed to: {path}")
+            # Force reload config on next access
+            if self._initialized:
+                self._load_config_cache(force=True)
 
     def shutdown(self) -> None:
         """Shutdown the LSP plugin and clean up resources."""
@@ -1273,8 +1289,9 @@ Example:
 
         Search order:
         1. Custom path from plugin_configs (config_path)
-        2. .lsp.json in current working directory
-        3. ~/.lsp.json in home directory
+        2. .lsp.json in workspace directory (client's working directory)
+        3. .lsp.json in current working directory (fallback)
+        4. ~/.lsp.json in home directory
         """
         if self._config_cache and not force:
             return
@@ -1283,8 +1300,10 @@ Example:
         paths = []
         if self._custom_config_path:
             paths.append(self._custom_config_path)
+        # Use workspace_path if set, otherwise fall back to cwd
+        workspace = self._workspace_path or os.getcwd()
         paths.extend([
-            os.path.join(os.getcwd(), '.lsp.json'),
+            os.path.join(workspace, '.lsp.json'),
             os.path.expanduser('~/.lsp.json'),
         ])
 

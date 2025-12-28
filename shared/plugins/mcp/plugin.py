@@ -189,6 +189,7 @@ class MCPToolPlugin:
         # Configuration state
         self._config_path: Optional[str] = None  # Path config was loaded from
         self._custom_config_path: Optional[str] = None  # User-specified path via plugin_configs
+        self._workspace_path: Optional[str] = None  # Client's working directory
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}  # server -> error message
@@ -250,6 +251,7 @@ class MCPToolPlugin:
         Args:
             config: Optional configuration dict. Supports:
                 - config_path: Path to .mcp.json file (overrides default search)
+                - workspace_path: Client's working directory for finding .mcp.json
                 - agent_name: Name for trace logging
         """
         if self._initialized:
@@ -259,10 +261,23 @@ class MCPToolPlugin:
         # Extract config from plugin_configs
         self._agent_name = config.get("agent_name")
         self._custom_config_path = config.get("config_path")
+        self._workspace_path = config.get("workspace_path")
         self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True
         self._trace(f"initialize: connected_servers={list(self._connected_servers)}")
+
+    def set_workspace_path(self, path: str) -> None:
+        """Set the workspace path for finding config files.
+
+        This should be called when the client's working directory changes.
+        It will trigger a reload of the config file from the new location.
+        """
+        if path != self._workspace_path:
+            self._workspace_path = path
+            self._trace(f"workspace_path changed to: {path}")
+            # Note: Unlike LSP, we don't force reload here since MCP servers
+            # may already be connected. Use 'mcp reload' to apply changes.
 
     def shutdown(self) -> None:
         """Shutdown the MCP plugin and clean up resources."""
@@ -914,8 +929,9 @@ Examples:
         if self._config_path:
             path = self._config_path
         else:
-            # Default to current directory
-            path = os.path.join(os.getcwd(), '.mcp.json')
+            # Default to workspace or current directory
+            workspace = self._workspace_path or os.getcwd()
+            path = os.path.join(workspace, '.mcp.json')
 
         try:
             with open(path, 'w', encoding='utf-8') as f:
@@ -1031,11 +1047,14 @@ Examples:
 
         Search order:
         1. registry_path (if specified via plugin_configs.config_path)
-        2. .mcp.json in current working directory
-        3. ~/.mcp.json in home directory
+        2. .mcp.json in workspace directory (client's working directory)
+        3. .mcp.json in current working directory (fallback)
+        4. ~/.mcp.json in home directory
         """
+        # Use workspace_path if set, otherwise fall back to cwd
+        workspace = self._workspace_path or os.getcwd()
         default_paths = [
-            os.path.join(os.getcwd(), '.mcp.json'),
+            os.path.join(workspace, '.mcp.json'),
             os.path.expanduser('~/.mcp.json')
         ]
         if registry_path:
