@@ -189,6 +189,9 @@ class JaatoServer:
         # Trace log path
         self._trace_path = os.path.join(tempfile.gettempdir(), "jaato_server_trace.log")
 
+        # Terminal width for formatting (default 80)
+        self._terminal_width: int = 80
+
     # =========================================================================
     # Workspace Management
     # =========================================================================
@@ -202,6 +205,23 @@ class JaatoServer:
     def workspace_path(self, path: Optional[str]) -> None:
         """Set the client's workspace path."""
         self._workspace_path = path
+
+    @property
+    def terminal_width(self) -> int:
+        """Get the terminal width for formatting."""
+        return self._terminal_width
+
+    @terminal_width.setter
+    def terminal_width(self, width: int) -> None:
+        """Set the terminal width for formatting.
+
+        This affects enrichment notification formatting to properly
+        wrap and align text for the terminal.
+        """
+        self._terminal_width = width
+        # Propagate to JaatoClient if connected
+        if self._jaato:
+            self._jaato.set_terminal_width(width)
 
     @contextlib.contextmanager
     def _in_workspace(self):
@@ -339,6 +359,9 @@ class JaatoServer:
         # Store model info
         self._model_name = self._jaato.model_name or model_name
         self._model_provider = self._jaato.provider_name
+
+        # Set terminal width for formatting
+        self._jaato.set_terminal_width(self._terminal_width)
 
         # Initialize plugin registry
         self.registry = PluginRegistry(model_name=model_name)

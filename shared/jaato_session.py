@@ -131,6 +131,19 @@ class JaatoSession:
         self._gc_threshold_crossed: bool = False  # Set when threshold crossed during streaming
         self._gc_threshold_callback: Optional[GCThresholdCallback] = None
 
+        # Terminal width for formatting (used by enrichment notifications)
+        self._terminal_width: int = 80
+
+    def set_terminal_width(self, width: int) -> None:
+        """Set the terminal width for formatting.
+
+        This affects enrichment notification formatting.
+
+        Args:
+            width: Terminal width in columns.
+        """
+        self._terminal_width = width
+
     def _get_trace_prefix(self) -> str:
         """Get the trace prefix including agent context."""
         if self._agent_type == "main":
@@ -778,7 +791,7 @@ class JaatoSession:
 
         # Set output callback on registry for enrichment notifications
         if self._runtime.registry and on_output:
-            self._runtime.registry.set_output_callback(on_output)
+            self._runtime.registry.set_output_callback(on_output, self._terminal_width)
 
         # Initialize cancellation support
         self._cancel_token = CancelToken()
