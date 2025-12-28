@@ -51,6 +51,8 @@ class ActiveToolCall:
     # Live output tracking (tail -f style preview)
     output_lines: Optional[List[str]] = None  # Rolling buffer of recent output lines
     output_max_lines: int = 30  # Max lines to keep in buffer
+    output_display_lines: int = 5  # Max lines to show at once when expanded
+    output_scroll_offset: int = 0  # Scroll position (0 = show most recent lines)
     # Per-tool expand state for navigation
     expanded: bool = False  # Whether this tool's output is expanded
 
@@ -554,6 +556,36 @@ class OutputBuffer:
            0 <= self._selected_tool_index < len(self._active_tools):
             return self._active_tools[self._selected_tool_index]
         return None
+
+    def scroll_selected_tool_up(self) -> bool:
+        """Scroll up within the selected tool's output.
+
+        Returns:
+            True if scroll position changed, False if at top or no tool selected.
+        """
+        tool = self.get_selected_tool()
+        if not tool or not tool.expanded or not tool.output_lines:
+            return False
+        # Scroll offset is from the end, so scrolling "up" means increasing offset
+        max_offset = max(0, len(tool.output_lines) - tool.output_display_lines)
+        if tool.output_scroll_offset < max_offset:
+            tool.output_scroll_offset += 1
+            return True
+        return False
+
+    def scroll_selected_tool_down(self) -> bool:
+        """Scroll down within the selected tool's output.
+
+        Returns:
+            True if scroll position changed, False if at bottom or no tool selected.
+        """
+        tool = self.get_selected_tool()
+        if not tool or not tool.expanded or not tool.output_lines:
+            return False
+        if tool.output_scroll_offset > 0:
+            tool.output_scroll_offset -= 1
+            return True
+        return False
 
     def finalize_tool_tree(self) -> None:
         """Convert tool tree to stored lines (collapsed or expanded based on setting).
@@ -1341,9 +1373,27 @@ class OutputBuffer:
 
                     if show_output and tool.output_lines:
                         continuation = "   " if is_last else "│  "
-                        for output_line in tool.output_lines:
+                        prefix = "    "
+                        total_lines = len(tool.output_lines)
+                        display_count = tool.output_display_lines
+
+                        # Calculate visible window (offset is from end, 0 = most recent)
+                        # end_idx is exclusive, start_idx is inclusive
+                        end_idx = total_lines - tool.output_scroll_offset
+                        start_idx = max(0, end_idx - display_count)
+
+                        lines_above = start_idx
+                        lines_below = tool.output_scroll_offset
+
+                        # Show "more above" indicator
+                        if lines_above > 0:
                             output.append("\n")
-                            prefix = "    " if self._tool_nav_active else "    "
+                            output.append(f"{prefix}{continuation}   ", style="dim")
+                            output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''} ([ to scroll)", style="dim italic")
+
+                        # Show visible lines
+                        for output_line in tool.output_lines[start_idx:end_idx]:
+                            output.append("\n")
                             output.append(f"{prefix}{continuation}   ", style="dim")
                             # Truncate long lines
                             max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
@@ -1352,6 +1402,12 @@ class OutputBuffer:
                             else:
                                 display_line = output_line
                             output.append(display_line, style="dim italic")
+
+                        # Show "more below" indicator
+                        if lines_below > 0:
+                            output.append("\n")
+                            output.append(f"{prefix}{continuation}   ", style="dim")
+                            output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} (] to scroll)", style="dim italic")
 
                     # Show permission denied info (when permission was denied)
                     if tool.permission_state == "denied" and tool.permission_method:

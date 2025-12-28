@@ -148,6 +148,8 @@ DEFAULT_KEYBINDINGS = {
     "tool_nav_enter": "c-n",  # Enter tool navigation mode
     "tool_toggle": "space",   # Toggle expand/collapse on selected tool
     "tool_exit": "escape",    # Exit tool navigation mode
+    "tool_scroll_up": "[",    # Scroll up within expanded tool output
+    "tool_scroll_down": "]",  # Scroll down within expanded tool output
 }
 
 
@@ -309,6 +311,8 @@ class KeybindingConfig:
     tool_nav_enter: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_nav_enter"])
     tool_toggle: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_toggle"])
     tool_exit: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_exit"])
+    tool_scroll_up: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_scroll_up"])
+    tool_scroll_down: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_scroll_down"])
 
     # Profile metadata (not a keybinding)
     _profile: str = field(default="default")
@@ -494,6 +498,8 @@ class KeybindingConfig:
             "tool_nav_enter": self.tool_nav_enter,
             "tool_toggle": self.tool_toggle,
             "tool_exit": self.tool_exit,
+            "tool_scroll_up": self.tool_scroll_up,
+            "tool_scroll_down": self.tool_scroll_down,
         }
 
     def set_binding(self, action: str, key: KeyBinding) -> bool:
@@ -668,5 +674,7 @@ def generate_example_config() -> str:
         "tool_nav_enter": "c-n",
         "tool_toggle": "space",
         "tool_exit": "escape",
+        "tool_scroll_up": "[",
+        "tool_scroll_down": "]",
     }
     return json.dumps(example, indent=2)
