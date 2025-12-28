@@ -221,11 +221,15 @@ class IPCClient:
         # Get terminal width for formatting
         terminal_width, _ = shutil.get_terminal_size()
 
+        # Get client's working directory (for finding config files like .lsp.json)
+        working_dir = os.getcwd()
+
         # Send config to server
         await self._send_event(ClientConfigRequest(
             trace_log_path=trace_log,
             provider_trace_log=provider_trace,
             terminal_width=terminal_width,
+            working_dir=working_dir,
         ))
 
     async def _start_server(self) -> bool:

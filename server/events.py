@@ -497,6 +497,8 @@ class ClientConfigRequest(Event):
     provider_trace_log: Optional[str] = None  # PROVIDER_TRACE_LOG
     # Terminal width for formatting (enrichment notifications)
     terminal_width: Optional[int] = None
+    # Client's working directory (for finding config files like .lsp.json)
+    working_dir: Optional[str] = None
 
 
 # =============================================================================
