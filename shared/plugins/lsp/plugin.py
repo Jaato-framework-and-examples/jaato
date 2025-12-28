@@ -814,19 +814,28 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         if tool_name not in FILE_WRITING_TOOLS:
             return ToolResultEnrichmentResult(result=result)
 
+        self._trace(f"enrich_tool_result: checking {tool_name}")
+
         # Skip if no LSP servers are connected
         if not self._connected_servers:
+            self._trace(f"enrich_tool_result: skipped - no servers connected")
             return ToolResultEnrichmentResult(result=result)
 
         # Parse the result to extract file paths
         file_paths = self._extract_file_paths_from_result(tool_name, result)
         if not file_paths:
+            self._trace(f"enrich_tool_result: no file paths found in result")
             return ToolResultEnrichmentResult(result=result)
+
+        self._trace(f"enrich_tool_result: found files {file_paths}")
 
         # Filter to files that have LSP support
         supported_files = self._filter_supported_files(file_paths)
         if not supported_files:
+            self._trace(f"enrich_tool_result: no supported file types")
             return ToolResultEnrichmentResult(result=result)
+
+        self._trace(f"enrich_tool_result: checking diagnostics for {supported_files}")
 
         # Run diagnostics on each file and collect results
         all_diagnostics = {}
@@ -834,6 +843,8 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             diags = self._get_diagnostics_for_file(file_path)
             if diags:
                 all_diagnostics[file_path] = diags
+
+        self._trace(f"enrich_tool_result: found {len(all_diagnostics)} files with diagnostics")
 
         # Build enriched result with diagnostic summary
         enriched_result = self._build_enriched_result(result, all_diagnostics)
