@@ -1437,12 +1437,14 @@ class SubagentPlugin:
 
             # Inject agent_name into each plugin's config for trace logging
             # Inject plan reporter into todo plugin for UI display
+            # Note: Always override agent_name to ensure subagent uses its own name,
+            # not an inherited one from profile's plugin_configs
             effective_plugin_configs = expanded_configs
             for plugin_name in (profile.plugins or []):
                 if plugin_name not in effective_plugin_configs:
                     effective_plugin_configs[plugin_name] = {}
-                if "agent_name" not in effective_plugin_configs[plugin_name]:
-                    effective_plugin_configs[plugin_name]["agent_name"] = profile.name
+                # Always set agent_name to profile.name (override any inherited value)
+                effective_plugin_configs[plugin_name]["agent_name"] = profile.name
                 # Inject plan reporter so subagent plans show in UI instead of console
                 if plugin_name == "todo" and self._plan_reporter:
                     effective_plugin_configs[plugin_name]["_injected_reporter"] = self._plan_reporter
