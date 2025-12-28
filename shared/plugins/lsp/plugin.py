@@ -1209,8 +1209,22 @@ Example:
         if not self._initialized:
             self.initialize()
 
+        # Force reload config from disk
+        old_servers = set(self._config_cache.get('languageServers', {}).keys()) if self._config_cache else set()
         self._load_config_cache(force=True)
         servers = self._config_cache.get('languageServers', {})
+        new_servers = set(servers.keys())
+
+        lines = []
+        if old_servers != new_servers:
+            added = new_servers - old_servers
+            removed = old_servers - new_servers
+            if added:
+                lines.append(f"Added servers: {', '.join(added)}")
+            if removed:
+                lines.append(f"Removed servers: {', '.join(removed)}")
+        else:
+            lines.append(f"Config unchanged ({len(servers)} server(s))")
 
         try:
             self._request_queue.put((MSG_RELOAD_CONFIG, {'servers': servers}))
@@ -1221,8 +1235,19 @@ Example:
                 failed = result.get('failed', {})
                 self._connected_servers = set(connected)
                 self._failed_servers = failed
-                return f"Reloaded: {len(connected)} connected, {len(failed)} failed"
+
+                if connected:
+                    lines.append(f"Connected: {', '.join(connected)}")
+                if failed:
+                    for name, error in failed.items():
+                        lines.append(f"Failed: {name} - {error}")
+                if not connected and not failed:
+                    lines.append("No servers to connect")
+
+                return '\n'.join(lines)
             return f"Reload failed: {result}"
+        except queue.Empty:
+            return "Reload timed out - async loop may not be running"
         except Exception as e:
             return f"Error reloading: {e}"
 
