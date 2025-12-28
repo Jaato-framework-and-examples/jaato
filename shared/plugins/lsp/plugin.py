@@ -1531,8 +1531,8 @@ Example:
             if not locations:
                 return {
                     "error": f"No definition found at {file_path}:{args['line']+1}:{args['character']}. "
-                             "The LSP server returned no results - the symbol may not be defined "
-                             "or the server may still be indexing."
+                             "Possible causes: symbol not defined, LSP server not running, "
+                             "or server still indexing. Run 'lsp status' to check server state."
                 }
             return self._format_locations(locations)
 
@@ -1544,8 +1544,8 @@ Example:
             if not locations:
                 return {
                     "error": f"No references found at {file_path}:{args['line']+1}:{args['character']}. "
-                             "The LSP server returned no results - there may be no references "
-                             "or the server may still be indexing."
+                             "Possible causes: no references exist, LSP server not running, "
+                             "or server still indexing. Run 'lsp status' to check server state."
                 }
             return self._format_locations(locations)
 
@@ -1568,8 +1568,8 @@ Example:
             if not symbols:
                 return {
                     "error": f"No symbols found in {file_path}. "
-                             "The file may be empty, have no defined symbols, "
-                             "or the LSP server may still be indexing."
+                             "Possible causes: file is empty, LSP server not running, "
+                             "or server still indexing. Run 'lsp status' to check server state."
                 }
             return [
                 {
@@ -1586,7 +1586,8 @@ Example:
             if not symbols:
                 return {
                     "error": f"No symbols matching '{query}' found in the workspace. "
-                             "Try a different query or check if the LSP server has finished indexing."
+                             "Possible causes: no matches, LSP server not running, "
+                             "or server still indexing. Run 'lsp status' to check server state."
                 }
             return [
                 {
