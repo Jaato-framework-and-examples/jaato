@@ -253,18 +253,44 @@ class Hover:
 
 @dataclass
 class SymbolInformation:
-    """Information about a symbol."""
+    """Information about a symbol.
+
+    Handles both SymbolInformation and DocumentSymbol LSP formats:
+    - SymbolInformation: flat list with 'location' field (older servers)
+    - DocumentSymbol: hierarchical with 'range'/'selectionRange' (modern servers like pyright)
+    """
     name: str
     kind: int
     location: Location
     container_name: Optional[str] = None
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "SymbolInformation":
+    def from_dict(cls, d: Dict[str, Any], file_uri: Optional[str] = None) -> "SymbolInformation":
+        """Parse symbol from either SymbolInformation or DocumentSymbol format.
+
+        Args:
+            d: The symbol dictionary from LSP response
+            file_uri: File URI to use when parsing DocumentSymbol format
+                     (DocumentSymbol doesn't include URI, only range)
+        """
+        # Check if this is DocumentSymbol format (has 'range' but no 'location')
+        if "range" in d and "location" not in d:
+            # DocumentSymbol format - construct location from range
+            if not file_uri:
+                # Fall back to empty URI if not provided
+                file_uri = ""
+            location = Location(
+                uri=file_uri,
+                range=Range.from_dict(d.get("selectionRange", d["range"]))
+            )
+        else:
+            # SymbolInformation format - use location directly
+            location = Location.from_dict(d["location"])
+
         return cls(
             name=d["name"],
             kind=d["kind"],
-            location=Location.from_dict(d["location"]),
+            location=location,
             container_name=d.get("containerName")
         )
 
@@ -638,14 +664,47 @@ class LSPClient:
         return [CompletionItem.from_dict(item) for item in items]
 
     async def get_document_symbols(self, path: str) -> List[SymbolInformation]:
-        """Get all symbols in a document."""
+        """Get all symbols in a document.
+
+        Handles both SymbolInformation[] and DocumentSymbol[] response formats.
+        DocumentSymbol is hierarchical, so we flatten it to a list.
+        """
         uri = self.uri_from_path(path)
         params = {"textDocument": {"uri": uri}}
 
         result = await self._send_request("textDocument/documentSymbol", params)
         if result is None:
             return []
-        return [SymbolInformation.from_dict(sym) for sym in result]
+
+        symbols = []
+        self._collect_symbols(result, uri, symbols)
+        return symbols
+
+    def _collect_symbols(
+        self,
+        items: List[Dict[str, Any]],
+        file_uri: str,
+        out: List[SymbolInformation],
+        container_name: Optional[str] = None
+    ) -> None:
+        """Recursively collect symbols from potentially hierarchical DocumentSymbol structure.
+
+        Args:
+            items: List of symbol dictionaries (SymbolInformation or DocumentSymbol)
+            file_uri: The file URI for constructing locations
+            out: Output list to append symbols to
+            container_name: Name of the containing symbol (for nested symbols)
+        """
+        for item in items:
+            sym = SymbolInformation.from_dict(item, file_uri)
+            if container_name:
+                sym.container_name = container_name
+            out.append(sym)
+
+            # DocumentSymbol can have children - recurse into them
+            children = item.get("children", [])
+            if children:
+                self._collect_symbols(children, file_uri, out, container_name=sym.name)
 
     async def workspace_symbols(self, query: str) -> List[SymbolInformation]:
         """Search for symbols in workspace."""
