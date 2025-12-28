@@ -1246,10 +1246,12 @@ class JaatoSession:
         tool_name: str,
         result_dict: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Run tool result enrichment on text fields in result dict.
+        """Run tool result enrichment on tool results.
 
-        Looks for common text fields (result, content, stdout, output) and
-        runs them through the registry's tool result enrichment pipeline.
+        Two enrichment modes:
+        1. For file-writing tools (writeNewFile, updateFile): Pass the full JSON
+           result so enrichers can extract file paths and run diagnostics.
+        2. For other tools with large text fields: Enrich individual text fields.
 
         Args:
             tool_name: Name of the tool that produced the result.
@@ -1258,13 +1260,27 @@ class JaatoSession:
         Returns:
             Enriched result dictionary.
         """
-        # Fields that commonly contain text content to enrich
-        text_fields = ('result', 'content', 'stdout', 'output', 'text', 'data')
-
-        # Minimum length to consider for enrichment (avoid enriching short strings)
-        min_length = 100
-
         enriched_dict = result_dict.copy()
+
+        # Tools that write files - pass full JSON for LSP diagnostics enrichment
+        file_writing_tools = {'writeNewFile', 'updateFile', 'lsp_rename_symbol', 'lsp_apply_code_action'}
+
+        if tool_name in file_writing_tools:
+            # Pass full result as JSON so LSP can extract file paths
+            import json
+            result_json = json.dumps(result_dict)
+            enrichment = self._runtime.registry.enrich_tool_result(tool_name, result_json)
+            if enrichment.result != result_json:
+                try:
+                    enriched_dict = json.loads(enrichment.result)
+                except json.JSONDecodeError:
+                    # If enrichment broke JSON, keep original and append as text
+                    enriched_dict['_lsp_diagnostics'] = enrichment.result
+            return enriched_dict
+
+        # For other tools: enrich large text fields
+        text_fields = ('result', 'content', 'stdout', 'output', 'text', 'data')
+        min_length = 100
 
         for field in text_fields:
             if field in enriched_dict:
