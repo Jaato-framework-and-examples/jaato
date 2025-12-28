@@ -1073,6 +1073,13 @@ class OutputBuffer:
                         output.append("[*required]", style="yellow")
                     else:
                         output.append_text(Text.from_ansi(wrapped_line))
+            elif line.source == "enrichment":
+                # Enrichment notifications - render dimmed, already formatted with
+                # box drawing chars and proper alignment from enrichment_formatter
+                for j, text_line in enumerate(line.text.split('\n')):
+                    if j > 0:
+                        output.append("\n")
+                    output.append(text_line, style="dim")
             else:
                 # Other plugin output - wrap and preserve ANSI codes
                 prefix_width = len(f"[{line.source}] ") if line.is_turn_start else 0
