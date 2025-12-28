@@ -1462,11 +1462,15 @@ Example:
         """Call an LSP method on the client."""
         file_path = args.get('file_path')
 
+        # Methods that require full parsing need more time
+        needs_parsing = method in ('hover', 'document_symbols', 'goto_definition', 'find_references')
+
         # Ensure document is open if needed
         if file_path and method not in ('workspace_symbols',):
             await client.open_document(file_path)
-            # Small delay for diagnostics to arrive
-            await asyncio.sleep(0.2)
+            # Wait for server to process the document
+            # Longer delay for operations that need full parsing
+            await asyncio.sleep(0.5 if needs_parsing else 0.2)
 
         if method == 'goto_definition':
             locations = await client.goto_definition(
@@ -1482,10 +1486,14 @@ Example:
             return self._format_locations(locations)
 
         elif method == 'hover':
-            hover = await client.hover(file_path, args['line'], args['character'])
-            if hover:
-                return {"contents": hover.contents}
-            return {"contents": "No hover information available"}
+            # Retry hover a few times - server might still be indexing
+            for attempt in range(3):
+                hover = await client.hover(file_path, args['line'], args['character'])
+                if hover and hover.contents:
+                    return {"contents": hover.contents}
+                if attempt < 2:
+                    await asyncio.sleep(0.3)  # Brief wait before retry
+            return {"contents": "No hover information available (server may still be indexing)"}
 
         elif method == 'get_diagnostics':
             diagnostics = client.get_diagnostics(file_path)
