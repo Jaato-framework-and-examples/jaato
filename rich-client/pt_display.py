@@ -810,6 +810,28 @@ class PTDisplay:
                 buffer.enter_tool_navigation()
             self._app.invalidate()
 
+        @kb.add(*keys.get_key_args("tool_scroll_up"))
+        def handle_tool_scroll_up(event):
+            """Handle [ - scroll up within expanded tool output."""
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                buffer.scroll_selected_tool_up()
+                self._app.invalidate()
+            else:
+                # Not in tool nav mode - insert character
+                event.current_buffer.insert_text("[")
+
+        @kb.add(*keys.get_key_args("tool_scroll_down"))
+        def handle_tool_scroll_down(event):
+            """Handle ] - scroll down within expanded tool output."""
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                buffer.scroll_selected_tool_down()
+                self._app.invalidate()
+            else:
+                # Not in tool nav mode - insert character
+                event.current_buffer.insert_text("]")
+
         @kb.add(*keys.get_key_args("yank"))
         def handle_ctrl_y(event):
             """Handle Ctrl+Y - yank (copy) last response to clipboard."""
