@@ -1627,14 +1627,15 @@ Example:
         file_path = args.get('file_path')
 
         # Methods that require full parsing need more time
-        needs_parsing = method in ('hover', 'document_symbols', 'goto_definition', 'find_references')
+        # get_diagnostics also needs time for server to analyze and publish diagnostics
+        needs_parsing = method in ('hover', 'document_symbols', 'goto_definition', 'find_references', 'get_diagnostics')
 
         # Ensure document is open if needed
         if file_path and method not in ('workspace_symbols',):
             await client.open_document(file_path)
             # Wait for server to process the document
-            # Longer delay for operations that need full parsing
-            await asyncio.sleep(0.5 if needs_parsing else 0.2)
+            # Longer delay for operations that need full parsing/diagnostics
+            await asyncio.sleep(0.8 if needs_parsing else 0.2)
 
         if method == 'goto_definition':
             locations = await client.goto_definition(
