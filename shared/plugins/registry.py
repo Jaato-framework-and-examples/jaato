@@ -199,7 +199,18 @@ class PluginRegistry:
         if "memory_matches" in metadata:
             count = metadata["memory_matches"]
             if count > 0:
+                # Include trigger keywords if available
+                keywords = metadata.get("trigger_keywords", [])
+                if keywords:
+                    keyword_summary = ", ".join(f'"{k}"' for k in keywords[:3])
+                    if len(keywords) > 3:
+                        keyword_summary += f" +{len(keywords) - 3} more"
+                    return f"added context about {count} memories (triggered by {keyword_summary})"
                 return f"added context about {count} relevant memories"
+
+        # Session plugin pattern
+        if metadata.get("description_requested"):
+            return "requested session description (turn threshold reached)"
 
         # References plugin pattern
         if "mentioned_references" in metadata:

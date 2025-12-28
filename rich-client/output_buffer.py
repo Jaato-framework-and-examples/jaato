@@ -120,6 +120,10 @@ class OutputBuffer:
             rendered.append(text)
         elif source == "system":
             rendered.append(text)
+        elif source == "enrichment":
+            # Enrichment notifications are pre-formatted single lines
+            # after _flush_current_block splits by newline
+            rendered.append(text)
         else:
             if is_turn_start:
                 rendered.append(f"[{source}] ", style="dim magenta")
@@ -1076,10 +1080,8 @@ class OutputBuffer:
             elif line.source == "enrichment":
                 # Enrichment notifications - render dimmed, already formatted with
                 # box drawing chars and proper alignment from enrichment_formatter
-                for j, text_line in enumerate(line.text.split('\n')):
-                    if j > 0:
-                        output.append("\n")
-                    output.append(text_line, style="dim")
+                # Each OutputLine is a single line (split by _flush_current_block)
+                output.append(line.text, style="dim")
             else:
                 # Other plugin output - wrap and preserve ANSI codes
                 prefix_width = len(f"[{line.source}] ") if line.is_turn_start else 0
