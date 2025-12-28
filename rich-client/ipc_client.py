@@ -42,6 +42,7 @@ from server.events import (
     SendMessageRequest,
     PermissionResponseRequest,
     ClarificationResponseRequest,
+    ReferenceSelectionResponseRequest,
     StopRequest,
     CommandRequest,
     CommandListRequest,
@@ -439,6 +440,22 @@ class IPCClient:
             response: The user's answer.
         """
         await self._send_event(ClarificationResponseRequest(
+            request_id=request_id,
+            response=response,
+        ))
+
+    async def respond_to_reference_selection(
+        self,
+        request_id: str,
+        response: str,
+    ) -> None:
+        """Respond to a reference selection request.
+
+        Args:
+            request_id: The reference selection request ID.
+            response: The user's selection (e.g., "1,3,4", "all", "none").
+        """
+        await self._send_event(ReferenceSelectionResponseRequest(
             request_id=request_id,
             response=response,
         ))
