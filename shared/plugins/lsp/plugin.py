@@ -1510,6 +1510,63 @@ Example:
 
         return ". ".join(parts)
 
+    def _build_empty_result_error(self, file_path: str, operation: str, detail: str = "") -> str:
+        """Build a specific error message when an LSP operation returns no results.
+
+        Detects the actual cause:
+        - No server configured for this file type
+        - Server configured but failed to start (with reason)
+        - Server connected but returned empty results
+        """
+        ext = os.path.splitext(file_path)[1].lower() if file_path else ''
+        lang = EXT_TO_LANGUAGE.get(ext)
+
+        # Load config to check server configuration
+        self._load_config_cache()
+        servers = self._config_cache.get('languageServers', {})
+
+        # Find servers that might handle this file type
+        matching_servers = []
+        if lang:
+            for name, spec in servers.items():
+                if spec.get('languageId') == lang or lang in name.lower():
+                    matching_servers.append(name)
+
+        # Case 1: No servers configured at all
+        if not servers:
+            return f"{operation}{detail}. No LSP servers configured - create .lsp.json to enable LSP features."
+
+        # Case 2: No server configured for this language
+        if lang and not matching_servers:
+            return f"{operation}{detail}. No LSP server configured for {lang} files in .lsp.json."
+
+        # Case 3: Server configured but failed to start
+        failed_matching = [s for s in matching_servers if s in self._failed_servers]
+        if failed_matching:
+            server_name = failed_matching[0]
+            error = self._failed_servers[server_name]
+            # Simplify common errors
+            if "FileNotFoundError" in error or "No such file" in error:
+                cmd = servers.get(server_name, {}).get('command', 'unknown')
+                return f"{operation}{detail}. LSP server '{server_name}' failed: command '{cmd}' not found (not installed?)."
+            elif "timed out" in error.lower():
+                return f"{operation}{detail}. LSP server '{server_name}' failed: connection timed out."
+            else:
+                return f"{operation}{detail}. LSP server '{server_name}' failed: {error}."
+
+        # Case 4: Server connected but returned empty - genuine empty result
+        connected_matching = [s for s in matching_servers if s in self._connected_servers]
+        if connected_matching:
+            server_name = connected_matching[0]
+            return f"{operation}{detail}. Server '{server_name}' is connected but returned no results."
+
+        # Case 5: Server configured but not connected (unknown state)
+        if matching_servers:
+            return f"{operation}{detail}. LSP server '{matching_servers[0]}' is not connected. Run 'lsp status' for details."
+
+        # Fallback
+        return f"{operation}{detail}. Run 'lsp status' to check server state."
+
     async def _call_lsp_method(self, client: LSPClient, method: str, args: Dict[str, Any]) -> Any:
         """Call an LSP method on the client."""
         file_path = args.get('file_path')
@@ -1529,11 +1586,8 @@ Example:
                 file_path, args['line'], args['character']
             )
             if not locations:
-                return {
-                    "error": f"No definition found at {file_path}:{args['line']+1}:{args['character']}. "
-                             "Possible causes: symbol not defined, LSP server not running, "
-                             "or server still indexing. Run 'lsp status' to check server state."
-                }
+                pos = f" at {file_path}:{args['line']+1}:{args['character']}"
+                return {"error": self._build_empty_result_error(file_path, "No definition found", pos)}
             return self._format_locations(locations)
 
         elif method == 'find_references':
@@ -1542,11 +1596,8 @@ Example:
                 args.get('include_declaration', True)
             )
             if not locations:
-                return {
-                    "error": f"No references found at {file_path}:{args['line']+1}:{args['character']}. "
-                             "Possible causes: no references exist, LSP server not running, "
-                             "or server still indexing. Run 'lsp status' to check server state."
-                }
+                pos = f" at {file_path}:{args['line']+1}:{args['character']}"
+                return {"error": self._build_empty_result_error(file_path, "No references found", pos)}
             return self._format_locations(locations)
 
         elif method == 'hover':
@@ -1557,7 +1608,8 @@ Example:
                     return {"contents": hover.contents}
                 if attempt < 2:
                     await asyncio.sleep(0.3)  # Brief wait before retry
-            return {"contents": "No hover information available (server may still be indexing)"}
+            pos = f" at {file_path}:{args['line']+1}:{args['character']}"
+            return {"error": self._build_empty_result_error(file_path, "No hover information", pos)}
 
         elif method == 'get_diagnostics':
             diagnostics = client.get_diagnostics(file_path)
@@ -1566,11 +1618,7 @@ Example:
         elif method == 'document_symbols':
             symbols = await client.get_document_symbols(file_path)
             if not symbols:
-                return {
-                    "error": f"No symbols found in {file_path}. "
-                             "Possible causes: file is empty, LSP server not running, "
-                             "or server still indexing. Run 'lsp status' to check server state."
-                }
+                return {"error": self._build_empty_result_error(file_path, "No symbols found", f" in {file_path}")}
             return [
                 {
                     "name": s.name,
@@ -1584,11 +1632,8 @@ Example:
             query = args['query']
             symbols = await client.workspace_symbols(query)
             if not symbols:
-                return {
-                    "error": f"No symbols matching '{query}' found in the workspace. "
-                             "Possible causes: no matches, LSP server not running, "
-                             "or server still indexing. Run 'lsp status' to check server state."
-                }
+                # For workspace symbols, use the working directory to determine language context
+                return {"error": self._build_empty_result_error("", f"No symbols matching '{query}' found")}
             return [
                 {
                     "name": s.name,
