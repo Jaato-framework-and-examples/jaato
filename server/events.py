@@ -50,6 +50,11 @@ class EventType(str, Enum):
     CLARIFICATION_RESOLVED = "clarification.resolved"
     CLARIFICATION_RESPONSE = "clarification.response"  # Client -> Server
 
+    # Reference selection flow (Server <-> Client)
+    REFERENCE_SELECTION_REQUESTED = "reference_selection.requested"
+    REFERENCE_SELECTION_RESOLVED = "reference_selection.resolved"
+    REFERENCE_SELECTION_RESPONSE = "reference_selection.response"  # Client -> Server
+
     # Plan updates (Server -> Client)
     PLAN_UPDATED = "plan.updated"
     PLAN_CLEARED = "plan.cleared"
@@ -261,6 +266,28 @@ class ClarificationResolvedEvent(Event):
 
 
 @dataclass
+class ReferenceSelectionRequestedEvent(Event):
+    """Reference selection has been requested.
+
+    Sent when the model calls selectReferences and the user needs to choose
+    which references to include.
+    """
+    type: EventType = field(default=EventType.REFERENCE_SELECTION_REQUESTED)
+    request_id: str = ""
+    tool_name: str = ""
+    prompt_lines: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ReferenceSelectionResolvedEvent(Event):
+    """Reference selection has been completed."""
+    type: EventType = field(default=EventType.REFERENCE_SELECTION_RESOLVED)
+    request_id: str = ""
+    tool_name: str = ""
+    selected_ids: List[str] = field(default_factory=list)
+
+
+@dataclass
 class PlanStepData:
     """A single step in a plan."""
     content: str
@@ -394,6 +421,14 @@ class ClarificationResponseRequest(Event):
 
 
 @dataclass
+class ReferenceSelectionResponseRequest(Event):
+    """Respond to a reference selection request."""
+    type: EventType = field(default=EventType.REFERENCE_SELECTION_RESPONSE)
+    request_id: str = ""
+    response: str = ""  # User's selection (e.g., "1,3,4", "all", "none")
+
+
+@dataclass
 class StopRequest(Event):
     """Stop current operation (cancel generation)."""
     type: EventType = field(default=EventType.STOP)
@@ -481,6 +516,9 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.CLARIFICATION_REQUESTED.value: ClarificationRequestedEvent,
     EventType.CLARIFICATION_QUESTION.value: ClarificationQuestionEvent,
     EventType.CLARIFICATION_RESOLVED.value: ClarificationResolvedEvent,
+    EventType.REFERENCE_SELECTION_REQUESTED.value: ReferenceSelectionRequestedEvent,
+    EventType.REFERENCE_SELECTION_RESOLVED.value: ReferenceSelectionResolvedEvent,
+    EventType.REFERENCE_SELECTION_RESPONSE.value: ReferenceSelectionResponseRequest,
     EventType.PLAN_UPDATED.value: PlanUpdatedEvent,
     EventType.PLAN_CLEARED.value: PlanClearedEvent,
     EventType.CONTEXT_UPDATED.value: ContextUpdatedEvent,

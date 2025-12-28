@@ -2138,6 +2138,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         ClarificationRequestedEvent,
         ClarificationQuestionEvent,
         ClarificationResolvedEvent,
+        ReferenceSelectionRequestedEvent,
+        ReferenceSelectionResolvedEvent,
         PlanUpdatedEvent,
         PlanClearedEvent,
         ToolCallStartEvent,
@@ -2183,6 +2185,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     # State tracking
     pending_permission_request: Optional[dict] = None
     pending_clarification_request: Optional[dict] = None
+    pending_reference_selection_request: Optional[dict] = None
     model_running = False
     should_exit = False
     server_commands: list = []  # Commands from server for help display
@@ -2275,7 +2278,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
     async def handle_events():
         """Handle events from the server."""
-        nonlocal pending_permission_request, pending_clarification_request
+        nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
         nonlocal model_running, should_exit
 
         ipc_trace("Event handler starting")
@@ -2430,6 +2433,27 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     buffer.set_tool_clarification_resolved(event.tool_name)
                     display.refresh()
                 pending_clarification_request = None
+                display.set_waiting_for_channel_input(False)
+
+            elif isinstance(event, ReferenceSelectionRequestedEvent):
+                ipc_trace(f"  ReferenceSelectionRequestedEvent: tool={event.tool_name}, id={event.request_id}")
+                # Show reference selection prompt
+                pending_reference_selection_request = {
+                    "request_id": event.request_id,
+                    "tool_name": event.tool_name,
+                }
+                # Display the prompt lines in the output
+                buffer = agent_registry.get_selected_buffer()
+                if buffer:
+                    for line in event.prompt_lines:
+                        buffer.append("references", line + "\n", "append")
+                    display.refresh()
+                # Enable input mode for selection
+                display.set_waiting_for_channel_input(True)
+
+            elif isinstance(event, ReferenceSelectionResolvedEvent):
+                ipc_trace(f"  ReferenceSelectionResolvedEvent: tool={event.tool_name}, selected={event.selected_ids}")
+                pending_reference_selection_request = None
                 display.set_waiting_for_channel_input(False)
 
             elif isinstance(event, PlanUpdatedEvent):
@@ -2701,7 +2725,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
     async def handle_input():
         """Handle user input from the queue."""
-        nonlocal pending_permission_request, pending_clarification_request
+        nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
         nonlocal model_running, should_exit
 
         # Request session - new or default
@@ -2760,6 +2784,15 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 if pending_clarification_request:
                     await client.respond_to_clarification(
                         pending_clarification_request["request_id"],
+                        text
+                    )
+                    continue
+
+                # Handle reference selection response
+                if pending_reference_selection_request:
+                    ipc_trace(f"Sending reference selection response: {text} for {pending_reference_selection_request['request_id']}")
+                    await client.respond_to_reference_selection(
+                        pending_reference_selection_request["request_id"],
                         text
                     )
                     continue
