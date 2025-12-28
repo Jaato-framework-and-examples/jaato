@@ -70,6 +70,9 @@ from .events import (
     ClarificationRequestedEvent,
     ClarificationQuestionEvent,
     ClarificationResolvedEvent,
+    ReferenceSelectionRequestedEvent,
+    ReferenceSelectionResolvedEvent,
+    ReferenceSelectionResponseRequest,
     PlanUpdatedEvent,
     PlanClearedEvent,
     ContextUpdatedEvent,
@@ -173,6 +176,7 @@ class JaatoServer:
         self._waiting_for_channel_input: bool = False
         self._pending_permission_request_id: Optional[str] = None
         self._pending_clarification_request_id: Optional[str] = None
+        self._pending_reference_selection_request_id: Optional[str] = None
 
         # Background model thread
         self._model_thread: Optional[threading.Thread] = None
@@ -396,6 +400,10 @@ class JaatoServer:
         logger.debug("initialize: setting up clarification hooks...")
         self._setup_clarification_hooks()
         logger.debug("initialize: clarification hooks done")
+
+        logger.debug("initialize: setting up reference selection hooks...")
+        self._setup_reference_selection_hooks()
+        logger.debug("initialize: reference selection hooks done")
 
         logger.debug("initialize: setting up plan hooks...")
         self._setup_plan_hooks()
@@ -749,6 +757,42 @@ class JaatoServer:
             on_question_answered=on_question_answered,
         )
 
+    def _setup_reference_selection_hooks(self) -> None:
+        """Set up reference selection lifecycle hooks."""
+        if not self.registry:
+            return
+
+        references_plugin = self.registry.get_plugin("references")
+        if not references_plugin or not hasattr(references_plugin, 'set_selection_hooks'):
+            return
+
+        server = self
+
+        def on_selection_requested(tool_name: str, prompt_lines: list):
+            request_id = f"ref_selection_{datetime.utcnow().timestamp()}"
+            server._pending_reference_selection_request_id = request_id
+            server._waiting_for_channel_input = True
+            server.emit(ReferenceSelectionRequestedEvent(
+                request_id=request_id,
+                tool_name=tool_name,
+                prompt_lines=prompt_lines,
+            ))
+
+        def on_selection_resolved(tool_name: str, selected_ids: list):
+            request_id = server._pending_reference_selection_request_id or ""
+            server._pending_reference_selection_request_id = None
+            server._waiting_for_channel_input = False
+            server.emit(ReferenceSelectionResolvedEvent(
+                request_id=request_id,
+                tool_name=tool_name,
+                selected_ids=selected_ids,
+            ))
+
+        references_plugin.set_selection_hooks(
+            on_requested=on_selection_requested,
+            on_resolved=on_selection_resolved,
+        )
+
     def _setup_plan_hooks(self) -> None:
         """Set up plan update hooks."""
         if not self.todo_plugin:
@@ -1028,6 +1072,22 @@ class JaatoServer:
         if self._pending_clarification_request_id != request_id:
             self.emit(ErrorEvent(
                 error=f"Unknown clarification request: {request_id}",
+                error_type="StateError",
+            ))
+            return
+
+        self._channel_input_queue.put(response)
+
+    def respond_to_reference_selection(self, request_id: str, response: str) -> None:
+        """Respond to a reference selection request.
+
+        Args:
+            request_id: The reference selection request ID.
+            response: The user's selection (e.g., "1,3,4", "all", "none").
+        """
+        if self._pending_reference_selection_request_id != request_id:
+            self.emit(ErrorEvent(
+                error=f"Unknown reference selection request: {request_id}",
                 error_type="StateError",
             ))
             return
