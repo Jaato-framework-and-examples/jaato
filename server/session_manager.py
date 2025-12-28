@@ -753,6 +753,7 @@ class SessionManager:
             SendMessageRequest,
             PermissionResponseRequest,
             ClarificationResponseRequest,
+            ReferenceSelectionResponseRequest,
             StopRequest,
             CommandRequest,
         )
@@ -774,6 +775,9 @@ class SessionManager:
 
         elif isinstance(event, ClarificationResponseRequest):
             server.respond_to_clarification(event.request_id, event.response)
+
+        elif isinstance(event, ReferenceSelectionResponseRequest):
+            server.respond_to_reference_selection(event.request_id, event.response)
 
         elif isinstance(event, StopRequest):
             server.stop()

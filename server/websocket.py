@@ -39,6 +39,7 @@ from .events import (
     SendMessageRequest,
     PermissionResponseRequest,
     ClarificationResponseRequest,
+    ReferenceSelectionResponseRequest,
     StopRequest,
     CommandRequest,
 )
@@ -329,6 +330,12 @@ class JaatoWSServer:
 
         elif isinstance(event, ClarificationResponseRequest):
             self._jaato_server.respond_to_clarification(
+                event.request_id,
+                event.response
+            )
+
+        elif isinstance(event, ReferenceSelectionResponseRequest):
+            self._jaato_server.respond_to_reference_selection(
                 event.request_id,
                 event.response
             )
