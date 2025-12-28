@@ -25,8 +25,8 @@
       }
     },
     "python": {
-      "command": "pyright-langserver",
-      "args": ["--stdio"],
+      "command": "pylsp",
+      "args": [],
       "languageId": "python",
       "autoConnect": true
     },
