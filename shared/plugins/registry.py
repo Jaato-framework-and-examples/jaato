@@ -104,6 +104,7 @@ class PluginRegistry:
         """
         self._output_callback = callback
         self._terminal_width = terminal_width
+        _trace(f"set_output_callback: callback={callback is not None}, terminal_width={terminal_width}")
 
     def _emit_enrichment_notifications(
         self,
@@ -114,6 +115,7 @@ class PluginRegistry:
         Args:
             notifications: List of enrichment notifications to display.
         """
+        _trace(f"_emit_enrichment_notifications: {len(notifications)} notifications, callback={self._output_callback is not None}")
         if not self._output_callback or not notifications:
             return
 
@@ -121,6 +123,7 @@ class PluginRegistry:
             notifications,
             terminal_width=self._terminal_width
         )
+        _trace(f"_emit_enrichment_notifications: formatted={repr(formatted[:100]) if formatted else 'empty'}")
         if formatted:
             self._output_callback("enrichment", formatted, "write")
 
