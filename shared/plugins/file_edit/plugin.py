@@ -359,7 +359,8 @@ updateFile, removeFile, and moveFile operations."""
     def _format_update_file(self, arguments: Dict[str, Any]) -> Optional[PermissionDisplayInfo]:
         """Format updateFile for permission display."""
         path = arguments.get("path", "")
-        new_content = arguments.get("new_content", "")
+        # Accept both 'new_content' (canonical) and 'content' (for consistency with writeNewFile)
+        new_content = arguments.get("new_content") or arguments.get("content", "")
 
         file_path = Path(path)
         if not file_path.exists():
@@ -522,7 +523,8 @@ updateFile, removeFile, and moveFile operations."""
     def _execute_update_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute updateFile tool."""
         path = args.get("path", "")
-        new_content = args.get("new_content", "")
+        # Accept both 'new_content' (canonical) and 'content' (for consistency with writeNewFile)
+        new_content = args.get("new_content") or args.get("content", "")
         self._trace(f"updateFile: path={path}, content_len={len(new_content)}")
 
         if not path:

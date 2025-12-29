@@ -215,6 +215,30 @@ class TestUpdateFileExecution:
         assert "error" in result
         assert "not found" in result["error"].lower()
 
+    def test_update_file_accepts_content_parameter(self, tmp_path):
+        """Test that updateFile accepts 'content' as alias for 'new_content'.
+
+        This ensures consistency with writeNewFile which uses 'content'.
+        Models often use 'content' for both tools, so we accept either.
+        """
+        plugin = FileEditPlugin()
+        backup_dir = tmp_path / "backups"
+        plugin.initialize({"backup_dir": str(backup_dir)})
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("Original content")
+
+        # Use 'content' instead of 'new_content'
+        result = plugin._execute_update_file({
+            "path": str(test_file),
+            "content": "Updated via content param"
+        })
+
+        assert "error" not in result
+        assert result["success"] is True
+        assert test_file.read_text() == "Updated via content param"
+        assert result["size"] == len("Updated via content param")
+
 
 class TestWriteNewFileExecution:
     """Tests for writeNewFile tool execution."""
@@ -383,6 +407,26 @@ class TestFormatPermissionRequest:
         display_info = plugin.format_permission_request(
             "updateFile",
             {"path": str(test_file), "new_content": "Line 1\nLine 2\nLine 3\n"},
+            "console"
+        )
+
+        assert display_info is not None
+        assert "Update" in display_info.summary
+        assert display_info.format_hint == "diff"
+        assert "+Line 3" in display_info.details
+
+    def test_format_update_file_accepts_content_parameter(self, tmp_path):
+        """Test that format_permission_request accepts 'content' for updateFile."""
+        plugin = FileEditPlugin()
+        plugin.initialize({"backup_dir": str(tmp_path / "backups")})
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("Line 1\nLine 2\n")
+
+        # Use 'content' instead of 'new_content'
+        display_info = plugin.format_permission_request(
+            "updateFile",
+            {"path": str(test_file), "content": "Line 1\nLine 2\nLine 3\n"},
             "console"
         )
 
