@@ -143,6 +143,14 @@ DEFAULT_KEYBINDINGS = {
     "cycle_agents": "c-a",
     "yank": "c-y",
     "view_full": "v",
+
+    # Tool navigation
+    "tool_nav_enter": "c-n",  # Enter tool navigation mode
+    "tool_expand": "right",   # Expand selected tool's output
+    "tool_collapse": "left",  # Collapse selected tool's output
+    "tool_exit": "escape",    # Exit tool navigation mode
+    "tool_output_up": "up",   # Scroll up within expanded tool output (same as nav_up)
+    "tool_output_down": "down",  # Scroll down within expanded tool output (same as nav_down)
 }
 
 
@@ -299,6 +307,14 @@ class KeybindingConfig:
     cycle_agents: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["cycle_agents"])
     yank: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["yank"])
     view_full: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["view_full"])
+
+    # Tool navigation
+    tool_nav_enter: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_nav_enter"])
+    tool_expand: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_expand"])
+    tool_collapse: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_collapse"])
+    tool_exit: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_exit"])
+    tool_output_up: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_output_up"])
+    tool_output_down: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_output_down"])
 
     # Profile metadata (not a keybinding)
     _profile: str = field(default="default")
@@ -481,6 +497,12 @@ class KeybindingConfig:
             "cycle_agents": self.cycle_agents,
             "yank": self.yank,
             "view_full": self.view_full,
+            "tool_nav_enter": self.tool_nav_enter,
+            "tool_expand": self.tool_expand,
+            "tool_collapse": self.tool_collapse,
+            "tool_exit": self.tool_exit,
+            "tool_output_up": self.tool_output_up,
+            "tool_output_down": self.tool_output_down,
         }
 
     def set_binding(self, action: str, key: KeyBinding) -> bool:
@@ -651,5 +673,12 @@ def generate_example_config() -> str:
         "cycle_agents": "c-a",
         "yank": "c-y",
         "view_full": "v",
+
+        "tool_nav_enter": "c-n",
+        "tool_expand": "right",
+        "tool_collapse": "left",
+        "tool_exit": "escape",
+        "tool_output_up": "up",
+        "tool_output_down": "down",
     }
     return json.dumps(example, indent=2)

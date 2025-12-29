@@ -129,6 +129,11 @@ class PTDisplay:
         self._plan_panel = PlanPanel(toggle_key=self._keybinding_config.toggle_plan)
         self._output_buffer = OutputBuffer()
         self._output_buffer.set_width(output_width)
+        self._output_buffer.set_keybinding_config(self._keybinding_config)
+
+        # Set keybinding config on agent registry buffers too
+        if self._agent_registry:
+            self._agent_registry.set_keybinding_config_all(self._keybinding_config)
 
         # Rich renderer
         self._renderer = RichRenderer(self._width)
@@ -436,6 +441,14 @@ class PTDisplay:
 
         return to_formatted_text(ANSI(self._renderer.render(rendered)))
 
+    def _get_active_buffer(self):
+        """Get the active output buffer (selected agent's or main)."""
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if buffer:
+                return buffer
+        return self._output_buffer
+
     def _get_output_content(self):
         """Get rendered output content as ANSI for prompt_toolkit."""
         # Check for terminal resize and update dimensions if needed
@@ -592,10 +605,22 @@ class PTDisplay:
                 event.current_buffer.insert_text('\n')
 
         @kb.add(*keys.get_key_args("clear_input"))
-        def handle_escape(event):
+        def handle_escape_escape(event):
             """Handle Escape+Escape - clear input buffer contents."""
             if not getattr(self, '_pager_active', False):
                 event.current_buffer.reset()
+
+        @kb.add(*keys.get_key_args("tool_exit"))
+        def handle_tool_exit(event):
+            """Handle Escape - exit tool navigation mode if active."""
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                buffer.exit_tool_navigation()
+                self._app.invalidate()
+                # Don't let escape propagate further
+                return
+            # Not in tool nav mode - let other handlers process escape
+            # (escape+enter for newline, escape+escape for clear)
 
         @kb.add(*keys.get_key_args("pager_quit"), eager=True)
         def handle_q(event):
@@ -627,7 +652,7 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("pager_next"), eager=True)
         def handle_space(event):
-            """Handle space key - advance pager if active, otherwise insert space."""
+            """Handle space key - pager advance or insert space."""
             if getattr(self, '_pager_active', False):
                 # In pager mode - advance page
                 self._advance_pager_page()
@@ -714,9 +739,21 @@ class PTDisplay:
                 self._output_buffer.scroll_to_bottom()
             self._app.invalidate()
 
-        @kb.add(*keys.get_key_args("nav_up"))
+        @kb.add(*keys.get_key_args("nav_up"), eager=True)
         def handle_up(event):
-            """Handle Up arrow - scroll popup if visible, otherwise history/completion."""
+            """Handle Up arrow - tool nav, scroll popup, or history/completion."""
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                # If selected tool is expanded, scroll its output up
+                selected_tool = buffer.get_selected_tool()
+                if selected_tool and selected_tool.expanded:
+                    buffer.scroll_selected_tool_up()
+                    self._app.invalidate()
+                    return
+                # Otherwise navigate to previous tool
+                buffer.select_prev_tool()
+                self._app.invalidate()
+                return
             # If plan popup is visible, scroll it up
             if self._plan_panel.is_popup_visible and self._current_plan_has_data():
                 plan_data = self._get_current_plan_data()
@@ -726,9 +763,21 @@ class PTDisplay:
             # Normal mode - history/completion navigation
             event.current_buffer.auto_up()
 
-        @kb.add(*keys.get_key_args("nav_down"))
+        @kb.add(*keys.get_key_args("nav_down"), eager=True)
         def handle_down(event):
-            """Handle Down arrow - scroll popup if visible, otherwise history/completion."""
+            """Handle Down arrow - tool nav, scroll popup, or history/completion."""
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                # If selected tool is expanded, scroll its output down
+                selected_tool = buffer.get_selected_tool()
+                if selected_tool and selected_tool.expanded:
+                    buffer.scroll_selected_tool_down()
+                    self._app.invalidate()
+                    return
+                # Otherwise navigate to next tool
+                buffer.select_next_tool()
+                self._app.invalidate()
+                return
             # If plan popup is visible, scroll it down
             if self._plan_panel.is_popup_visible and self._current_plan_has_data():
                 plan_data = self._get_current_plan_data()
@@ -756,16 +805,41 @@ class PTDisplay:
         @kb.add(*keys.get_key_args("toggle_tools"))
         def handle_ctrl_t(event):
             """Handle Ctrl+T - toggle tool view between collapsed/expanded."""
-            # Use selected agent's buffer if registry present
-            if self._agent_registry:
-                buffer = self._agent_registry.get_selected_buffer()
-                if buffer:
-                    buffer.toggle_tools_expanded()
-                else:
-                    self._output_buffer.toggle_tools_expanded()
-            else:
-                self._output_buffer.toggle_tools_expanded()
+            buffer = self._get_active_buffer()
+            buffer.toggle_tools_expanded()
             self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("tool_nav_enter"), eager=True)
+        def handle_tool_nav_enter(event):
+            """Handle Ctrl+N - enter/exit tool navigation mode."""
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                # Already in nav mode - exit
+                buffer.exit_tool_navigation()
+            else:
+                # Try to enter navigation mode (will check for tools)
+                buffer.enter_tool_navigation()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("tool_expand"), eager=True)
+        def handle_tool_expand(event):
+            """Handle right arrow - expand selected tool's output."""
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                buffer.expand_selected_tool()
+                self._app.invalidate()
+            # If not in tool nav mode, let the default right arrow behavior happen
+            # (cursor movement in input buffer)
+
+        @kb.add(*keys.get_key_args("tool_collapse"), eager=True)
+        def handle_tool_collapse(event):
+            """Handle left arrow - collapse selected tool's output."""
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                buffer.collapse_selected_tool()
+                self._app.invalidate()
+            # If not in tool nav mode, let the default left arrow behavior happen
+            # (cursor movement in input buffer)
 
         @kb.add(*keys.get_key_args("yank"))
         def handle_ctrl_y(event):
