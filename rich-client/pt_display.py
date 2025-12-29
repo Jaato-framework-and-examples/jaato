@@ -611,8 +611,9 @@ class PTDisplay:
             # Check if waiting for channel input with TRUNCATED pending prompt
             if getattr(self, '_waiting_for_channel_input', False):
                 # Only zoom if the prompt is actually truncated
+                # Use get_selected_buffer() for IPC compatibility (agent ID may not be "main")
                 if self._agent_registry:
-                    buffer = self._agent_registry.get_buffer("main")
+                    buffer = self._agent_registry.get_selected_buffer()
                     if buffer and buffer.has_truncated_pending_prompt():
                         # Trigger zoom via callback
                         if self._input_callback:
