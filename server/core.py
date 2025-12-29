@@ -471,8 +471,19 @@ class JaatoServer:
         return True
 
     def _create_main_agent(self) -> None:
-        """Create the main agent entry."""
+        """Create the main agent entry.
+
+        Note: This only creates the local AgentState tracking. The AgentCreatedEvent
+        is already emitted via the UI hooks when set_ui_hooks() is called on JaatoClient,
+        which triggers on_agent_created() in ServerAgentHooks.
+        """
         logger.debug("  _create_main_agent: creating AgentState...")
+
+        # Check if agent was already created by hooks
+        if "main" in self._agents:
+            logger.debug("  _create_main_agent: 'main' already exists (created by hooks), skipping")
+            return
+
         agent = AgentState(
             agent_id="main",
             name="Main Agent",
@@ -480,15 +491,10 @@ class JaatoServer:
         )
         self._agents["main"] = agent
         self._selected_agent_id = "main"
-        logger.debug("  _create_main_agent: agent state created, emitting AgentCreatedEvent...")
+        logger.debug("  _create_main_agent: agent state created")
 
-        self.emit(AgentCreatedEvent(
-            agent_id="main",
-            agent_name="Main Agent",
-            agent_type="main",
-            created_at=agent.created_at,
-        ))
-        logger.debug("  _create_main_agent: event emitted")
+        # Note: AgentCreatedEvent is NOT emitted here - it's handled by
+        # ServerAgentHooks.on_agent_created() when set_ui_hooks() is called
 
     def _setup_session_plugin(self) -> None:
         """Set up session persistence plugin."""

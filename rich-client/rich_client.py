@@ -2280,12 +2280,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     # Track initialization progress for formatted display
     init_shown_header = False
     init_step_max_len = 30  # Fixed width for step names
+    init_current_step = None  # Track current step for in-place updates
 
     async def handle_events():
         """Handle events from the server."""
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
         nonlocal model_running, should_exit
-        nonlocal init_shown_header
+        nonlocal init_shown_header, init_current_step
 
         ipc_trace("Event handler starting")
         event_count = 0
@@ -2297,7 +2298,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 break
 
             if isinstance(event, InitProgressEvent):
-                # Handle initialization progress
+                # Handle initialization progress with in-place updates
                 step_name = event.step
                 status = event.status
 
@@ -2306,15 +2307,30 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     display.add_system_message("Initializing session:", style="dim")
                     init_shown_header = True
 
-                # Format and show step progress
+                # Format step name with fixed width
                 padded_name = step_name.ljust(init_step_max_len)
+
                 if status == "running":
+                    # Show step in progress
                     display.add_system_message(f"   {padded_name} ...", style="dim italic")
+                    init_current_step = step_name
                 elif status == "done":
-                    display.add_system_message(f"   {padded_name} OK", style="dim")
+                    # Update the same line to show completion
+                    if init_current_step == step_name:
+                        # Update in place
+                        display.update_last_system_message(f"   {padded_name} OK", style="dim")
+                    else:
+                        # Step mismatch (shouldn't happen), add new line
+                        display.add_system_message(f"   {padded_name} OK", style="dim")
+                    init_current_step = None
                 elif status == "error":
+                    # Show error
                     msg = event.message or "ERROR"
-                    display.add_system_message(f"   {padded_name} {msg}", style="dim red")
+                    if init_current_step == step_name:
+                        display.update_last_system_message(f"   {padded_name} {msg}", style="dim red")
+                    else:
+                        display.add_system_message(f"   {padded_name} {msg}", style="dim red")
+                    init_current_step = None
 
             elif isinstance(event, AgentOutputEvent):
                 # Route output to the correct agent's buffer
