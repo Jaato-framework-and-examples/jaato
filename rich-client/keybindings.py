@@ -149,8 +149,8 @@ DEFAULT_KEYBINDINGS = {
     "tool_expand": "right",   # Expand selected tool's output
     "tool_collapse": "left",  # Collapse selected tool's output
     "tool_exit": "escape",    # Exit tool navigation mode
-    "tool_output_up": "[",    # Scroll up within expanded tool output
-    "tool_output_down": "]",  # Scroll down within expanded tool output
+    "tool_output_up": "up",   # Scroll up within expanded tool output (same as nav_up)
+    "tool_output_down": "down",  # Scroll down within expanded tool output (same as nav_down)
 }
 
 
@@ -678,7 +678,7 @@ def generate_example_config() -> str:
         "tool_expand": "right",
         "tool_collapse": "left",
         "tool_exit": "escape",
-        "tool_output_up": "[",
-        "tool_output_down": "]",
+        "tool_output_up": "up",
+        "tool_output_down": "down",
     }
     return json.dumps(example, indent=2)

@@ -141,7 +141,7 @@ class OutputBuffer:
             defaults = {
                 "nav_up": "↑", "nav_down": "↓",
                 "tool_expand": "→", "tool_collapse": "←", "tool_exit": "Esc",
-                "tool_output_up": "[", "tool_output_down": "]",
+                "tool_output_up": "↑", "tool_output_down": "↓",
                 "tool_nav_enter": "Ctrl+N", "toggle_tools": "Ctrl+T",
             }
             return defaults.get(action, action)

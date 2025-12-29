@@ -821,28 +821,6 @@ class PTDisplay:
                 buffer.enter_tool_navigation()
             self._app.invalidate()
 
-        @kb.add(*keys.get_key_args("tool_output_up"))
-        def handle_tool_output_up(event):
-            """Handle [ - scroll up within expanded tool output."""
-            buffer = self._get_active_buffer()
-            if buffer.tool_nav_active:
-                buffer.scroll_selected_tool_up()
-                self._app.invalidate()
-            else:
-                # Not in tool nav mode - insert character
-                event.current_buffer.insert_text("[")
-
-        @kb.add(*keys.get_key_args("tool_output_down"))
-        def handle_tool_output_down(event):
-            """Handle ] - scroll down within expanded tool output."""
-            buffer = self._get_active_buffer()
-            if buffer.tool_nav_active:
-                buffer.scroll_selected_tool_down()
-                self._app.invalidate()
-            else:
-                # Not in tool nav mode - insert character
-                event.current_buffer.insert_text("]")
-
         @kb.add(*keys.get_key_args("tool_expand"), eager=True)
         def handle_tool_expand(event):
             """Handle right arrow - expand selected tool's output."""
