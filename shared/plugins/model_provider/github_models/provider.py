@@ -20,21 +20,24 @@ import time
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from azure.ai.inference import ChatCompletionsClient
-from azure.ai.inference.models import (
-    AssistantMessage,
-    SystemMessage,
-    UserMessage,
+# Lazy imports - SDK is only loaded when actually used
+from ._lazy import (
+    get_chat_client_class,
+    get_models,
+    get_azure_key_credential,
+    get_response_format_json,
 )
-from azure.core.credentials import AzureKeyCredential
 
-# ChatCompletionsResponseFormatJSON may not be available in older SDK versions
-try:
-    from azure.ai.inference.models import ChatCompletionsResponseFormatJSON
-except ImportError:
-    ChatCompletionsResponseFormatJSON = None  # type: ignore
+if TYPE_CHECKING:
+    from azure.ai.inference import ChatCompletionsClient
+    from azure.ai.inference.models import (
+        AssistantMessage,
+        SystemMessage,
+        UserMessage,
+    )
+    from azure.core.credentials import AzureKeyCredential
 
 from ..base import ModelProviderPlugin, ProviderConfig, StreamingCallback, UsageUpdateCallback
 from ..types import (
@@ -276,15 +279,15 @@ class GitHubModelsProvider:
         # Verify connectivity
         self._verify_connectivity()
 
-    def _create_client(self) -> ChatCompletionsClient:
+    def _create_client(self) -> "ChatCompletionsClient":
         """Create the ChatCompletionsClient.
 
         Returns:
             Initialized ChatCompletionsClient.
         """
-        return ChatCompletionsClient(
+        return get_chat_client_class()(
             endpoint=self._endpoint,
-            credential=AzureKeyCredential(self._token),
+            credential=get_azure_key_credential()(self._token),
         )
 
     def _verify_connectivity(self) -> None:
@@ -456,7 +459,7 @@ class GitHubModelsProvider:
         if not self._client or not self._model_name:
             raise RuntimeError("Provider not connected. Call connect() first.")
 
-        messages = [UserMessage(content=prompt)]
+        messages = [get_models().UserMessage(content=prompt)]
 
         try:
             response = self._client.complete(
@@ -490,7 +493,7 @@ class GitHubModelsProvider:
 
         # Build messages list
         messages = self._build_messages()
-        messages.append(UserMessage(content=message))
+        messages.append(get_models().UserMessage(content=message))
 
         # Add user message to history
         self._history.append(Message.from_text(Role.USER, message))
@@ -607,7 +610,7 @@ class GitHubModelsProvider:
 
         # Add system instruction if present
         if self._system_instruction:
-            messages.append(SystemMessage(content=self._system_instruction))
+            messages.append(get_models().SystemMessage(content=self._system_instruction))
 
         # Convert history to SDK format
         messages.extend(history_to_sdk(self._history))
@@ -625,8 +628,9 @@ class GitHubModelsProvider:
                 kwargs['tools'] = sdk_tools
 
         # Add response format for structured output
-        if response_schema and ChatCompletionsResponseFormatJSON is not None:
-            kwargs['response_format'] = ChatCompletionsResponseFormatJSON()
+        response_format_json = get_response_format_json()
+        if response_schema and response_format_json is not None:
+            kwargs['response_format'] = response_format_json()
 
         return kwargs
 
@@ -800,7 +804,7 @@ class GitHubModelsProvider:
 
         # Build messages list
         messages = self._build_messages()
-        messages.append(UserMessage(content=message))
+        messages.append(get_models().UserMessage(content=message))
 
         # Add user message to history
         self._history.append(Message.from_text(Role.USER, message))
