@@ -11,7 +11,7 @@ import shutil
 import sys
 import time
 from io import StringIO
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
@@ -155,6 +155,9 @@ class PTDisplay:
         # Temporary status message (for copy feedback, etc.)
         self._status_message: Optional[str] = None
         self._status_message_expires: float = 0.0
+
+        # Initialization progress tracking
+        self._init_progress_lines: List[Tuple[str, str]] = []  # [(line, style), ...]
 
         # Clipboard support
         self._clipboard_config = clipboard_config or ClipboardConfig.from_env()
@@ -1085,6 +1088,33 @@ class PTDisplay:
         # Auto-scroll to bottom when new output arrives
         buffer.scroll_to_bottom()
         self.refresh()
+
+    def add_init_progress(self, message: str, style: str = "dim") -> None:
+        """Add a line to the initialization progress display.
+
+        Init progress lines are displayed during session initialization
+        and cleared when initialization completes.
+        """
+        self._init_progress_lines.append((message, style))
+
+    def clear_init_progress(self) -> None:
+        """Clear all initialization progress lines."""
+        self._init_progress_lines.clear()
+
+    def show_init_progress(self) -> None:
+        """Display the current initialization progress lines to the output buffer."""
+        # Use selected agent's buffer if registry present, otherwise use default
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if not buffer:
+                buffer = self._output_buffer
+        else:
+            buffer = self._output_buffer
+
+        for message, style in self._init_progress_lines:
+            buffer.add_system_message(message, style)
+
+        buffer.scroll_to_bottom()
 
     def clear_output(self) -> None:
         """Clear the output buffer."""
