@@ -958,8 +958,8 @@ class OutputBuffer:
         Returns:
             True if scroll position changed.
         """
-        # Calculate total display lines
-        total_display_lines = sum(line.display_lines for line in self._lines)
+        # Calculate total display lines (handles both OutputLine and ToolBlock)
+        total_display_lines = sum(self._get_item_display_lines(item) for item in self._lines)
         max_offset = max(0, total_display_lines - 1)
 
         old_offset = self._scroll_offset
@@ -2014,10 +2014,10 @@ class OutputBuffer:
         if sources is None:
             sources = {"model"}
 
-        # Get all lines including current streaming block
-        all_lines = list(self._lines) + self._get_current_block_lines()
+        # Get all items including current streaming block
+        all_items = list(self._lines) + self._get_current_block_lines()
 
-        if not all_lines:
+        if not all_items:
             return None
 
         # Find the last contiguous block of matching source lines
@@ -2025,9 +2025,16 @@ class OutputBuffer:
         in_block = False
 
         # Walk backwards to find the last matching block
-        for line in reversed(all_lines):
-            if self._should_include_source(line.source, sources):
-                result_lines.append(line.text)
+        for item in reversed(all_items):
+            # Skip ToolBlocks - they don't have text content
+            if isinstance(item, ToolBlock):
+                if in_block:
+                    # We've hit a ToolBlock while in a block, stop
+                    break
+                continue
+            # item is an OutputLine
+            if self._should_include_source(item.source, sources):
+                result_lines.append(item.text)
                 in_block = True
             elif in_block:
                 # We've exited the block, stop
@@ -2061,21 +2068,24 @@ class OutputBuffer:
         Returns:
             The extracted text, or None if no matching content.
         """
-        all_lines = list(self._lines) + self._get_current_block_lines()
+        all_items = list(self._lines) + self._get_current_block_lines()
 
-        if not all_lines:
+        if not all_items:
             return None
 
         result_lines: List[str] = []
         current_display_line = 0
 
-        for line in all_lines:
-            line_end = current_display_line + line.display_lines
+        for item in all_items:
+            item_height = self._get_item_display_lines(item)
+            line_end = current_display_line + item_height
 
-            # Check if this line overlaps with the selection range
+            # Check if this item overlaps with the selection range
             if line_end > start_line and current_display_line <= end_line:
-                if self._should_include_source(line.source, sources):
-                    result_lines.append(line.text)
+                # Only include OutputLine items (skip ToolBlocks)
+                if isinstance(item, OutputLine):
+                    if self._should_include_source(item.source, sources):
+                        result_lines.append(item.text)
 
             current_display_line = line_end
 
@@ -2098,16 +2108,18 @@ class OutputBuffer:
         Returns:
             The extracted text, or None if no matching content.
         """
-        all_lines = list(self._lines) + self._get_current_block_lines()
+        all_items = list(self._lines) + self._get_current_block_lines()
 
-        if not all_lines:
+        if not all_items:
             return None
 
         result_lines: List[str] = []
 
-        for line in all_lines:
-            if self._should_include_source(line.source, sources):
-                result_lines.append(line.text)
+        for item in all_items:
+            # Only include OutputLine items (skip ToolBlocks)
+            if isinstance(item, OutputLine):
+                if self._should_include_source(item.source, sources):
+                    result_lines.append(item.text)
 
         if not result_lines:
             return None
@@ -2126,8 +2138,8 @@ class OutputBuffer:
         Returns:
             Tuple of (start_line, end_line) display line indices.
         """
-        all_lines = list(self._lines) + self._get_current_block_lines()
-        total_display_lines = sum(line.display_lines for line in all_lines)
+        all_items = list(self._lines) + self._get_current_block_lines()
+        total_display_lines = sum(self._get_item_display_lines(item) for item in all_items)
 
         # Calculate visible range based on scroll offset
         end_line = total_display_lines - self._scroll_offset
