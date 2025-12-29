@@ -915,7 +915,9 @@ class OutputBuffer:
             # Calculate how much space the tool tree will take (including separator)
             tool_tree_height = self._calculate_tool_tree_height()
             if tool_tree_height > 0 and all_lines:
-                tool_tree_height += 4  # Account for separator (\n\n + line + \n)
+                # Separator adds: blank line (\n\n) + separator text + \n = 2 visual lines
+                # Add +3 safety margin for edge cases (line wrapping, alignment)
+                tool_tree_height += 5  # 2 for separator + 3 safety margin
 
             # Adjust available height for stored lines
             available_for_lines = max(1, height - tool_tree_height)
