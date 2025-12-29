@@ -1089,6 +1089,25 @@ class PTDisplay:
         buffer.scroll_to_bottom()
         self.refresh()
 
+    def update_last_system_message(self, message: str, style: str = "dim") -> bool:
+        """Update the last system message in the output.
+
+        Returns:
+            True if updated, False if no system message found.
+        """
+        # Use selected agent's buffer if registry present, otherwise use default
+        if self._agent_registry:
+            buffer = self._agent_registry.get_selected_buffer()
+            if not buffer:
+                buffer = self._output_buffer
+        else:
+            buffer = self._output_buffer
+
+        result = buffer.update_last_system_message(message, style)
+        if result:
+            self.refresh()
+        return result
+
     def add_init_progress(self, message: str, style: str = "dim") -> None:
         """Add a line to the initialization progress display.
 
