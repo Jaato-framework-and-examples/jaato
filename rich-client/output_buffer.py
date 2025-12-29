@@ -7,7 +7,7 @@ region of the TUI.
 import textwrap
 from collections import deque
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 from rich.console import Console, RenderableType
 from rich.text import Text
