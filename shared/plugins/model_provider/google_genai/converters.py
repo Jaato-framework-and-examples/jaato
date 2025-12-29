@@ -5,6 +5,8 @@ types (Message, ToolSchema, etc.) and Google's SDK types (Content,
 FunctionDeclaration, etc.).
 """
 
+from __future__ import annotations
+
 import base64
 import json
 import uuid

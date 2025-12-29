@@ -12,6 +12,8 @@ Authentication methods:
 - Impersonation: For Vertex AI, act as another service account
 """
 
+from __future__ import annotations
+
 import json
 import os
 import time

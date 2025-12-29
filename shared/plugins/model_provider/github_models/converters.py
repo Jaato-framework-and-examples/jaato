@@ -5,6 +5,8 @@ types (Message, ToolSchema, etc.) and the azure-ai-inference SDK types
 which follow the OpenAI chat completions format.
 """
 
+from __future__ import annotations
+
 import base64
 import json
 import uuid
