@@ -341,6 +341,7 @@ class LSPToolPlugin:
         self._initialized = False
         self._config_path: Optional[str] = None  # Explicit config path from plugin_configs
         self._custom_config_path: Optional[str] = None  # User-specified path
+        self._workspace_path: Optional[str] = None  # Client's working directory
         self._config_cache: Dict[str, Any] = {}
         self._connected_servers: set = set()
         self._failed_servers: Dict[str, str] = {}
@@ -399,6 +400,7 @@ class LSPToolPlugin:
         Args:
             config: Optional configuration dict. Supports:
                 - config_path: Path to .lsp.json file (overrides default search)
+                - workspace_path: Client's working directory for finding .lsp.json
                 - agent_name: Name for trace logging
         """
         if self._initialized:
@@ -410,11 +412,25 @@ class LSPToolPlugin:
         # Extract config values
         self._agent_name = config.get('agent_name')
         self._custom_config_path = config.get('config_path')
+        self._workspace_path = config.get('workspace_path')
 
         self._trace("initialize: starting background thread")
         self._ensure_thread()
         self._initialized = True
         self._trace(f"initialize: connected_servers={list(self._connected_servers)}")
+
+    def set_workspace_path(self, path: str) -> None:
+        """Set the workspace path for finding config files.
+
+        This should be called when the client's working directory changes.
+        It will trigger a reload of the config file from the new location.
+        """
+        if path != self._workspace_path:
+            self._workspace_path = path
+            self._trace(f"workspace_path changed to: {path}")
+            # Force reload config on next access
+            if self._initialized:
+                self._load_config_cache(force=True)
 
     def shutdown(self) -> None:
         """Shutdown the LSP plugin and clean up resources."""
@@ -798,19 +814,28 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         if tool_name not in FILE_WRITING_TOOLS:
             return ToolResultEnrichmentResult(result=result)
 
+        self._trace(f"enrich_tool_result: checking {tool_name}")
+
         # Skip if no LSP servers are connected
         if not self._connected_servers:
+            self._trace(f"enrich_tool_result: skipped - no servers connected")
             return ToolResultEnrichmentResult(result=result)
 
         # Parse the result to extract file paths
         file_paths = self._extract_file_paths_from_result(tool_name, result)
         if not file_paths:
+            self._trace(f"enrich_tool_result: no file paths found in result")
             return ToolResultEnrichmentResult(result=result)
+
+        self._trace(f"enrich_tool_result: found files {file_paths}")
 
         # Filter to files that have LSP support
         supported_files = self._filter_supported_files(file_paths)
         if not supported_files:
+            self._trace(f"enrich_tool_result: no supported file types")
             return ToolResultEnrichmentResult(result=result)
+
+        self._trace(f"enrich_tool_result: checking diagnostics for {supported_files}")
 
         # Run diagnostics on each file and collect results
         all_diagnostics = {}
@@ -818,6 +843,8 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             diags = self._get_diagnostics_for_file(file_path)
             if diags:
                 all_diagnostics[file_path] = diags
+
+        self._trace(f"enrich_tool_result: found {len(all_diagnostics)} files with diagnostics")
 
         # Build enriched result with diagnostic summary
         enriched_result = self._build_enriched_result(result, all_diagnostics)
@@ -1209,8 +1236,22 @@ Example:
         if not self._initialized:
             self.initialize()
 
+        # Force reload config from disk
+        old_servers = set(self._config_cache.get('languageServers', {}).keys()) if self._config_cache else set()
         self._load_config_cache(force=True)
         servers = self._config_cache.get('languageServers', {})
+        new_servers = set(servers.keys())
+
+        lines = []
+        if old_servers != new_servers:
+            added = new_servers - old_servers
+            removed = old_servers - new_servers
+            if added:
+                lines.append(f"Added servers: {', '.join(added)}")
+            if removed:
+                lines.append(f"Removed servers: {', '.join(removed)}")
+        else:
+            lines.append(f"Config unchanged ({len(servers)} server(s))")
 
         try:
             self._request_queue.put((MSG_RELOAD_CONFIG, {'servers': servers}))
@@ -1221,8 +1262,19 @@ Example:
                 failed = result.get('failed', {})
                 self._connected_servers = set(connected)
                 self._failed_servers = failed
-                return f"Reloaded: {len(connected)} connected, {len(failed)} failed"
+
+                if connected:
+                    lines.append(f"Connected: {', '.join(connected)}")
+                if failed:
+                    for name, error in failed.items():
+                        lines.append(f"Failed: {name} - {error}")
+                if not connected and not failed:
+                    lines.append("No servers to connect")
+
+                return '\n'.join(lines)
             return f"Reload failed: {result}"
+        except queue.Empty:
+            return "Reload timed out - async loop may not be running"
         except Exception as e:
             return f"Error reloading: {e}"
 
@@ -1248,8 +1300,9 @@ Example:
 
         Search order:
         1. Custom path from plugin_configs (config_path)
-        2. .lsp.json in current working directory
-        3. ~/.lsp.json in home directory
+        2. .lsp.json in workspace directory (client's working directory)
+        3. .lsp.json in current working directory (fallback)
+        4. ~/.lsp.json in home directory
         """
         if self._config_cache and not force:
             return
@@ -1258,8 +1311,10 @@ Example:
         paths = []
         if self._custom_config_path:
             paths.append(self._custom_config_path)
+        # Use workspace_path if set, otherwise fall back to cwd
+        workspace = self._workspace_path or os.getcwd()
         paths.extend([
-            os.path.join(os.getcwd(), '.lsp.json'),
+            os.path.join(workspace, '.lsp.json'),
             os.path.expanduser('~/.lsp.json'),
         ])
 
@@ -1510,24 +1565,85 @@ Example:
 
         return ". ".join(parts)
 
+    def _build_empty_result_error(self, file_path: str, operation: str, detail: str = "") -> str:
+        """Build a specific error message when an LSP operation returns no results.
+
+        Detects the actual cause:
+        - No server configured for this file type
+        - Server configured but failed to start (with reason)
+        - Server connected but returned empty results
+        """
+        ext = os.path.splitext(file_path)[1].lower() if file_path else ''
+        lang = EXT_TO_LANGUAGE.get(ext)
+
+        # Load config to check server configuration
+        self._load_config_cache()
+        servers = self._config_cache.get('languageServers', {})
+
+        # Find servers that might handle this file type
+        matching_servers = []
+        if lang:
+            for name, spec in servers.items():
+                if spec.get('languageId') == lang or lang in name.lower():
+                    matching_servers.append(name)
+
+        # Case 1: No servers configured at all
+        if not servers:
+            return f"{operation}{detail}. No LSP servers configured - create .lsp.json to enable LSP features."
+
+        # Case 2: No server configured for this language
+        if lang and not matching_servers:
+            return f"{operation}{detail}. No LSP server configured for {lang} files in .lsp.json."
+
+        # Case 3: Server configured but failed to start
+        failed_matching = [s for s in matching_servers if s in self._failed_servers]
+        if failed_matching:
+            server_name = failed_matching[0]
+            error = self._failed_servers[server_name]
+            # Simplify common errors
+            if "FileNotFoundError" in error or "No such file" in error:
+                cmd = servers.get(server_name, {}).get('command', 'unknown')
+                return f"{operation}{detail}. LSP server '{server_name}' failed: command '{cmd}' not found (not installed?)."
+            elif "timed out" in error.lower():
+                return f"{operation}{detail}. LSP server '{server_name}' failed: connection timed out."
+            else:
+                return f"{operation}{detail}. LSP server '{server_name}' failed: {error}."
+
+        # Case 4: Server connected but returned empty - genuine empty result
+        connected_matching = [s for s in matching_servers if s in self._connected_servers]
+        if connected_matching:
+            server_name = connected_matching[0]
+            return f"{operation}{detail}. Server '{server_name}' is connected but returned no results."
+
+        # Case 5: Server configured but not connected (unknown state)
+        if matching_servers:
+            return f"{operation}{detail}. LSP server '{matching_servers[0]}' is not connected. Run 'lsp status' for details."
+
+        # Fallback
+        return f"{operation}{detail}. Run 'lsp status' to check server state."
+
     async def _call_lsp_method(self, client: LSPClient, method: str, args: Dict[str, Any]) -> Any:
         """Call an LSP method on the client."""
         file_path = args.get('file_path')
 
         # Methods that require full parsing need more time
-        needs_parsing = method in ('hover', 'document_symbols', 'goto_definition', 'find_references')
+        # get_diagnostics also needs time for server to analyze and publish diagnostics
+        needs_parsing = method in ('hover', 'document_symbols', 'goto_definition', 'find_references', 'get_diagnostics')
 
         # Ensure document is open if needed
         if file_path and method not in ('workspace_symbols',):
             await client.open_document(file_path)
             # Wait for server to process the document
-            # Longer delay for operations that need full parsing
-            await asyncio.sleep(0.5 if needs_parsing else 0.2)
+            # Longer delay for operations that need full parsing/diagnostics
+            await asyncio.sleep(0.8 if needs_parsing else 0.2)
 
         if method == 'goto_definition':
             locations = await client.goto_definition(
                 file_path, args['line'], args['character']
             )
+            if not locations:
+                pos = f" at {file_path}:{args['line']+1}:{args['character']}"
+                return {"error": self._build_empty_result_error(file_path, "No definition found", pos)}
             return self._format_locations(locations)
 
         elif method == 'find_references':
@@ -1535,6 +1651,9 @@ Example:
                 file_path, args['line'], args['character'],
                 args.get('include_declaration', True)
             )
+            if not locations:
+                pos = f" at {file_path}:{args['line']+1}:{args['character']}"
+                return {"error": self._build_empty_result_error(file_path, "No references found", pos)}
             return self._format_locations(locations)
 
         elif method == 'hover':
@@ -1545,7 +1664,8 @@ Example:
                     return {"contents": hover.contents}
                 if attempt < 2:
                     await asyncio.sleep(0.3)  # Brief wait before retry
-            return {"contents": "No hover information available (server may still be indexing)"}
+            pos = f" at {file_path}:{args['line']+1}:{args['character']}"
+            return {"error": self._build_empty_result_error(file_path, "No hover information", pos)}
 
         elif method == 'get_diagnostics':
             diagnostics = client.get_diagnostics(file_path)
@@ -1553,6 +1673,8 @@ Example:
 
         elif method == 'document_symbols':
             symbols = await client.get_document_symbols(file_path)
+            if not symbols:
+                return {"error": self._build_empty_result_error(file_path, "No symbols found", f" in {file_path}")}
             return [
                 {
                     "name": s.name,
@@ -1563,7 +1685,11 @@ Example:
             ]
 
         elif method == 'workspace_symbols':
-            symbols = await client.workspace_symbols(args['query'])
+            query = args['query']
+            symbols = await client.workspace_symbols(query)
+            if not symbols:
+                # For workspace symbols, use the working directory to determine language context
+                return {"error": self._build_empty_result_error("", f"No symbols matching '{query}' found")}
             return [
                 {
                     "name": s.name,
@@ -1724,7 +1850,11 @@ Example:
             if status == 'error':
                 self._trace(f"execute: {method} ERROR - {result}")
                 return {"error": result}
-            self._trace(f"execute: {method} OK")
+            # Check if result indicates an error (e.g., no definitions found)
+            if isinstance(result, dict) and 'error' in result:
+                self._trace(f"execute: {method} EMPTY - {result.get('error', 'no results')}")
+            else:
+                self._trace(f"execute: {method} OK")
             return result
         except queue.Empty:
             self._trace(f"execute: {method} TIMEOUT")

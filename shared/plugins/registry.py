@@ -17,8 +17,13 @@ from .base import (
     SystemInstructionEnrichmentResult,
     ToolResultEnrichmentResult,
     model_matches_requirements,
+    OutputCallback,
 )
 from .model_provider.types import ToolSchema
+from .enrichment_formatter import (
+    EnrichmentNotification,
+    format_enrichment_notifications,
+)
 
 # Entry point group names by plugin kind
 PLUGIN_ENTRY_POINT_GROUPS = {
@@ -79,6 +84,174 @@ class PluginRegistry:
         self._model_name: Optional[str] = model_name
         self._skipped_plugins: Dict[str, List[str]] = {}  # name -> required patterns
         self._disabled_tools: Set[str] = set()  # Individual tools disabled by user
+        self._output_callback: Optional[OutputCallback] = None
+        self._terminal_width: int = 80
+
+    def set_output_callback(
+        self,
+        callback: Optional[OutputCallback],
+        terminal_width: int = 80
+    ) -> None:
+        """Set the output callback for enrichment notifications.
+
+        When set, the registry will emit visual notifications about enrichments
+        through this callback with source="enrichment".
+
+        Args:
+            callback: OutputCallback function (source, text, mode) -> None,
+                     or None to disable notifications.
+            terminal_width: Terminal width for word wrapping (default 80).
+        """
+        self._output_callback = callback
+        self._terminal_width = terminal_width
+        _trace(f"set_output_callback: callback={callback is not None}, terminal_width={terminal_width}")
+
+    def _emit_enrichment_notifications(
+        self,
+        notifications: List[EnrichmentNotification]
+    ) -> None:
+        """Emit enrichment notifications through the output callback.
+
+        Args:
+            notifications: List of enrichment notifications to display.
+        """
+        _trace(f"_emit_enrichment_notifications: {len(notifications)} notifications, callback={self._output_callback is not None}")
+        if not self._output_callback or not notifications:
+            return
+
+        formatted = format_enrichment_notifications(
+            notifications,
+            terminal_width=self._terminal_width
+        )
+        _trace(f"_emit_enrichment_notifications: formatted={repr(formatted[:100]) if formatted else 'empty'}")
+        if formatted:
+            self._output_callback("enrichment", formatted, "write")
+
+    def _build_notification(
+        self,
+        target: str,
+        plugin_name: str,
+        metadata: Optional[Dict[str, Any]],
+        size_bytes: int
+    ) -> Optional[EnrichmentNotification]:
+        """Build an enrichment notification from plugin metadata.
+
+        Plugins can provide explicit notification info via metadata["notification"],
+        or a fallback message is generated from known metadata patterns.
+
+        Args:
+            target: What was enriched ("prompt", "result", "system").
+            plugin_name: Name of the plugin that performed enrichment.
+            metadata: Plugin's returned metadata, may contain notification info.
+            size_bytes: Size difference in bytes (can be negative for reductions).
+
+        Returns:
+            EnrichmentNotification if a message could be generated, None otherwise.
+        """
+        if metadata is None:
+            metadata = {}
+
+        # Check for explicit notification in metadata
+        notif_data = metadata.get("notification")
+        if isinstance(notif_data, dict):
+            message = notif_data.get("message", "enriched content")
+            notif_size = notif_data.get("size_bytes", abs(size_bytes) if size_bytes else None)
+            return EnrichmentNotification(
+                target=target,
+                plugin=plugin_name,
+                message=message,
+                size_bytes=notif_size
+            )
+
+        # Generate fallback message from known metadata patterns
+        message = self._generate_fallback_message(plugin_name, metadata)
+        if message:
+            return EnrichmentNotification(
+                target=target,
+                plugin=plugin_name,
+                message=message,
+                size_bytes=abs(size_bytes) if size_bytes else None
+            )
+
+        # Last resort: generic message
+        return EnrichmentNotification(
+            target=target,
+            plugin=plugin_name,
+            message="enriched content",
+            size_bytes=abs(size_bytes) if size_bytes else None
+        )
+
+    def _generate_fallback_message(
+        self,
+        plugin_name: str,
+        metadata: Dict[str, Any]
+    ) -> Optional[str]:
+        """Generate a notification message from known metadata patterns.
+
+        Args:
+            plugin_name: Name of the plugin for pattern matching.
+            metadata: Plugin's returned metadata.
+
+        Returns:
+            A human-readable message, or None if no pattern matched.
+        """
+        # Memory plugin pattern
+        if "memory_matches" in metadata:
+            count = metadata["memory_matches"]
+            if count > 0:
+                # Include trigger keywords if available
+                keywords = metadata.get("trigger_keywords", [])
+                if keywords:
+                    keyword_summary = ", ".join(f'"{k}"' for k in keywords[:3])
+                    if len(keywords) > 3:
+                        keyword_summary += f" +{len(keywords) - 3} more"
+                    return f"added context about {count} memories (triggered by {keyword_summary})"
+                return f"added context about {count} relevant memories"
+
+        # Session plugin pattern
+        if metadata.get("description_requested"):
+            return "requested session description (turn threshold reached)"
+
+        # LSP plugin pattern - show diagnostic counts
+        if "total_errors" in metadata or "total_warnings" in metadata:
+            errors = metadata.get("total_errors", 0)
+            warnings = metadata.get("total_warnings", 0)
+            files = metadata.get("files_checked", [])
+            file_str = files[0] if len(files) == 1 else f"{len(files)} files"
+
+            parts = []
+            if errors > 0:
+                parts.append(f"{errors} error{'s' if errors != 1 else ''}")
+            if warnings > 0:
+                parts.append(f"{warnings} warning{'s' if warnings != 1 else ''}")
+
+            if parts:
+                return f"found {', '.join(parts)} in {file_str}"
+            else:
+                return f"checked {file_str}, no issues found"
+
+        # References plugin pattern
+        if "mentioned_references" in metadata:
+            refs = metadata["mentioned_references"]
+            if refs:
+                if len(refs) == 1:
+                    return f"expanded @{refs[0]}"
+                elif len(refs) <= 3:
+                    ref_list = ", ".join(f"@{r}" for r in refs)
+                    return f"expanded {ref_list}"
+                else:
+                    return f"expanded {len(refs)} references"
+
+        # Template extraction pattern
+        if "extracted_templates" in metadata:
+            templates = metadata["extracted_templates"]
+            if templates:
+                if len(templates) == 1:
+                    return f"extracted @{templates[0]} template"
+                else:
+                    return f"extracted {len(templates)} templates"
+
+        return None
 
     def discover(
         self,
@@ -699,17 +872,33 @@ class PluginRegistry:
         """
         current_prompt = prompt
         combined_metadata: Dict[str, Any] = {}
+        notifications: List[EnrichmentNotification] = []
 
         for plugin in self.get_prompt_enrichment_subscribers():
             try:
                 if hasattr(plugin, 'enrich_prompt'):
+                    before = current_prompt
                     result = plugin.enrich_prompt(current_prompt)
                     current_prompt = result.prompt
                     # Merge metadata, using plugin name as namespace
                     if result.metadata:
                         combined_metadata[plugin.name] = result.metadata
+
+                    # Build notification if content changed
+                    if current_prompt != before:
+                        notif = self._build_notification(
+                            target="prompt",
+                            plugin_name=plugin.name,
+                            metadata=result.metadata,
+                            size_bytes=len(current_prompt) - len(before)
+                        )
+                        if notif:
+                            notifications.append(notif)
             except Exception as exc:
                 _trace(f" Error in prompt enrichment for '{plugin.name}': {exc}")
+
+        # Emit notifications
+        self._emit_enrichment_notifications(notifications)
 
         return PromptEnrichmentResult(prompt=current_prompt, metadata=combined_metadata)
 
@@ -770,16 +959,32 @@ class PluginRegistry:
         """
         current_instructions = instructions
         combined_metadata: Dict[str, Any] = {}
+        notifications: List[EnrichmentNotification] = []
 
         for plugin in self.get_system_instruction_enrichment_subscribers():
             try:
                 if hasattr(plugin, 'enrich_system_instructions'):
+                    before = current_instructions
                     result = plugin.enrich_system_instructions(current_instructions)
                     current_instructions = result.instructions
                     if result.metadata:
                         combined_metadata[plugin.name] = result.metadata
+
+                    # Build notification if content changed
+                    if current_instructions != before:
+                        notif = self._build_notification(
+                            target="system",
+                            plugin_name=plugin.name,
+                            metadata=result.metadata,
+                            size_bytes=len(current_instructions) - len(before)
+                        )
+                        if notif:
+                            notifications.append(notif)
             except Exception as exc:
                 _trace(f" Error in system instruction enrichment for '{plugin.name}': {exc}")
+
+        # Emit notifications
+        self._emit_enrichment_notifications(notifications)
 
         return SystemInstructionEnrichmentResult(
             instructions=current_instructions,
@@ -844,16 +1049,32 @@ class PluginRegistry:
         """
         current_result = result
         combined_metadata: Dict[str, Any] = {}
+        notifications: List[EnrichmentNotification] = []
 
         for plugin in self.get_tool_result_enrichment_subscribers():
             try:
                 if hasattr(plugin, 'enrich_tool_result'):
+                    before = current_result
                     enrichment = plugin.enrich_tool_result(tool_name, current_result)
                     current_result = enrichment.result
                     if enrichment.metadata:
                         combined_metadata[plugin.name] = enrichment.metadata
+
+                    # Build notification if content changed
+                    if current_result != before:
+                        notif = self._build_notification(
+                            target="result",
+                            plugin_name=plugin.name,
+                            metadata=enrichment.metadata,
+                            size_bytes=len(current_result) - len(before)
+                        )
+                        if notif:
+                            notifications.append(notif)
             except Exception as exc:
                 _trace(f" Error in tool result enrichment for '{plugin.name}': {exc}")
+
+        # Emit notifications
+        self._emit_enrichment_notifications(notifications)
 
         return ToolResultEnrichmentResult(
             result=current_result,

@@ -716,7 +716,12 @@ class FileSessionPlugin:
 
             return PromptEnrichmentResult(
                 prompt=prompt + hint,
-                metadata={"description_requested": True}
+                metadata={
+                    "description_requested": True,
+                    "notification": {
+                        "message": "requested session description (turn threshold reached)"
+                    }
+                }
             )
 
         return PromptEnrichmentResult(prompt=prompt)

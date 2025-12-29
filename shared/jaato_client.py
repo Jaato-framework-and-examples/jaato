@@ -218,6 +218,18 @@ class JaatoClient:
         if self._session:
             self._session.set_streaming_enabled(enabled)
 
+    def set_terminal_width(self, width: int) -> None:
+        """Set the terminal width for formatting.
+
+        This affects enrichment notification formatting to properly
+        wrap and align text for the terminal.
+
+        Args:
+            width: Terminal width in columns.
+        """
+        if self._session:
+            self._session.set_terminal_width(width)
+
     def set_ui_hooks(self, hooks: 'AgentUIHooks') -> None:
         """Set UI hooks for agent lifecycle events.
 

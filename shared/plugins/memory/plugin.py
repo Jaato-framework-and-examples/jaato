@@ -279,11 +279,20 @@ class MemoryPlugin:
 
         enriched_prompt = prompt + "\n" + "\n".join(hint_lines)
 
+        # Build notification message with trigger keywords
+        keyword_summary = ", ".join(f'"{k}"' for k in keywords[:3])
+        if len(keywords) > 3:
+            keyword_summary += f" +{len(keywords) - 3} more"
+
         return PromptEnrichmentResult(
             prompt=enriched_prompt,
             metadata={
                 "memory_matches": len(matches),
-                "matched_ids": [m.id for m in matches]
+                "matched_ids": [m.id for m in matches],
+                "trigger_keywords": keywords,
+                "notification": {
+                    "message": f"added context about {len(matches)} memories (triggered by {keyword_summary})"
+                }
             }
         )
 
