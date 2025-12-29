@@ -189,6 +189,9 @@ class JaatoServer:
         # Trace log path
         self._trace_path = os.path.join(tempfile.gettempdir(), "jaato_server_trace.log")
 
+        # Terminal width for formatting (default 80)
+        self._terminal_width: int = 80
+
     # =========================================================================
     # Workspace Management
     # =========================================================================
@@ -202,6 +205,25 @@ class JaatoServer:
     def workspace_path(self, path: Optional[str]) -> None:
         """Set the client's workspace path."""
         self._workspace_path = path
+        # Propagate to plugins that need workspace awareness
+        self._update_plugin_workspace(path)
+
+    @property
+    def terminal_width(self) -> int:
+        """Get the terminal width for formatting."""
+        return self._terminal_width
+
+    @terminal_width.setter
+    def terminal_width(self, width: int) -> None:
+        """Set the terminal width for formatting.
+
+        This affects enrichment notification formatting to properly
+        wrap and align text for the terminal.
+        """
+        self._terminal_width = width
+        # Propagate to JaatoClient if connected
+        if self._jaato:
+            self._jaato.set_terminal_width(width)
 
     @contextlib.contextmanager
     def _in_workspace(self):
@@ -223,6 +245,27 @@ class JaatoServer:
         finally:
             os.chdir(original_cwd)
             logger.debug(f"Restored to: {original_cwd}")
+
+    def _update_plugin_workspace(self, path: Optional[str]) -> None:
+        """Update workspace-aware plugins with the new workspace path.
+
+        This notifies plugins like LSP and MCP that need to find config files
+        relative to the client's working directory.
+        """
+        if not path or not hasattr(self, 'registry') or not self.registry:
+            return
+
+        # Update LSP plugin if registered
+        lsp_plugin = self.registry.get_plugin('lsp')
+        if lsp_plugin and hasattr(lsp_plugin, 'set_workspace_path'):
+            lsp_plugin.set_workspace_path(path)
+            logger.debug(f"Updated LSP plugin workspace_path to {path}")
+
+        # Update MCP plugin if registered
+        mcp_plugin = self.registry.get_plugin('mcp')
+        if mcp_plugin and hasattr(mcp_plugin, 'set_workspace_path'):
+            mcp_plugin.set_workspace_path(path)
+            logger.debug(f"Updated MCP plugin workspace_path to {path}")
 
     # =========================================================================
     # Event Emission
@@ -339,6 +382,9 @@ class JaatoServer:
         # Store model info
         self._model_name = self._jaato.model_name or model_name
         self._model_provider = self._jaato.provider_name
+
+        # Set terminal width for formatting
+        self._jaato.set_terminal_width(self._terminal_width)
 
         # Initialize plugin registry
         self.registry = PluginRegistry(model_name=model_name)

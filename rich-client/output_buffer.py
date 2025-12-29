@@ -120,6 +120,10 @@ class OutputBuffer:
             rendered.append(text)
         elif source == "system":
             rendered.append(text)
+        elif source == "enrichment":
+            # Enrichment notifications are pre-formatted single lines
+            # after _flush_current_block splits by newline
+            rendered.append(text)
         else:
             if is_turn_start:
                 rendered.append(f"[{source}] ", style="dim magenta")
@@ -777,24 +781,37 @@ class OutputBuffer:
                     box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
                     content_width = box_width - 4
 
-                    # Calculate actual rendered lines (with wrapping and truncation)
-                    if len(prompt_lines) > max_prompt_lines:
-                        lines_to_render = prompt_lines[:max_prompt_lines - 2]
-                        extra_lines = 2  # truncation msg + last line
-                    else:
-                        lines_to_render = prompt_lines
-                        extra_lines = 0
-
-                    rendered_lines = 0
-                    for prompt_line in lines_to_render:
+                    # First count ALL wrapped lines to decide truncation (matches render logic)
+                    total_wrapped_lines = 0
+                    for prompt_line in prompt_lines:
                         if len(prompt_line) > content_width:
                             wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
-                            rendered_lines += len(wrapped) if wrapped else 1
+                            total_wrapped_lines += len(wrapped) if wrapped else 1
                         else:
-                            rendered_lines += 1
+                            total_wrapped_lines += 1
+
+                    if total_wrapped_lines > max_prompt_lines:
+                        # Truncation triggered - render shows:
+                        # - max_lines_before_truncation content lines
+                        # - 1 truncation message
+                        # - Last line (may wrap to multiple lines)
+                        max_lines_before_truncation = max_prompt_lines - 3
+
+                        # Calculate wrapped lines for last line
+                        last_line = prompt_lines[-1]
+                        if len(last_line) > content_width:
+                            last_wrapped = textwrap.wrap(last_line, width=content_width, break_long_words=True)
+                            last_line_count = len(last_wrapped) if last_wrapped else 1
+                        else:
+                            last_line_count = 1
+
+                        rendered_lines = max_lines_before_truncation + 1 + last_line_count  # content + truncation + last
+                    else:
+                        # No truncation - show all wrapped lines
+                        rendered_lines = total_wrapped_lines
 
                     height += 1  # top border
-                    height += rendered_lines + extra_lines
+                    height += rendered_lines
                     height += 1  # bottom border
 
                 # Clarification prompt (if pending)
@@ -813,23 +830,37 @@ class OutputBuffer:
                         box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
                         content_width = box_width - 4
 
-                        if len(prompt_lines) > max_prompt_lines:
-                            lines_to_render = prompt_lines[:max_prompt_lines - 2]
-                            extra_lines = 2
-                        else:
-                            lines_to_render = prompt_lines
-                            extra_lines = 0
-
-                        rendered_lines = 0
-                        for prompt_line in lines_to_render:
+                        # First count ALL wrapped lines to decide truncation (matches render logic)
+                        total_wrapped_lines = 0
+                        for prompt_line in prompt_lines:
                             if len(prompt_line) > content_width:
                                 wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
-                                rendered_lines += len(wrapped) if wrapped else 1
+                                total_wrapped_lines += len(wrapped) if wrapped else 1
                             else:
-                                rendered_lines += 1
+                                total_wrapped_lines += 1
+
+                        if total_wrapped_lines > max_prompt_lines:
+                            # Truncation triggered - render shows:
+                            # - max_lines_before_truncation content lines
+                            # - 1 truncation message
+                            # - Last line (may wrap to multiple lines)
+                            max_lines_before_truncation = max_prompt_lines - 3
+
+                            # Calculate wrapped lines for last line
+                            last_line = prompt_lines[-1]
+                            if len(last_line) > content_width:
+                                last_wrapped = textwrap.wrap(last_line, width=content_width, break_long_words=True)
+                                last_line_count = len(last_wrapped) if last_wrapped else 1
+                            else:
+                                last_line_count = 1
+
+                            rendered_lines = max_lines_before_truncation + 1 + last_line_count  # content + truncation + last
+                        else:
+                            # No truncation - show all wrapped lines
+                            rendered_lines = total_wrapped_lines
 
                         height += 1  # top border
-                        height += rendered_lines + extra_lines
+                        height += rendered_lines
                         height += 1  # bottom border
 
         elif self._spinner_active:
@@ -1073,6 +1104,14 @@ class OutputBuffer:
                         output.append("[*required]", style="yellow")
                     else:
                         output.append_text(Text.from_ansi(wrapped_line))
+            elif line.source == "enrichment":
+                # Enrichment notifications - render dimmed with proper wrapping
+                # The formatter pre-aligns continuation lines, so we wrap each line
+                wrapped = wrap_text(line.text)
+                for j, wrapped_line in enumerate(wrapped):
+                    if j > 0:
+                        output.append("\n")
+                    output.append(wrapped_line, style="dim")
             else:
                 # Other plugin output - wrap and preserve ANSI codes
                 prefix_width = len(f"[{line.source}] ") if line.is_turn_start else 0

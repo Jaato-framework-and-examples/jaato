@@ -131,6 +131,19 @@ class JaatoSession:
         self._gc_threshold_crossed: bool = False  # Set when threshold crossed during streaming
         self._gc_threshold_callback: Optional[GCThresholdCallback] = None
 
+        # Terminal width for formatting (used by enrichment notifications)
+        self._terminal_width: int = 80
+
+    def set_terminal_width(self, width: int) -> None:
+        """Set the terminal width for formatting.
+
+        This affects enrichment notification formatting.
+
+        Args:
+            width: Terminal width in columns.
+        """
+        self._terminal_width = width
+
     def _get_trace_prefix(self) -> str:
         """Get the trace prefix including agent context."""
         if self._agent_type == "main":
@@ -776,6 +789,10 @@ class JaatoSession:
         if self._executor:
             self._executor.set_output_callback(on_output)
 
+        # Set output callback on registry for enrichment notifications
+        if self._runtime.registry and on_output:
+            self._runtime.registry.set_output_callback(on_output, self._terminal_width)
+
         # Initialize cancellation support
         self._cancel_token = CancelToken()
         self._is_running = True
@@ -1229,10 +1246,12 @@ class JaatoSession:
         tool_name: str,
         result_dict: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Run tool result enrichment on text fields in result dict.
+        """Run tool result enrichment on tool results.
 
-        Looks for common text fields (result, content, stdout, output) and
-        runs them through the registry's tool result enrichment pipeline.
+        Two enrichment modes:
+        1. For file-writing tools (writeNewFile, updateFile): Pass the full JSON
+           result so enrichers can extract file paths and run diagnostics.
+        2. For other tools with large text fields: Enrich individual text fields.
 
         Args:
             tool_name: Name of the tool that produced the result.
@@ -1241,13 +1260,27 @@ class JaatoSession:
         Returns:
             Enriched result dictionary.
         """
-        # Fields that commonly contain text content to enrich
-        text_fields = ('result', 'content', 'stdout', 'output', 'text', 'data')
-
-        # Minimum length to consider for enrichment (avoid enriching short strings)
-        min_length = 100
-
         enriched_dict = result_dict.copy()
+
+        # Tools that write files - pass full JSON for LSP diagnostics enrichment
+        file_writing_tools = {'writeNewFile', 'updateFile', 'lsp_rename_symbol', 'lsp_apply_code_action'}
+
+        if tool_name in file_writing_tools:
+            # Pass full result as JSON so LSP can extract file paths
+            import json
+            result_json = json.dumps(result_dict)
+            enrichment = self._runtime.registry.enrich_tool_result(tool_name, result_json)
+            if enrichment.result != result_json:
+                try:
+                    enriched_dict = json.loads(enrichment.result)
+                except json.JSONDecodeError:
+                    # If enrichment broke JSON, keep original and append as text
+                    enriched_dict['_lsp_diagnostics'] = enrichment.result
+            return enriched_dict
+
+        # For other tools: enrich large text fields
+        text_fields = ('result', 'content', 'stdout', 'output', 'text', 'data')
+        min_length = 100
 
         for field in text_fields:
             if field in enriched_dict:
