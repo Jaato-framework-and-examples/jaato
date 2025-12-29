@@ -146,7 +146,8 @@ DEFAULT_KEYBINDINGS = {
 
     # Tool navigation
     "tool_nav_enter": "c-n",  # Enter tool navigation mode
-    "tool_expand": "right",   # Expand/collapse selected tool's output
+    "tool_expand": "right",   # Expand selected tool's output
+    "tool_collapse": "left",  # Collapse selected tool's output
     "tool_exit": "escape",    # Exit tool navigation mode
     "tool_output_up": "[",    # Scroll up within expanded tool output
     "tool_output_down": "]",  # Scroll down within expanded tool output
@@ -310,6 +311,7 @@ class KeybindingConfig:
     # Tool navigation
     tool_nav_enter: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_nav_enter"])
     tool_expand: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_expand"])
+    tool_collapse: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_collapse"])
     tool_exit: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_exit"])
     tool_output_up: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_output_up"])
     tool_output_down: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_output_down"])
@@ -497,6 +499,7 @@ class KeybindingConfig:
             "view_full": self.view_full,
             "tool_nav_enter": self.tool_nav_enter,
             "tool_expand": self.tool_expand,
+            "tool_collapse": self.tool_collapse,
             "tool_exit": self.tool_exit,
             "tool_output_up": self.tool_output_up,
             "tool_output_down": self.tool_output_down,
@@ -673,6 +676,7 @@ def generate_example_config() -> str:
 
         "tool_nav_enter": "c-n",
         "tool_expand": "right",
+        "tool_collapse": "left",
         "tool_exit": "escape",
         "tool_output_up": "[",
         "tool_output_down": "]",

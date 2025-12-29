@@ -140,7 +140,7 @@ class OutputBuffer:
             # Fallback defaults if no config
             defaults = {
                 "nav_up": "↑", "nav_down": "↓",
-                "tool_expand": "→", "tool_exit": "Esc",
+                "tool_expand": "→", "tool_collapse": "←", "tool_exit": "Esc",
                 "tool_output_up": "[", "tool_output_down": "]",
                 "tool_nav_enter": "Ctrl+N", "toggle_tools": "Ctrl+T",
             }
@@ -816,6 +816,30 @@ class OutputBuffer:
         tool.expanded = not tool.expanded
         return tool.expanded
 
+    def expand_selected_tool(self) -> bool:
+        """Expand the selected tool's output.
+
+        Returns:
+            True if tool was expanded (or already expanded), False if no selection.
+        """
+        tool = self.get_selected_tool()
+        if tool is None:
+            return False
+        tool.expanded = True
+        return True
+
+    def collapse_selected_tool(self) -> bool:
+        """Collapse the selected tool's output.
+
+        Returns:
+            True if tool was collapsed (or already collapsed), False if no selection.
+        """
+        tool = self.get_selected_tool()
+        if tool is None:
+            return False
+        tool.expanded = False
+        return True
+
     def get_selected_tool(self) -> Optional[ActiveToolCall]:
         """Get the currently selected tool."""
         if self._selected_tool_index is None:
@@ -1303,8 +1327,9 @@ class OutputBuffer:
             nav_up = self._format_key_hint("nav_up")
             nav_down = self._format_key_hint("nav_down")
             expand_key = self._format_key_hint("tool_expand")
+            collapse_key = self._format_key_hint("tool_collapse")
             exit_key = self._format_key_hint("tool_exit")
-            toggle_hint = f"← collapse" if selected_tool.expanded else f"{expand_key} expand"
+            toggle_hint = f"{collapse_key} collapse" if selected_tool.expanded else f"{expand_key} expand"
             output.append(f"  {nav_up}/{nav_down} nav, {toggle_hint}, {exit_key} exit [{pos}/{total}]", style="dim")
 
         output.append("\n")
@@ -1683,10 +1708,11 @@ class OutputBuffer:
                     nav_up = self._format_key_hint("nav_up")
                     nav_down = self._format_key_hint("nav_down")
                     expand_key = self._format_key_hint("tool_expand")
+                    collapse_key = self._format_key_hint("tool_collapse")
                     output_up = self._format_key_hint("tool_output_up")
                     output_down = self._format_key_hint("tool_output_down")
                     exit_key = self._format_key_hint("tool_exit")
-                    toggle_hint = f"← collapse" if selected_tool.expanded else f"{expand_key} expand"
+                    toggle_hint = f"{collapse_key} collapse" if selected_tool.expanded else f"{expand_key} expand"
                     output.append(f"  ───  {nav_up}/{nav_down} nav, {toggle_hint}, {output_up}/{output_down} scroll, {exit_key} exit [{pos}/{total}]", style="dim")
                 elif self._tools_expanded:
                     toggle_tools = self._format_key_hint("toggle_tools")
