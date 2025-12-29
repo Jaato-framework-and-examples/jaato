@@ -556,13 +556,18 @@ class OutputBuffer:
         if not blocks:
             return False
 
-        # Select first tool in first block
+        # Select last tool in last block (most recent) for more intuitive navigation
         self._tool_nav_active = True
-        self._selected_block_index = 0
-        self._selected_tool_index = 0
-        first_block = blocks[0][1]
-        first_block.selected_index = 0
-        first_block.expanded = True
+        last_block_idx = len(blocks) - 1
+        self._selected_block_index = last_block_idx
+        last_block = blocks[last_block_idx][1]
+        last_tool_idx = len(last_block.tools) - 1
+        self._selected_tool_index = last_tool_idx
+        last_block.selected_index = last_tool_idx
+        last_block.expanded = True
+        self._tools_expanded = True  # Ensure tools are in expanded mode
+        # Scroll to bottom to show the selected block
+        self._scroll_offset = 0
         return True
 
     def exit_tool_navigation(self) -> None:
@@ -1175,7 +1180,7 @@ class OutputBuffer:
                     pos = i + 1
                     break
             total = len(all_tools)
-            output.append(f"  ↑/↓ nav, Space expand, Esc exit [{pos}/{total}]", style="dim")
+            output.append(f"  ↑/↓ nav, → expand, Esc exit [{pos}/{total}]", style="dim")
 
         output.append("\n")
 
@@ -1545,7 +1550,7 @@ class OutputBuffer:
                     # Show navigation hints when in tool nav mode
                     pos = (self._selected_tool_index or 0) + 1
                     total = len(self._active_tools)
-                    output.append(f"  ───  ↑/↓ nav, Space expand, [/] scroll, Esc exit [{pos}/{total}]", style="dim")
+                    output.append(f"  ───  ↑/↓ nav, → expand, [/] scroll, Esc exit [{pos}/{total}]", style="dim")
                 elif self._tools_expanded:
                     output.append("  ───  Ctrl+T to collapse, Ctrl+N to navigate", style="dim")
                 else:
