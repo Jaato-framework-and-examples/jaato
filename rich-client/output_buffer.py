@@ -1392,7 +1392,8 @@ class OutputBuffer:
                     if lines_above > 0:
                         output.append("\n")
                         output.append(f"{prefix}{continuation}   ", style="dim")
-                        output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''}", style="dim italic")
+                        scroll_up_key = self._format_key_hint("nav_up")
+                        output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''} ({scroll_up_key} to scroll)", style="dim italic")
 
                     for output_line in tool.output_lines[start_idx:end_idx]:
                         output.append("\n")
@@ -1407,7 +1408,8 @@ class OutputBuffer:
                     if lines_below > 0:
                         output.append("\n")
                         output.append(f"{prefix}{continuation}   ", style="dim")
-                        output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''}", style="dim italic")
+                        scroll_down_key = self._format_key_hint("nav_down")
+                        output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style="dim italic")
 
                 # Error message
                 if not tool.success and tool.error_message:
@@ -1823,7 +1825,8 @@ class OutputBuffer:
                         if lines_above > 0:
                             output.append("\n")
                             output.append(f"{prefix}{continuation}   ", style="dim")
-                            output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''} ([ to scroll)", style="dim italic")
+                            scroll_up_key = self._format_key_hint("nav_up")
+                            output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''} ({scroll_up_key} to scroll)", style="dim italic")
 
                         # Show visible lines
                         for output_line in tool.output_lines[start_idx:end_idx]:
@@ -1841,7 +1844,8 @@ class OutputBuffer:
                         if lines_below > 0:
                             output.append("\n")
                             output.append(f"{prefix}{continuation}   ", style="dim")
-                            output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} (] to scroll)", style="dim italic")
+                            scroll_down_key = self._format_key_hint("nav_down")
+                            output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style="dim italic")
 
                     # Show permission denied info (when permission was denied)
                     if tool.permission_state == "denied" and tool.permission_method:
