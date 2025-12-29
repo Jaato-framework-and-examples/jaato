@@ -349,6 +349,10 @@ class OutputBuffer:
             tool_args: Arguments passed to the tool.
             call_id: Unique identifier for this tool call (for correlation).
         """
+        # If all existing tools are completed, finalize them first (new turn starting)
+        if self._active_tools and all(t.completed for t in self._active_tools):
+            self._finalize_completed_tools()
+
         # Create a summary of args (truncated for display)
         args_str = str(tool_args)
         if len(args_str) > 60:
@@ -588,34 +592,34 @@ class OutputBuffer:
         return False
 
     def finalize_tool_tree(self) -> None:
-        """Convert tool tree to stored lines (collapsed or expanded based on setting).
+        """Mark turn as complete but keep tools available for navigation.
 
-        Called when a turn is complete to make the tool summary scroll
-        with the rest of the content instead of staying fixed.
+        Called when a turn is complete. Tools remain in _active_tools for
+        navigation until the next turn starts (when _finalize_completed_tools
+        is called automatically).
         """
         # Flush any pending streaming text first to ensure proper ordering
         self._flush_current_block()
 
+        # Don't clear tools - keep them for navigation
+        # They will be finalized when the next turn starts
+
+    def _finalize_completed_tools(self) -> None:
+        """Convert completed tools to stored lines and clear for new turn.
+
+        Called internally when a new turn starts (new tool added while
+        previous tools are all completed).
+        """
         if not self._active_tools:
             return
 
-        # Check if all tools are completed and no pending prompts
-        all_completed = all(tool.completed for tool in self._active_tools)
-        any_pending = any(
-            tool.permission_state == "pending" or tool.clarification_state == "pending"
-            for tool in self._active_tools
-        )
-
-        if not all_completed or any_pending:
-            return  # Don't finalize yet
-
-        # Exit navigation mode when finalizing
+        # Exit navigation mode
         self._tool_nav_active = False
         self._selected_tool_index = None
 
         tool_count = len(self._active_tools)
 
-        # Add separator line for visual distinction (no F3 hint for finalized trees)
+        # Add separator line for visual distinction
         self._add_line("system", "", "")
         self._add_line("system", "  ───", "dim")
 
