@@ -267,6 +267,7 @@ def show_keybindings(display) -> None:
         "Navigation": ["nav_up", "nav_down"],
         "Pager": ["pager_quit", "pager_next"],
         "Features": ["toggle_plan", "toggle_tools", "cycle_agents", "yank", "view_full"],
+        "Tool Navigation": ["tool_nav_enter", "tool_expand", "tool_collapse", "tool_exit", "tool_output_up", "tool_output_down"],
     }
 
     for category, keys in categories.items():
