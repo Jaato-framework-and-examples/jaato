@@ -1329,8 +1329,12 @@ class OutputBuffer:
             expand_key = self._format_key_hint("tool_expand")
             collapse_key = self._format_key_hint("tool_collapse")
             exit_key = self._format_key_hint("tool_exit")
-            toggle_hint = f"{collapse_key} collapse" if selected_tool.expanded else f"{expand_key} expand"
-            output.append(f"  {nav_up}/{nav_down} nav, {toggle_hint}, {exit_key} exit [{pos}/{total}]", style="dim")
+            if selected_tool.expanded:
+                # When expanded: arrows scroll output, left collapses
+                output.append(f"  {nav_up}/{nav_down} scroll, {collapse_key} collapse, {exit_key} exit [{pos}/{total}]", style="dim")
+            else:
+                # When collapsed: arrows navigate, right expands
+                output.append(f"  {nav_up}/{nav_down} nav, {expand_key} expand, {exit_key} exit [{pos}/{total}]", style="dim")
 
         output.append("\n")
 
@@ -1709,11 +1713,13 @@ class OutputBuffer:
                     nav_down = self._format_key_hint("nav_down")
                     expand_key = self._format_key_hint("tool_expand")
                     collapse_key = self._format_key_hint("tool_collapse")
-                    output_up = self._format_key_hint("tool_output_up")
-                    output_down = self._format_key_hint("tool_output_down")
                     exit_key = self._format_key_hint("tool_exit")
-                    toggle_hint = f"{collapse_key} collapse" if selected_tool.expanded else f"{expand_key} expand"
-                    output.append(f"  ───  {nav_up}/{nav_down} nav, {toggle_hint}, {output_up}/{output_down} scroll, {exit_key} exit [{pos}/{total}]", style="dim")
+                    if selected_tool.expanded:
+                        # When expanded: arrows scroll output, left collapses
+                        output.append(f"  ───  {nav_up}/{nav_down} scroll, {collapse_key} collapse, {exit_key} exit [{pos}/{total}]", style="dim")
+                    else:
+                        # When collapsed: arrows navigate, right expands
+                        output.append(f"  ───  {nav_up}/{nav_down} nav, {expand_key} expand, {exit_key} exit [{pos}/{total}]", style="dim")
                 elif self._tools_expanded:
                     toggle_tools = self._format_key_hint("toggle_tools")
                     tool_nav = self._format_key_hint("tool_nav_enter")
