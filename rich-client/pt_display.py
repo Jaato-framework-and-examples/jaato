@@ -740,7 +740,7 @@ class PTDisplay:
                 self._output_buffer.scroll_to_bottom()
             self._app.invalidate()
 
-        @kb.add(*keys.get_key_args("nav_up"))
+        @kb.add(*keys.get_key_args("nav_up"), eager=True)
         def handle_up(event):
             """Handle Up arrow - tool nav, scroll popup, or history/completion."""
             # Tool navigation mode - select previous tool
@@ -758,7 +758,7 @@ class PTDisplay:
             # Normal mode - history/completion navigation
             event.current_buffer.auto_up()
 
-        @kb.add(*keys.get_key_args("nav_down"))
+        @kb.add(*keys.get_key_args("nav_down"), eager=True)
         def handle_down(event):
             """Handle Down arrow - tool nav, scroll popup, or history/completion."""
             # Tool navigation mode - select next tool
