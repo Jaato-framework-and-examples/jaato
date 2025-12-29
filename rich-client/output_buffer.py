@@ -1407,7 +1407,7 @@ class OutputBuffer:
                             display_line = output_line[:max_line_width - 3] + "..."
                         else:
                             display_line = output_line
-                        output.append(display_line, style="dim italic")
+                        output.append(display_line, style="#87D7D7 italic")
 
                     if lines_below > 0:
                         output.append("\n")
@@ -1846,7 +1846,7 @@ class OutputBuffer:
                                 display_line = output_line[:max_line_width - 3] + "..."
                             else:
                                 display_line = output_line
-                            output.append(display_line, style="dim italic")
+                            output.append(display_line, style="#87D7D7 italic")
 
                         # Show "more below" indicator
                         if lines_below > 0:
