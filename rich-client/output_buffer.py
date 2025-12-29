@@ -178,6 +178,11 @@ class OutputBuffer:
         if source == "clarification":
             return
 
+        # If this is new user input and there are tools from previous turn, finalize them
+        # This is the TRUE turn boundary - when user sends a new message
+        if source == "user" and mode == "write" and self._active_tools:
+            self._finalize_completed_tools()
+
         # If this is new model text and there are completed tools, finalize the tree first
         # This ensures the tool tree appears BEFORE the new response, not after
         if source == "model" and mode == "write" and self._active_tools:
@@ -349,9 +354,8 @@ class OutputBuffer:
             tool_args: Arguments passed to the tool.
             call_id: Unique identifier for this tool call (for correlation).
         """
-        # If all existing tools are completed, finalize them first (new turn starting)
-        if self._active_tools and all(t.completed for t in self._active_tools):
-            self._finalize_completed_tools()
+        # Don't finalize here - tools from the same model turn should stay together
+        # Finalization happens when a new USER turn starts (in append() with source="user")
 
         # Create a summary of args (truncated for display)
         args_str = str(tool_args)
