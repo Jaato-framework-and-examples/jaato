@@ -90,6 +90,8 @@ class OutputBuffer:
         # Tool navigation state
         self._tool_nav_active: bool = False  # True when navigating tools
         self._selected_tool_index: Optional[int] = None  # Currently selected tool
+        # Accumulated tools from current turn (for navigation after turn ends)
+        self._turn_tools: List[ActiveToolCall] = []
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -178,10 +180,15 @@ class OutputBuffer:
         if source == "clarification":
             return
 
-        # If this is new user input and there are tools from previous turn, finalize them
+        # If this is new user input, clear the accumulated turn tools
         # This is the TRUE turn boundary - when user sends a new message
-        if source == "user" and mode == "write" and self._active_tools:
-            self._finalize_completed_tools()
+        if source == "user" and mode == "write":
+            self._turn_tools.clear()
+            self._tool_nav_active = False
+            self._selected_tool_index = None
+            # Also finalize any remaining active tools
+            if self._active_tools:
+                self._finalize_completed_tools()
 
         # If this is new model text and there are completed tools, finalize the tree first
         # This ensures the tool tree appears BEFORE the new response, not after
@@ -321,6 +328,9 @@ class OutputBuffer:
         self._scroll_offset = 0
         self._spinner_active = False
         self._active_tools.clear()
+        self._turn_tools.clear()
+        self._tool_nav_active = False
+        self._selected_tool_index = None
 
     def start_spinner(self) -> None:
         """Start showing spinner in the output."""
@@ -354,8 +364,10 @@ class OutputBuffer:
             tool_args: Arguments passed to the tool.
             call_id: Unique identifier for this tool call (for correlation).
         """
-        # Don't finalize here - tools from the same model turn should stay together
-        # Finalization happens when a new USER turn starts (in append() with source="user")
+        # If all existing tools are completed, finalize them for proper ordering
+        # BUT keep them in _turn_tools for navigation after turn ends
+        if self._active_tools and all(t.completed for t in self._active_tools):
+            self._finalize_completed_tools()
 
         # Create a summary of args (truncated for display)
         args_str = str(tool_args)
@@ -484,13 +496,24 @@ class OutputBuffer:
         return None
 
     # Tool navigation methods
+    def _get_navigable_tools(self) -> List[ActiveToolCall]:
+        """Get the list of tools available for navigation.
+
+        During active turn: returns _active_tools (live tools)
+        After turn ends: returns _turn_tools (accumulated completed tools)
+        """
+        if self._active_tools:
+            return self._active_tools
+        return self._turn_tools
+
     def enter_tool_navigation(self) -> bool:
         """Enter tool navigation mode.
 
         Returns:
             True if entered successfully, False if no tools available.
         """
-        if not self._active_tools:
+        tools = self._get_navigable_tools()
+        if not tools:
             return False
         self._tool_nav_active = True
         self._selected_tool_index = 0  # Select first tool
@@ -518,12 +541,13 @@ class OutputBuffer:
         Returns:
             True if selection changed, False if already at end.
         """
-        if not self._tool_nav_active or not self._active_tools:
+        tools = self._get_navigable_tools()
+        if not self._tool_nav_active or not tools:
             return False
         if self._selected_tool_index is None:
             self._selected_tool_index = 0
             return True
-        if self._selected_tool_index < len(self._active_tools) - 1:
+        if self._selected_tool_index < len(tools) - 1:
             self._selected_tool_index += 1
             return True
         return False  # Already at end
@@ -534,7 +558,8 @@ class OutputBuffer:
         Returns:
             True if selection changed, False if already at start.
         """
-        if not self._tool_nav_active or not self._active_tools:
+        tools = self._get_navigable_tools()
+        if not self._tool_nav_active or not tools:
             return False
         if self._selected_tool_index is None:
             self._selected_tool_index = 0
@@ -550,19 +575,21 @@ class OutputBuffer:
         Returns:
             New expanded state of the tool, False if no selection.
         """
+        tools = self._get_navigable_tools()
         if self._selected_tool_index is None:
             return False
-        if 0 <= self._selected_tool_index < len(self._active_tools):
-            tool = self._active_tools[self._selected_tool_index]
+        if 0 <= self._selected_tool_index < len(tools):
+            tool = tools[self._selected_tool_index]
             tool.expanded = not tool.expanded
             return tool.expanded
         return False
 
     def get_selected_tool(self) -> Optional[ActiveToolCall]:
         """Get the currently selected tool."""
+        tools = self._get_navigable_tools()
         if self._selected_tool_index is not None and \
-           0 <= self._selected_tool_index < len(self._active_tools):
-            return self._active_tools[self._selected_tool_index]
+           0 <= self._selected_tool_index < len(tools):
+            return tools[self._selected_tool_index]
         return None
 
     def scroll_selected_tool_up(self) -> bool:
@@ -596,28 +623,31 @@ class OutputBuffer:
         return False
 
     def finalize_tool_tree(self) -> None:
-        """Mark turn as complete but keep tools available for navigation.
+        """Mark turn as complete and finalize tools for navigation.
 
-        Called when a turn is complete. Tools remain in _active_tools for
-        navigation until the next turn starts (when _finalize_completed_tools
-        is called automatically).
+        Called when a turn is complete. Tools are converted to stored lines
+        and copied to _turn_tools for navigation.
         """
         # Flush any pending streaming text first to ensure proper ordering
         self._flush_current_block()
 
-        # Don't clear tools - keep them for navigation
-        # They will be finalized when the next turn starts
+        # Finalize any remaining active tools (adds to _turn_tools)
+        if self._active_tools:
+            self._finalize_completed_tools()
 
     def _finalize_completed_tools(self) -> None:
         """Convert completed tools to stored lines and clear for new turn.
 
-        Called internally when a new turn starts (new tool added while
-        previous tools are all completed).
+        Called internally when a new tool is added while previous tools are
+        all completed. Tools are copied to _turn_tools for navigation.
         """
         if not self._active_tools:
             return
 
-        # Exit navigation mode
+        # Copy tools to turn list for navigation (accumulate, don't replace)
+        self._turn_tools.extend(self._active_tools)
+
+        # Exit navigation mode (will re-enter when user requests)
         self._tool_nav_active = False
         self._selected_tool_index = None
 
@@ -1669,6 +1699,91 @@ class OutputBuffer:
 
                         output.append("\n")
                         output.append(f"  {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
+        elif self._tool_nav_active and self._turn_tools:
+            # Navigation mode with completed tools from this turn
+            # Render a navigation panel at the bottom
+            if lines_to_show:
+                output.append("\n\n")  # Extra blank line for visual separation
+
+            # Show navigation hints
+            pos = (self._selected_tool_index or 0) + 1
+            total = len(self._turn_tools)
+            output.append(f"  ───  ↑/↓ nav, Space expand, [/] scroll, Esc exit [{pos}/{total}]", style="dim")
+            output.append("\n")
+
+            # Show tools header
+            output.append("  ▾ ", style="dim")
+            output.append(f"{total} tool{'s' if total != 1 else ''} (completed):", style="dim")
+
+            # Show each tool
+            for i, tool in enumerate(self._turn_tools):
+                is_last = (i == len(self._turn_tools) - 1)
+                is_selected = (i == self._selected_tool_index)
+                connector = "└─" if is_last else "├─"
+
+                status_icon = "✓" if tool.success else "✗"
+                status_style = "green" if tool.success else "red"
+
+                # Expand indicator
+                expand_icon = "▾" if tool.expanded else "▸"
+
+                # Selection highlight style
+                row_style = "reverse" if is_selected else "dim"
+
+                output.append("\n")
+                output.append(f"  {expand_icon} {connector} ", style=row_style)
+                output.append(tool.name, style=row_style)
+                if tool.args_summary:
+                    output.append(f"({tool.args_summary})", style=row_style)
+                output.append(f" {status_icon}", style=status_style)
+
+                # Show approval indicator
+                if tool.permission_state == "granted" and tool.permission_method:
+                    indicator = self._get_approval_indicator(tool.permission_method)
+                    if indicator:
+                        output.append(f" {indicator}", style="dim cyan")
+
+                # Show duration
+                if tool.duration_seconds is not None:
+                    output.append(f" ({tool.duration_seconds:.1f}s)", style="dim")
+
+                # Show expanded output
+                if tool.expanded and tool.output_lines:
+                    continuation = "   " if is_last else "│  "
+                    prefix = "    "
+                    total_lines = len(tool.output_lines)
+                    display_count = tool.output_display_lines
+
+                    # Calculate visible window
+                    end_idx = total_lines - tool.output_scroll_offset
+                    start_idx = max(0, end_idx - display_count)
+
+                    lines_above = start_idx
+                    lines_below = tool.output_scroll_offset
+
+                    # Show "more above" indicator
+                    if lines_above > 0:
+                        output.append("\n")
+                        output.append(f"{prefix}{continuation}   ", style="dim")
+                        output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''} ([ to scroll)", style="dim italic")
+
+                    # Show visible lines
+                    for output_line in tool.output_lines[start_idx:end_idx]:
+                        output.append("\n")
+                        output.append(f"{prefix}{continuation}   ", style="dim")
+                        max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
+                        if len(output_line) > max_line_width:
+                            display_line = output_line[:max_line_width - 3] + "..."
+                        else:
+                            display_line = output_line
+                        output.append(display_line, style="dim italic")
+
+                    # Show "more below" indicator
+                    if lines_below > 0:
+                        output.append("\n")
+                        output.append(f"{prefix}{continuation}   ", style="dim")
+                        output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} (] to scroll)", style="dim italic")
+
         elif self._spinner_active:
             # Spinner active but no tools yet - show model header first
             if lines_to_show:
