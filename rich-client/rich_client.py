@@ -2149,6 +2149,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         ContextUpdatedEvent,
         TurnCompletedEvent,
         SystemMessageEvent,
+        InitProgressEvent,
         ErrorEvent,
         SessionListEvent,
         SessionInfoEvent,
@@ -2277,10 +2278,16 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
             ts = dt.now().strftime("%H:%M:%S.%f")[:-3]
             f.write(f"[{ts}] [IPC] {msg}\n")
 
+    # Track initialization progress for formatted display
+    init_shown_header = False
+    init_step_max_len = 30  # Fixed width for step names
+    init_current_step = None  # Track current step for in-place updates
+
     async def handle_events():
         """Handle events from the server."""
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
         nonlocal model_running, should_exit
+        nonlocal init_shown_header, init_current_step
 
         ipc_trace("Event handler starting")
         event_count = 0
@@ -2291,7 +2298,42 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 ipc_trace("  should_exit=True, breaking")
                 break
 
-            if isinstance(event, AgentOutputEvent):
+            if isinstance(event, InitProgressEvent):
+                # Handle initialization progress with in-place updates
+                step_name = event.step
+                status = event.status
+
+                # Show header once
+                if not init_shown_header:
+                    display.add_system_message("Initializing session:", style="dim")
+                    init_shown_header = True
+
+                # Format step name with fixed width
+                padded_name = step_name.ljust(init_step_max_len)
+
+                if status == "running":
+                    # Show step in progress
+                    display.add_system_message(f"   {padded_name} ...", style="dim italic")
+                    init_current_step = step_name
+                elif status == "done":
+                    # Update the same line to show completion
+                    if init_current_step == step_name:
+                        # Update in place
+                        display.update_last_system_message(f"   {padded_name} OK", style="dim")
+                    else:
+                        # Step mismatch (shouldn't happen), add new line
+                        display.add_system_message(f"   {padded_name} OK", style="dim")
+                    init_current_step = None
+                elif status == "error":
+                    # Show error
+                    msg = event.message or "ERROR"
+                    if init_current_step == step_name:
+                        display.update_last_system_message(f"   {padded_name} {msg}", style="dim red")
+                    else:
+                        display.add_system_message(f"   {padded_name} {msg}", style="dim red")
+                    init_current_step = None
+
+            elif isinstance(event, AgentOutputEvent):
                 # Route output to the correct agent's buffer
                 ipc_trace(f"  AgentOutputEvent: agent={event.agent_id}, source={event.source}, mode={event.mode}, len={len(event.text)}")
                 buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
@@ -2728,6 +2770,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         """Handle user input from the queue."""
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
         nonlocal model_running, should_exit
+
+        # Yield control to let handle_events() start listening before we trigger session init
+        await asyncio.sleep(0)
 
         # Request session - new or default
         if new_session:

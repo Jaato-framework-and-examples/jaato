@@ -275,11 +275,12 @@ class SessionManager:
         server = JaatoServer(
             env_file=self._env_file,
             provider=self._provider,
-            on_event=lambda e: self._emit_to_session(session_id, e),
+            # During init, emit directly to requesting client (not yet attached to session)
+            on_event=lambda e: self._emit_to_client(client_id, e),
             workspace_path=workspace_path,
         )
 
-        # Initialize the server
+        # Initialize the server (events go directly to requesting client)
         if not server.initialize():
             self._emit_to_client(client_id, ErrorEvent(
                 error="Failed to initialize session",
@@ -288,6 +289,9 @@ class SessionManager:
             return ""
 
         logger.info(f"Server initialized successfully for session {session_id}")
+
+        # Switch to session-based event emission now that init is complete
+        server.set_event_callback(lambda e: self._emit_to_session(session_id, e))
 
         # Apply client-specific config (e.g., terminal_width)
         self._apply_client_config_to_server(client_id, server)
@@ -313,11 +317,8 @@ class SessionManager:
 
         logger.info(f"Session created: {session_id} ({name})")
 
-        # Emit current agent state to the newly attached client (skip SessionInfo, we'll send our own)
-        server.emit_current_state(
-            lambda e: self._emit_to_client(client_id, e),
-            skip_session_info=True
-        )
+        # Note: We don't call emit_current_state() here because the client
+        # already received all events during initialize() via direct emission.
 
         # Send complete SessionInfoEvent with state snapshot
         self._emit_to_client(client_id, self._build_session_info_event(session))
@@ -347,15 +348,19 @@ class SessionManager:
         Returns:
             True if attached successfully.
         """
+        # Track if session was already in memory (client missed init events)
+        session_was_in_memory = False
+
         with self._lock:
             # Check if session is in memory
             session = self._sessions.get(session_id)
+            session_was_in_memory = session is not None
 
             if not session:
-                # Try to load from disk
+                # Try to load from disk (pass client_id for init progress events)
                 logger.debug(f"attach_session: session {session_id} not in memory, loading from disk...")
                 try:
-                    session = self._load_session(session_id)
+                    session = self._load_session(session_id, client_id=client_id)
                     logger.debug(f"attach_session: _load_session returned {session is not None}")
                 except Exception as e:
                     logger.error(f"attach_session: _load_session raised: {type(e).__name__}: {e}")
@@ -394,11 +399,13 @@ class SessionManager:
         # Apply client-specific config (e.g., terminal_width)
         self._apply_client_config_to_server(client_id, session.server)
 
-        # Emit current agent state to the newly attached client (skip SessionInfo, we'll send our own)
-        session.server.emit_current_state(
-            lambda e: self._emit_to_client(client_id, e),
-            skip_session_info=True
-        )
+        # Only emit current state if session was already in memory.
+        # If we just loaded it from disk, the client received all events during init.
+        if session_was_in_memory:
+            session.server.emit_current_state(
+                lambda e: self._emit_to_client(client_id, e),
+                skip_session_info=True
+            )
 
         # Send complete SessionInfoEvent with state snapshot
         self._emit_to_client(client_id, self._build_session_info_event(session))
@@ -410,11 +417,16 @@ class SessionManager:
 
         return True
 
-    def _load_session(self, session_id: str) -> Optional[Session]:
+    def _load_session(
+        self,
+        session_id: str,
+        client_id: Optional[str] = None
+    ) -> Optional[Session]:
         """Load a session from disk.
 
         Args:
             session_id: The session ID to load.
+            client_id: Optional client ID to receive init progress events.
 
         Returns:
             The loaded Session, or None if not found.
@@ -432,10 +444,17 @@ class SessionManager:
 
         # Create JaatoServer and restore state
         logger.debug(f"_load_session: creating JaatoServer for {session_id}...")
+
+        # During init, emit directly to requesting client if provided
+        if client_id:
+            init_callback = lambda e: self._emit_to_client(client_id, e)
+        else:
+            init_callback = lambda e: self._emit_to_session(session_id, e)
+
         server = JaatoServer(
             env_file=self._env_file,
             provider=self._provider,
-            on_event=lambda e: self._emit_to_session(session_id, e),
+            on_event=init_callback,
         )
         logger.debug(f"_load_session: JaatoServer created, calling initialize()...")
 
@@ -452,6 +471,9 @@ class SessionManager:
             return None
 
         logger.debug(f"_load_session: server initialized for {session_id}")
+
+        # Switch to session-based event emission now that init is complete
+        server.set_event_callback(lambda e: self._emit_to_session(session_id, e))
 
         # Restore history to the server's JaatoClient
         if state.history and server._jaato:

@@ -103,6 +103,9 @@ class JaatoIPCServer:
         self._client_counter = 0
         self._lock = asyncio.Lock()
 
+        # Event loop reference for thread-safe operations
+        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
+
         # Event queue for broadcasting
         self._event_queues: Dict[str, asyncio.Queue[Event]] = {}
 
@@ -114,6 +117,9 @@ class JaatoIPCServer:
 
         Creates the Unix domain socket and listens for connections.
         """
+        # Capture event loop for thread-safe operations
+        self._event_loop = asyncio.get_running_loop()
+
         # Remove existing socket file
         socket_file = Path(self.socket_path)
         if socket_file.exists():
@@ -315,7 +321,17 @@ class JaatoIPCServer:
         # CommandRequest and ClientConfigRequest are allowed without session_id
         if self._on_session_request:
             if session_id or isinstance(event, (CommandRequest, ClientConfigRequest)):
-                self._on_session_request(client_id, session_id or "", event)
+                # Run in executor to not block the event loop.
+                # This allows _broadcast_to_client to send events while
+                # the session request (e.g., initialization) is running.
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,  # Default executor
+                    self._on_session_request,
+                    client_id,
+                    session_id or "",
+                    event,
+                )
             else:
                 await self._send_error(
                     client_id,
@@ -344,17 +360,29 @@ class JaatoIPCServer:
     def queue_event(self, client_id: str, event: Event) -> None:
         """Queue an event for delivery to a client.
 
-        This is thread-safe and can be called from session handlers.
+        This is thread-safe and can be called from session handlers
+        running in thread pool executors.
         """
         logger.debug(f"queue_event: {client_id} <- {type(event).__name__}")
-        if client_id in self._event_queues:
+        if client_id not in self._event_queues:
+            logger.warning(f"queue_event: client {client_id} not in queues")
+            return
+
+        queue = self._event_queues[client_id]
+
+        def _do_put():
             try:
-                self._event_queues[client_id].put_nowait(event)
+                queue.put_nowait(event)
                 logger.debug(f"  queued successfully")
             except asyncio.QueueFull:
                 logger.warning(f"Event queue full for {client_id}")
+
+        # Use call_soon_threadsafe for thread-safe queue operations
+        if self._event_loop:
+            self._event_loop.call_soon_threadsafe(_do_put)
         else:
-            logger.warning(f"queue_event: client {client_id} not in queues")
+            # Fallback for when called before start() - direct put
+            _do_put()
 
     def set_client_session(self, client_id: str, session_id: str) -> None:
         """Set the session ID for a client.

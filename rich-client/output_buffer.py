@@ -273,6 +273,33 @@ class OutputBuffer:
         for line in message.split('\n'):
             self._add_line("system", line, style)
 
+    def update_last_system_message(self, message: str, style: str = "dim") -> bool:
+        """Update the last system message in the buffer.
+
+        Used for progressive updates like init progress that show "..." then "OK".
+
+        Args:
+            message: The new message text.
+            style: Rich style for the message.
+
+        Returns:
+            True if a system message was found and updated, False otherwise.
+        """
+        # Search backwards for the last system message
+        for i in range(len(self._lines) - 1, -1, -1):
+            if self._lines[i].source == "system":
+                # Update the line
+                display_lines = self._measure_display_lines("system", message, False)
+                self._lines[i] = OutputLine(
+                    source="system",
+                    text=message,
+                    style=style,
+                    display_lines=display_lines,
+                    is_turn_start=False
+                )
+                return True
+        return False
+
     def clear(self) -> None:
         """Clear all output."""
         self._lines.clear()
