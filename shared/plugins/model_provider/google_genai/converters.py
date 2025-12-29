@@ -8,9 +8,13 @@ FunctionDeclaration, etc.).
 import base64
 import json
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from google.genai import types
+# Lazy imports - SDK is only loaded when actually used
+from ._lazy import get_types
+
+if TYPE_CHECKING:
+    from google.genai import types
 
 from ..types import (
     Attachment,
@@ -49,16 +53,16 @@ def role_from_sdk(role: str) -> Role:
 
 # ==================== ToolSchema Conversion ====================
 
-def tool_schema_to_sdk(schema: ToolSchema) -> types.FunctionDeclaration:
+def tool_schema_to_sdk(schema: ToolSchema) -> get_types().FunctionDeclaration:
     """Convert ToolSchema to SDK FunctionDeclaration."""
-    return types.FunctionDeclaration(
+    return get_types().FunctionDeclaration(
         name=schema.name,
         description=schema.description,
         parameters_json_schema=schema.parameters
     )
 
 
-def tool_schema_from_sdk(decl: types.FunctionDeclaration) -> ToolSchema:
+def tool_schema_from_sdk(decl: get_types().FunctionDeclaration) -> ToolSchema:
     """Convert SDK FunctionDeclaration to ToolSchema."""
     # Handle both dict and object forms of parameters
     params = {}
@@ -78,25 +82,25 @@ def tool_schema_from_sdk(decl: types.FunctionDeclaration) -> ToolSchema:
     )
 
 
-def tool_schemas_to_sdk_tool(schemas: List[ToolSchema]) -> Optional[types.Tool]:
+def tool_schemas_to_sdk_tool(schemas: List[ToolSchema]) -> Optional[get_types().Tool]:
     """Convert list of ToolSchemas to SDK Tool object."""
     if not schemas:
         return None
     declarations = [tool_schema_to_sdk(s) for s in schemas]
-    return types.Tool(function_declarations=declarations)
+    return get_types().Tool(function_declarations=declarations)
 
 
 # ==================== Part Conversion ====================
 
-def part_to_sdk(part: Part) -> types.Part:
+def part_to_sdk(part: Part) -> get_types().Part:
     """Convert internal Part to SDK Part."""
     if part.text is not None:
-        return types.Part.from_text(text=part.text)
+        return get_types().Part.from_text(text=part.text)
 
     if part.function_call is not None:
         fc = part.function_call
-        return types.Part(
-            function_call=types.FunctionCall(
+        return get_types().Part(
+            function_call=get_types().FunctionCall(
                 name=fc.name,
                 args=fc.args
             )
@@ -105,24 +109,24 @@ def part_to_sdk(part: Part) -> types.Part:
     if part.function_response is not None:
         fr = part.function_response
         response = fr.result if isinstance(fr.result, dict) else {"result": fr.result}
-        return types.Part.from_function_response(
+        return get_types().Part.from_function_response(
             name=fr.name,
             response=response
         )
 
     if part.inline_data is not None:
-        return types.Part(
-            inline_data=types.Blob(
+        return get_types().Part(
+            inline_data=get_types().Blob(
                 mime_type=part.inline_data.get("mime_type", "application/octet-stream"),
                 data=part.inline_data.get("data")
             )
         )
 
     # Fallback to empty text
-    return types.Part.from_text(text="")
+    return get_types().Part.from_text(text="")
 
 
-def part_from_sdk(part: types.Part) -> Part:
+def part_from_sdk(part: get_types().Part) -> Part:
     """Convert SDK Part to internal Part."""
     # Text part
     if hasattr(part, 'text') and part.text is not None:
@@ -196,16 +200,16 @@ def part_from_sdk(part: types.Part) -> Part:
 
 # ==================== Message/Content Conversion ====================
 
-def message_to_sdk(message: Message) -> types.Content:
+def message_to_sdk(message: Message) -> get_types().Content:
     """Convert internal Message to SDK Content."""
     sdk_parts = [part_to_sdk(p) for p in (message.parts or [])]
-    return types.Content(
+    return get_types().Content(
         role=role_to_sdk(message.role),
         parts=sdk_parts
     )
 
 
-def message_from_sdk(content: types.Content) -> Message:
+def message_from_sdk(content: get_types().Content) -> Message:
     """Convert SDK Content to internal Message."""
     parts = [part_from_sdk(p) for p in (content.parts or [])]
     return Message(
@@ -214,19 +218,19 @@ def message_from_sdk(content: types.Content) -> Message:
     )
 
 
-def history_to_sdk(history: List[Message]) -> List[types.Content]:
+def history_to_sdk(history: List[Message]) -> List[get_types().Content]:
     """Convert internal history to SDK history."""
     return [message_to_sdk(m) for m in (history or [])]
 
 
-def history_from_sdk(history: List[types.Content]) -> List[Message]:
+def history_from_sdk(history: List[get_types().Content]) -> List[Message]:
     """Convert SDK history to internal history."""
     return [message_from_sdk(c) for c in (history or [])]
 
 
 # ==================== ToolResult Conversion ====================
 
-def tool_result_to_sdk_part(result: ToolResult) -> types.Part:
+def tool_result_to_sdk_part(result: ToolResult) -> get_types().Part:
     """Convert ToolResult to SDK function response Part.
 
     Handles both simple results and multimodal results with attachments.
@@ -241,7 +245,7 @@ def tool_result_to_sdk_part(result: ToolResult) -> types.Part:
     if result.attachments:
         return _build_multimodal_function_response(result.name, response, result.attachments)
 
-    return types.Part.from_function_response(
+    return get_types().Part.from_function_response(
         name=result.name,
         response=response
     )
@@ -251,7 +255,7 @@ def _build_multimodal_function_response(
     name: str,
     response: Dict[str, Any],
     attachments: List[Attachment]
-) -> types.Part:
+) -> get_types().Part:
     """Build a multimodal function response with attachments.
 
     Creates a function response that includes inline binary data using
@@ -264,7 +268,7 @@ def _build_multimodal_function_response(
         attachments: List of Attachment objects with binary data.
 
     Returns:
-        A types.Part with nested multimodal data.
+        A get_types().Part with nested multimodal data.
     """
     # Build FunctionResponsePart list from attachments
     parts = []
@@ -276,8 +280,8 @@ def _build_multimodal_function_response(
             response[display_name] = {"$ref": display_name}
 
         parts.append(
-            types.FunctionResponsePart(
-                inlineData=types.FunctionResponseBlob(
+            get_types().FunctionResponsePart(
+                inlineData=get_types().FunctionResponseBlob(
                     mimeType=attachment.mime_type,
                     data=attachment.data,
                     displayName=display_name
@@ -286,20 +290,20 @@ def _build_multimodal_function_response(
         )
 
     try:
-        return types.Part.from_function_response(
+        return get_types().Part.from_function_response(
             name=name,
             response=response,
             parts=parts
         )
     except Exception:
         # Fallback to simple response if multimodal fails
-        return types.Part.from_function_response(
+        return get_types().Part.from_function_response(
             name=name,
             response={**response, "error": "Failed to attach multimodal data"}
         )
 
 
-def tool_results_to_sdk_parts(results: List[ToolResult]) -> List[types.Part]:
+def tool_results_to_sdk_parts(results: List[ToolResult]) -> List[get_types().Part]:
     """Convert list of ToolResults to SDK Parts."""
     return [tool_result_to_sdk_part(r) for r in (results or [])]
 

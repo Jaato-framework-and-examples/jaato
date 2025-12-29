@@ -2916,6 +2916,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
             except Exception as e:
                 display.add_system_message(f"Error: {e}", style="bold red")
 
+    # Show initializing message while session loads
+    display.add_system_message("Initializing session...", style="dim italic")
+
     # Run everything concurrently
     try:
         # Start event handler
