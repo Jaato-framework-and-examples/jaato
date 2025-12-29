@@ -7,7 +7,7 @@ region of the TUI.
 import textwrap
 from collections import deque
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 from rich.console import Console, RenderableType
 from rich.text import Text
@@ -23,6 +23,18 @@ class OutputLine:
     style: str
     display_lines: int = 1  # How many terminal lines this takes when rendered
     is_turn_start: bool = False  # True if this is the first line of a new turn
+
+
+@dataclass
+class ToolBlock:
+    """A block of completed tools stored inline in the output buffer.
+
+    This allows tool blocks to be rendered dynamically with expand/collapse
+    state while maintaining their position in the output flow.
+    """
+    tools: List['ActiveToolCall']  # The tools in this block
+    expanded: bool = True  # Whether the block is in expanded view
+    selected_index: Optional[int] = None  # Which tool is selected (when navigating)
 
 
 @dataclass
@@ -67,6 +79,9 @@ class OutputBuffer:
     # Spinner animation frames
     SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
+    # Type alias for items that can be stored in the line buffer
+    LineItem = Union[OutputLine, ToolBlock]
+
     def __init__(self, max_lines: int = 1000, agent_type: str = "main"):
         """Initialize the output buffer.
 
@@ -74,7 +89,7 @@ class OutputBuffer:
             max_lines: Maximum number of lines to retain.
             agent_type: Type of agent ("main" or "subagent") for label display.
         """
-        self._lines: deque[OutputLine] = deque(maxlen=max_lines)
+        self._lines: deque[Union[OutputLine, ToolBlock]] = deque(maxlen=max_lines)
         self._current_block: Optional[Tuple[str, List[str], bool]] = None
         self._measure_console: Optional[Console] = None
         self._console_width: int = 80
@@ -89,9 +104,8 @@ class OutputBuffer:
         self._agent_type: str = agent_type  # "main" or "subagent" for user label
         # Tool navigation state
         self._tool_nav_active: bool = False  # True when navigating tools
-        self._selected_tool_index: Optional[int] = None  # Currently selected tool
-        # Accumulated tools from current turn (for navigation after turn ends)
-        self._turn_tools: List[ActiveToolCall] = []
+        self._selected_block_index: Optional[int] = None  # Which ToolBlock is selected
+        self._selected_tool_index: Optional[int] = None  # Which tool within selected block
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -180,13 +194,10 @@ class OutputBuffer:
         if source == "clarification":
             return
 
-        # If this is new user input, clear the accumulated turn tools
-        # This is the TRUE turn boundary - when user sends a new message
+        # If this is new user input, exit navigation mode and finalize any remaining tools
         if source == "user" and mode == "write":
-            self._turn_tools.clear()
-            self._tool_nav_active = False
-            self._selected_tool_index = None
-            # Also finalize any remaining active tools
+            self._exit_navigation_mode()
+            # Finalize any remaining active tools
             if self._active_tools:
                 self._finalize_completed_tools()
 
@@ -328,8 +339,8 @@ class OutputBuffer:
         self._scroll_offset = 0
         self._spinner_active = False
         self._active_tools.clear()
-        self._turn_tools.clear()
         self._tool_nav_active = False
+        self._selected_block_index = None
         self._selected_tool_index = None
 
     def start_spinner(self) -> None:
@@ -364,8 +375,8 @@ class OutputBuffer:
             tool_args: Arguments passed to the tool.
             call_id: Unique identifier for this tool call (for correlation).
         """
-        # If all existing tools are completed, finalize them for proper ordering
-        # BUT keep them in _turn_tools for navigation after turn ends
+        # If all existing tools are completed, finalize them as a ToolBlock
+        # This ensures proper ordering of text and tool output
         if self._active_tools and all(t.completed for t in self._active_tools):
             self._finalize_completed_tools()
 
@@ -496,15 +507,35 @@ class OutputBuffer:
         return None
 
     # Tool navigation methods
-    def _get_navigable_tools(self) -> List[ActiveToolCall]:
-        """Get the list of tools available for navigation.
+    def _get_tool_blocks(self) -> List[Tuple[int, ToolBlock]]:
+        """Get all ToolBlocks in the line buffer with their indices.
 
-        During active turn: returns _active_tools (live tools)
-        After turn ends: returns _turn_tools (accumulated completed tools)
+        Returns:
+            List of (index, ToolBlock) tuples.
         """
-        if self._active_tools:
-            return self._active_tools
-        return self._turn_tools
+        blocks = []
+        for i, item in enumerate(self._lines):
+            if isinstance(item, ToolBlock):
+                blocks.append((i, item))
+        return blocks
+
+    def _get_selected_block(self) -> Optional[ToolBlock]:
+        """Get the currently selected ToolBlock."""
+        if self._selected_block_index is None:
+            return None
+        blocks = self._get_tool_blocks()
+        if 0 <= self._selected_block_index < len(blocks):
+            return blocks[self._selected_block_index][1]
+        return None
+
+    def _exit_navigation_mode(self) -> None:
+        """Exit navigation mode and clear all selection state."""
+        self._tool_nav_active = False
+        self._selected_block_index = None
+        self._selected_tool_index = None
+        # Clear selection from all blocks
+        for _, block in self._get_tool_blocks():
+            block.selected_index = None
 
     def enter_tool_navigation(self) -> bool:
         """Enter tool navigation mode.
@@ -512,18 +543,31 @@ class OutputBuffer:
         Returns:
             True if entered successfully, False if no tools available.
         """
-        tools = self._get_navigable_tools()
-        if not tools:
+        # First check active tools (currently executing)
+        if self._active_tools:
+            self._tool_nav_active = True
+            self._selected_block_index = None  # No block, using active tools
+            self._selected_tool_index = 0
+            self._tools_expanded = True
+            return True
+
+        # Then check tool blocks in the buffer
+        blocks = self._get_tool_blocks()
+        if not blocks:
             return False
+
+        # Select first tool in first block
         self._tool_nav_active = True
-        self._selected_tool_index = 0  # Select first tool
-        self._tools_expanded = True  # Auto-expand when entering nav mode
+        self._selected_block_index = 0
+        self._selected_tool_index = 0
+        first_block = blocks[0][1]
+        first_block.selected_index = 0
+        first_block.expanded = True
         return True
 
     def exit_tool_navigation(self) -> None:
         """Exit tool navigation mode."""
-        self._tool_nav_active = False
-        self._selected_tool_index = None
+        self._exit_navigation_mode()
 
     @property
     def tool_nav_active(self) -> bool:
@@ -535,61 +579,135 @@ class OutputBuffer:
         """Get currently selected tool index."""
         return self._selected_tool_index
 
+    def _get_all_tools_flat(self) -> List[Tuple[Optional[int], int, ActiveToolCall]]:
+        """Get all tools flattened with (block_index, tool_index, tool).
+
+        Returns:
+            List of (block_index, tool_index, tool) where block_index is None for active tools.
+        """
+        result = []
+        # Active tools first (block_index = None)
+        for i, tool in enumerate(self._active_tools):
+            result.append((None, i, tool))
+        # Then tools from blocks
+        for block_idx, (_, block) in enumerate(self._get_tool_blocks()):
+            for tool_idx, tool in enumerate(block.tools):
+                result.append((block_idx, tool_idx, tool))
+        return result
+
     def select_next_tool(self) -> bool:
-        """Select next tool in list.
+        """Select next tool in list (across all blocks).
 
         Returns:
             True if selection changed, False if already at end.
         """
-        tools = self._get_navigable_tools()
-        if not self._tool_nav_active or not tools:
+        if not self._tool_nav_active:
             return False
-        if self._selected_tool_index is None:
-            self._selected_tool_index = 0
+
+        all_tools = self._get_all_tools_flat()
+        if not all_tools:
+            return False
+
+        # Find current position
+        current_flat_idx = None
+        for i, (block_idx, tool_idx, _) in enumerate(all_tools):
+            if block_idx == self._selected_block_index and tool_idx == self._selected_tool_index:
+                current_flat_idx = i
+                break
+
+        if current_flat_idx is None:
+            # No selection, select first
+            block_idx, tool_idx, _ = all_tools[0]
+            self._select_tool(block_idx, tool_idx)
             return True
-        if self._selected_tool_index < len(tools) - 1:
-            self._selected_tool_index += 1
+
+        if current_flat_idx < len(all_tools) - 1:
+            # Move to next
+            block_idx, tool_idx, _ = all_tools[current_flat_idx + 1]
+            self._select_tool(block_idx, tool_idx)
             return True
+
         return False  # Already at end
 
     def select_prev_tool(self) -> bool:
-        """Select previous tool in list.
+        """Select previous tool in list (across all blocks).
 
         Returns:
             True if selection changed, False if already at start.
         """
-        tools = self._get_navigable_tools()
-        if not self._tool_nav_active or not tools:
+        if not self._tool_nav_active:
             return False
-        if self._selected_tool_index is None:
-            self._selected_tool_index = 0
+
+        all_tools = self._get_all_tools_flat()
+        if not all_tools:
+            return False
+
+        # Find current position
+        current_flat_idx = None
+        for i, (block_idx, tool_idx, _) in enumerate(all_tools):
+            if block_idx == self._selected_block_index and tool_idx == self._selected_tool_index:
+                current_flat_idx = i
+                break
+
+        if current_flat_idx is None:
+            # No selection, select first
+            block_idx, tool_idx, _ = all_tools[0]
+            self._select_tool(block_idx, tool_idx)
             return True
-        if self._selected_tool_index > 0:
-            self._selected_tool_index -= 1
+
+        if current_flat_idx > 0:
+            # Move to previous
+            block_idx, tool_idx, _ = all_tools[current_flat_idx - 1]
+            self._select_tool(block_idx, tool_idx)
             return True
+
         return False  # Already at start
 
+    def _select_tool(self, block_idx: Optional[int], tool_idx: int) -> None:
+        """Select a specific tool."""
+        # Clear selection from old block
+        old_block = self._get_selected_block()
+        if old_block:
+            old_block.selected_index = None
+
+        self._selected_block_index = block_idx
+        self._selected_tool_index = tool_idx
+
+        # Set selection on new block
+        if block_idx is not None:
+            blocks = self._get_tool_blocks()
+            if 0 <= block_idx < len(blocks):
+                new_block = blocks[block_idx][1]
+                new_block.selected_index = tool_idx
+                new_block.expanded = True
+
     def toggle_selected_tool_expanded(self) -> bool:
-        """Toggle expand/collapse for selected tool.
+        """Toggle expand/collapse for selected tool's output.
 
         Returns:
             New expanded state of the tool, False if no selection.
         """
-        tools = self._get_navigable_tools()
-        if self._selected_tool_index is None:
+        tool = self.get_selected_tool()
+        if tool is None:
             return False
-        if 0 <= self._selected_tool_index < len(tools):
-            tool = tools[self._selected_tool_index]
-            tool.expanded = not tool.expanded
-            return tool.expanded
-        return False
+        tool.expanded = not tool.expanded
+        return tool.expanded
 
     def get_selected_tool(self) -> Optional[ActiveToolCall]:
         """Get the currently selected tool."""
-        tools = self._get_navigable_tools()
-        if self._selected_tool_index is not None and \
-           0 <= self._selected_tool_index < len(tools):
-            return tools[self._selected_tool_index]
+        if self._selected_tool_index is None:
+            return None
+
+        # Check active tools first
+        if self._selected_block_index is None:
+            if 0 <= self._selected_tool_index < len(self._active_tools):
+                return self._active_tools[self._selected_tool_index]
+            return None
+
+        # Check tool blocks
+        block = self._get_selected_block()
+        if block and 0 <= self._selected_tool_index < len(block.tools):
+            return block.tools[self._selected_tool_index]
         return None
 
     def scroll_selected_tool_up(self) -> bool:
@@ -623,92 +741,41 @@ class OutputBuffer:
         return False
 
     def finalize_tool_tree(self) -> None:
-        """Mark turn as complete and finalize tools for navigation.
+        """Mark turn as complete and finalize active tools as a ToolBlock.
 
-        Called when a turn is complete. Tools are converted to stored lines
-        and copied to _turn_tools for navigation.
+        Called when a turn is complete. Active tools are stored as a ToolBlock
+        that can be navigated and expanded.
         """
         # Flush any pending streaming text first to ensure proper ordering
         self._flush_current_block()
 
-        # Finalize any remaining active tools (adds to _turn_tools)
+        # Finalize any remaining active tools as a ToolBlock
         if self._active_tools:
             self._finalize_completed_tools()
 
     def _finalize_completed_tools(self) -> None:
-        """Convert completed tools to stored lines and clear for new turn.
+        """Store completed tools as a ToolBlock in the line buffer.
 
         Called internally when a new tool is added while previous tools are
-        all completed. Tools are copied to _turn_tools for navigation.
+        all completed. Stores a ToolBlock that can be navigated and expanded.
         """
         if not self._active_tools:
             return
 
-        # Copy tools to turn list for navigation (accumulate, don't replace)
-        self._turn_tools.extend(self._active_tools)
+        # Create a copy of the tools for the ToolBlock
+        import copy
+        tools_copy = copy.deepcopy(self._active_tools)
 
-        # Exit navigation mode (will re-enter when user requests)
-        self._tool_nav_active = False
-        self._selected_tool_index = None
+        # Create ToolBlock with the completed tools
+        tool_block = ToolBlock(
+            tools=tools_copy,
+            expanded=self._tools_expanded,
+            selected_index=None
+        )
 
-        tool_count = len(self._active_tools)
-
-        # Add separator line for visual distinction
+        # Add separator and the tool block to the buffer
         self._add_line("system", "", "")
-        self._add_line("system", "  ───", "dim")
-
-        if self._tools_expanded:
-            # Expanded view - each tool on its own line
-            header = f"  ▾ {tool_count} tool{'s' if tool_count != 1 else ''}:"
-            self._add_line("system", header, "dim")
-
-            for i, tool in enumerate(self._active_tools):
-                is_last = (i == len(self._active_tools) - 1)
-                connector = "└─" if is_last else "├─"
-                status_icon = "✓" if tool.success else "✗"
-
-                # Build tool line with args and duration if available
-                tool_line = f"    {connector} {tool.name}"
-                if tool.args_summary:
-                    tool_line += f"({tool.args_summary})"
-                tool_line += f" {status_icon}"
-                # Add approval indicator for granted permissions
-                if tool.permission_state == "granted" and tool.permission_method:
-                    indicator = self._get_approval_indicator(tool.permission_method)
-                    if indicator:
-                        tool_line += f" {indicator}"
-                if tool.duration_seconds is not None:
-                    tool_line += f" ({tool.duration_seconds:.1f}s)"
-
-                self._add_line("system", tool_line, "dim")
-
-                # Add permission denied info
-                if tool.permission_state == "denied" and tool.permission_method:
-                    continuation = "   " if is_last else "│  "
-                    denied_line = f"    {continuation}   ⊘ Permission denied: {tool.permission_method}"
-                    self._add_line("system", denied_line, "dim red")
-                # Add error message if failed (but not for permission denied)
-                elif not tool.success and tool.error_message:
-                    continuation = "   " if is_last else "│  "
-                    error_line = f"    {continuation}   ⚠ {tool.error_message[:60]}"
-                    self._add_line("system", error_line, "dim red")
-        else:
-            # Collapsed view - all tools on one line
-            tool_summaries = []
-            for tool in self._active_tools:
-                status_icon = "✓" if tool.success else "✗"
-                summary = f"{tool.name} {status_icon}"
-                # Add approval indicator for granted permissions
-                if tool.permission_state == "granted" and tool.permission_method:
-                    indicator = self._get_approval_indicator(tool.permission_method)
-                    if indicator:
-                        summary += f" {indicator}"
-                tool_summaries.append(summary)
-
-            summary_line = f"  ▸ {tool_count} tool{'s' if tool_count != 1 else ''}: " + " ".join(tool_summaries)
-            self._add_line("system", summary_line, "dim")
-
-        # Add blank line for spacing before next model response
+        self._lines.append(tool_block)
         self._add_line("system", "", "")
 
         # Clear active tools so they don't render separately anymore
@@ -928,23 +995,12 @@ class OutputBuffer:
         This is used to reserve space when selecting which stored lines to display,
         ensuring the tool tree doesn't push content off the visible area.
 
+        Note: This only calculates height for active tools. ToolBlocks in the
+        line buffer are accounted for via _get_item_display_lines().
+
         Returns:
             Number of display lines the tool tree will occupy.
         """
-        # Check for navigation mode with turn tools (after model turn ends)
-        if self._tool_nav_active and self._turn_tools and not self._active_tools:
-            # Navigation panel height: separator + header + each tool
-            height = 2  # Separator line + header
-            for tool in self._turn_tools:
-                height += 1  # Tool line
-                if tool.expanded and tool.output_lines:
-                    # Display lines + possible scroll indicators
-                    display_count = min(len(tool.output_lines), tool.output_display_lines)
-                    height += display_count
-                    if len(tool.output_lines) > tool.output_display_lines:
-                        height += 2  # Up/down scroll indicators
-            return height
-
         if not self._active_tools and not self._spinner_active:
             return 0
 
@@ -1073,6 +1129,147 @@ class OutputBuffer:
 
         return height
 
+    def _get_item_display_lines(self, item: Union[OutputLine, ToolBlock]) -> int:
+        """Get display line count for a line item (OutputLine or ToolBlock)."""
+        if isinstance(item, OutputLine):
+            return item.display_lines
+        elif isinstance(item, ToolBlock):
+            return self._calculate_tool_block_height(item)
+        return 1
+
+    def _calculate_tool_block_height(self, block: ToolBlock) -> int:
+        """Calculate display height of a ToolBlock."""
+        height = 1  # Separator line
+        if block.expanded:
+            height += 1  # Header
+            for tool in block.tools:
+                height += 1  # Tool line
+                # Output preview if tool has output and is expanded
+                if tool.expanded and tool.output_lines:
+                    display_count = min(len(tool.output_lines), tool.output_display_lines)
+                    height += display_count
+                    # Scroll indicators
+                    if len(tool.output_lines) > tool.output_display_lines:
+                        height += 2
+                # Error message
+                if not tool.success and tool.error_message:
+                    height += 1
+        else:
+            height += 1  # Collapsed summary line
+        return height
+
+    def _render_tool_block(self, block: ToolBlock, output: Text, wrap_width: int) -> None:
+        """Render a ToolBlock inline in the output."""
+        tool_count = len(block.tools)
+
+        # Separator
+        output.append("  ───", style="dim")
+
+        # Navigation hint if in nav mode and this block is selected
+        if self._tool_nav_active and block.selected_index is not None:
+            all_tools = self._get_all_tools_flat()
+            # Find position in all tools
+            pos = 0
+            for i, (bidx, tidx, _) in enumerate(all_tools):
+                if bidx == self._selected_block_index and tidx == self._selected_tool_index:
+                    pos = i + 1
+                    break
+            total = len(all_tools)
+            output.append(f"  ↑/↓ nav, Space expand, Esc exit [{pos}/{total}]", style="dim")
+
+        output.append("\n")
+
+        if block.expanded:
+            # Expanded view - each tool on its own line
+            output.append(f"  ▾ {tool_count} tool{'s' if tool_count != 1 else ''}:", style="dim")
+
+            for i, tool in enumerate(block.tools):
+                is_last = (i == len(block.tools) - 1)
+                is_selected = (block.selected_index == i)
+                connector = "└─" if is_last else "├─"
+
+                status_icon = "✓" if tool.success else "✗"
+                status_style = "green" if tool.success else "red"
+
+                # Expand indicator for tool output (only if tool has output)
+                if tool.output_lines:
+                    expand_icon = "▾" if tool.expanded else "▸"
+                else:
+                    expand_icon = " "
+
+                # Selection highlight
+                row_style = "reverse" if is_selected else "dim"
+
+                output.append("\n")
+                output.append(f"  {expand_icon} {connector} ", style=row_style)
+                output.append(tool.name, style=row_style)
+                if tool.args_summary:
+                    output.append(f"({tool.args_summary})", style=row_style)
+                output.append(f" {status_icon}", style=status_style)
+
+                # Approval indicator
+                if tool.permission_state == "granted" and tool.permission_method:
+                    indicator = self._get_approval_indicator(tool.permission_method)
+                    if indicator:
+                        output.append(f" {indicator}", style="dim cyan")
+
+                # Duration
+                if tool.duration_seconds is not None:
+                    output.append(f" ({tool.duration_seconds:.1f}s)", style="dim")
+
+                # Expanded output
+                if tool.expanded and tool.output_lines:
+                    continuation = "   " if is_last else "│  "
+                    prefix = "    "
+                    total_lines = len(tool.output_lines)
+                    display_count = tool.output_display_lines
+
+                    end_idx = total_lines - tool.output_scroll_offset
+                    start_idx = max(0, end_idx - display_count)
+
+                    lines_above = start_idx
+                    lines_below = tool.output_scroll_offset
+
+                    if lines_above > 0:
+                        output.append("\n")
+                        output.append(f"{prefix}{continuation}   ", style="dim")
+                        output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''}", style="dim italic")
+
+                    for output_line in tool.output_lines[start_idx:end_idx]:
+                        output.append("\n")
+                        output.append(f"{prefix}{continuation}   ", style="dim")
+                        max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
+                        if len(output_line) > max_line_width:
+                            display_line = output_line[:max_line_width - 3] + "..."
+                        else:
+                            display_line = output_line
+                        output.append(display_line, style="dim italic")
+
+                    if lines_below > 0:
+                        output.append("\n")
+                        output.append(f"{prefix}{continuation}   ", style="dim")
+                        output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''}", style="dim italic")
+
+                # Error message
+                if not tool.success and tool.error_message:
+                    output.append("\n")
+                    continuation = "   " if is_last else "│  "
+                    output.append(f"    {continuation}   ⚠ {tool.error_message}", style="red dim")
+        else:
+            # Collapsed view
+            tool_summaries = []
+            for tool in block.tools:
+                status_icon = "✓" if tool.success else "✗"
+                summary = f"{tool.name} {status_icon}"
+                if tool.permission_state == "granted" and tool.permission_method:
+                    indicator = self._get_approval_indicator(tool.permission_method)
+                    if indicator:
+                        summary += f" {indicator}"
+                tool_summaries.append(summary)
+
+            output.append(f"  ▸ {tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
+            output.append(" ".join(tool_summaries), style="dim")
+
     def render(self, height: Optional[int] = None, width: Optional[int] = None) -> RenderableType:
         """Render the output buffer as Rich Text.
 
@@ -1112,13 +1309,13 @@ class OutputBuffer:
         # Work backwards from the end, using stored display line counts
         # First skip _scroll_offset lines, then collect 'height' lines
         # Include current block lines (streaming content) at the end
-        all_lines = list(self._lines) + current_block_lines
-        lines_to_show: List[OutputLine] = []
+        all_items: List[Union[OutputLine, ToolBlock]] = list(self._lines) + current_block_lines
+        items_to_show: List[Union[OutputLine, ToolBlock]] = []
 
         if height:
-            # Calculate how much space the tool tree will take (including separator)
+            # Calculate how much space the active tool tree will take (including separator)
             tool_tree_height = self._calculate_tool_tree_height()
-            if tool_tree_height > 0 and all_lines:
+            if tool_tree_height > 0 and all_items:
                 # Separator adds: blank line (\n\n) + separator text + \n = 2 visual lines
                 # Add +3 safety margin for edge cases (line wrapping, alignment)
                 tool_tree_height += 5  # 2 for separator + 3 safety margin
@@ -1126,8 +1323,8 @@ class OutputBuffer:
             # Adjust available height for stored lines
             available_for_lines = max(1, height - tool_tree_height)
 
-            # Calculate total display lines
-            total_display_lines = sum(line.display_lines for line in all_lines)
+            # Calculate total display lines (accounting for ToolBlocks)
+            total_display_lines = sum(self._get_item_display_lines(item) for item in all_items)
 
             # Find the end position (bottom of visible window)
             # scroll_offset=0 means show the most recent content
@@ -1135,19 +1332,20 @@ class OutputBuffer:
             end_display_line = total_display_lines - self._scroll_offset
             start_display_line = max(0, end_display_line - available_for_lines)
 
-            # Collect lines that fall within the visible range
+            # Collect items that fall within the visible range
             current_display_line = 0
-            for line in all_lines:
-                line_end = current_display_line + line.display_lines
-                # Include line if it overlaps with visible range
+            for item in all_items:
+                item_height = self._get_item_display_lines(item)
+                line_end = current_display_line + item_height
+                # Include item if it overlaps with visible range
                 if line_end > start_display_line and current_display_line < end_display_line:
-                    lines_to_show.append(line)
+                    items_to_show.append(item)
                 current_display_line = line_end
                 # Stop if we've passed the visible range
                 if current_display_line >= end_display_line:
                     break
         else:
-            lines_to_show = all_lines
+            items_to_show = all_items
 
         # Build output text with wrapping
         output = Text()
@@ -1181,11 +1379,18 @@ class OutputBuffer:
                     result.extend(wrapped)
             return result if result else ['']
 
-        # Render lines (model intent text appears before tool tree)
-        for i, line in enumerate(lines_to_show):
+        # Render items (OutputLines and ToolBlocks)
+        for i, item in enumerate(items_to_show):
             if i > 0:
                 output.append("\n")
 
+            # Handle ToolBlocks specially
+            if isinstance(item, ToolBlock):
+                self._render_tool_block(item, output, wrap_width)
+                continue
+
+            # For OutputLine items, render based on source
+            line = item
             if line.source == "system":
                 # System messages use their style directly
                 wrapped = wrap_text(line.text)
@@ -1333,7 +1538,7 @@ class OutputBuffer:
 
         # Add tool call summary (after regular lines)
         if self._active_tools:
-            if lines_to_show:
+            if items_to_show:
                 output.append("\n\n")  # Extra blank line for visual separation
                 # Add separator line with toggle/navigation hint
                 if self._tool_nav_active:
@@ -1713,94 +1918,9 @@ class OutputBuffer:
 
                         output.append("\n")
                         output.append(f"  {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
-        elif self._tool_nav_active and self._turn_tools:
-            # Navigation mode with completed tools from this turn
-            # Render a navigation panel at the bottom
-            if lines_to_show:
-                output.append("\n\n")  # Extra blank line for visual separation
-
-            # Show navigation hints
-            pos = (self._selected_tool_index or 0) + 1
-            total = len(self._turn_tools)
-            output.append(f"  ───  ↑/↓ nav, Space expand, [/] scroll, Esc exit [{pos}/{total}]", style="dim")
-            output.append("\n")
-
-            # Show tools header
-            output.append("  ▾ ", style="dim")
-            output.append(f"{total} tool{'s' if total != 1 else ''} (completed):", style="dim")
-
-            # Show each tool
-            for i, tool in enumerate(self._turn_tools):
-                is_last = (i == len(self._turn_tools) - 1)
-                is_selected = (i == self._selected_tool_index)
-                connector = "└─" if is_last else "├─"
-
-                status_icon = "✓" if tool.success else "✗"
-                status_style = "green" if tool.success else "red"
-
-                # Expand indicator
-                expand_icon = "▾" if tool.expanded else "▸"
-
-                # Selection highlight style
-                row_style = "reverse" if is_selected else "dim"
-
-                output.append("\n")
-                output.append(f"  {expand_icon} {connector} ", style=row_style)
-                output.append(tool.name, style=row_style)
-                if tool.args_summary:
-                    output.append(f"({tool.args_summary})", style=row_style)
-                output.append(f" {status_icon}", style=status_style)
-
-                # Show approval indicator
-                if tool.permission_state == "granted" and tool.permission_method:
-                    indicator = self._get_approval_indicator(tool.permission_method)
-                    if indicator:
-                        output.append(f" {indicator}", style="dim cyan")
-
-                # Show duration
-                if tool.duration_seconds is not None:
-                    output.append(f" ({tool.duration_seconds:.1f}s)", style="dim")
-
-                # Show expanded output
-                if tool.expanded and tool.output_lines:
-                    continuation = "   " if is_last else "│  "
-                    prefix = "    "
-                    total_lines = len(tool.output_lines)
-                    display_count = tool.output_display_lines
-
-                    # Calculate visible window
-                    end_idx = total_lines - tool.output_scroll_offset
-                    start_idx = max(0, end_idx - display_count)
-
-                    lines_above = start_idx
-                    lines_below = tool.output_scroll_offset
-
-                    # Show "more above" indicator
-                    if lines_above > 0:
-                        output.append("\n")
-                        output.append(f"{prefix}{continuation}   ", style="dim")
-                        output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''} ([ to scroll)", style="dim italic")
-
-                    # Show visible lines
-                    for output_line in tool.output_lines[start_idx:end_idx]:
-                        output.append("\n")
-                        output.append(f"{prefix}{continuation}   ", style="dim")
-                        max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
-                        if len(output_line) > max_line_width:
-                            display_line = output_line[:max_line_width - 3] + "..."
-                        else:
-                            display_line = output_line
-                        output.append(display_line, style="dim italic")
-
-                    # Show "more below" indicator
-                    if lines_below > 0:
-                        output.append("\n")
-                        output.append(f"{prefix}{continuation}   ", style="dim")
-                        output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} (] to scroll)", style="dim italic")
-
         elif self._spinner_active:
             # Spinner active but no tools yet - show model header first
-            if lines_to_show:
+            if items_to_show:
                 output.append("\n\n")  # Blank line before header
                 # Show model header if this is a new turn
                 if self._last_turn_source != "model":
