@@ -15,6 +15,8 @@ Enterprise features:
 - SSO support (fine-grained PATs auto-authorized)
 """
 
+from __future__ import annotations
+
 import json
 import time
 import urllib.request
