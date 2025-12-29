@@ -212,6 +212,24 @@ class PluginRegistry:
         if metadata.get("description_requested"):
             return "requested session description (turn threshold reached)"
 
+        # LSP plugin pattern - show diagnostic counts
+        if "total_errors" in metadata or "total_warnings" in metadata:
+            errors = metadata.get("total_errors", 0)
+            warnings = metadata.get("total_warnings", 0)
+            files = metadata.get("files_checked", [])
+            file_str = files[0] if len(files) == 1 else f"{len(files)} files"
+
+            parts = []
+            if errors > 0:
+                parts.append(f"{errors} error{'s' if errors != 1 else ''}")
+            if warnings > 0:
+                parts.append(f"{warnings} warning{'s' if warnings != 1 else ''}")
+
+            if parts:
+                return f"found {', '.join(parts)} in {file_str}"
+            else:
+                return f"checked {file_str}, no issues found"
+
         # References plugin pattern
         if "mentioned_references" in metadata:
             refs = metadata["mentioned_references"]
