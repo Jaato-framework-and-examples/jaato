@@ -931,6 +931,20 @@ class OutputBuffer:
         Returns:
             Number of display lines the tool tree will occupy.
         """
+        # Check for navigation mode with turn tools (after model turn ends)
+        if self._tool_nav_active and self._turn_tools and not self._active_tools:
+            # Navigation panel height: separator + header + each tool
+            height = 2  # Separator line + header
+            for tool in self._turn_tools:
+                height += 1  # Tool line
+                if tool.expanded and tool.output_lines:
+                    # Display lines + possible scroll indicators
+                    display_count = min(len(tool.output_lines), tool.output_display_lines)
+                    height += display_count
+                    if len(tool.output_lines) > tool.output_display_lines:
+                        height += 2  # Up/down scroll indicators
+            return height
+
         if not self._active_tools and not self._spinner_active:
             return 0
 
