@@ -146,7 +146,7 @@ DEFAULT_KEYBINDINGS = {
 
     # Tool navigation
     "tool_nav_enter": "c-n",  # Enter tool navigation mode
-    "tool_toggle": "space",   # Toggle expand/collapse on selected tool
+    "tool_toggle": "right",   # Toggle expand/collapse on selected tool
     "tool_exit": "escape",    # Exit tool navigation mode
     "tool_scroll_up": "[",    # Scroll up within expanded tool output
     "tool_scroll_down": "]",  # Scroll down within expanded tool output
@@ -672,7 +672,7 @@ def generate_example_config() -> str:
         "view_full": "v",
 
         "tool_nav_enter": "c-n",
-        "tool_toggle": "space",
+        "tool_toggle": "right",
         "tool_exit": "escape",
         "tool_scroll_up": "[",
         "tool_scroll_down": "]",

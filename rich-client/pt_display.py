@@ -647,13 +647,7 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("pager_next"), eager=True)
         def handle_space(event):
-            """Handle space key - tool toggle, pager advance, or insert space."""
-            # Tool navigation mode - toggle expand/collapse on selected tool
-            buffer = self._get_active_buffer()
-            if buffer.tool_nav_active:
-                buffer.toggle_selected_tool_expanded()
-                self._app.invalidate()
-                return
+            """Handle space key - pager advance or insert space."""
             if getattr(self, '_pager_active', False):
                 # In pager mode - advance page
                 self._advance_pager_page()
@@ -831,6 +825,16 @@ class PTDisplay:
             else:
                 # Not in tool nav mode - insert character
                 event.current_buffer.insert_text("]")
+
+        @kb.add(*keys.get_key_args("tool_toggle"), eager=True)
+        def handle_tool_toggle(event):
+            """Handle right arrow - toggle expand/collapse on selected tool."""
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                buffer.toggle_selected_tool_expanded()
+                self._app.invalidate()
+            # If not in tool nav mode, let the default right arrow behavior happen
+            # (cursor movement in input buffer)
 
         @kb.add(*keys.get_key_args("yank"))
         def handle_ctrl_y(event):
