@@ -805,7 +805,7 @@ class PTDisplay:
             if buffer.tool_nav_active:
                 # Already in nav mode - exit
                 buffer.exit_tool_navigation()
-            elif buffer._active_tools:
+            elif buffer._get_navigable_tools():
                 # Enter navigation mode (auto-expands view)
                 buffer.enter_tool_navigation()
             self._app.invalidate()
