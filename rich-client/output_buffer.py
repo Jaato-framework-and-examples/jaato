@@ -1243,7 +1243,10 @@ class OutputBuffer:
                     pos = i + 1
                     break
             total = len(all_tools)
-            output.append(f"  ↑/↓ nav, → expand, Esc exit [{pos}/{total}]", style="dim")
+            # Dynamic hint based on selected tool's expanded state
+            selected_tool = block.tools[block.selected_index]
+            toggle_hint = "← collapse" if selected_tool.expanded else "→ expand"
+            output.append(f"  ↑/↓ nav, {toggle_hint}, Esc exit [{pos}/{total}]", style="dim")
 
         output.append("\n")
 
@@ -1617,7 +1620,10 @@ class OutputBuffer:
                     # Show navigation hints when in tool nav mode
                     pos = (self._selected_tool_index or 0) + 1
                     total = len(self._active_tools)
-                    output.append(f"  ───  ↑/↓ nav, → expand, [/] scroll, Esc exit [{pos}/{total}]", style="dim")
+                    # Dynamic hint based on selected tool's expanded state
+                    selected_tool = self._active_tools[self._selected_tool_index or 0]
+                    toggle_hint = "← collapse" if selected_tool.expanded else "→ expand"
+                    output.append(f"  ───  ↑/↓ nav, {toggle_hint}, [/] scroll, Esc exit [{pos}/{total}]", style="dim")
                 elif self._tools_expanded:
                     output.append("  ───  Ctrl+T to collapse, Ctrl+N to navigate", style="dim")
                 else:
