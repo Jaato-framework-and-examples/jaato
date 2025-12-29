@@ -2754,6 +2754,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
         nonlocal model_running, should_exit
 
+        # Yield control to let handle_events() start listening before we trigger session init
+        await asyncio.sleep(0)
+
         # Request session - new or default
         if new_session:
             await client.create_session()

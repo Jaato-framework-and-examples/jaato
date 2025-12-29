@@ -317,11 +317,8 @@ class SessionManager:
 
         logger.info(f"Session created: {session_id} ({name})")
 
-        # Emit current agent state to the newly attached client (skip SessionInfo, we'll send our own)
-        server.emit_current_state(
-            lambda e: self._emit_to_client(client_id, e),
-            skip_session_info=True
-        )
+        # Note: We don't call emit_current_state() here because the client
+        # already received all events during initialize() via direct emission.
 
         # Send complete SessionInfoEvent with state snapshot
         self._emit_to_client(client_id, self._build_session_info_event(session))
@@ -351,9 +348,13 @@ class SessionManager:
         Returns:
             True if attached successfully.
         """
+        # Track if session was already in memory (client missed init events)
+        session_was_in_memory = False
+
         with self._lock:
             # Check if session is in memory
             session = self._sessions.get(session_id)
+            session_was_in_memory = session is not None
 
             if not session:
                 # Try to load from disk (pass client_id for init progress events)
@@ -398,11 +399,13 @@ class SessionManager:
         # Apply client-specific config (e.g., terminal_width)
         self._apply_client_config_to_server(client_id, session.server)
 
-        # Emit current agent state to the newly attached client (skip SessionInfo, we'll send our own)
-        session.server.emit_current_state(
-            lambda e: self._emit_to_client(client_id, e),
-            skip_session_info=True
-        )
+        # Only emit current state if session was already in memory.
+        # If we just loaded it from disk, the client received all events during init.
+        if session_was_in_memory:
+            session.server.emit_current_state(
+                lambda e: self._emit_to_client(client_id, e),
+                skip_session_info=True
+            )
 
         # Send complete SessionInfoEvent with state snapshot
         self._emit_to_client(client_id, self._build_session_info_event(session))
