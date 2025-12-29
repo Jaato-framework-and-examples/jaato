@@ -78,6 +78,7 @@ from .events import (
     ContextUpdatedEvent,
     TurnCompletedEvent,
     SystemMessageEvent,
+    InitProgressEvent,
     ErrorEvent,
     SessionInfoEvent,
     SendMessageRequest,
@@ -329,21 +330,40 @@ class JaatoServer:
     # Initialization
     # =========================================================================
 
+    def _emit_init_progress(
+        self,
+        step: str,
+        status: str,
+        step_number: int,
+        total_steps: int,
+        message: str = ""
+    ) -> None:
+        """Emit an initialization progress event."""
+        self.emit(InitProgressEvent(
+            step=step,
+            status=status,
+            step_number=step_number,
+            total_steps=total_steps,
+            message=message,
+        ))
+
     def initialize(self) -> bool:
         """Initialize the server.
 
         Returns:
             True if initialization succeeded, False otherwise.
         """
-        # Load environment
-        load_dotenv(self.env_file)
+        total_steps = 5
 
-        # Check CA bundle
+        # Step 1: Load configuration
+        self._emit_init_progress("Loading configuration", "running", 1, total_steps)
+        load_dotenv(self.env_file)
         active_bundle = active_cert_bundle(verbose=False)
 
-        # Check required vars
         model_name = os.environ.get("MODEL_NAME")
         if not model_name:
+            self._emit_init_progress("Loading configuration", "error", 1, total_steps,
+                                     "Missing MODEL_NAME")
             self.emit(ErrorEvent(
                 error="Missing required environment variable: MODEL_NAME",
                 error_type="ConfigurationError",
@@ -351,20 +371,23 @@ class JaatoServer:
             ))
             return False
 
-        # Check auth method
         api_key = os.environ.get("GOOGLE_GENAI_API_KEY")
         project_id = os.environ.get("PROJECT_ID")
         location = os.environ.get("LOCATION")
 
         if not api_key and (not project_id or not location):
+            self._emit_init_progress("Loading configuration", "error", 1, total_steps,
+                                     "Missing credentials")
             self.emit(ErrorEvent(
                 error="Set GOOGLE_GENAI_API_KEY for AI Studio, or PROJECT_ID and LOCATION for Vertex AI",
                 error_type="ConfigurationError",
                 recoverable=False,
             ))
             return False
+        self._emit_init_progress("Loading configuration", "done", 1, total_steps)
 
-        # Initialize JaatoClient
+        # Step 2: Connect to model provider
+        self._emit_init_progress("Connecting to model provider", "running", 2, total_steps)
         try:
             self._jaato = JaatoClient(provider_name=self._provider)
             if api_key:
@@ -372,6 +395,8 @@ class JaatoServer:
             else:
                 self._jaato.connect(project_id, location, model_name)
         except Exception as e:
+            self._emit_init_progress("Connecting to model provider", "error", 2, total_steps,
+                                     str(e))
             self.emit(ErrorEvent(
                 error=f"Failed to connect: {e}",
                 error_type=type(e).__name__,
@@ -379,18 +404,16 @@ class JaatoServer:
             ))
             return False
 
-        # Store model info
         self._model_name = self._jaato.model_name or model_name
         self._model_provider = self._jaato.provider_name
-
-        # Set terminal width for formatting
         self._jaato.set_terminal_width(self._terminal_width)
+        self._emit_init_progress("Connecting to model provider", "done", 2, total_steps)
 
-        # Initialize plugin registry
+        # Step 3: Discover and configure plugins
+        self._emit_init_progress("Loading plugins", "running", 3, total_steps)
         self.registry = PluginRegistry(model_name=model_name)
         self.registry.discover()
 
-        # Configure plugins
         plugin_configs = {
             "todo": {
                 "reporter_type": "memory",
@@ -406,7 +429,6 @@ class JaatoServer:
         self.registry.expose_all(plugin_configs)
         self.todo_plugin = self.registry.get_plugin("todo")
 
-        # Initialize permission plugin
         self.permission_plugin = PermissionPlugin()
         self.permission_plugin.initialize({
             "channel_type": "queue",
@@ -417,60 +439,35 @@ class JaatoServer:
                 "blacklist": {"tools": [], "patterns": []},
             }
         })
+        self._emit_init_progress("Loading plugins", "done", 3, total_steps)
 
-        # Configure tools
+        # Step 4: Configure tools
+        self._emit_init_progress("Configuring tools", "running", 4, total_steps)
         self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
-        # Load GC configuration
-        logger.debug("initialize: loading GC config...")
         gc_result = load_gc_from_file()
         if gc_result:
             gc_plugin, gc_config = gc_result
             self._jaato.set_gc_plugin(gc_plugin, gc_config)
-        logger.debug("initialize: GC config done")
+        self._emit_init_progress("Configuring tools", "done", 4, total_steps)
 
-        # Setup session plugin
-        logger.debug("initialize: setting up session plugin...")
+        # Step 5: Set up session
+        self._emit_init_progress("Setting up session", "running", 5, total_steps)
         self._setup_session_plugin()
-        logger.debug("initialize: session plugin done")
-
-        # Setup hooks
-        logger.debug("initialize: setting up agent hooks...")
         self._setup_agent_hooks()
-        logger.debug("initialize: agent hooks done")
-
-        logger.debug("initialize: setting up permission hooks...")
         self._setup_permission_hooks()
-        logger.debug("initialize: permission hooks done")
-
-        logger.debug("initialize: setting up clarification hooks...")
         self._setup_clarification_hooks()
-        logger.debug("initialize: clarification hooks done")
-
-        logger.debug("initialize: setting up reference selection hooks...")
         self._setup_reference_selection_hooks()
-        logger.debug("initialize: reference selection hooks done")
-
-        logger.debug("initialize: setting up plan hooks...")
         self._setup_plan_hooks()
-        logger.debug("initialize: plan hooks done")
-
-        logger.debug("initialize: setting up queue channels...")
         self._setup_queue_channels()
-        logger.debug("initialize: queue channels done")
-
-        # Create main agent
-        logger.debug("initialize: creating main agent...")
         self._create_main_agent()
-        logger.debug("initialize: main agent done")
+        self._emit_init_progress("Setting up session", "done", 5, total_steps)
 
-        logger.debug("initialize: emitting system message...")
         self.emit(SystemMessageEvent(
             message=f"Connected to {self._model_provider}/{self._model_name}",
             style="info",
         ))
 
-        logger.debug("initialize: returning True")
         return True
 
     def _create_main_agent(self) -> None:
