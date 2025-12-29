@@ -146,10 +146,10 @@ DEFAULT_KEYBINDINGS = {
 
     # Tool navigation
     "tool_nav_enter": "c-n",  # Enter tool navigation mode
-    "tool_toggle": "right",   # Toggle expand/collapse on selected tool
+    "tool_expand": "right",   # Expand/collapse selected tool's output
     "tool_exit": "escape",    # Exit tool navigation mode
-    "tool_scroll_up": "[",    # Scroll up within expanded tool output
-    "tool_scroll_down": "]",  # Scroll down within expanded tool output
+    "tool_output_up": "[",    # Scroll up within expanded tool output
+    "tool_output_down": "]",  # Scroll down within expanded tool output
 }
 
 
@@ -309,10 +309,10 @@ class KeybindingConfig:
 
     # Tool navigation
     tool_nav_enter: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_nav_enter"])
-    tool_toggle: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_toggle"])
+    tool_expand: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_expand"])
     tool_exit: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_exit"])
-    tool_scroll_up: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_scroll_up"])
-    tool_scroll_down: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_scroll_down"])
+    tool_output_up: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_output_up"])
+    tool_output_down: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_output_down"])
 
     # Profile metadata (not a keybinding)
     _profile: str = field(default="default")
@@ -496,10 +496,10 @@ class KeybindingConfig:
             "yank": self.yank,
             "view_full": self.view_full,
             "tool_nav_enter": self.tool_nav_enter,
-            "tool_toggle": self.tool_toggle,
+            "tool_expand": self.tool_expand,
             "tool_exit": self.tool_exit,
-            "tool_scroll_up": self.tool_scroll_up,
-            "tool_scroll_down": self.tool_scroll_down,
+            "tool_output_up": self.tool_output_up,
+            "tool_output_down": self.tool_output_down,
         }
 
     def set_binding(self, action: str, key: KeyBinding) -> bool:
@@ -672,9 +672,9 @@ def generate_example_config() -> str:
         "view_full": "v",
 
         "tool_nav_enter": "c-n",
-        "tool_toggle": "right",
+        "tool_expand": "right",
         "tool_exit": "escape",
-        "tool_scroll_up": "[",
-        "tool_scroll_down": "]",
+        "tool_output_up": "[",
+        "tool_output_down": "]",
     }
     return json.dumps(example, indent=2)

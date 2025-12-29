@@ -129,6 +129,11 @@ class PTDisplay:
         self._plan_panel = PlanPanel(toggle_key=self._keybinding_config.toggle_plan)
         self._output_buffer = OutputBuffer()
         self._output_buffer.set_width(output_width)
+        self._output_buffer.set_keybinding_config(self._keybinding_config)
+
+        # Set keybinding config on agent registry buffers too
+        if self._agent_registry:
+            self._agent_registry.set_keybinding_config_all(self._keybinding_config)
 
         # Rich renderer
         self._renderer = RichRenderer(self._width)
@@ -804,8 +809,8 @@ class PTDisplay:
                 buffer.enter_tool_navigation()
             self._app.invalidate()
 
-        @kb.add(*keys.get_key_args("tool_scroll_up"))
-        def handle_tool_scroll_up(event):
+        @kb.add(*keys.get_key_args("tool_output_up"))
+        def handle_tool_output_up(event):
             """Handle [ - scroll up within expanded tool output."""
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
@@ -815,8 +820,8 @@ class PTDisplay:
                 # Not in tool nav mode - insert character
                 event.current_buffer.insert_text("[")
 
-        @kb.add(*keys.get_key_args("tool_scroll_down"))
-        def handle_tool_scroll_down(event):
+        @kb.add(*keys.get_key_args("tool_output_down"))
+        def handle_tool_output_down(event):
             """Handle ] - scroll down within expanded tool output."""
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
@@ -826,9 +831,9 @@ class PTDisplay:
                 # Not in tool nav mode - insert character
                 event.current_buffer.insert_text("]")
 
-        @kb.add(*keys.get_key_args("tool_toggle"), eager=True)
-        def handle_tool_toggle(event):
-            """Handle right arrow - toggle expand/collapse on selected tool."""
+        @kb.add(*keys.get_key_args("tool_expand"), eager=True)
+        def handle_tool_expand(event):
+            """Handle right arrow - expand/collapse selected tool's output."""
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
                 buffer.toggle_selected_tool_expanded()

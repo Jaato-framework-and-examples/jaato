@@ -107,6 +107,8 @@ class OutputBuffer:
         self._tool_nav_active: bool = False  # True when navigating tools
         self._selected_block_index: Optional[int] = None  # Which ToolBlock is selected
         self._selected_tool_index: Optional[int] = None  # Which tool within selected block
+        # Keybinding config for dynamic UI hints
+        self._keybinding_config: Optional[Any] = None
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -116,6 +118,59 @@ class OutputBuffer:
         """
         self._console_width = width
         self._measure_console = Console(width=width, force_terminal=True)
+
+    def set_keybinding_config(self, config: Any) -> None:
+        """Set the keybinding config for dynamic UI hints.
+
+        Args:
+            config: KeybindingConfig instance from keybindings module.
+        """
+        self._keybinding_config = config
+
+    def _format_key_hint(self, action: str) -> str:
+        """Format a keybinding for display in UI hints.
+
+        Args:
+            action: The action name (e.g., "tool_expand", "nav_up")
+
+        Returns:
+            Human-readable key representation (e.g., "→", "↑", "Ctrl+N")
+        """
+        if not self._keybinding_config:
+            # Fallback defaults if no config
+            defaults = {
+                "nav_up": "↑", "nav_down": "↓",
+                "tool_expand": "→", "tool_exit": "Esc",
+                "tool_output_up": "[", "tool_output_down": "]",
+                "tool_nav_enter": "Ctrl+N", "toggle_tools": "Ctrl+T",
+            }
+            return defaults.get(action, action)
+
+        try:
+            key = getattr(self._keybinding_config, action, None)
+            if key is None:
+                return action
+
+            # Convert key to human-readable format
+            if isinstance(key, list):
+                key = " ".join(key)
+
+            # Map common keys to symbols/readable names
+            key_map = {
+                "up": "↑", "down": "↓", "left": "←", "right": "→",
+                "escape": "Esc", "enter": "Enter", "space": "Space",
+                "pageup": "PgUp", "pagedown": "PgDn",
+                "home": "Home", "end": "End", "tab": "Tab",
+            }
+
+            # Handle control keys
+            if key.startswith("c-"):
+                letter = key[2:].upper()
+                return f"Ctrl+{letter}"
+
+            return key_map.get(key, key)
+        except Exception:
+            return action
 
     def _measure_display_lines(self, source: str, text: str, is_turn_start: bool = False) -> int:
         """Measure how many display lines a piece of text will take.
@@ -1243,10 +1298,14 @@ class OutputBuffer:
                     pos = i + 1
                     break
             total = len(all_tools)
-            # Dynamic hint based on selected tool's expanded state
+            # Dynamic hint based on selected tool's expanded state and actual keybindings
             selected_tool = block.tools[block.selected_index]
-            toggle_hint = "← collapse" if selected_tool.expanded else "→ expand"
-            output.append(f"  ↑/↓ nav, {toggle_hint}, Esc exit [{pos}/{total}]", style="dim")
+            nav_up = self._format_key_hint("nav_up")
+            nav_down = self._format_key_hint("nav_down")
+            expand_key = self._format_key_hint("tool_expand")
+            exit_key = self._format_key_hint("tool_exit")
+            toggle_hint = f"← collapse" if selected_tool.expanded else f"{expand_key} expand"
+            output.append(f"  {nav_up}/{nav_down} nav, {toggle_hint}, {exit_key} exit [{pos}/{total}]", style="dim")
 
         output.append("\n")
 
@@ -1617,17 +1676,25 @@ class OutputBuffer:
                 output.append("\n\n")  # Extra blank line for visual separation
                 # Add separator line with toggle/navigation hint
                 if self._tool_nav_active:
-                    # Show navigation hints when in tool nav mode
+                    # Show navigation hints when in tool nav mode using actual keybindings
                     pos = (self._selected_tool_index or 0) + 1
                     total = len(self._active_tools)
-                    # Dynamic hint based on selected tool's expanded state
                     selected_tool = self._active_tools[self._selected_tool_index or 0]
-                    toggle_hint = "← collapse" if selected_tool.expanded else "→ expand"
-                    output.append(f"  ───  ↑/↓ nav, {toggle_hint}, [/] scroll, Esc exit [{pos}/{total}]", style="dim")
+                    nav_up = self._format_key_hint("nav_up")
+                    nav_down = self._format_key_hint("nav_down")
+                    expand_key = self._format_key_hint("tool_expand")
+                    output_up = self._format_key_hint("tool_output_up")
+                    output_down = self._format_key_hint("tool_output_down")
+                    exit_key = self._format_key_hint("tool_exit")
+                    toggle_hint = f"← collapse" if selected_tool.expanded else f"{expand_key} expand"
+                    output.append(f"  ───  {nav_up}/{nav_down} nav, {toggle_hint}, {output_up}/{output_down} scroll, {exit_key} exit [{pos}/{total}]", style="dim")
                 elif self._tools_expanded:
-                    output.append("  ───  Ctrl+T to collapse, Ctrl+N to navigate", style="dim")
+                    toggle_tools = self._format_key_hint("toggle_tools")
+                    tool_nav = self._format_key_hint("tool_nav_enter")
+                    output.append(f"  ───  {toggle_tools} to collapse, {tool_nav} to navigate", style="dim")
                 else:
-                    output.append("  ───  Ctrl+T to expand", style="dim")
+                    toggle_tools = self._format_key_hint("toggle_tools")
+                    output.append(f"  ───  {toggle_tools} to expand", style="dim")
                 output.append("\n")
 
             # Check if waiting for user input (permission or clarification)
