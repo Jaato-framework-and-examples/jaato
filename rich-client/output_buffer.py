@@ -93,6 +93,7 @@ class OutputBuffer:
         self._current_block: Optional[Tuple[str, List[str], bool]] = None
         self._measure_console: Optional[Console] = None
         self._console_width: int = 80
+        self._visible_height: int = 20  # Last known visible height for auto-scroll
         self._last_source: Optional[str] = None  # Track source for turn detection
         self._last_turn_source: Optional[str] = None  # Track user/model turns (ignores system/tool)
         self._scroll_offset: int = 0  # Lines scrolled up from bottom (0 = at bottom)
@@ -685,6 +686,68 @@ class OutputBuffer:
                 new_block = blocks[block_idx][1]
                 new_block.selected_index = tool_idx
                 new_block.expanded = True
+
+        # Auto-scroll to keep selected tool visible
+        self._scroll_to_selected_tool()
+
+    def _scroll_to_selected_tool(self) -> None:
+        """Scroll the output panel to keep the selected tool visible."""
+        if not self._tool_nav_active:
+            return
+
+        # For active tools (block_idx is None), they're always at the bottom
+        if self._selected_block_index is None:
+            self._scroll_offset = 0
+            return
+
+        # For ToolBlocks, calculate the position and scroll if needed
+        blocks = self._get_tool_blocks()
+        if not blocks or self._selected_block_index >= len(blocks):
+            return
+
+        # Calculate display lines up to the selected block
+        display_line = 0
+        for i, item in enumerate(self._lines):
+            if isinstance(item, ToolBlock):
+                # Find which block index this is
+                block_list_idx = None
+                for bi, (line_idx, _) in enumerate(blocks):
+                    if line_idx == i:
+                        block_list_idx = bi
+                        break
+
+                if block_list_idx == self._selected_block_index:
+                    # Found the selected block, add lines for tools before selected
+                    # Block header (separator + header line)
+                    display_line += 2
+                    # Add lines for each tool before the selected one
+                    block = blocks[block_list_idx][1]
+                    for ti in range(self._selected_tool_index or 0):
+                        display_line += 1  # Tool line
+                        tool = block.tools[ti]
+                        if tool.expanded and tool.output_lines:
+                            display_line += min(len(tool.output_lines), tool.output_display_lines)
+                            if len(tool.output_lines) > tool.output_display_lines:
+                                display_line += 2  # Scroll indicators
+                    break
+
+            display_line += self._get_item_display_lines(item)
+
+        # Calculate total display lines
+        total_lines = sum(self._get_item_display_lines(item) for item in self._lines)
+
+        # Calculate the scroll offset needed to show this position
+        # scroll_offset is "lines from bottom", so higher = older content shown
+        # We want the selected tool roughly in the middle of the visible area
+        target_from_bottom = total_lines - display_line
+        margin = self._visible_height // 3  # Keep some margin
+
+        # If tool would be above visible area, scroll up (increase offset)
+        if target_from_bottom > self._scroll_offset + self._visible_height - margin:
+            self._scroll_offset = max(0, target_from_bottom - self._visible_height + margin)
+        # If tool would be below visible area, scroll down (decrease offset)
+        elif target_from_bottom < self._scroll_offset + margin:
+            self._scroll_offset = max(0, target_from_bottom - margin)
 
     def toggle_selected_tool_expanded(self) -> bool:
         """Toggle expand/collapse for selected tool's output.
@@ -1310,6 +1373,10 @@ class OutputBuffer:
         # Update width if provided
         if width and width != self._console_width:
             self.set_width(width)
+
+        # Store visible height for auto-scroll calculations
+        if height:
+            self._visible_height = height
 
         # Work backwards from the end, using stored display line counts
         # First skip _scroll_offset lines, then collect 'height' lines
