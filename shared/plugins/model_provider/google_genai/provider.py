@@ -12,13 +12,19 @@ Authentication methods:
 - Impersonation: For Vertex AI, act as another service account
 """
 
+from __future__ import annotations
+
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from google import genai
-from google.genai import types
+# Lazy imports - SDK is only loaded when actually used
+from ._lazy import get_genai, get_types
+
+if TYPE_CHECKING:
+    from google import genai
+    from google.genai import types
 
 from ..base import (
     FunctionCallDetectedCallback,
@@ -372,7 +378,7 @@ class GoogleGenAIProvider:
                 # Vertex AI mode - check for impersonation
                 if config.auth_method == "impersonation":
                     credentials = self._create_impersonated_credentials(config)
-                    return genai.Client(
+                    return get_genai().Client(
                         vertexai=True,
                         project=config.project,
                         location=config.location,
@@ -380,14 +386,14 @@ class GoogleGenAIProvider:
                     )
                 else:
                     # Standard Vertex AI auth (ADC or service account file)
-                    return genai.Client(
+                    return get_genai().Client(
                         vertexai=True,
                         project=config.project,
                         location=config.location,
                     )
             else:
                 # AI Studio mode with API key
-                return genai.Client(
+                return get_genai().Client(
                     api_key=config.api_key,
                 )
         except ImpersonationError:
@@ -603,10 +609,10 @@ class GoogleGenAIProvider:
         sdk_tool = tool_schemas_to_sdk_tool(tools) if tools else None
 
         # Build config
-        config = types.GenerateContentConfig(
+        config = get_types().GenerateContentConfig(
             system_instruction=system_instruction,
             tools=[sdk_tool] if sdk_tool else None,
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+            automatic_function_calling=get_types().AutomaticFunctionCallingConfig(disable=True)
         )
 
         # Convert history to SDK format
@@ -677,7 +683,7 @@ class GoogleGenAIProvider:
         # Build config override for structured output
         config = None
         if response_schema:
-            config = types.GenerateContentConfig(
+            config = get_types().GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=response_schema
             )
@@ -724,12 +730,12 @@ class GoogleGenAIProvider:
         sdk_parts = [part_to_sdk(p) for p in parts]
 
         # Create user Content with the parts
-        user_content = types.Content(role='user', parts=sdk_parts)
+        user_content = get_types().Content(role='user', parts=sdk_parts)
 
         # Build config override for structured output
         config = None
         if response_schema:
-            config = types.GenerateContentConfig(
+            config = get_types().GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=response_schema
             )
@@ -771,7 +777,7 @@ class GoogleGenAIProvider:
         # Build config override for structured output
         config = None
         if response_schema:
-            config = types.GenerateContentConfig(
+            config = get_types().GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=response_schema
             )
@@ -903,7 +909,7 @@ class GoogleGenAIProvider:
         # Build config override for structured output
         config = None
         if response_schema:
-            config = types.GenerateContentConfig(
+            config = get_types().GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=response_schema
             )
@@ -1083,7 +1089,7 @@ class GoogleGenAIProvider:
         # Build config override for structured output
         config = None
         if response_schema:
-            config = types.GenerateContentConfig(
+            config = get_types().GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=response_schema
             )

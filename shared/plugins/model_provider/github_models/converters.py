@@ -5,23 +5,29 @@ types (Message, ToolSchema, etc.) and the azure-ai-inference SDK types
 which follow the OpenAI chat completions format.
 """
 
+from __future__ import annotations
+
 import base64
 import json
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from azure.ai.inference.models import (
-    AssistantMessage,
-    ChatCompletions,
-    ChatCompletionsToolCall,
-    ChatCompletionsToolDefinition,
-    ChatRequestMessage,
-    FunctionCall as AzureFunctionCall,
-    FunctionDefinition,
-    SystemMessage,
-    ToolMessage,
-    UserMessage,
-)
+# Lazy imports - SDK is only loaded when actually used
+from ._lazy import get_models
+
+if TYPE_CHECKING:
+    from azure.ai.inference.models import (
+        AssistantMessage,
+        ChatCompletions,
+        ChatCompletionsToolCall,
+        ChatCompletionsToolDefinition,
+        ChatRequestMessage,
+        FunctionCall as AzureFunctionCall,
+        FunctionDefinition,
+        SystemMessage,
+        ToolMessage,
+        UserMessage,
+    )
 
 from ..types import (
     FinishReason,
@@ -63,8 +69,8 @@ def role_from_sdk(role: str) -> Role:
 
 def tool_schema_to_sdk(schema: ToolSchema) -> ChatCompletionsToolDefinition:
     """Convert ToolSchema to SDK ChatCompletionsToolDefinition."""
-    return ChatCompletionsToolDefinition(
-        function=FunctionDefinition(
+    return get_models().ChatCompletionsToolDefinition(
+        function=get_models().FunctionDefinition(
             name=schema.name,
             description=schema.description,
             parameters=schema.parameters,
@@ -116,7 +122,7 @@ def message_to_sdk(message: Message) -> ChatRequestMessage:
         # Tool result message - use the first response
         fr = function_responses[0]
         result_str = json.dumps(fr.result) if not isinstance(fr.result, str) else fr.result
-        return ToolMessage(
+        return get_models().ToolMessage(
             tool_call_id=fr.call_id,
             content=result_str,
         )
@@ -125,36 +131,37 @@ def message_to_sdk(message: Message) -> ChatRequestMessage:
         # Assistant message - may include tool calls
         if function_calls:
             tool_calls = [
-                ChatCompletionsToolCall(
+                get_models().ChatCompletionsToolCall(
                     id=fc.id,
-                    function=AzureFunctionCall(
+                    function=get_models().FunctionCall(
                         name=fc.name,
                         arguments=json.dumps(fc.args),
                     ),
                 )
                 for fc in function_calls
             ]
-            return AssistantMessage(
+            return get_models().AssistantMessage(
                 content=content if content else None,
                 tool_calls=tool_calls,
             )
-        return AssistantMessage(content=content)
+        return get_models().AssistantMessage(content=content)
 
     # Default to user message
-    return UserMessage(content=content)
+    return get_models().UserMessage(content=content)
 
 
-def message_from_sdk(msg: ChatRequestMessage) -> Message:
+def message_from_sdk(msg: "ChatRequestMessage") -> Message:
     """Convert SDK ChatRequestMessage to internal Message."""
     parts = []
+    models = get_models()
 
     # Handle different message types
-    if isinstance(msg, SystemMessage):
+    if isinstance(msg, models.SystemMessage):
         if msg.content:
             parts.append(Part(text=msg.content))
         return Message(role=Role.USER, parts=parts)
 
-    if isinstance(msg, UserMessage):
+    if isinstance(msg, models.UserMessage):
         if msg.content:
             if isinstance(msg.content, str):
                 parts.append(Part(text=msg.content))
@@ -166,7 +173,7 @@ def message_from_sdk(msg: ChatRequestMessage) -> Message:
                     # Image parts would need special handling
         return Message(role=Role.USER, parts=parts)
 
-    if isinstance(msg, AssistantMessage):
+    if isinstance(msg, models.AssistantMessage):
         if msg.content:
             parts.append(Part(text=msg.content))
         if msg.tool_calls:
@@ -184,7 +191,7 @@ def message_from_sdk(msg: ChatRequestMessage) -> Message:
                 )))
         return Message(role=Role.MODEL, parts=parts)
 
-    if isinstance(msg, ToolMessage):
+    if isinstance(msg, models.ToolMessage):
         result = msg.content
         try:
             result = json.loads(msg.content)
@@ -221,7 +228,7 @@ def tool_result_to_sdk(result: ToolResult) -> ToolMessage:
 
     content_str = json.dumps(content) if not isinstance(content, str) else content
 
-    return ToolMessage(
+    return get_models().ToolMessage(
         tool_call_id=result.call_id,
         content=content_str,
     )

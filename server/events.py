@@ -66,6 +66,7 @@ class EventType(str, Enum):
     # System messages (Server -> Client)
     SYSTEM_MESSAGE = "system.message"
     ERROR = "error"
+    INIT_PROGRESS = "init.progress"  # Initialization step progress
 
     # Session management (Server -> Client)
     SESSION_LIST = "session.list"  # For user display (updates local cache too)
@@ -347,6 +348,21 @@ class SystemMessageEvent(Event):
 
 
 @dataclass
+class InitProgressEvent(Event):
+    """Initialization progress update.
+
+    Sent during session initialization to show progress on each step.
+    Steps are shown in sequence with their status.
+    """
+    type: EventType = field(default=EventType.INIT_PROGRESS)
+    step: str = ""  # Step name (e.g., "Loading plugins")
+    status: str = "running"  # "running", "done", "error"
+    message: str = ""  # Optional details (e.g., error message)
+    step_number: int = 0  # Current step (1-based)
+    total_steps: int = 0  # Total number of steps
+
+
+@dataclass
 class ErrorEvent(Event):
     """Error occurred."""
     type: EventType = field(default=EventType.ERROR)
@@ -528,6 +544,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.CONTEXT_UPDATED.value: ContextUpdatedEvent,
     EventType.TURN_COMPLETED.value: TurnCompletedEvent,
     EventType.SYSTEM_MESSAGE.value: SystemMessageEvent,
+    EventType.INIT_PROGRESS.value: InitProgressEvent,
     EventType.ERROR.value: ErrorEvent,
     EventType.SESSION_LIST.value: SessionListEvent,
     EventType.SESSION_INFO.value: SessionInfoEvent,
