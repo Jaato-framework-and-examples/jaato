@@ -798,7 +798,7 @@ class PTDisplay:
             buffer.toggle_tools_expanded()
             self._app.invalidate()
 
-        @kb.add(*keys.get_key_args("tool_nav_enter"))
+        @kb.add(*keys.get_key_args("tool_nav_enter"), eager=True)
         def handle_tool_nav_enter(event):
             """Handle Ctrl+N - enter/exit tool navigation mode."""
             buffer = self._get_active_buffer()
