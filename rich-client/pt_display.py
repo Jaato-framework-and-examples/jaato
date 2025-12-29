@@ -742,9 +742,15 @@ class PTDisplay:
         @kb.add(*keys.get_key_args("nav_up"), eager=True)
         def handle_up(event):
             """Handle Up arrow - tool nav, scroll popup, or history/completion."""
-            # Tool navigation mode - select previous tool
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
+                # If selected tool is expanded, scroll its output up
+                selected_tool = buffer.get_selected_tool()
+                if selected_tool and selected_tool.expanded:
+                    buffer.scroll_selected_tool_up()
+                    self._app.invalidate()
+                    return
+                # Otherwise navigate to previous tool
                 buffer.select_prev_tool()
                 self._app.invalidate()
                 return
@@ -760,9 +766,15 @@ class PTDisplay:
         @kb.add(*keys.get_key_args("nav_down"), eager=True)
         def handle_down(event):
             """Handle Down arrow - tool nav, scroll popup, or history/completion."""
-            # Tool navigation mode - select next tool
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
+                # If selected tool is expanded, scroll its output down
+                selected_tool = buffer.get_selected_tool()
+                if selected_tool and selected_tool.expanded:
+                    buffer.scroll_selected_tool_down()
+                    self._app.invalidate()
+                    return
+                # Otherwise navigate to next tool
                 buffer.select_next_tool()
                 self._app.invalidate()
                 return
