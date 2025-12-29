@@ -138,6 +138,17 @@ class AgentRegistry:
         with self._lock:
             return [self._agents[agent_id] for agent_id in self._agent_order if agent_id in self._agents]
 
+    def set_keybinding_config_all(self, config: Any) -> None:
+        """Set keybinding config on all agent output buffers.
+
+        Args:
+            config: KeybindingConfig instance for dynamic UI hints.
+        """
+        with self._lock:
+            for agent in self._agents.values():
+                if agent.output_buffer:
+                    agent.output_buffer.set_keybinding_config(config)
+
     def get_selected_agent(self) -> Optional[AgentInfo]:
         """Get currently selected agent.
 
