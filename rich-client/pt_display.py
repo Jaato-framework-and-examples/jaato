@@ -833,12 +833,22 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("tool_expand"), eager=True)
         def handle_tool_expand(event):
-            """Handle right arrow - expand/collapse selected tool's output."""
+            """Handle right arrow - expand selected tool's output."""
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
-                buffer.toggle_selected_tool_expanded()
+                buffer.expand_selected_tool()
                 self._app.invalidate()
             # If not in tool nav mode, let the default right arrow behavior happen
+            # (cursor movement in input buffer)
+
+        @kb.add(*keys.get_key_args("tool_collapse"), eager=True)
+        def handle_tool_collapse(event):
+            """Handle left arrow - collapse selected tool's output."""
+            buffer = self._get_active_buffer()
+            if buffer.tool_nav_active:
+                buffer.collapse_selected_tool()
+                self._app.invalidate()
+            # If not in tool nav mode, let the default left arrow behavior happen
             # (cursor movement in input buffer)
 
         @kb.add(*keys.get_key_args("yank"))
