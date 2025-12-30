@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 from plan_panel import PlanPanel
 from output_buffer import OutputBuffer
 from agent_panel import AgentPanel
+from agent_tab_bar import AgentTabBar
 from clipboard import ClipboardConfig, ClipboardProvider, create_provider
 from keybindings import KeybindingConfig, load_keybindings
 
@@ -109,21 +110,19 @@ class PTDisplay:
         # Keybinding configuration (needed early for panels)
         self._keybinding_config = keybinding_config or load_keybindings()
 
-        # Agent registry and panel
+        # Agent registry and tab bar (horizontal tabs at top)
         self._agent_registry = agent_registry
-        self._agent_panel: Optional[AgentPanel] = None
+        self._agent_tab_bar: Optional[AgentTabBar] = None
+        self._agent_panel: Optional[AgentPanel] = None  # Keep for compatibility
         if agent_registry:
-            self._agent_panel = AgentPanel(
+            self._agent_tab_bar = AgentTabBar(
                 agent_registry,
                 cycle_key=self._keybinding_config.cycle_agents
             )
-            # Set initial agent panel width
-            agent_width = int(self._width * self.AGENT_PANEL_WIDTH_RATIO) - 2
-            self._agent_panel.set_width(agent_width)
+            self._agent_tab_bar.set_width(self._width)
 
-        # Calculate output width based on whether agent panel is present
-        output_width_ratio = self.OUTPUT_PANEL_WIDTH_RATIO if self._agent_panel else 1.0
-        output_width = int(self._width * output_width_ratio) - 4
+        # Calculate output width (now always 100% since tab bar is horizontal)
+        output_width = self._width - 4
 
         # Rich components
         self._plan_panel = PlanPanel(toggle_key=self._keybinding_config.toggle_plan)
@@ -215,15 +214,13 @@ class PTDisplay:
             self._width = new_width
             self._height = new_height
 
-            # Update output buffer width (OUTPUT_PANEL_WIDTH_RATIO if agent panel present, 100% otherwise)
-            output_width_ratio = self.OUTPUT_PANEL_WIDTH_RATIO if self._agent_panel else 1.0
-            output_width = int(self._width * output_width_ratio) - 4
+            # Update output buffer width (now always 100% since tab bar is horizontal)
+            output_width = self._width - 4
             self._output_buffer.set_width(output_width)
 
-            # Update agent panel width if present
-            if self._agent_panel:
-                agent_width = int(self._width * self.AGENT_PANEL_WIDTH_RATIO) - 2
-                self._agent_panel.set_width(agent_width)
+            # Update agent tab bar width if present
+            if self._agent_tab_bar:
+                self._agent_tab_bar.set_width(self._width)
 
             self._renderer.set_width(self._width)
             return True
@@ -469,11 +466,12 @@ class PTDisplay:
 
         # Calculate available height for output (account for dynamic input height)
         input_height = self._get_input_height()
-        available_height = self._height - 1 - input_height  # minus status bar and input area
+        # Subtract: status bar (1), tab bar (1 if present), input area
+        tab_bar_height = 1 if self._agent_tab_bar else 0
+        available_height = self._height - 1 - tab_bar_height - input_height
 
-        # Calculate width (OUTPUT_PANEL_WIDTH_RATIO if agent panel present)
-        output_width_ratio = self.OUTPUT_PANEL_WIDTH_RATIO if self._agent_panel else 1.0
-        panel_width = int(self._width * output_width_ratio)
+        # Output is now 100% width (tab bar is horizontal, not side panel)
+        panel_width = self._width
 
         # Render output panel with correct width for word wrapping
         panel = output_buffer.render_panel(
@@ -483,19 +481,31 @@ class PTDisplay:
         # Use full-width renderer - Panel's width parameter handles sizing
         return to_formatted_text(ANSI(self._renderer.render(panel)))
 
-    def _get_agent_panel_content(self):
-        """Get rendered agent panel content as ANSI for prompt_toolkit."""
-        if not self._agent_panel:
-            return to_formatted_text(ANSI(""))
+    def _get_agent_tab_bar_content(self):
+        """Get agent tab bar content as prompt_toolkit formatted text."""
+        if not self._agent_tab_bar:
+            return []
 
-        # Calculate available height for agent panel (account for dynamic input height)
-        input_height = self._get_input_height()
-        available_height = self._height - 1 - input_height  # minus status bar and input area
+        # Check for popup auto-hide timeout
+        if self._agent_tab_bar.check_popup_timeout():
+            pass  # Popup was hidden, will render without it
 
-        # Render agent panel (width is set on AgentPanel instance)
-        panel = self._agent_panel.render(available_height)
-        # Use full-width renderer - Panel's width parameter handles sizing
-        return to_formatted_text(ANSI(self._renderer.render(panel)))
+        return self._agent_tab_bar.render()
+
+    def _get_agent_popup_content(self):
+        """Get agent details popup content as prompt_toolkit formatted text."""
+        if not self._agent_tab_bar or not self._agent_tab_bar.is_popup_visible:
+            return []
+
+        # Get the selected agent
+        if not self._agent_registry:
+            return []
+
+        agent = self._agent_registry.get_selected_agent()
+        if not agent:
+            return []
+
+        return self._agent_tab_bar.render_popup(agent)
 
     def set_status_message(self, message: str, timeout: float = 2.0) -> None:
         """Set a temporary status bar message.
@@ -800,6 +810,9 @@ class PTDisplay:
             """Handle cycle_agents keybinding - cycle through agents."""
             if self._agent_registry:
                 self._agent_registry.cycle_selection()
+                # Show the agent details popup briefly
+                if self._agent_tab_bar:
+                    self._agent_tab_bar.show_popup()
                 self._app.invalidate()
 
         @kb.add(*keys.get_key_args("toggle_tools"))
@@ -846,35 +859,28 @@ class PTDisplay:
             """Handle Ctrl+Y - yank (copy) last response to clipboard."""
             self._yank_last_response()
 
-        # Status bar at top (always visible, 1 line)
+        # Agent tab bar at top (conditional - only if agent_registry present)
+        agent_tab_bar = ConditionalContainer(
+            Window(
+                FormattedTextControl(self._get_agent_tab_bar_content),
+                height=1,
+                style="class:agent-tab-bar",
+            ),
+            filter=Condition(lambda: self._agent_tab_bar is not None),
+        )
+
+        # Status bar (always visible, 1 line)
         status_bar = Window(
             FormattedTextControl(self._get_status_bar_content),
             height=1,
             style="class:status-bar",
         )
 
-        # Output panel (fills remaining space)
+        # Output panel (fills remaining space, now 100% width)
         output_window = Window(
             FormattedTextControl(self._get_output_content),
             wrap_lines=False,
         )
-
-        # Agent panel (conditional - only if agent_registry present)
-        agent_window = Window(
-            FormattedTextControl(self._get_agent_panel_content),
-            wrap_lines=False,
-        )
-
-        # Combine output and agent panels (OUTPUT_PANEL_WIDTH_RATIO/AGENT_PANEL_WIDTH_RATIO split if agent panel present)
-        if self._agent_panel:
-            # VSplit: output (OUTPUT_PANEL_WIDTH_RATIO) on left, agent panel (AGENT_PANEL_WIDTH_RATIO) on right
-            content_area = VSplit([
-                output_window,
-                agent_window,
-            ])
-        else:
-            # No agent panel - just output
-            content_area = output_window
 
         # Input prompt label - changes based on mode (pager, waiting for channel, normal)
         def get_prompt_text():
@@ -936,13 +942,23 @@ class PTDisplay:
             filter=Condition(lambda: self._plan_panel.is_popup_visible and self._current_plan_has_data()),
         )
 
-        # Root layout with completions menu and plan popup
+        # Agent details popup (floating overlay, shown on agent cycle)
+        agent_popup_window = ConditionalContainer(
+            Window(
+                FormattedTextControl(self._get_agent_popup_content),
+                height=8,  # Fixed height for agent popup
+            ),
+            filter=Condition(lambda: self._agent_tab_bar is not None and self._agent_tab_bar.is_popup_visible),
+        )
+
+        # Root layout with tab bar at top, then status bar, output, input
         from prompt_toolkit.layout.containers import FloatContainer, Float
         root = FloatContainer(
             content=HSplit([
-                status_bar,
-                content_area,  # Output panel (or VSplit with output + agent panel)
-                input_row,
+                agent_tab_bar,   # Agent tabs (conditional)
+                status_bar,      # Status bar
+                output_window,   # Output panel (100% width now)
+                input_row,       # Input area
             ]),
             floats=[
                 Float(
@@ -951,17 +967,53 @@ class PTDisplay:
                     content=CompletionsMenu(max_height=8),
                 ),
                 Float(
-                    top=1,  # Below status bar
+                    top=2,  # Below tab bar and status bar
                     left=2,
                     content=plan_popup_window,
+                ),
+                Float(
+                    top=1,  # Below tab bar, aligned with selected tab
+                    left=1,
+                    content=agent_popup_window,
                 ),
             ],
         )
 
         layout = Layout(root, focused_element=input_window)
 
-        # Get style from input handler if available
-        style = self._input_handler._pt_style if self._input_handler else None
+        # Get style from input handler if available, merge with default styles
+        from prompt_toolkit.styles import Style, merge_styles
+
+        # Default styles for agent tab bar and other components
+        default_style = Style.from_dict({
+            # Agent tab bar
+            "agent-tab-bar": "bg:#1a1a1a",
+            "agent-tab.selected": "bold #5fd7ff underline",  # cyan
+            "agent-tab.dim": "#808080",  # dim gray
+            "agent-tab.separator": "#404040",
+            "agent-tab.hint": "#606060 italic",
+            "agent-tab.scroll": "#5fd7ff bold",  # cyan scroll indicators
+            # Status symbol colors (always colored, regardless of selection)
+            "agent-tab.symbol.processing": "#5f87ff",  # blue
+            "agent-tab.symbol.awaiting": "#5fd7ff",    # cyan
+            "agent-tab.symbol.finished": "#808080",    # dim
+            "agent-tab.symbol.error": "#ff5f5f",       # red
+            "agent-tab.symbol.permission": "#ffff5f",  # yellow
+            # Agent popup
+            "agent-popup.border": "#404040",
+            "agent-popup.icon": "#5fd7ff",
+            "agent-popup.name": "#ffffff bold",
+            "agent-popup.status.processing": "#5f87ff",
+            "agent-popup.status.awaiting": "#5fd7ff",
+            "agent-popup.status.finished": "#808080",
+            "agent-popup.status.error": "#ff5f5f",
+        })
+
+        input_style = self._input_handler._pt_style if self._input_handler else None
+        if input_style:
+            style = merge_styles([default_style, input_style])
+        else:
+            style = default_style
 
         self._app = Application(
             layout=layout,
@@ -1485,7 +1537,8 @@ class PTDisplay:
     def _advance_spinner(self) -> None:
         """Advance spinner animation frame.
 
-        Advances spinners on ALL agent buffers that have active spinners.
+        Advances spinners on ALL agent buffers that have active spinners,
+        and also the agent tab bar spinner for processing status display.
         This ensures that when you switch agents (F2), the spinner is
         already animating if that agent is thinking.
         """
@@ -1504,6 +1557,10 @@ class PTDisplay:
             if self._output_buffer.spinner_active:
                 self._output_buffer.advance_spinner()
                 any_active = True
+
+        # Advance tab bar spinner (for processing status in tabs)
+        if self._agent_tab_bar and any_active:
+            self._agent_tab_bar.advance_spinner()
 
         # Stop timer if no agents have active spinners
         if not any_active:
