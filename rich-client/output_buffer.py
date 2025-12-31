@@ -130,6 +130,8 @@ class OutputBuffer:
         self._keybinding_config: Optional[Any] = None
         # Pending enrichment notifications (queued while tools are active)
         self._pending_enrichments: List[Tuple[str, str, str]] = []  # (source, text, mode)
+        # Output formatter for syntax highlighting (optional)
+        self._output_formatter: Optional[Any] = None
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -139,6 +141,9 @@ class OutputBuffer:
         """
         self._console_width = width
         self._measure_console = Console(width=width, force_terminal=True)
+        # Sync width with output formatter if set
+        if self._output_formatter and hasattr(self._output_formatter, 'set_console_width'):
+            self._output_formatter.set_console_width(width)
 
     def set_keybinding_config(self, config: Any) -> None:
         """Set the keybinding config for dynamic UI hints.
@@ -147,6 +152,17 @@ class OutputBuffer:
             config: KeybindingConfig instance from keybindings module.
         """
         self._keybinding_config = config
+
+    def set_output_formatter(self, formatter: Any) -> None:
+        """Set the output formatter for syntax highlighting code blocks.
+
+        Args:
+            formatter: OutputFormatterPlugin instance or None to disable.
+        """
+        self._output_formatter = formatter
+        # Sync console width with formatter if it has the method
+        if formatter and hasattr(formatter, 'set_console_width'):
+            formatter.set_console_width(self._console_width)
 
     def _format_key_hint(self, action: str) -> str:
         """Format a keybinding for display in UI hints.
@@ -355,6 +371,12 @@ class OutputBuffer:
             # Concatenate streaming chunks directly (no separator)
             # Then split by newlines for display
             full_text = ''.join(parts)
+
+            # Apply output formatter for model output with code blocks
+            if source == "model" and self._output_formatter:
+                if hasattr(self._output_formatter, 'format_output'):
+                    full_text = self._output_formatter.format_output(full_text)
+
             lines = full_text.split('\n')
             for i, line in enumerate(lines):
                 # Only first line of a new turn gets the prefix
@@ -374,6 +396,13 @@ class OutputBuffer:
         source, parts, is_new_turn = self._current_block
         # Concatenate streaming chunks directly (no separator)
         full_text = ''.join(parts)
+
+        # Apply output formatter for model output with code blocks
+        # This handles complete code blocks during streaming
+        if source == "model" and self._output_formatter:
+            if hasattr(self._output_formatter, 'format_output'):
+                full_text = self._output_formatter.format_output(full_text)
+
         lines_text = full_text.split('\n')
 
         result = []
@@ -1676,6 +1705,8 @@ class OutputBuffer:
                         output.append(wrapped_line)
             elif line.source == "model":
                 # Model output - use header line for turn start
+                # Text may contain ANSI codes from output formatter (syntax highlighting)
+                has_ansi = '\x1b[' in line.text
                 if line.is_turn_start:
                     # Add blank line before header for visual separation (if not first line)
                     if i > 0:
@@ -1687,18 +1718,26 @@ class OutputBuffer:
                     output.append("─" * remaining, style="dim cyan")
                     output.append("\n")
                     # Then render the text content (no prefix needed)
-                    wrapped = wrap_text(line.text, 0)
-                    for j, wrapped_line in enumerate(wrapped):
-                        if j > 0:
-                            output.append("\n")
-                        output.append(wrapped_line)
+                    if has_ansi:
+                        # Text contains ANSI codes from syntax highlighting
+                        output.append_text(Text.from_ansi(line.text))
+                    else:
+                        wrapped = wrap_text(line.text, 0)
+                        for j, wrapped_line in enumerate(wrapped):
+                            if j > 0:
+                                output.append("\n")
+                            output.append(wrapped_line)
                 else:
                     # Non-turn-start - just render text, no prefix
-                    wrapped = wrap_text(line.text, 0)
-                    for j, wrapped_line in enumerate(wrapped):
-                        if j > 0:
-                            output.append("\n")
-                        output.append(wrapped_line)
+                    if has_ansi:
+                        # Text contains ANSI codes from syntax highlighting
+                        output.append_text(Text.from_ansi(line.text))
+                    else:
+                        wrapped = wrap_text(line.text, 0)
+                        for j, wrapped_line in enumerate(wrapped):
+                            if j > 0:
+                                output.append("\n")
+                            output.append(wrapped_line)
             elif line.source == "tool":
                 # Tool output
                 prefix_width = len(f"[{line.source}] ") if line.is_turn_start else 0
