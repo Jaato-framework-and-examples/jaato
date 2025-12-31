@@ -1176,13 +1176,12 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
                 artifact.related_to.append(source_path)
             artifact.mark_for_review(f"Dependency {os.path.basename(source_path)} was modified")
         else:
-            # Auto-track as a new artifact
-            artifact = ArtifactRecord(
+            # Auto-track as a new artifact using factory method
+            artifact = ArtifactRecord.create(
                 path=dep_path,
                 artifact_type=ArtifactType.CODE,
                 description=f"Auto-tracked: depends on {os.path.basename(source_path)}",
                 related_to=[source_path],
-                review_status=ReviewStatus.NEEDS_REVIEW,
             )
             artifact.mark_for_review(f"Dependency {os.path.basename(source_path)} was modified")
             self._registry.add(artifact)
