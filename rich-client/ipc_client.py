@@ -1,12 +1,17 @@
 """IPC Client for connecting to Jaato Server.
 
 This module provides a client for connecting to the Jaato server
-via Unix domain socket (IPC).
+via Unix domain socket (Unix/Linux/macOS) or named pipe (Windows).
 
 Usage:
     from ipc_client import IPCClient
 
+    # On Unix:
     client = IPCClient("/tmp/jaato.sock")
+
+    # On Windows:
+    client = IPCClient("jaato")  # connects to \\.\pipe\jaato
+
     await client.connect()
 
     # Send a message
@@ -23,6 +28,7 @@ import logging
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, Optional
@@ -59,9 +65,16 @@ from server.events import (
 HEADER_SIZE = 4
 MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB max
 
-# Default socket path
-DEFAULT_SOCKET_PATH = "/tmp/jaato.sock"
-DEFAULT_PID_FILE = "/tmp/jaato.pid"
+# Windows named pipe prefix
+WINDOWS_PIPE_PREFIX = r"\\.\pipe\\"
+
+# Platform-specific defaults
+if sys.platform == "win32":
+    DEFAULT_SOCKET_PATH = "jaato"  # Will become \\.\pipe\jaato
+    DEFAULT_PID_FILE = str(Path(tempfile.gettempdir()) / "jaato.pid")
+else:
+    DEFAULT_SOCKET_PATH = "/tmp/jaato.sock"
+    DEFAULT_PID_FILE = "/tmp/jaato.pid"
 
 
 class IPCClient:
@@ -72,6 +85,10 @@ class IPCClient:
     - Sending messages and commands
     - Receiving events
     - Auto-starting server if not running
+
+    Platform support:
+    - Unix/Linux/macOS: Unix domain sockets
+    - Windows: Named pipes (\\.\pipe\pipename)
     """
 
     def __init__(
@@ -83,7 +100,7 @@ class IPCClient:
         """Initialize the IPC client.
 
         Args:
-            socket_path: Path to the Unix domain socket.
+            socket_path: Path to Unix domain socket or Windows pipe name.
             auto_start: Whether to auto-start server if not running.
             env_file: Path to .env file for auto-started server.
         """
@@ -99,6 +116,16 @@ class IPCClient:
 
         # Event callback
         self._on_event: Optional[Callable[[Event], None]] = None
+
+    def _get_pipe_path(self) -> str:
+        """Get the full Windows named pipe path."""
+        if self.socket_path.startswith(WINDOWS_PIPE_PREFIX):
+            return self.socket_path
+        return f"{WINDOWS_PIPE_PREFIX}{self.socket_path}"
+
+    def _is_windows_pipe(self) -> bool:
+        """Check if we're using a Windows named pipe."""
+        return sys.platform == "win32"
 
     @property
     def is_connected(self) -> bool:
@@ -136,27 +163,53 @@ class IPCClient:
         Returns:
             True if connected successfully.
         """
-        socket_file = Path(self.socket_path)
+        if self._is_windows_pipe():
+            # Windows: named pipes don't have a file to check
+            # Try to connect directly, auto-start if it fails
+            pipe_path = self._get_pipe_path()
+            try:
+                self._reader, self._writer = await asyncio.wait_for(
+                    asyncio.open_connection(pipe_path),
+                    timeout=timeout,
+                )
+                self._connected = True
+            except (asyncio.TimeoutError, OSError, ConnectionRefusedError) as e:
+                if self.auto_start:
+                    if not await self._start_server():
+                        return False
+                    # Try again after starting server
+                    try:
+                        self._reader, self._writer = await asyncio.wait_for(
+                            asyncio.open_connection(pipe_path),
+                            timeout=timeout,
+                        )
+                        self._connected = True
+                    except Exception as e2:
+                        raise ConnectionError(f"Connection failed: {e2}")
+                else:
+                    raise ConnectionError(f"Connection failed: {e}")
+        else:
+            # Unix: check if socket file exists
+            socket_file = Path(self.socket_path)
 
-        # Check if socket exists
-        if not socket_file.exists():
-            if self.auto_start:
-                if not await self._start_server():
-                    return False
-            else:
-                raise ConnectionError(f"Socket not found: {self.socket_path}")
+            if not socket_file.exists():
+                if self.auto_start:
+                    if not await self._start_server():
+                        return False
+                else:
+                    raise ConnectionError(f"Socket not found: {self.socket_path}")
 
-        # Connect to socket
-        try:
-            self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(self.socket_path),
-                timeout=timeout,
-            )
-            self._connected = True
-        except asyncio.TimeoutError:
-            raise ConnectionError(f"Connection timeout: {self.socket_path}")
-        except Exception as e:
-            raise ConnectionError(f"Connection failed: {e}")
+            # Connect to socket
+            try:
+                self._reader, self._writer = await asyncio.wait_for(
+                    asyncio.open_unix_connection(self.socket_path),
+                    timeout=timeout,
+                )
+                self._connected = True
+            except asyncio.TimeoutError:
+                raise ConnectionError(f"Connection timeout: {self.socket_path}")
+            except Exception as e:
+                raise ConnectionError(f"Connection failed: {e}")
 
         # Wait for connected event
         try:
@@ -264,25 +317,42 @@ class IPCClient:
         return await self._wait_for_socket()
 
     async def _wait_for_socket(self, timeout: float = 10.0) -> bool:
-        """Wait for the socket file to appear.
+        """Wait for the IPC endpoint to become available.
 
         Args:
             timeout: Maximum time to wait.
 
         Returns:
-            True if socket appeared.
+            True if endpoint became available.
         """
-        socket_file = Path(self.socket_path)
         start = time.time()
 
-        while time.time() - start < timeout:
-            if socket_file.exists():
-                # Give server a moment to start listening
+        if self._is_windows_pipe():
+            # Windows: try to connect to the named pipe
+            pipe_path = self._get_pipe_path()
+            while time.time() - start < timeout:
+                try:
+                    # Try to open the pipe briefly to check if server is listening
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(pipe_path),
+                        timeout=0.5,
+                    )
+                    writer.close()
+                    await writer.wait_closed()
+                    return True
+                except (OSError, asyncio.TimeoutError, ConnectionRefusedError):
+                    await asyncio.sleep(0.2)
+            return False
+        else:
+            # Unix: wait for socket file to appear
+            socket_file = Path(self.socket_path)
+            while time.time() - start < timeout:
+                if socket_file.exists():
+                    # Give server a moment to start listening
+                    await asyncio.sleep(0.1)
+                    return True
                 await asyncio.sleep(0.1)
-                return True
-            await asyncio.sleep(0.1)
-
-        return False
+            return False
 
     def _check_server_running(self) -> Optional[int]:
         """Check if server is already running.
@@ -299,9 +369,22 @@ class IPCClient:
         try:
             with open(pid_file, 'r') as f:
                 pid = int(f.read().strip())
-            os.kill(pid, 0)  # Check if process exists
-            return pid
-        except (ValueError, ProcessLookupError, PermissionError):
+
+            if sys.platform == "win32":
+                # Windows: use ctypes to check process
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                if handle:
+                    kernel32.CloseHandle(handle)
+                    return pid
+                else:
+                    raise ProcessLookupError("Process not found")
+            else:
+                os.kill(pid, 0)  # Check if process exists
+                return pid
+        except (ValueError, ProcessLookupError, PermissionError, OSError):
             return None
 
     # =========================================================================
