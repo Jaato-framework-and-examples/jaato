@@ -433,6 +433,9 @@ class JaatoServer:
         artifact_tracker = self.registry.get_plugin("artifact_tracker")
         if artifact_tracker and hasattr(artifact_tracker, 'set_plugin_registry'):
             artifact_tracker.set_plugin_registry(self.registry)
+            self._trace("artifact_tracker wired with registry (LSP integration enabled)")
+        else:
+            self._trace("artifact_tracker not found or missing set_plugin_registry - LSP integration disabled")
 
         self.permission_plugin = PermissionPlugin()
         self.permission_plugin.initialize({

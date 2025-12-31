@@ -1045,14 +1045,22 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         self._trace(f"enrich_tool_result: processing {tool_name}")
 
         # Need both registries to work
-        if not self._plugin_registry or not self._registry:
-            self._trace("enrich_tool_result: skipped - registries not set")
+        if not self._plugin_registry:
+            self._trace("enrich_tool_result: skipped - _plugin_registry not set (call set_plugin_registry())")
+            return ToolResultEnrichmentResult(result=result)
+
+        if not self._registry:
+            self._trace("enrich_tool_result: skipped - _registry not set (plugin not initialized?)")
             return ToolResultEnrichmentResult(result=result)
 
         # Get LSP plugin for dependency discovery
         lsp_plugin = self._plugin_registry.get_plugin("lsp")
-        if not lsp_plugin or not hasattr(lsp_plugin, 'get_file_dependents'):
-            self._trace("enrich_tool_result: skipped - LSP plugin not available")
+        if not lsp_plugin:
+            self._trace("enrich_tool_result: skipped - LSP plugin not found in registry")
+            return ToolResultEnrichmentResult(result=result)
+
+        if not hasattr(lsp_plugin, 'get_file_dependents'):
+            self._trace("enrich_tool_result: skipped - LSP plugin missing get_file_dependents method")
             return ToolResultEnrichmentResult(result=result)
 
         # Extract file paths from result
