@@ -784,21 +784,33 @@ class RichClient:
             # This makes the permission plugin the single source of truth
             self._pending_response_options = response_options
 
-            # Build prompt lines using shared utility (consistent with IPC mode)
-            from shared.ui_utils import build_permission_prompt_lines
-            prompt_lines = build_permission_prompt_lines(
-                tool_args=tool_args,
-                response_options=response_options,
-                include_tool_name=True,  # Direct mode includes tool name
-                tool_name=tool_name,
-            )
-            self._trace(f"on_permission_requested: built {len(prompt_lines)} prompt lines")
+            # Get formatted prompt lines from permission plugin (with diff for file edits)
+            prompt_lines = None
+            format_hint = None
+            if hasattr(self.permission_plugin, 'get_formatted_prompt'):
+                try:
+                    prompt_lines, format_hint = self.permission_plugin.get_formatted_prompt(
+                        tool_name, tool_args, "queue"
+                    )
+                except Exception:
+                    pass  # Fall back to basic formatting
+
+            # Fallback to basic formatting if plugin formatting failed
+            if not prompt_lines:
+                from shared.ui_utils import build_permission_prompt_lines
+                prompt_lines = build_permission_prompt_lines(
+                    tool_args=tool_args,
+                    response_options=response_options,
+                    include_tool_name=True,  # Direct mode includes tool name
+                    tool_name=tool_name,
+                )
+            self._trace(f"on_permission_requested: built {len(prompt_lines)} prompt lines, format_hint={format_hint}")
 
             # Update the tool in the main agent's buffer
             buffer = registry.get_buffer("main")
             self._trace(f"on_permission_requested: buffer={buffer}, active_tools={len(buffer._active_tools) if buffer else 0}")
             if buffer:
-                buffer.set_tool_permission_pending(tool_name, prompt_lines)
+                buffer.set_tool_permission_pending(tool_name, prompt_lines, format_hint=format_hint)
                 self._trace(f"on_permission_requested: set_tool_permission_pending called")
                 if display:
                     display.refresh()
