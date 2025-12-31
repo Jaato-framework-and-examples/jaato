@@ -380,32 +380,79 @@ class AgentTabBar:
         }
         status_label = status_labels.get(agent.status, agent.status.capitalize())
 
-        # Build popup content
+        # Calculate dynamic width based on agent name
+        # Min 20, max 50, or name length + 4 for padding
+        min_width = 20
+        max_width = 50
+        content_width = max(min_width, min(max_width, len(agent.name) + 4))
+
+        # Wrap long names into multiple lines if needed
+        name_lines = self._wrap_text(agent.name, content_width - 2)
+
+        # Build popup content with double-line border for visibility
         # Top border
-        lines.append(("class:agent-popup.border", "┌" + "─" * 22 + "┐\n"))
+        lines.append(("class:agent-popup.border", "╔" + "═" * content_width + "╗\n"))
 
-        # Icon lines
+        # Icon lines (centered)
         for icon_line in icon_lines:
-            padded = icon_line.center(22)
-            lines.append(("class:agent-popup.border", "│"))
+            padded = icon_line.center(content_width)
+            lines.append(("class:agent-popup.border", "║"))
             lines.append(("class:agent-popup.icon", padded))
-            lines.append(("class:agent-popup.border", "│\n"))
+            lines.append(("class:agent-popup.border", "║\n"))
 
-        # Name
-        name_padded = agent.name.center(22)
-        lines.append(("class:agent-popup.border", "│"))
-        lines.append(("class:agent-popup.name bold", name_padded))
-        lines.append(("class:agent-popup.border", "│\n"))
+        # Separator after icon
+        lines.append(("class:agent-popup.border", "╟" + "─" * content_width + "╢\n"))
+
+        # Name (potentially multiple lines)
+        for name_line in name_lines:
+            name_padded = name_line.center(content_width)
+            lines.append(("class:agent-popup.border", "║"))
+            lines.append(("class:agent-popup.name", name_padded))
+            lines.append(("class:agent-popup.border", "║\n"))
 
         # Status
-        status_padded = status_label.center(22)
+        status_padded = status_label.center(content_width)
         status_style = self._get_popup_status_style(agent.status)
-        lines.append(("class:agent-popup.border", "│"))
+        lines.append(("class:agent-popup.border", "║"))
         lines.append((status_style, status_padded))
-        lines.append(("class:agent-popup.border", "│\n"))
+        lines.append(("class:agent-popup.border", "║\n"))
 
         # Bottom border
-        lines.append(("class:agent-popup.border", "└" + "─" * 22 + "┘"))
+        lines.append(("class:agent-popup.border", "╚" + "═" * content_width + "╝"))
+
+        return lines
+
+    def _wrap_text(self, text: str, max_width: int) -> List[str]:
+        """Wrap text to fit within max_width.
+
+        Args:
+            text: Text to wrap.
+            max_width: Maximum width per line.
+
+        Returns:
+            List of wrapped lines.
+        """
+        if len(text) <= max_width:
+            return [text]
+
+        lines = []
+        remaining = text
+
+        while remaining:
+            if len(remaining) <= max_width:
+                lines.append(remaining)
+                break
+
+            # Find a good break point (prefer breaking at - or .)
+            break_at = max_width
+            for sep in ['-', '.', '_']:
+                pos = remaining.rfind(sep, 0, max_width)
+                if pos > max_width // 2:  # Only break if separator is past halfway
+                    break_at = pos + 1
+                    break
+
+            lines.append(remaining[:break_at])
+            remaining = remaining[break_at:]
 
         return lines
 
