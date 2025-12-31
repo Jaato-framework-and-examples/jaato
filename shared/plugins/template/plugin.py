@@ -820,15 +820,22 @@ Template rendering requires approval since it writes files."""
 
         # Get template content
         if template_path:
+            path = Path(template_path)
+            if not path.is_absolute():
+                path = self._base_path / path
             try:
-                path = Path(template_path)
-                if not path.is_absolute():
-                    path = self._base_path / path
                 template = path.read_text()
             except FileNotFoundError:
-                return {"error": f"Template file not found: {template_path}"}
+                return {
+                    "error": f"Template file not found: {template_path}",
+                    "resolved_path": str(path),
+                    "base_path": str(self._base_path)
+                }
             except IOError as e:
-                return {"error": f"Failed to read template: {e}"}
+                return {
+                    "error": f"Failed to read template: {e}",
+                    "resolved_path": str(path)
+                }
 
         # Render using Jinja2
         rendered, error = self._render_with_jinja2(template, variables)
@@ -929,12 +936,15 @@ Template rendering requires approval since it writes files."""
                 if not path.exists():
                     return {
                         "error": f"Template file not found: {template_path}",
+                        "resolved_path": str(path),
+                        "base_path": str(self._base_path),
                         "template_path": template_path
                     }
                 template = path.read_text()
             except IOError as e:
                 return {
                     "error": f"Failed to read template: {e}",
+                    "resolved_path": str(path),
                     "template_path": template_path
                 }
 
