@@ -10,7 +10,7 @@ Usage:
     client = IPCClient("/tmp/jaato.sock")
 
     # On Windows:
-    client = IPCClient("jaato")  # connects to \\.\pipe\jaato
+    client = IPCClient("jaato")  # connects to \\\\.\\pipe\\jaato
 
     await client.connect()
 
@@ -88,7 +88,7 @@ class IPCClient:
 
     Platform support:
     - Unix/Linux/macOS: Unix domain sockets
-    - Windows: Named pipes (\\.\pipe\pipename)
+    - Windows: Named pipes
     """
 
     def __init__(
@@ -127,6 +127,32 @@ class IPCClient:
         """Check if we're using a Windows named pipe."""
         return sys.platform == "win32"
 
+    async def _connect_windows_pipe(self, pipe_path: str):
+        """Connect to a Windows named pipe.
+
+        Args:
+            pipe_path: Full path to the named pipe (e.g., \\\\.\\pipe\\jaato)
+
+        Returns:
+            Tuple of (reader, writer) for the pipe connection.
+        """
+        loop = asyncio.get_running_loop()
+
+        # Create a protocol that will wrap the pipe connection
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+
+        # Connect to the named pipe
+        transport, _ = await loop.create_pipe_connection(
+            lambda: protocol,
+            pipe_path,
+        )
+
+        # Create writer from transport
+        writer = asyncio.StreamWriter(transport, protocol, reader, loop)
+
+        return reader, writer
+
     @property
     def is_connected(self) -> bool:
         """Check if connected to server."""
@@ -164,23 +190,22 @@ class IPCClient:
             True if connected successfully.
         """
         if self._is_windows_pipe():
-            # Windows: named pipes don't have a file to check
-            # Try to connect directly, auto-start if it fails
+            # Windows: use named pipe connection
             pipe_path = self._get_pipe_path()
             try:
                 self._reader, self._writer = await asyncio.wait_for(
-                    asyncio.open_connection(pipe_path),
+                    self._connect_windows_pipe(pipe_path),
                     timeout=timeout,
                 )
                 self._connected = True
-            except (asyncio.TimeoutError, OSError, ConnectionRefusedError) as e:
+            except (asyncio.TimeoutError, OSError, ConnectionRefusedError, FileNotFoundError) as e:
                 if self.auto_start:
                     if not await self._start_server():
                         return False
                     # Try again after starting server
                     try:
                         self._reader, self._writer = await asyncio.wait_for(
-                            asyncio.open_connection(pipe_path),
+                            self._connect_windows_pipe(pipe_path),
                             timeout=timeout,
                         )
                         self._connected = True
@@ -334,13 +359,13 @@ class IPCClient:
                 try:
                     # Try to open the pipe briefly to check if server is listening
                     reader, writer = await asyncio.wait_for(
-                        asyncio.open_connection(pipe_path),
+                        self._connect_windows_pipe(pipe_path),
                         timeout=0.5,
                     )
                     writer.close()
                     await writer.wait_closed()
                     return True
-                except (OSError, asyncio.TimeoutError, ConnectionRefusedError):
+                except (OSError, asyncio.TimeoutError, ConnectionRefusedError, FileNotFoundError):
                     await asyncio.sleep(0.2)
             return False
         else:
