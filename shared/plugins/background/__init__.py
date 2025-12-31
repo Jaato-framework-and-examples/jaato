@@ -30,6 +30,7 @@ Usage:
 from .protocol import (
     BackgroundCapable,
     TaskHandle,
+    TaskInfo,
     TaskOutput,
     TaskResult,
     TaskStatus,
@@ -43,6 +44,7 @@ __all__ = [
     # Protocol and data structures
     'BackgroundCapable',
     'TaskHandle',
+    'TaskInfo',
     'TaskOutput',
     'TaskResult',
     'TaskStatus',
