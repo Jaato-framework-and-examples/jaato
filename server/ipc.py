@@ -1,20 +1,28 @@
-"""IPC Server using Unix Domain Sockets.
+"""IPC Server using Unix Domain Sockets or Windows Named Pipes.
 
 This module provides a local IPC server for fast, secure communication
 with local clients (rich-client, IDE extensions, etc.).
 
-Unix domain sockets are:
+On Unix/Linux/macOS:
+- Uses Unix domain sockets
 - Faster than TCP (no network stack overhead)
 - Inherently secure (filesystem permissions)
 - Local-only (no remote access)
 
-Note: On Windows, Unix domain sockets require Windows 10 version 1803 or later.
-For older Windows versions, use WebSocket instead.
+On Windows:
+- Uses named pipes (\\.\pipe\pipename)
+- Native Windows IPC mechanism
+- Secure and local-only
 
 Usage:
     from server.ipc import JaatoIPCServer
 
+    # On Unix: uses socket path
     server = JaatoIPCServer(socket_path="/tmp/jaato.sock")
+
+    # On Windows: uses named pipe (socket_path is pipe name)
+    server = JaatoIPCServer(socket_path="jaato")  # becomes \\.\pipe\jaato
+
     await server.start()
 """
 
@@ -22,7 +30,6 @@ import asyncio
 import json
 import logging
 import os
-import socket
 import struct
 import sys
 import tempfile
@@ -32,29 +39,38 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Set
 
 
-def _get_default_socket_path() -> str:
-    """Get the platform-appropriate default socket path."""
-    temp_dir = Path(tempfile.gettempdir())
-    return str(temp_dir / "jaato.sock")
+# Windows named pipe prefix
+WINDOWS_PIPE_PREFIX = r"\\.\pipe\\"
 
 
-def _unix_socket_available() -> bool:
-    """Check if Unix domain sockets are available on this platform.
+def _get_default_ipc_path() -> str:
+    """Get the platform-appropriate default IPC path.
 
-    On Windows 10 version 1803+ with Python 3.9+, Unix domain sockets are supported.
-    We do a runtime check by attempting to create a socket rather than just checking
-    for the AF_UNIX attribute, as the attribute may exist even when not fully supported.
+    Returns:
+        On Unix: Path to socket file in temp directory
+        On Windows: Named pipe name (will be prefixed with \\\\.\\pipe\\)
     """
-    if not hasattr(socket, 'AF_UNIX'):
-        return False
+    if sys.platform == "win32":
+        # On Windows, use a named pipe
+        return "jaato"
+    else:
+        # On Unix, use a socket file in temp directory
+        temp_dir = Path(tempfile.gettempdir())
+        return str(temp_dir / "jaato.sock")
 
-    # Try to actually create a Unix socket to verify it works
-    try:
-        test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        test_sock.close()
-        return True
-    except (OSError, socket.error):
-        return False
+
+def _get_display_path(path: str) -> str:
+    """Get a display-friendly path for logging.
+
+    Args:
+        path: The IPC path (socket path or pipe name)
+
+    Returns:
+        Full path including Windows pipe prefix if applicable
+    """
+    if sys.platform == "win32" and not path.startswith(WINDOWS_PIPE_PREFIX):
+        return f"{WINDOWS_PIPE_PREFIX}{path}"
+    return path
 
 from .events import (
     Event,
@@ -94,8 +110,51 @@ class IPCClientConnection:
     workspace_path: Optional[str] = None  # Client's working directory
 
 
+class _PipeServerProtocol(asyncio.Protocol):
+    """Protocol handler for Windows named pipe connections.
+
+    This wraps the pipe connection and creates StreamReader/StreamWriter
+    pairs that can be used with the same handler as Unix sockets.
+    """
+
+    def __init__(self, server: "JaatoIPCServer"):
+        self._server = server
+        self._transport = None
+        self._reader: Optional[asyncio.StreamReader] = None
+        self._writer: Optional[asyncio.StreamWriter] = None
+
+    def connection_made(self, transport):
+        """Called when a client connects to the named pipe."""
+        self._transport = transport
+
+        # Create StreamReader/StreamWriter pair
+        loop = asyncio.get_event_loop()
+        self._reader = asyncio.StreamReader(loop=loop)
+        self._writer = asyncio.StreamWriter(
+            transport, self, self._reader, loop
+        )
+
+        # Handle the client in a task
+        asyncio.create_task(
+            self._server._handle_pipe_client(self._reader, self._writer)
+        )
+
+    def data_received(self, data: bytes):
+        """Called when data is received from the client."""
+        if self._reader:
+            self._reader.feed_data(data)
+
+    def connection_lost(self, exc):
+        """Called when the connection is closed."""
+        if self._reader:
+            if exc:
+                self._reader.set_exception(exc)
+            else:
+                self._reader.feed_eof()
+
+
 class JaatoIPCServer:
-    """IPC server using Unix domain sockets.
+    """IPC server using Unix domain sockets or Windows named pipes.
 
     Provides fast local communication for:
     - rich-client TUI
@@ -107,6 +166,10 @@ class JaatoIPCServer:
     - Each message is framed: 4-byte length (big-endian) + JSON payload
     - Same event protocol as WebSocket (server/events.py)
     - Supports session multiplexing (client specifies session_id)
+
+    Platform support:
+    - Unix/Linux/macOS: Unix domain sockets
+    - Windows: Named pipes (\\.\pipe\pipename)
     """
 
     def __init__(
@@ -118,18 +181,20 @@ class JaatoIPCServer:
         """Initialize the IPC server.
 
         Args:
-            socket_path: Path to the Unix domain socket. Defaults to platform temp dir.
+            socket_path: Path to the Unix domain socket or Windows pipe name.
+                Defaults to platform-appropriate path.
             on_session_request: Callback for session requests.
                 Called with (client_id, session_id, event).
             on_command_list_request: Callback to get list of available commands.
                 Returns list of {name, description} dicts.
         """
-        self.socket_path = socket_path or _get_default_socket_path()
+        self.socket_path = socket_path or _get_default_ipc_path()
         self._on_session_request = on_session_request
         self._on_command_list_request = on_command_list_request
 
         # Server state
         self._server: Optional[asyncio.Server] = None
+        self._pipe_server = None  # Windows named pipe server
         self._clients: Dict[str, IPCClientConnection] = {}
         self._client_counter = 0
         self._lock = asyncio.Lock()
@@ -143,25 +208,40 @@ class JaatoIPCServer:
         # Shutdown flag
         self._shutdown_event = asyncio.Event()
 
+    def _get_pipe_path(self) -> str:
+        """Get the full Windows named pipe path."""
+        if self.socket_path.startswith(WINDOWS_PIPE_PREFIX):
+            return self.socket_path
+        return f"{WINDOWS_PIPE_PREFIX}{self.socket_path}"
+
     async def start(self) -> None:
         """Start the IPC server.
 
-        Creates the Unix domain socket and listens for connections.
-
-        Raises:
-            RuntimeError: If Unix domain sockets are not available on this platform.
+        On Unix: Creates a Unix domain socket and listens for connections.
+        On Windows: Creates a named pipe and listens for connections.
         """
-        # Check if Unix domain sockets are available
-        if not _unix_socket_available():
-            raise RuntimeError(
-                "Unix domain sockets are not available on this platform. "
-                "On Windows, Unix domain sockets require Windows 10 version 1803 or later. "
-                "Use --web-socket instead for IPC on older Windows versions."
-            )
-
         # Capture event loop for thread-safe operations
         self._event_loop = asyncio.get_running_loop()
 
+        display_path = _get_display_path(self.socket_path)
+
+        if sys.platform == "win32":
+            # Windows: Use named pipes
+            await self._start_windows_pipe_server()
+        else:
+            # Unix: Use Unix domain sockets
+            await self._start_unix_socket_server()
+
+        logger.info(f"IPC server listening on {display_path}")
+
+        # Run until shutdown
+        await self._shutdown_event.wait()
+
+        # Cleanup handled in stop()
+        logger.info("IPC server stopped")
+
+    async def _start_unix_socket_server(self) -> None:
+        """Start the Unix domain socket server."""
         # Remove existing socket file
         socket_file = Path(self.socket_path)
         if socket_file.exists():
@@ -176,21 +256,59 @@ class JaatoIPCServer:
             path=self.socket_path,
         )
 
-        # Set socket permissions (owner read/write only) - Unix only
-        if sys.platform != "win32":
-            os.chmod(self.socket_path, 0o600)
+        # Set socket permissions (owner read/write only)
+        os.chmod(self.socket_path, 0o600)
 
-        logger.info(f"IPC server listening on {self.socket_path}")
+        # Run server in background
+        asyncio.create_task(self._run_unix_server())
 
-        # Run until shutdown
+    async def _run_unix_server(self) -> None:
+        """Run the Unix socket server until shutdown."""
         async with self._server:
             await self._shutdown_event.wait()
 
-        # Cleanup
+        # Cleanup socket file
+        socket_file = Path(self.socket_path)
         if socket_file.exists():
             socket_file.unlink()
 
-        logger.info("IPC server stopped")
+    async def _start_windows_pipe_server(self) -> None:
+        """Start the Windows named pipe server."""
+        pipe_path = self._get_pipe_path()
+
+        # Use proactor event loop's pipe server
+        loop = asyncio.get_running_loop()
+
+        def protocol_factory():
+            return _PipeServerProtocol(self)
+
+        # Start serving on the named pipe
+        self._pipe_server = await loop.start_serving_pipe(
+            protocol_factory,
+            pipe_path,
+        )
+
+        # Run server in background
+        asyncio.create_task(self._run_windows_pipe_server())
+
+    async def _run_windows_pipe_server(self) -> None:
+        """Run the Windows pipe server until shutdown."""
+        await self._shutdown_event.wait()
+
+        # Close pipe server
+        if self._pipe_server:
+            self._pipe_server.close()
+
+    async def _handle_pipe_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Handle a Windows named pipe client connection.
+
+        This is called from the pipe protocol when a client connects.
+        """
+        await self._handle_client(reader, writer)
 
     async def start_background(self) -> None:
         """Start the server in a background task."""
@@ -211,9 +329,14 @@ class JaatoIPCServer:
                     pass
             self._clients.clear()
 
+        # Close Unix socket server
         if self._server:
             self._server.close()
             await self._server.wait_closed()
+
+        # Close Windows pipe server
+        if self._pipe_server:
+            self._pipe_server.close()
 
     async def _handle_client(
         self,
