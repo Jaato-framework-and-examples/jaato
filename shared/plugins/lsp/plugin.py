@@ -1131,12 +1131,17 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             if len(parts) >= 2:
                 try:
                     line = int(parts[1]) - 1  # Convert to 0-indexed
-                    # Character position is optional (for backwards compatibility)
+                    # Character position from LSP - may point to start of definition, not symbol name
                     character = int(parts[2]) if len(parts) >= 3 else 0
                 except (ValueError, IndexError):
                     continue
             else:
                 continue
+
+            # For SymbolInformation format, the character position often points to the
+            # start of the entire definition (e.g., "def" in "def hello():") rather than
+            # the symbol name. We need to find the actual position of the symbol name.
+            character = self._find_symbol_name_in_line(file_path, line, symbol_name, character)
 
             self._trace(f"get_file_dependents: checking references for {symbol_name} at line {line}, char {character}")
 
@@ -1185,6 +1190,48 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             "Operator": 25, "TypeParameter": 26
         }
         return kind_map.get(kind_name, 0)
+
+    def _find_symbol_name_in_line(
+        self,
+        file_path: str,
+        line_num: int,
+        symbol_name: str,
+        default_char: int
+    ) -> int:
+        """Find the character position of a symbol name within a specific line.
+
+        For SymbolInformation format, the LSP range often covers the entire
+        definition (e.g., the whole "def hello():" line) rather than just
+        the symbol name. This method finds where the symbol name actually
+        appears in the line.
+
+        Args:
+            file_path: Path to the source file.
+            line_num: 0-indexed line number.
+            symbol_name: Name of the symbol to find.
+            default_char: Default character position to return if not found.
+
+        Returns:
+            The 0-indexed character position of the symbol name in the line.
+        """
+        import re
+
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                lines = f.readlines()
+
+            if 0 <= line_num < len(lines):
+                line_content = lines[line_num]
+                # Search for symbol name as a word boundary match
+                pattern = re.compile(r'\b' + re.escape(symbol_name) + r'\b')
+                match = pattern.search(line_content)
+                if match:
+                    self._trace(f"_find_symbol_name_in_line: found '{symbol_name}' at char {match.start()} (was {default_char})")
+                    return match.start()
+        except (IOError, OSError) as e:
+            self._trace(f"_find_symbol_name_in_line: error reading {file_path}: {e}")
+
+        return default_char
 
     def get_user_commands(self) -> List[UserCommand]:
         return [
