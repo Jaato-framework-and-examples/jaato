@@ -2255,7 +2255,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     print(f"Connecting to server at {socket_path}...")
 
     try:
-        await client.connect()
+        connected = await client.connect()
+        if not connected:
+            print("Connection failed: Server did not respond with handshake")
+            return
         print("Connected!")
 
     except ConnectionError as e:
