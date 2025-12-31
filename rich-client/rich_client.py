@@ -779,6 +779,7 @@ class RichClient:
                 response_options: List of PermissionResponseOption objects
                     that define valid responses for autocompletion.
             """
+            self._trace(f"on_permission_requested: tool={tool_name}, request_id={request_id}")
             # Store the response options for the prompt_callback to use
             # This makes the permission plugin the single source of truth
             self._pending_response_options = response_options
@@ -791,16 +792,21 @@ class RichClient:
                 include_tool_name=True,  # Direct mode includes tool name
                 tool_name=tool_name,
             )
+            self._trace(f"on_permission_requested: built {len(prompt_lines)} prompt lines")
 
             # Update the tool in the main agent's buffer
             buffer = registry.get_buffer("main")
+            self._trace(f"on_permission_requested: buffer={buffer}, active_tools={len(buffer._active_tools) if buffer else 0}")
             if buffer:
                 buffer.set_tool_permission_pending(tool_name, prompt_lines)
+                self._trace(f"on_permission_requested: set_tool_permission_pending called")
                 if display:
                     display.refresh()
+                    self._trace(f"on_permission_requested: display.refresh() called")
 
         def on_permission_resolved(tool_name: str, request_id: str, granted: bool, method: str):
             """Called when permission is resolved."""
+            self._trace(f"on_permission_resolved: tool={tool_name}, granted={granted}, method={method}")
             # Clear pending options
             self._pending_response_options = None
 
