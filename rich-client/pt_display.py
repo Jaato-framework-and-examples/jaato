@@ -38,6 +38,7 @@ from agent_panel import AgentPanel
 from agent_tab_bar import AgentTabBar
 from clipboard import ClipboardConfig, ClipboardProvider, create_provider
 from keybindings import KeybindingConfig, load_keybindings
+from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter
 
 
 class RichRenderer:
@@ -130,9 +131,16 @@ class PTDisplay:
         self._output_buffer.set_width(output_width)
         self._output_buffer.set_keybinding_config(self._keybinding_config)
 
+        # Code block formatter for syntax highlighting
+        self._code_block_formatter = create_code_block_formatter()
+        self._code_block_formatter.initialize({"console_width": output_width})
+        self._output_buffer.set_output_formatter(self._code_block_formatter)
+
         # Set keybinding config on agent registry buffers too
         if self._agent_registry:
             self._agent_registry.set_keybinding_config_all(self._keybinding_config)
+            # Also set code block formatter on agent buffers
+            self._agent_registry.set_output_formatter_all(self._code_block_formatter)
 
         # Rich renderer
         self._renderer = RichRenderer(self._width)
@@ -1438,6 +1446,9 @@ class PTDisplay:
                 self._pager_temp_buffer.set_width(original_buffer._console_width)
         else:
             self._pager_temp_buffer.set_width(self._output_buffer._console_width)
+        # Apply code block formatter for syntax highlighting
+        if self._code_block_formatter:
+            self._pager_temp_buffer.set_output_formatter(self._code_block_formatter)
 
         self._show_pager_page()
 

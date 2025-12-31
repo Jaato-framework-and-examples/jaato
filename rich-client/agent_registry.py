@@ -62,6 +62,7 @@ class AgentRegistry:
         self._agent_order: List[str] = []  # Maintains display order
         self._selected_agent_id: str = "main"
         self._lock = threading.RLock()  # Reentrant lock for nested calls
+        self._output_formatter: Any = None  # Shared output formatter for all agents
 
     def create_agent(
         self,
@@ -113,6 +114,10 @@ class AgentRegistry:
             self._agents[agent_id] = agent_info
             self._agent_order.append(agent_id)
 
+            # Apply output formatter if set
+            if self._output_formatter and agent_info.output_buffer:
+                agent_info.output_buffer.set_output_formatter(self._output_formatter)
+
             # If this is the first agent (main), select it
             if len(self._agents) == 1:
                 self._selected_agent_id = agent_id
@@ -148,6 +153,18 @@ class AgentRegistry:
             for agent in self._agents.values():
                 if agent.output_buffer:
                     agent.output_buffer.set_keybinding_config(config)
+
+    def set_output_formatter_all(self, formatter: Any) -> None:
+        """Set output formatter on all agent output buffers.
+
+        Args:
+            formatter: OutputFormatterPlugin instance for syntax highlighting.
+        """
+        self._output_formatter = formatter
+        with self._lock:
+            for agent in self._agents.values():
+                if agent.output_buffer:
+                    agent.output_buffer.set_output_formatter(formatter)
 
     def get_selected_agent(self) -> Optional[AgentInfo]:
         """Get currently selected agent.
