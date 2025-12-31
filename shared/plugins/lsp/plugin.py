@@ -1040,7 +1040,7 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             UserCommand(
                 name="lsp",
                 description="Manage LSP language servers",
-                share_with_model=True,
+                share_with_model=False,
                 parameters=[
                     CommandParameter("subcommand", "Subcommand (list, status, connect, disconnect, reload)", required=False),
                     CommandParameter("rest", "Additional arguments", required=False, capture_rest=True),
