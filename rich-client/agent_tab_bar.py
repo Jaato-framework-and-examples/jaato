@@ -381,9 +381,9 @@ class AgentTabBar:
         status_label = status_labels.get(agent.status, agent.status.capitalize())
 
         # Calculate dynamic width based on agent name
-        # Min 20, max 50, or name length + 4 for padding
+        # Min 20, max 40 (force wrapping on long names to keep popup compact)
         min_width = 20
-        max_width = 50
+        max_width = 40
         content_width = max(min_width, min(max_width, len(agent.name) + 4))
 
         # Wrap long names into multiple lines if needed
