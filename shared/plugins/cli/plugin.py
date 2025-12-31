@@ -252,23 +252,21 @@ Known slow commands that will be auto-backgrounded:
 - Build commands: make, cmake, docker build
 - Test suites: pytest, npm test, mvn test, cargo test
 
-When a command is auto-backgrounded, use these tools to monitor it:
-- listBackgroundTasks() - See all running background tasks
-- getBackgroundTaskStatus(task_id="abc-123") - Check if a specific task is done
-- getBackgroundTaskOutput(task_id="abc-123", stdout_offset=0) - Stream stdout/stderr incrementally
-- getBackgroundTaskResult(task_id="abc-123") - Get final result once complete
+When a command is auto-backgrounded, use `getBackgroundTask` to monitor it:
 
-Example workflow for a Maven build with real-time monitoring:
+Example workflow for a Maven build:
 1. cli_based_tool(command="mvn clean install")
-2. Receive: {"auto_backgrounded": true, "task_id": "xyz-789", ...}
-3. getBackgroundTaskOutput(task_id="xyz-789", stdout_offset=0)
-   -> {"status": "running", "stdout": "Downloading dependencies...", "stdout_offset": 1024, "has_more": true}
-4. getBackgroundTaskOutput(task_id="xyz-789", stdout_offset=1024)
-   -> {"stdout": "[ERROR] Compilation failed at Foo.java:42", "stdout_offset": 2048, "has_more": true}
+   -> {"auto_backgrounded": true, "task_id": "xyz-789", ...}
+
+2. getBackgroundTask(task_id="xyz-789")
+   -> {"status": "running", "stdout": "Downloading...", "stdout_offset": 1024, "has_more": true}
+
+3. getBackgroundTask(task_id="xyz-789", stdout_offset=1024)
+   -> {"status": "running", "stdout": "[ERROR] Compilation failed", "stdout_offset": 2048, "has_more": true}
    -> React to errors early! Consider: cancelBackgroundTask(task_id="xyz-789")
-5. When has_more is false:
+
+4. getBackgroundTask(task_id="xyz-789", stdout_offset=2048)
    -> {"status": "completed", "stdout": "BUILD SUCCESS", "has_more": false, "returncode": 0}
-6. getBackgroundTaskResult(task_id="xyz-789") -> {"stdout": "...", "stderr": "...", "returncode": 0}
 
 Use the returned stdout_offset for subsequent calls to get only new output.
 
