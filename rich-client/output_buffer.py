@@ -1167,6 +1167,18 @@ class OutputBuffer:
         self._scroll_offset = 0
         return self._scroll_offset != old_offset
 
+    def scroll_to_top(self) -> bool:
+        """Scroll to the top (oldest content).
+
+        Returns:
+            True if scroll position changed.
+        """
+        total_display_lines = sum(self._get_item_display_lines(item) for item in self._lines)
+        max_offset = max(0, total_display_lines - 1)
+        old_offset = self._scroll_offset
+        self._scroll_offset = max_offset
+        return self._scroll_offset != old_offset
+
     @property
     def is_at_bottom(self) -> bool:
         """Check if scrolled to the bottom."""
