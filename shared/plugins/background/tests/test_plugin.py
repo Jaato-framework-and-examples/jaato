@@ -125,6 +125,7 @@ class TestBackgroundPlugin:
             "startBackgroundTask",
             "getBackgroundTaskStatus",
             "getBackgroundTaskResult",
+            "getBackgroundTaskOutput",
             "cancelBackgroundTask",
             "listBackgroundTasks",
             "listBackgroundCapableTools",
@@ -142,6 +143,7 @@ class TestBackgroundPlugin:
             "startBackgroundTask",
             "getBackgroundTaskStatus",
             "getBackgroundTaskResult",
+            "getBackgroundTaskOutput",
             "cancelBackgroundTask",
             "listBackgroundTasks",
             "listBackgroundCapableTools",
@@ -164,8 +166,9 @@ class TestBackgroundPlugin:
         plugin = BackgroundPlugin()
         auto_approved = plugin.get_auto_approved_tools()
 
-        # Status/list tools should be auto-approved
+        # Status/list/output tools should be auto-approved (read-only)
         assert "getBackgroundTaskStatus" in auto_approved
+        assert "getBackgroundTaskOutput" in auto_approved
         assert "listBackgroundTasks" in auto_approved
         assert "listBackgroundCapableTools" in auto_approved
 
@@ -439,6 +442,182 @@ class TestBackgroundPlugin:
         # Check auto-background threshold is included
         slow_tool = next(t for t in result["tools"] if t["tool_name"] == "slow_bg_tool")
         assert slow_tool["auto_background_threshold_seconds"] == 1.0
+
+    def test_get_output_not_found(self):
+        """Test getBackgroundTaskOutput with unknown task."""
+        plugin = BackgroundPlugin()
+
+        result = plugin._get_output({"task_id": "nonexistent"})
+        assert "error" in result
+        assert "not found" in result["error"]
+
+    def test_get_output_missing_task_id(self):
+        """Test getBackgroundTaskOutput without task_id."""
+        plugin = BackgroundPlugin()
+
+        result = plugin._get_output({})
+        assert "error" in result
+        assert "task_id is required" in result["error"]
+
+    def test_get_output_invalid_stream(self):
+        """Test getBackgroundTaskOutput with invalid stream value."""
+        capable = MockCapablePlugin()
+        registry = MockRegistry()
+        registry.add_plugin(capable)
+
+        plugin = BackgroundPlugin()
+        plugin.set_registry(registry)
+
+        # Start a task
+        start_result = plugin._start_task({
+            "tool_name": "slow_bg_tool",
+            "arguments": {"duration": 5.0},
+        })
+        task_id = start_result["task_id"]
+
+        # Try invalid stream value
+        result = plugin._get_output({
+            "task_id": task_id,
+            "stream": "invalid"
+        })
+
+        assert "error" in result
+        assert "Invalid stream value" in result["error"]
+
+        plugin._cancel_task({"task_id": task_id})
+
+    def test_get_output_success(self):
+        """Test getBackgroundTaskOutput with valid task."""
+        capable = MockCapablePlugin()
+        registry = MockRegistry()
+        registry.add_plugin(capable)
+
+        plugin = BackgroundPlugin()
+        plugin.set_registry(registry)
+
+        # Start a task
+        start_result = plugin._start_task({
+            "tool_name": "slow_bg_tool",
+            "arguments": {"duration": 5.0},
+        })
+        task_id = start_result["task_id"]
+
+        # Append some output to the task
+        capable.append_output(task_id, stdout=b"Build starting...\n")
+        capable.append_output(task_id, stdout=b"Compiling...\n")
+
+        # Get output
+        result = plugin._get_output({"task_id": task_id})
+
+        assert "error" not in result
+        assert result["task_id"] == task_id
+        assert result["status"] in ["pending", "running"]
+        assert "Build starting" in result["stdout"]
+        assert "Compiling" in result["stdout"]
+        assert result["stdout_offset"] > 0
+        assert result["has_more"] is True
+
+        plugin._cancel_task({"task_id": task_id})
+
+    def test_get_output_with_offset(self):
+        """Test getBackgroundTaskOutput with offset parameter."""
+        capable = MockCapablePlugin()
+        registry = MockRegistry()
+        registry.add_plugin(capable)
+
+        plugin = BackgroundPlugin()
+        plugin.set_registry(registry)
+
+        # Start a task
+        start_result = plugin._start_task({
+            "tool_name": "slow_bg_tool",
+            "arguments": {"duration": 5.0},
+        })
+        task_id = start_result["task_id"]
+
+        # Append some output
+        capable.append_output(task_id, stdout=b"Line 1\n")
+
+        # Get initial output
+        result1 = plugin._get_output({"task_id": task_id, "stdout_offset": 0})
+        assert result1["stdout"] == "Line 1\n"
+        offset = result1["stdout_offset"]
+
+        # Append more output
+        capable.append_output(task_id, stdout=b"Line 2\n")
+
+        # Get output from offset - should only get new data
+        result2 = plugin._get_output({"task_id": task_id, "stdout_offset": offset})
+        assert result2["stdout"] == "Line 2\n"
+        assert "Line 1" not in result2["stdout"]
+
+        plugin._cancel_task({"task_id": task_id})
+
+    def test_get_output_stream_filter(self):
+        """Test getBackgroundTaskOutput with stream filter."""
+        capable = MockCapablePlugin()
+        registry = MockRegistry()
+        registry.add_plugin(capable)
+
+        plugin = BackgroundPlugin()
+        plugin.set_registry(registry)
+
+        # Start a task
+        start_result = plugin._start_task({
+            "tool_name": "slow_bg_tool",
+            "arguments": {"duration": 5.0},
+        })
+        task_id = start_result["task_id"]
+
+        # Append to both streams
+        capable.append_output(task_id, stdout=b"stdout content\n", stderr=b"stderr content\n")
+
+        # Get stdout only
+        result_stdout = plugin._get_output({
+            "task_id": task_id,
+            "stream": "stdout"
+        })
+        assert "stdout content" in result_stdout["stdout"]
+        assert result_stdout["stderr"] == ""
+
+        # Get stderr only
+        result_stderr = plugin._get_output({
+            "task_id": task_id,
+            "stream": "stderr"
+        })
+        assert result_stderr["stdout"] == ""
+        assert "stderr content" in result_stderr["stderr"]
+
+        plugin._cancel_task({"task_id": task_id})
+
+    def test_get_output_after_completion(self):
+        """Test getBackgroundTaskOutput after task completes."""
+        capable = MockCapablePlugin()
+        registry = MockRegistry()
+        registry.add_plugin(capable)
+
+        plugin = BackgroundPlugin()
+        plugin.set_registry(registry)
+
+        # Start a fast task
+        start_result = plugin._start_task({
+            "tool_name": "bg_tool",
+            "arguments": {"duration": 0.1},
+        })
+        task_id = start_result["task_id"]
+
+        # Append output
+        capable.append_output(task_id, stdout=b"Task output\n")
+
+        # Wait for completion
+        time.sleep(0.2)
+
+        # Get output
+        result = plugin._get_output({"task_id": task_id})
+
+        assert result["status"] == "completed"
+        assert result["has_more"] is False
+        assert "Task output" in result["stdout"]
 
     def test_user_commands(self):
         """Test that user commands are defined."""
