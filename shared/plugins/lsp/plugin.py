@@ -1116,21 +1116,26 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             if not symbol_name:
                 continue
 
-            # Parse location to get line number
+            # Parse location to get line and character (format: "path:line:character")
             location = symbol.get('location', '')
-            if ':' in location:
+            parts = location.split(':')
+            if len(parts) >= 2:
                 try:
-                    line = int(location.split(':')[1]) - 1  # Convert to 0-indexed
+                    line = int(parts[1]) - 1  # Convert to 0-indexed
+                    # Character position is optional (for backwards compatibility)
+                    character = int(parts[2]) if len(parts) >= 3 else 0
                 except (ValueError, IndexError):
                     continue
             else:
                 continue
 
+            self._trace(f"get_file_dependents: checking references for {symbol_name} at line {line}, char {character}")
+
             # Find references to this symbol
             refs_result = self._execute_method('find_references', {
                 'file_path': file_path,
                 'line': line,
-                'character': 0,  # Start of line, will find the symbol
+                'character': character,
                 'include_declaration': False  # Skip the definition itself
             })
 
@@ -1811,7 +1816,7 @@ Example:
                 {
                     "name": s.name,
                     "kind": s.kind_name,
-                    "location": f"{self._uri_to_path(s.location.uri)}:{s.location.range.start.line + 1}"
+                    "location": f"{self._uri_to_path(s.location.uri)}:{s.location.range.start.line + 1}:{s.location.range.start.character}"
                 }
                 for s in symbols
             ]
