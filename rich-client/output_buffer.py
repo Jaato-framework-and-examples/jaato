@@ -946,6 +946,8 @@ class OutputBuffer:
             prompt_lines: Lines of the permission prompt to display.
             format_hint: Optional hint for display format ("diff" for colored diff).
         """
+        self._trace(f"set_tool_permission_pending: looking for tool={tool_name}")
+        self._trace(f"set_tool_permission_pending: active_tools={[(t.name, t.completed) for t in self._active_tools]}")
         for tool in self._active_tools:
             if tool.name == tool_name and not tool.completed:
                 tool.permission_state = "pending"
@@ -953,7 +955,9 @@ class OutputBuffer:
                 tool.permission_format_hint = format_hint
                 # Scroll to bottom to show the prompt
                 self._scroll_offset = 0
+                self._trace(f"set_tool_permission_pending: FOUND and set pending for {tool_name}")
                 return
+        self._trace(f"set_tool_permission_pending: NO MATCH for {tool_name}")
 
     def set_tool_permission_resolved(self, tool_name: str, granted: bool,
                                       method: str) -> None:
