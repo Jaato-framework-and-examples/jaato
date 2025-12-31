@@ -65,8 +65,8 @@ from server.events import (
 HEADER_SIZE = 4
 MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB max
 
-# Windows named pipe prefix (no trailing backslash - we add the pipe name directly)
-WINDOWS_PIPE_PREFIX = r"\\.\pipe\"
+# Windows named pipe prefix (\\.\pipe\)
+WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\"
 
 # Platform-specific defaults
 if sys.platform == "win32":
