@@ -1769,6 +1769,11 @@ class OutputBuffer:
                     pending_tool = tool
                     break
 
+            # Trace for debugging permission display issues
+            if self._active_tools:
+                tool_states = [(t.name, t.permission_state, t.completed) for t in self._active_tools]
+                _trace(f"render_tool_tree: active_tools={tool_states}, pending_tool={pending_tool.name if pending_tool else None}")
+
             tool_count = len(self._active_tools)
             # Check if any tools are still executing (not completed)
             any_uncompleted = any(not tool.completed for tool in self._active_tools)
