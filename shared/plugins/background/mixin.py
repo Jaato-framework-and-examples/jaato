@@ -537,6 +537,7 @@ class BackgroundCapableMixin:
             error = task.get("error")
             started_at = task.get("started_at")
             completed_at = task.get("completed_at")
+            result = task.get("result")
 
         # Calculate duration
         duration = None
@@ -567,6 +568,19 @@ class BackgroundCapableMixin:
                     stderr_bytes = bytes(stderr_buffer[stderr_offset:])
                     stderr_data = stderr_bytes.decode('utf-8', errors='replace')
                 new_stderr_offset = len(stderr_buffer)
+
+        # For auto-backgrounded tasks, buffers may be empty but result contains output.
+        # Fall back to result if task is completed and buffers are empty.
+        if not has_more and not stdout_data and not stderr_data and result:
+            if isinstance(result, dict):
+                # CLI tool result format: {stdout, stderr, returncode}
+                stdout_data = result.get("stdout", "")
+                stderr_data = result.get("stderr", "")
+                if returncode is None:
+                    returncode = result.get("returncode")
+                # Set offsets to indicate we've read all the data
+                new_stdout_offset = len(stdout_data.encode('utf-8')) if stdout_data else 0
+                new_stderr_offset = len(stderr_data.encode('utf-8')) if stderr_data else 0
 
         return TaskInfo(
             task_id=task_id,
