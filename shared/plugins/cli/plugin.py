@@ -6,6 +6,7 @@ import shutil
 import shlex
 import subprocess
 import tempfile
+import threading
 from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional
 
@@ -254,15 +255,22 @@ Known slow commands that will be auto-backgrounded:
 When a command is auto-backgrounded, use these tools to monitor it:
 - listBackgroundTasks() - See all running background tasks
 - getBackgroundTaskStatus(task_id="abc-123") - Check if a specific task is done
-- getBackgroundTaskResult(task_id="abc-123") - Get stdout/stderr once complete
+- getBackgroundTaskOutput(task_id="abc-123", stdout_offset=0) - Stream stdout/stderr incrementally
+- getBackgroundTaskResult(task_id="abc-123") - Get final result once complete
 
-Example workflow for a Maven build:
+Example workflow for a Maven build with real-time monitoring:
 1. cli_based_tool(command="mvn clean install")
 2. Receive: {"auto_backgrounded": true, "task_id": "xyz-789", ...}
-3. getBackgroundTaskStatus(task_id="xyz-789") -> {"status": "RUNNING", ...}
-4. (wait or do other work)
-5. getBackgroundTaskStatus(task_id="xyz-789") -> {"status": "COMPLETED", ...}
+3. getBackgroundTaskOutput(task_id="xyz-789", stdout_offset=0)
+   -> {"status": "running", "stdout": "Downloading dependencies...", "stdout_offset": 1024, "has_more": true}
+4. getBackgroundTaskOutput(task_id="xyz-789", stdout_offset=1024)
+   -> {"stdout": "[ERROR] Compilation failed at Foo.java:42", "stdout_offset": 2048, "has_more": true}
+   -> React to errors early! Consider: cancelBackgroundTask(task_id="xyz-789")
+5. When has_more is false:
+   -> {"status": "completed", "stdout": "BUILD SUCCESS", "has_more": false, "returncode": 0}
 6. getBackgroundTaskResult(task_id="xyz-789") -> {"stdout": "...", "stderr": "...", "returncode": 0}
+
+Use the returned stdout_offset for subsequent calls to get only new output.
 
 ERROR HANDLING:
 - A non-zero returncode indicates the command failed - always check stderr for details
@@ -347,6 +355,167 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
 
         # Default: unknown duration
         return None
+
+    def _get_streaming_executor(
+        self,
+        tool_name: str
+    ) -> Optional[Callable[..., Any]]:
+        """Get a streaming executor for CLI commands.
+
+        When running in background mode, this executor uses Popen with
+        threading to capture stdout/stderr incrementally.
+
+        Args:
+            tool_name: Name of the tool.
+
+        Returns:
+            Streaming executor for cli_based_tool, None otherwise.
+        """
+        if tool_name == 'cli_based_tool':
+            return self._execute_streaming
+        return None
+
+    def _execute_streaming(
+        self,
+        args: Dict[str, Any],
+        on_stdout: Callable[[bytes], None],
+        on_stderr: Callable[[bytes], None],
+        on_returncode: Callable[[int], None]
+    ) -> Dict[str, Any]:
+        """Execute a CLI command with streaming output capture.
+
+        Uses subprocess.Popen with threading to capture stdout/stderr
+        incrementally and route them to the provided callbacks.
+
+        Args:
+            args: Dict containing 'command' and optionally 'args'.
+            on_stdout: Callback for stdout data chunks.
+            on_stderr: Callback for stderr data chunks.
+            on_returncode: Callback for exit code.
+
+        Returns:
+            Dict containing stdout, stderr and returncode.
+        """
+        try:
+            command = args.get('command')
+            arg_list = args.get('args')
+            extra_paths = args.get('extra_paths', self._extra_paths)
+
+            if not command:
+                return {'error': 'cli_based_tool: command must be provided'}
+
+            cmd_preview = command[:100] + "..." if len(command) > 100 else command
+            self._trace(f"execute_streaming: {cmd_preview}")
+
+            # Prepare environment
+            env = os.environ.copy()
+            if extra_paths:
+                path_sep = os.pathsep
+                env['PATH'] = env.get('PATH', '') + path_sep + path_sep.join(extra_paths)
+
+            # Check if shell interpretation is needed
+            use_shell = self._requires_shell(command)
+
+            # Prepare command/argv
+            argv: Optional[List[str]] = None
+            if not use_shell:
+                if arg_list:
+                    argv = [command] + arg_list
+                else:
+                    argv = shlex.split(command)
+
+                if len(argv) == 1 and ' ' in argv[0]:
+                    argv = shlex.split(argv[0])
+
+                exe = argv[0]
+                resolved = shutil.which(exe, path=env.get('PATH'))
+                if resolved:
+                    argv[0] = resolved
+                else:
+                    return {
+                        'error': f"cli_based_tool: executable '{exe}' not found in PATH",
+                        'hint': 'Configure extra_paths or provide full path to the executable.'
+                    }
+
+            # Start process with pipes
+            cmd = command if use_shell else argv
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                shell=use_shell
+            )
+
+            # Collect output while streaming to callbacks
+            stdout_chunks: List[bytes] = []
+            stderr_chunks: List[bytes] = []
+            stdout_done = threading.Event()
+            stderr_done = threading.Event()
+
+            def read_stdout():
+                """Read stdout in a thread and call callback."""
+                try:
+                    while True:
+                        chunk = proc.stdout.read(4096)
+                        if not chunk:
+                            break
+                        stdout_chunks.append(chunk)
+                        on_stdout(chunk)
+                finally:
+                    stdout_done.set()
+
+            def read_stderr():
+                """Read stderr in a thread and call callback."""
+                try:
+                    while True:
+                        chunk = proc.stderr.read(4096)
+                        if not chunk:
+                            break
+                        stderr_chunks.append(chunk)
+                        on_stderr(chunk)
+                finally:
+                    stderr_done.set()
+
+            # Start reader threads
+            stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+            stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+            stdout_thread.start()
+            stderr_thread.start()
+
+            # Wait for process and readers to complete
+            proc.wait()
+            stdout_done.wait()
+            stderr_done.wait()
+
+            returncode = proc.returncode
+            on_returncode(returncode)
+
+            # Combine output for final result
+            stdout = b''.join(stdout_chunks).decode('utf-8', errors='replace')
+            stderr = b''.join(stderr_chunks).decode('utf-8', errors='replace')
+
+            # Truncate for final result (streaming already captured full output)
+            truncated = False
+            if len(stdout) > self._max_output_chars:
+                stdout = stdout[:self._max_output_chars]
+                truncated = True
+            if len(stderr) > self._max_output_chars:
+                stderr = stderr[:self._max_output_chars]
+                truncated = True
+
+            result = {'stdout': stdout, 'stderr': stderr, 'returncode': returncode}
+            if truncated:
+                result['truncated'] = True
+                result['truncation_message'] = (
+                    f"Output truncated to {self._max_output_chars} chars in final result. "
+                    "Full output available via getBackgroundTaskOutput."
+                )
+
+            return result
+
+        except Exception as exc:
+            return {'error': str(exc)}
 
     # --- End BackgroundCapable implementation ---
 

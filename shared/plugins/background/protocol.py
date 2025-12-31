@@ -86,6 +86,46 @@ class TaskResult:
         }
 
 
+@dataclass
+class TaskOutput:
+    """Incremental output from a background task.
+
+    Used for streaming stdout/stderr during task execution, allowing
+    agents to monitor progress and detect errors early.
+
+    Attributes:
+        task_id: Unique identifier for the task.
+        status: Current status of the task.
+        stdout: New stdout content since last read (from offset).
+        stderr: New stderr content since last read (from offset).
+        stdout_offset: Current offset in stdout buffer after this read.
+        stderr_offset: Current offset in stderr buffer after this read.
+        has_more: True if task is still running (more output expected).
+        returncode: Exit code if task is completed, None otherwise.
+    """
+    task_id: str
+    status: TaskStatus
+    stdout: str = ""
+    stderr: str = ""
+    stdout_offset: int = 0
+    stderr_offset: int = 0
+    has_more: bool = True
+    returncode: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "task_id": self.task_id,
+            "status": self.status.value,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "stdout_offset": self.stdout_offset,
+            "stderr_offset": self.stderr_offset,
+            "has_more": self.has_more,
+            "returncode": self.returncode,
+        }
+
+
 @runtime_checkable
 class BackgroundCapable(Protocol):
     """Protocol for plugins that support background task execution.
@@ -244,6 +284,32 @@ class BackgroundCapable(Protocol):
         """
         ...
 
+    def get_output(
+        self,
+        task_id: str,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        stream: str = "both"
+    ) -> 'TaskOutput':
+        """Get incremental output from a background task.
+
+        Allows agents to monitor task progress by reading stdout/stderr
+        incrementally. Returns new output since the specified offsets.
+
+        Args:
+            task_id: ID from the TaskHandle.
+            stdout_offset: Byte offset to start reading stdout from.
+            stderr_offset: Byte offset to start reading stderr from.
+            stream: Which streams to include: "stdout", "stderr", or "both".
+
+        Returns:
+            TaskOutput with new content and updated offsets.
+
+        Raises:
+            KeyError: If task_id is not found.
+        """
+        ...
+
     def register_running_task(
         self,
         future: Future,
@@ -274,5 +340,6 @@ __all__ = [
     'TaskStatus',
     'TaskHandle',
     'TaskResult',
+    'TaskOutput',
     'BackgroundCapable',
 ]
