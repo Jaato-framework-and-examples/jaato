@@ -943,10 +943,19 @@ class PTDisplay:
         )
 
         # Agent details popup (floating overlay, shown on agent cycle)
+        def get_agent_popup_height():
+            """Calculate popup height based on content."""
+            content = self._get_agent_popup_content()
+            if not content:
+                return 1
+            # Count newlines in content
+            line_count = sum(1 for _, text in content if '\n' in text)
+            return max(8, line_count + 2)  # At least 8 lines
+
         agent_popup_window = ConditionalContainer(
             Window(
                 FormattedTextControl(self._get_agent_popup_content),
-                height=8,  # Fixed height for agent popup
+                height=get_agent_popup_height,
             ),
             filter=Condition(lambda: self._agent_tab_bar is not None and self._agent_tab_bar.is_popup_visible),
         )
@@ -1000,7 +1009,7 @@ class PTDisplay:
             "agent-tab.symbol.error": "#ff5f5f",       # red
             "agent-tab.symbol.permission": "#ffff5f",  # yellow
             # Agent popup
-            "agent-popup.border": "#404040",
+            "agent-popup.border": "#5fd7ff",  # cyan border for visibility
             "agent-popup.icon": "#5fd7ff",
             "agent-popup.name": "#ffffff bold",
             "agent-popup.status.processing": "#5f87ff",
