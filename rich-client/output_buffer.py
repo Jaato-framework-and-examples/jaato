@@ -819,11 +819,16 @@ class OutputBuffer:
     def expand_selected_tool(self) -> bool:
         """Expand the selected tool's output.
 
+        Only expands if the tool has output to show.
+
         Returns:
-            True if tool was expanded (or already expanded), False if no selection.
+            True if tool was expanded, False if no selection or no output.
         """
         tool = self.get_selected_tool()
         if tool is None:
+            return False
+        # Only expand if there's output to show
+        if not tool.output_lines or len(tool.output_lines) == 0:
             return False
         tool.expanded = True
         return True
