@@ -8,6 +8,9 @@ Unix domain sockets are:
 - Inherently secure (filesystem permissions)
 - Local-only (no remote access)
 
+Note: On Windows, Unix domain sockets require Windows 10 version 1803 or later.
+For older Windows versions, use WebSocket instead.
+
 Usage:
     from server.ipc import JaatoIPCServer
 
@@ -19,11 +22,25 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import struct
+import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Set
+
+
+def _get_default_socket_path() -> str:
+    """Get the platform-appropriate default socket path."""
+    temp_dir = Path(tempfile.gettempdir())
+    return str(temp_dir / "jaato.sock")
+
+
+def _unix_socket_available() -> bool:
+    """Check if Unix domain sockets are available on this platform."""
+    return hasattr(socket, 'AF_UNIX')
 
 from .events import (
     Event,
@@ -80,20 +97,20 @@ class JaatoIPCServer:
 
     def __init__(
         self,
-        socket_path: str = "/tmp/jaato.sock",
+        socket_path: Optional[str] = None,
         on_session_request: Optional[Callable[[str, str, Event], None]] = None,
         on_command_list_request: Optional[Callable[[], list]] = None,
     ):
         """Initialize the IPC server.
 
         Args:
-            socket_path: Path to the Unix domain socket.
+            socket_path: Path to the Unix domain socket. Defaults to platform temp dir.
             on_session_request: Callback for session requests.
                 Called with (client_id, session_id, event).
             on_command_list_request: Callback to get list of available commands.
                 Returns list of {name, description} dicts.
         """
-        self.socket_path = socket_path
+        self.socket_path = socket_path or _get_default_socket_path()
         self._on_session_request = on_session_request
         self._on_command_list_request = on_command_list_request
 
@@ -116,7 +133,18 @@ class JaatoIPCServer:
         """Start the IPC server.
 
         Creates the Unix domain socket and listens for connections.
+
+        Raises:
+            RuntimeError: If Unix domain sockets are not available on this platform.
         """
+        # Check if Unix domain sockets are available
+        if not _unix_socket_available():
+            raise RuntimeError(
+                "Unix domain sockets are not available on this platform. "
+                "On Windows, Unix domain sockets require Windows 10 version 1803 or later. "
+                "Use --web-socket instead for IPC on older Windows versions."
+            )
+
         # Capture event loop for thread-safe operations
         self._event_loop = asyncio.get_running_loop()
 
@@ -134,8 +162,9 @@ class JaatoIPCServer:
             path=self.socket_path,
         )
 
-        # Set socket permissions (owner read/write only)
-        os.chmod(self.socket_path, 0o600)
+        # Set socket permissions (owner read/write only) - Unix only
+        if sys.platform != "win32":
+            os.chmod(self.socket_path, 0o600)
 
         logger.info(f"IPC server listening on {self.socket_path}")
 
