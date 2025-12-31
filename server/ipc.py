@@ -39,8 +39,22 @@ def _get_default_socket_path() -> str:
 
 
 def _unix_socket_available() -> bool:
-    """Check if Unix domain sockets are available on this platform."""
-    return hasattr(socket, 'AF_UNIX')
+    """Check if Unix domain sockets are available on this platform.
+
+    On Windows 10 version 1803+ with Python 3.9+, Unix domain sockets are supported.
+    We do a runtime check by attempting to create a socket rather than just checking
+    for the AF_UNIX attribute, as the attribute may exist even when not fully supported.
+    """
+    if not hasattr(socket, 'AF_UNIX'):
+        return False
+
+    # Try to actually create a Unix socket to verify it works
+    try:
+        test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        test_sock.close()
+        return True
+    except (OSError, socket.error):
+        return False
 
 from .events import (
     Event,
