@@ -582,6 +582,52 @@ class LSPClient:
                 "changes": changes
             })
 
+    async def update_configuration(self, settings: Dict[str, Any]) -> None:
+        """Send workspace/didChangeConfiguration notification.
+
+        This updates the language server's configuration dynamically.
+        Useful for setting extra_paths for Python servers like pylsp.
+
+        Args:
+            settings: The settings object to send to the server.
+        """
+        await self._send_notification("workspace/didChangeConfiguration", {
+            "settings": settings
+        })
+
+    async def configure_python_extra_paths(self, extra_paths: List[str]) -> None:
+        """Configure extra Python paths for module resolution.
+
+        Sends configuration to both pylsp and pyright formats to support
+        whichever Python language server is being used.
+
+        Args:
+            extra_paths: List of directory paths to add to Python's module search path.
+        """
+        # pylsp format (uses Jedi)
+        pylsp_settings = {
+            "pylsp": {
+                "plugins": {
+                    "jedi": {
+                        "extra_paths": extra_paths
+                    }
+                }
+            }
+        }
+
+        # pyright format
+        pyright_settings = {
+            "python": {
+                "analysis": {
+                    "extraPaths": extra_paths
+                }
+            }
+        }
+
+        # Send both formats - servers will ignore unknown settings
+        combined_settings = {**pylsp_settings, **pyright_settings}
+        await self.update_configuration(combined_settings)
+
     async def ensure_workspace_indexed(self, directory: str, extensions: Optional[List[str]] = None) -> None:
         """Open all files of supported types in a directory to ensure they're indexed.
 
@@ -594,6 +640,10 @@ class LSPClient:
                        If None, uses all extensions this server supports.
         """
         import glob
+
+        # For Python, configure extra_paths so the server can resolve imports
+        if self.config.language_id == 'python':
+            await self.configure_python_extra_paths([directory])
 
         if extensions is None:
             # Use the language ID to determine supported extensions
