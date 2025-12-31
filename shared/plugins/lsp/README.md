@@ -493,6 +493,60 @@ schemas = plugin.get_tool_schemas()
 executors = plugin.get_executors()
 ```
 
+## Programmatic API for Plugin Integration
+
+The LSP plugin exposes methods that other plugins can use for cross-plugin integration.
+
+### get_file_dependents(file_path)
+
+Find all files that depend on (reference) a given file. This is useful for:
+- Understanding impact of changes before modifying code
+- Automatically tracking related artifacts
+- Building dependency graphs
+
+```python
+# Get the LSP plugin from registry
+lsp_plugin = registry.get_plugin("lsp")
+
+# Find files that import/reference api.py
+dependents = lsp_plugin.get_file_dependents("/path/to/api.py")
+# Returns: ["/path/to/handler.py", "/path/to/tests/test_api.py", ...]
+```
+
+**How it works:**
+1. Gets all document symbols from the file (via `textDocument/documentSymbol`)
+2. Filters to "exportable" symbol kinds: Class, Function, Method, Enum, Interface, Constant, Struct, Module
+3. For each symbol, finds all references across the workspace (via `textDocument/references`)
+4. Returns deduplicated list of files containing those references
+
+**Integration with Artifact Tracker:**
+
+The artifact tracker plugin uses this method to automatically discover dependencies when files are modified:
+
+```
+File A.py modified via updateFile
+         │
+         ▼
+┌─────────────────────────────────────────────┐
+│  LSP Plugin (priority 30)                    │
+│  • Runs diagnostics                          │
+└─────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────┐
+│  Artifact Tracker (priority 50)              │
+│  • Calls lsp.get_file_dependents("A.py")     │
+│  • Flags dependent files for review          │
+│  • Shows notification to user                │
+└─────────────────────────────────────────────┘
+```
+
+User sees:
+```
+  ╭ result ← lsp: checked A.py, no issues found
+  ╰ result ← artifact_tracker: flagged for review: B.py, C.py
+```
+
 ## Language Server Capabilities
 
 Different language servers support different refactoring operations:

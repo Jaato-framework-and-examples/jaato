@@ -766,6 +766,44 @@ registry.expose_all({'clarification': {'channel_type': 'console'}})
 }
 ```
 
+### Artifact Tracker Plugin (`artifact_tracker`)
+
+Tracks artifacts (documents, tests, configs, code) created during sessions and reminds the model to review related artifacts when source files change. Integrates with the LSP plugin to automatically discover file dependencies.
+
+**Configuration:**
+- `storage_path`: Path to JSON file for persistence (default: `.jaato/.artifact_tracker.json`)
+- `auto_load`: Whether to load existing state on init (default: `true`)
+
+**Tools:**
+- `trackArtifact`: Register a new artifact with optional dependencies
+- `updateArtifact`: Modify artifact metadata, add/remove relations
+- `listArtifacts`: Show tracked artifacts, filterable by type/tag/status
+- `checkRelated`: Preview artifacts before modifying a file
+- `notifyChange`: Flag dependent artifacts after modifying a source file
+- `acknowledgeReview`: Mark artifact as reviewed
+- `flagForReview`: Manually flag an artifact for review
+- `removeArtifact`: Stop tracking an artifact
+
+**Auto-approved:** All tools (read-only tracking operations)
+
+**LSP Integration:**
+
+When files are modified, the artifact tracker automatically:
+1. Uses LSP to discover which files depend on the modified file
+2. Flags those dependent files for review
+3. Shows a notification listing flagged files
+
+User sees:
+```
+  ╭ result ← lsp: checked api.py, no issues found
+  ╰ result ← artifact_tracker: flagged for review: test_api.py, handler.py
+```
+
+**Example:**
+```python
+registry.expose_all({'artifact_tracker': {'storage_path': '.jaato/artifacts.json'}})
+```
+
 ---
 
 ## File Structure
@@ -813,6 +851,16 @@ shared/plugins/
 │   ├── models.py
 │   ├── channels.py
 │   └── tests/
+├── artifact_tracker/  # Artifact tracking with LSP integration
+│   ├── __init__.py
+│   ├── plugin.py
+│   ├── models.py
+│   └── README.md
+├── lsp/             # Language Server Protocol plugin
+│   ├── __init__.py
+│   ├── plugin.py
+│   ├── lsp_client.py
+│   └── README.md
 └── references/      # Documentation injection plugin
     ├── __init__.py
     ├── plugin.py
