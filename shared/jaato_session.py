@@ -693,7 +693,7 @@ class JaatoSession:
         wrapped_usage_callback = self._wrap_usage_callback_with_gc_check(on_usage_update)
 
         # Run prompt enrichment if registry is available
-        processed_message = self._enrich_and_clean_prompt(message, on_output)
+        processed_message = self._enrich_and_clean_prompt(message)
 
         response = self._run_chat_loop(processed_message, on_output, wrapped_usage_callback)
 
@@ -757,31 +757,14 @@ class JaatoSession:
 
         return result
 
-    def _enrich_and_clean_prompt(
-        self,
-        prompt: str,
-        on_output: Optional[OutputCallback] = None
-    ) -> str:
-        """Run prompt through enrichment pipeline and strip @references.
-
-        Args:
-            prompt: The user's prompt to enrich.
-            on_output: Optional callback for enrichment notifications.
-        """
+    def _enrich_and_clean_prompt(self, prompt: str) -> str:
+        """Run prompt through enrichment pipeline and strip @references."""
         enriched_prompt = prompt
 
         # Run through plugin enrichment pipeline
         if self._runtime.registry:
-            # Temporarily set output callback for enrichment notifications
-            if on_output:
-                self._runtime.registry.set_output_callback(on_output, self._terminal_width)
-
             result = self._runtime.registry.enrich_prompt(prompt)
             enriched_prompt = result.prompt
-
-            # Clear callback (will be set again in _run_chat_loop for tool result enrichment)
-            if on_output:
-                self._runtime.registry.set_output_callback(None)
 
         # Strip @references
         return AT_REFERENCE_PATTERN.sub(r'\1', enriched_prompt)
