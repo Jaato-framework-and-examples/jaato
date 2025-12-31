@@ -39,8 +39,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Set
 
 
-# Windows named pipe prefix (no trailing backslash - we add the pipe name directly)
-WINDOWS_PIPE_PREFIX = r"\\.\pipe\"
+# Windows named pipe prefix (\\.\pipe\)
+WINDOWS_PIPE_PREFIX = "\\\\.\\pipe\\"
 
 
 def _get_default_ipc_path() -> str:
