@@ -399,21 +399,24 @@ class JaatoIPCServer:
         Returns:
             The message string, or None if connection closed.
         """
-        # Read length header
-        header = await reader.read(HEADER_SIZE)
-        if len(header) < HEADER_SIZE:
-            return None  # Connection closed
+        try:
+            # Read length header - use readexactly for reliable framed reading
+            header = await reader.readexactly(HEADER_SIZE)
 
-        length = struct.unpack(">I", header)[0]
-        if length > MAX_MESSAGE_SIZE:
-            raise ValueError(f"Message too large: {length} bytes")
+            length = struct.unpack(">I", header)[0]
+            if length > MAX_MESSAGE_SIZE:
+                raise ValueError(f"Message too large: {length} bytes")
 
-        # Read payload
-        payload = await reader.read(length)
-        if len(payload) < length:
-            return None  # Connection closed
+            # Read payload
+            payload = await reader.readexactly(length)
+            return payload.decode("utf-8")
 
-        return payload.decode("utf-8")
+        except asyncio.IncompleteReadError:
+            # Connection closed before complete message was read
+            return None
+        except ConnectionResetError:
+            # Connection was reset by peer
+            return None
 
     async def _write_message(
         self,

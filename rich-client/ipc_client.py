@@ -138,20 +138,25 @@ class IPCClient:
         """
         loop = asyncio.get_running_loop()
 
-        # Create a protocol that will wrap the pipe connection
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
+        # Use a Future to capture the reader/writer from the protocol callback
+        connected_future: asyncio.Future = loop.create_future()
 
-        # Connect to the named pipe
-        transport, _ = await loop.create_pipe_connection(
+        def client_connected_cb(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            """Called when the protocol is ready with properly initialized streams."""
+            connected_future.set_result((reader, writer))
+
+        # Create a protocol with callback to get properly initialized writer
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader, client_connected_cb)
+
+        # Connect to the named pipe - this triggers connection_made -> callback
+        await loop.create_pipe_connection(
             lambda: protocol,
             pipe_path,
         )
 
-        # Create writer from transport
-        writer = asyncio.StreamWriter(transport, protocol, reader, loop)
-
-        return reader, writer
+        # Wait for the callback to provide the reader/writer
+        return await connected_future
 
     @property
     def is_connected(self) -> bool:
@@ -425,21 +430,24 @@ class IPCClient:
         if not self._reader:
             return None
 
-        # Read length header
-        header = await self._reader.read(HEADER_SIZE)
-        if len(header) < HEADER_SIZE:
+        try:
+            # Read length header - use readexactly for reliable framed reading
+            header = await self._reader.readexactly(HEADER_SIZE)
+
+            length = struct.unpack(">I", header)[0]
+            if length > MAX_MESSAGE_SIZE:
+                raise ValueError(f"Message too large: {length}")
+
+            # Read payload
+            payload = await self._reader.readexactly(length)
+            return payload.decode("utf-8")
+
+        except asyncio.IncompleteReadError:
+            # Connection closed before complete message was read
             return None
-
-        length = struct.unpack(">I", header)[0]
-        if length > MAX_MESSAGE_SIZE:
-            raise ValueError(f"Message too large: {length}")
-
-        # Read payload
-        payload = await self._reader.read(length)
-        if len(payload) < length:
+        except ConnectionResetError:
+            # Connection was reset by peer
             return None
-
-        return payload.decode("utf-8")
 
     async def _write_message(self, message: str) -> None:
         """Write a length-prefixed message to the socket."""
