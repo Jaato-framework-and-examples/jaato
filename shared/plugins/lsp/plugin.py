@@ -1817,14 +1817,15 @@ Example:
             symbols = await client.get_document_symbols(file_path)
             if not symbols:
                 return {"error": self._build_empty_result_error(file_path, "No symbols found", f" in {file_path}")}
-            return [
-                {
+            result = []
+            for s in symbols:
+                self._trace(f"document_symbols: {s.name} location.range.start = line {s.location.range.start.line}, char {s.location.range.start.character}")
+                result.append({
                     "name": s.name,
                     "kind": s.kind_name,
                     "location": f"{self._uri_to_path(s.location.uri)}:{s.location.range.start.line + 1}:{s.location.range.start.character}"
-                }
-                for s in symbols
-            ]
+                })
+            return result
 
         elif method == 'workspace_symbols':
             query = args['query']

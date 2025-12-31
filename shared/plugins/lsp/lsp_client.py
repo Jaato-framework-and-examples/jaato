@@ -696,11 +696,18 @@ class LSPClient:
             container_name: Name of the containing symbol (for nested symbols)
         """
         for item in items:
-            # Debug logging for symbol parsing
+            # Debug logging for symbol parsing - write to trace file
             sel_range = item.get("selectionRange")
-            if sel_range:
-                import sys
-                print(f"[LSP_CLIENT] _collect_symbols: {item.get('name')} selectionRange={sel_range}", file=sys.stderr)
+            range_data = item.get("range")
+            import os, tempfile
+            from datetime import datetime
+            trace_path = os.environ.get('JAATO_TRACE_LOG', os.path.join(tempfile.gettempdir(), "rich_client_trace.log"))
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [LSP_CLIENT] {item.get('name')}: selectionRange={sel_range}, range={range_data}\n")
+            except:
+                pass
             sym = SymbolInformation.from_dict(item, file_uri)
             if container_name:
                 sym.container_name = container_name
