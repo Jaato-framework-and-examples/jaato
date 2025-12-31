@@ -37,6 +37,7 @@ import logging
 import os
 import signal
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -51,11 +52,12 @@ from server.session_manager import SessionManager
 from server.events import Event
 
 
-# Default paths
-DEFAULT_SOCKET_PATH = "/tmp/jaato.sock"
-DEFAULT_PID_FILE = "/tmp/jaato.pid"
-DEFAULT_LOG_FILE = "/tmp/jaato.log"
-DEFAULT_CONFIG_FILE = "/tmp/jaato.config.json"
+# Default paths (use platform-appropriate temp directory)
+_TEMP_DIR = Path(tempfile.gettempdir())
+DEFAULT_SOCKET_PATH = str(_TEMP_DIR / "jaato.sock")
+DEFAULT_PID_FILE = str(_TEMP_DIR / "jaato.pid")
+DEFAULT_LOG_FILE = str(_TEMP_DIR / "jaato.log")
+DEFAULT_CONFIG_FILE = str(_TEMP_DIR / "jaato.config.json")
 
 
 logger = logging.getLogger(__name__)
@@ -119,15 +121,30 @@ class JaatoDaemon:
 
         # Start IPC server if configured
         if self.ipc_socket:
-            from server.ipc import JaatoIPCServer
+            from server.ipc import JaatoIPCServer, _unix_socket_available
 
-            self._ipc_server = JaatoIPCServer(
-                socket_path=self.ipc_socket,
-                on_session_request=self._handle_session_request,
-                on_command_list_request=self._get_command_list,
-            )
-            tasks.append(asyncio.create_task(self._ipc_server.start()))
-            logger.info(f"IPC server will listen on {self.ipc_socket}")
+            # Check if IPC is available on this platform
+            if not _unix_socket_available():
+                logger.error(
+                    "IPC server (Unix domain sockets) not available on this platform. "
+                    "On Windows, Unix domain sockets require Windows 10 version 1803+. "
+                    "Use --web-socket instead."
+                )
+                if not self.web_socket:
+                    # No fallback available
+                    print(
+                        "Error: IPC server not available on this Windows version.\n"
+                        "  Use --web-socket :8080 instead of --ipc-socket"
+                    )
+                    return
+            else:
+                self._ipc_server = JaatoIPCServer(
+                    socket_path=self.ipc_socket,
+                    on_session_request=self._handle_session_request,
+                    on_command_list_request=self._get_command_list,
+                )
+                tasks.append(asyncio.create_task(self._ipc_server.start()))
+                logger.info(f"IPC server will listen on {self.ipc_socket}")
 
         # Start WebSocket server if configured
         if self.web_socket:
@@ -164,10 +181,11 @@ class JaatoDaemon:
         self._write_pid()
         self._write_config()
 
-        # Set up signal handlers
-        loop = asyncio.get_event_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
+        # Set up signal handlers (not supported on Windows)
+        if sys.platform != "win32":
+            loop = asyncio.get_event_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
 
         logger.info("Jaato server started")
 
@@ -625,31 +643,52 @@ class JaatoDaemon:
 
 
 def daemonize(log_file: str = DEFAULT_LOG_FILE) -> None:
-    """Daemonize the process (double-fork method)."""
-    # First fork
-    pid = os.fork()
-    if pid > 0:
-        # Parent exits
+    """Daemonize the process (double-fork method on Unix, subprocess on Windows)."""
+    if sys.platform == "win32":
+        # Windows: use subprocess to start detached process
+        import subprocess
+        args = [sys.executable] + sys.argv
+        # Remove --daemon from args to avoid infinite recursion
+        args = [a for a in args if a not in ("--daemon", "-d")]
+        # Add a marker to indicate we're already daemonized
+        env = os.environ.copy()
+        env["JAATO_DAEMONIZED"] = "1"
+        # Start detached process
+        subprocess.Popen(
+            args,
+            stdout=open(log_file, 'a'),
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            env=env,
+        )
         sys.exit(0)
+    else:
+        # Unix: use double-fork method
+        # First fork
+        pid = os.fork()
+        if pid > 0:
+            # Parent exits
+            sys.exit(0)
 
-    # Create new session
-    os.setsid()
+        # Create new session
+        os.setsid()
 
-    # Second fork
-    pid = os.fork()
-    if pid > 0:
-        sys.exit(0)
+        # Second fork
+        pid = os.fork()
+        if pid > 0:
+            sys.exit(0)
 
-    # Redirect standard file descriptors
-    sys.stdout.flush()
-    sys.stderr.flush()
+        # Redirect standard file descriptors
+        sys.stdout.flush()
+        sys.stderr.flush()
 
-    with open('/dev/null', 'r') as devnull:
-        os.dup2(devnull.fileno(), sys.stdin.fileno())
+        with open('/dev/null', 'r') as devnull:
+            os.dup2(devnull.fileno(), sys.stdin.fileno())
 
-    with open(log_file, 'a') as log:
-        os.dup2(log.fileno(), sys.stdout.fileno())
-        os.dup2(log.fileno(), sys.stderr.fileno())
+        with open(log_file, 'a') as log:
+            os.dup2(log.fileno(), sys.stdout.fileno())
+            os.dup2(log.fileno(), sys.stderr.fileno())
 
 
 def check_running(pid_file: str = DEFAULT_PID_FILE) -> Optional[int]:
@@ -666,10 +705,22 @@ def check_running(pid_file: str = DEFAULT_PID_FILE) -> Optional[int]:
             pid = int(f.read().strip())
 
         # Check if process exists
-        os.kill(pid, 0)
-        return pid
+        if sys.platform == "win32":
+            # Windows: use tasklist or ctypes to check process
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if handle:
+                kernel32.CloseHandle(handle)
+                return pid
+            else:
+                raise ProcessLookupError("Process not found")
+        else:
+            os.kill(pid, 0)
+            return pid
 
-    except (ValueError, ProcessLookupError, PermissionError):
+    except (ValueError, ProcessLookupError, PermissionError, OSError):
         # PID file exists but process is dead
         try:
             os.remove(pid_file)
@@ -705,18 +756,38 @@ def stop_server(pid_file: str = DEFAULT_PID_FILE) -> bool:
         return False
 
     try:
-        os.kill(pid, signal.SIGTERM)
-        # Wait for process to exit
         import time
-        for _ in range(50):  # 5 seconds timeout
-            time.sleep(0.1)
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                return True
-        # Force kill
-        os.kill(pid, signal.SIGKILL)
-        return True
+
+        if sys.platform == "win32":
+            # Windows: use taskkill or TerminateProcess
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_TERMINATE = 0x0001
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = kernel32.OpenProcess(
+                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            if handle:
+                kernel32.TerminateProcess(handle, 0)
+                kernel32.CloseHandle(handle)
+            # Wait for process to exit
+            for _ in range(50):  # 5 seconds timeout
+                time.sleep(0.1)
+                if not check_running(pid_file):
+                    return True
+            return True
+        else:
+            os.kill(pid, signal.SIGTERM)
+            # Wait for process to exit
+            for _ in range(50):  # 5 seconds timeout
+                time.sleep(0.1)
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return True
+            # Force kill
+            os.kill(pid, signal.SIGKILL)
+            return True
     except Exception:
         return False
 
@@ -877,9 +948,19 @@ Examples:
 
     # Validate arguments
     if not args.ipc_socket and not args.web_socket:
-        # Default to IPC socket
-        args.ipc_socket = DEFAULT_SOCKET_PATH
-        print(f"No endpoint specified, using default IPC socket: {args.ipc_socket}")
+        # Check if IPC is available on this platform
+        import socket as _socket
+        if hasattr(_socket, 'AF_UNIX'):
+            # Default to IPC socket on Unix-like systems
+            args.ipc_socket = DEFAULT_SOCKET_PATH
+            print(f"No endpoint specified, using default IPC socket: {args.ipc_socket}")
+        else:
+            # Default to WebSocket on Windows (when Unix domain sockets not available)
+            args.web_socket = ":8080"
+            print(
+                "No endpoint specified. IPC socket not available on this platform.\n"
+                f"Using default WebSocket: ws://0.0.0.0:8080"
+            )
 
     # Check if already running
     pid = check_running(args.pid_file)
@@ -888,8 +969,8 @@ Examples:
         print(f"  Use 'python -m server --stop' to stop it")
         sys.exit(1)
 
-    # Daemonize if requested
-    if args.daemon:
+    # Daemonize if requested (skip if already daemonized on Windows)
+    if args.daemon and not os.environ.get("JAATO_DAEMONIZED"):
         print(f"Starting Jaato server as daemon...")
         print(f"  PID file: {args.pid_file}")
         print(f"  Log file: {args.log_file}")
