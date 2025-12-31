@@ -1139,13 +1139,18 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                 'include_declaration': False  # Skip the definition itself
             })
 
+            self._trace(f"get_file_dependents: find_references for {symbol_name} returned: {type(refs_result).__name__}, value={refs_result}")
+
             if isinstance(refs_result, dict) and refs_result.get("error"):
                 # No references found is not an error for our purposes
+                self._trace(f"get_file_dependents: find_references error: {refs_result.get('error')}")
                 continue
 
             if isinstance(refs_result, list):
+                self._trace(f"get_file_dependents: find_references returned {len(refs_result)} references")
                 for ref in refs_result:
                     ref_file = ref.get('file', '')
+                    self._trace(f"get_file_dependents: ref_file={ref_file}")
                     if ref_file and ref_file != file_path:
                         dependent_files.add(ref_file)
 

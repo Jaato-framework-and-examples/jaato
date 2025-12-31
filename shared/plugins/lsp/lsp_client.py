@@ -696,6 +696,11 @@ class LSPClient:
             container_name: Name of the containing symbol (for nested symbols)
         """
         for item in items:
+            # Debug logging for symbol parsing
+            sel_range = item.get("selectionRange")
+            if sel_range:
+                import sys
+                print(f"[LSP_CLIENT] _collect_symbols: {item.get('name')} selectionRange={sel_range}", file=sys.stderr)
             sym = SymbolInformation.from_dict(item, file_uri)
             if container_name:
                 sym.container_name = container_name
