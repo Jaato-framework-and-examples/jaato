@@ -5,6 +5,8 @@ and subagents). This separates the "environment" (connections, plugins, permissi
 from the "session" (conversation history, per-agent state).
 """
 
+import os
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .token_accounting import TokenLedger
@@ -70,8 +72,37 @@ class JaatoRuntime:
         self._system_instructions: Optional[str] = None
         self._auto_approved_tools: List[str] = []
 
+        # Base system instructions (loaded from .jaato/system_instructions.md)
+        self._base_system_instructions: Optional[str] = None
+        self._load_base_system_instructions()
+
         # Connection state
         self._connected: bool = False
+
+    def _load_base_system_instructions(self) -> None:
+        """Load base system instructions from .jaato/system_instructions.md.
+
+        Searches for the file in:
+        1. Current working directory: .jaato/system_instructions.md
+        2. User config directory: ~/.jaato/system_instructions.md
+
+        The file contents are loaded and will be prepended to all agent
+        system instructions, ensuring consistent behavior across main
+        agent and all subagents.
+        """
+        search_paths = [
+            Path.cwd() / ".jaato" / "system_instructions.md",
+            Path.home() / ".jaato" / "system_instructions.md",
+        ]
+
+        for path in search_paths:
+            if path.exists() and path.is_file():
+                try:
+                    self._base_system_instructions = path.read_text(encoding='utf-8')
+                    return
+                except (IOError, OSError):
+                    # Silently skip if file can't be read
+                    pass
 
     @property
     def is_connected(self) -> bool:
@@ -396,6 +427,14 @@ class JaatoRuntime:
     ) -> Optional[str]:
         """Get system instructions, optionally filtered by plugin names.
 
+        The final instructions are assembled in this order:
+        1. Base system instructions from .jaato/system_instructions.md (if exists)
+        2. Additional instructions passed as parameter
+        3. Plugin-specific system instructions
+
+        This ensures base behavioral rules (like transparency, no silent pauses)
+        apply consistently to all agents (main and subagents).
+
         Args:
             plugin_names: Optional list of plugin names to include.
                          If None, returns full cached system instructions.
@@ -407,9 +446,9 @@ class JaatoRuntime:
         if plugin_names is None:
             # Use registry's method which runs enrichment pipeline
             if self._registry:
-                base = self._registry.get_system_instructions(run_enrichment=True)
+                plugin_instructions = self._registry.get_system_instructions(run_enrichment=True)
             else:
-                base = self._system_instructions
+                plugin_instructions = self._system_instructions
         else:
             # Build from specific plugins, then run enrichment
             parts = []
@@ -427,19 +466,29 @@ class JaatoRuntime:
                 if perm_instr:
                     parts.append(perm_instr)
 
-            base = "\n\n".join(parts) if parts else None
+            plugin_instructions = "\n\n".join(parts) if parts else None
 
             # Run enrichment pipeline on combined instructions
-            if base and self._registry:
-                result = self._registry.enrich_system_instructions(base)
-                base = result.instructions
+            if plugin_instructions and self._registry:
+                result = self._registry.enrich_system_instructions(plugin_instructions)
+                plugin_instructions = result.instructions
 
-        # Combine with additional instructions
+        # Assemble final instructions: base -> additional -> plugin
+        result_parts = []
+
+        # 1. Base system instructions from .jaato/system_instructions.md
+        if self._base_system_instructions:
+            result_parts.append(self._base_system_instructions)
+
+        # 2. Additional instructions passed as parameter
         if additional:
-            if base:
-                return f"{additional}\n\n{base}"
-            return additional
-        return base
+            result_parts.append(additional)
+
+        # 3. Plugin-specific system instructions
+        if plugin_instructions:
+            result_parts.append(plugin_instructions)
+
+        return "\n\n".join(result_parts) if result_parts else None
 
     def list_available_models(self, prefix: Optional[str] = None) -> List[str]:
         """List available models from the provider.
