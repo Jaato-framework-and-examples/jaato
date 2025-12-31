@@ -30,6 +30,20 @@ FILE_WRITING_TOOLS = {
     'lsp_apply_code_action',
 }
 
+# Symbol kinds that represent exportable/referenceable entities
+# Used by get_file_dependents() to find symbols worth checking for external references
+# See LSP SymbolKind enum: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#symbolKind
+DEPENDENCY_SYMBOL_KINDS = {
+    2,   # Module
+    5,   # Class
+    6,   # Method
+    10,  # Enum
+    11,  # Interface
+    12,  # Function
+    14,  # Constant
+    23,  # Struct
+}
+
 # Mapping of file extensions to language IDs for LSP server matching
 EXT_TO_LANGUAGE = {
     '.py': 'python',
@@ -1034,6 +1048,124 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             lines.append("\n**ACTION REQUIRED**: Fix the errors above before proceeding.")
 
         return "\n".join(lines)
+
+    # ==================== Dependency Discovery ====================
+
+    def get_file_dependents(self, file_path: str) -> List[str]:
+        """Find files that depend on the given file via exported symbols.
+
+        Uses LSP to discover which other files reference symbols defined in
+        this file. This is useful for understanding the impact of changes
+        and tracking related artifacts.
+
+        Algorithm:
+        1. Get all document symbols for the file
+        2. Filter to "exportable" symbol kinds (Class, Function, etc.)
+        3. For each symbol, find all references across the codebase
+        4. Collect and deduplicate the files that contain those references
+
+        Args:
+            file_path: Path to the source file to analyze.
+
+        Returns:
+            List of file paths that depend on (reference) this file.
+            Returns empty list if LSP is not available or file has no
+            exported symbols with external references.
+        """
+        self._trace(f"get_file_dependents: analyzing {file_path}")
+
+        if not self._initialized:
+            self.initialize()
+
+        if not self._connected_servers:
+            self._trace("get_file_dependents: no servers connected")
+            return []
+
+        # Check if file type is supported
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext not in EXT_TO_LANGUAGE:
+            self._trace(f"get_file_dependents: unsupported file type {ext}")
+            return []
+
+        # Get document symbols
+        symbols_result = self._execute_method('document_symbols', {'file_path': file_path})
+        if isinstance(symbols_result, dict) and symbols_result.get("error"):
+            self._trace(f"get_file_dependents: failed to get symbols: {symbols_result['error']}")
+            return []
+
+        if not isinstance(symbols_result, list):
+            self._trace("get_file_dependents: no symbols found")
+            return []
+
+        # Filter to exportable symbol kinds
+        exportable_symbols = [
+            s for s in symbols_result
+            if self._get_symbol_kind_value(s.get('kind', '')) in DEPENDENCY_SYMBOL_KINDS
+        ]
+
+        self._trace(f"get_file_dependents: found {len(exportable_symbols)} exportable symbols")
+
+        if not exportable_symbols:
+            return []
+
+        # Collect all files that reference any of these symbols
+        dependent_files: set = set()
+
+        for symbol in exportable_symbols:
+            symbol_name = symbol.get('name', '')
+            if not symbol_name:
+                continue
+
+            # Parse location to get line number
+            location = symbol.get('location', '')
+            if ':' in location:
+                try:
+                    line = int(location.split(':')[1]) - 1  # Convert to 0-indexed
+                except (ValueError, IndexError):
+                    continue
+            else:
+                continue
+
+            # Find references to this symbol
+            refs_result = self._execute_method('find_references', {
+                'file_path': file_path,
+                'line': line,
+                'character': 0,  # Start of line, will find the symbol
+                'include_declaration': False  # Skip the definition itself
+            })
+
+            if isinstance(refs_result, dict) and refs_result.get("error"):
+                # No references found is not an error for our purposes
+                continue
+
+            if isinstance(refs_result, list):
+                for ref in refs_result:
+                    ref_file = ref.get('file', '')
+                    if ref_file and ref_file != file_path:
+                        dependent_files.add(ref_file)
+
+        self._trace(f"get_file_dependents: found {len(dependent_files)} dependent files")
+        return list(dependent_files)
+
+    def _get_symbol_kind_value(self, kind_name: str) -> int:
+        """Convert a symbol kind name back to its numeric value.
+
+        Args:
+            kind_name: Human-readable kind name (e.g., 'Function', 'Class').
+
+        Returns:
+            The LSP SymbolKind numeric value, or 0 if not recognized.
+        """
+        kind_map = {
+            "File": 1, "Module": 2, "Namespace": 3, "Package": 4,
+            "Class": 5, "Method": 6, "Property": 7, "Field": 8,
+            "Constructor": 9, "Enum": 10, "Interface": 11, "Function": 12,
+            "Variable": 13, "Constant": 14, "String": 15, "Number": 16,
+            "Boolean": 17, "Array": 18, "Object": 19, "Key": 20,
+            "Null": 21, "EnumMember": 22, "Struct": 23, "Event": 24,
+            "Operator": 25, "TypeParameter": 26
+        }
+        return kind_map.get(kind_name, 0)
 
     def get_user_commands(self) -> List[UserCommand]:
         return [
