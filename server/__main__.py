@@ -54,7 +54,11 @@ from server.events import Event
 
 # Default paths (use platform-appropriate temp directory)
 _TEMP_DIR = Path(tempfile.gettempdir())
-DEFAULT_SOCKET_PATH = str(_TEMP_DIR / "jaato.sock")
+# IPC path is platform-specific: Unix socket on Unix, named pipe on Windows
+if sys.platform == "win32":
+    DEFAULT_SOCKET_PATH = "jaato"  # Will become \\.\pipe\jaato
+else:
+    DEFAULT_SOCKET_PATH = str(_TEMP_DIR / "jaato.sock")
 DEFAULT_PID_FILE = str(_TEMP_DIR / "jaato.pid")
 DEFAULT_LOG_FILE = str(_TEMP_DIR / "jaato.log")
 DEFAULT_CONFIG_FILE = str(_TEMP_DIR / "jaato.config.json")
@@ -120,31 +124,18 @@ class JaatoDaemon:
         tasks = []
 
         # Start IPC server if configured
+        # Uses Unix domain sockets on Unix/Linux/macOS, named pipes on Windows
         if self.ipc_socket:
-            from server.ipc import JaatoIPCServer, _unix_socket_available
+            from server.ipc import JaatoIPCServer, _get_display_path
 
-            # Check if IPC is available on this platform
-            if not _unix_socket_available():
-                logger.error(
-                    "IPC server (Unix domain sockets) not available on this platform. "
-                    "On Windows, Unix domain sockets require Windows 10 version 1803+. "
-                    "Use --web-socket instead."
-                )
-                if not self.web_socket:
-                    # No fallback available
-                    print(
-                        "Error: IPC server not available on this Windows version.\n"
-                        "  Use --web-socket :8080 instead of --ipc-socket"
-                    )
-                    return
-            else:
-                self._ipc_server = JaatoIPCServer(
-                    socket_path=self.ipc_socket,
-                    on_session_request=self._handle_session_request,
-                    on_command_list_request=self._get_command_list,
-                )
-                tasks.append(asyncio.create_task(self._ipc_server.start()))
-                logger.info(f"IPC server will listen on {self.ipc_socket}")
+            self._ipc_server = JaatoIPCServer(
+                socket_path=self.ipc_socket,
+                on_session_request=self._handle_session_request,
+                on_command_list_request=self._get_command_list,
+            )
+            tasks.append(asyncio.create_task(self._ipc_server.start()))
+            display_path = _get_display_path(self.ipc_socket)
+            logger.info(f"IPC server will listen on {display_path}")
 
         # Start WebSocket server if configured
         if self.web_socket:
@@ -948,19 +939,12 @@ Examples:
 
     # Validate arguments
     if not args.ipc_socket and not args.web_socket:
-        # Check if IPC is available on this platform
-        import socket as _socket
-        if hasattr(_socket, 'AF_UNIX'):
-            # Default to IPC socket on Unix-like systems
-            args.ipc_socket = DEFAULT_SOCKET_PATH
-            print(f"No endpoint specified, using default IPC socket: {args.ipc_socket}")
+        # Default to IPC (Unix socket on Unix, named pipe on Windows)
+        args.ipc_socket = DEFAULT_SOCKET_PATH
+        if sys.platform == "win32":
+            print(f"No endpoint specified, using default named pipe: \\\\.\\pipe\\{args.ipc_socket}")
         else:
-            # Default to WebSocket on Windows (when Unix domain sockets not available)
-            args.web_socket = ":8080"
-            print(
-                "No endpoint specified. IPC socket not available on this platform.\n"
-                f"Using default WebSocket: ws://0.0.0.0:8080"
-            )
+            print(f"No endpoint specified, using default IPC socket: {args.ipc_socket}")
 
     # Check if already running
     pid = check_running(args.pid_file)
