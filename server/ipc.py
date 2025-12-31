@@ -110,47 +110,24 @@ class IPCClientConnection:
     workspace_path: Optional[str] = None  # Client's working directory
 
 
-class _PipeServerProtocol(asyncio.Protocol):
+class _PipeServerProtocol(asyncio.StreamReaderProtocol):
     """Protocol handler for Windows named pipe connections.
 
-    This wraps the pipe connection and creates StreamReader/StreamWriter
-    pairs that can be used with the same handler as Unix sockets.
+    Extends StreamReaderProtocol to properly handle StreamReader/StreamWriter
+    pairs with all required methods (like _drain_helper for drain()).
     """
 
     def __init__(self, server: "JaatoIPCServer"):
         self._server = server
-        self._transport = None
-        self._reader: Optional[asyncio.StreamReader] = None
-        self._writer: Optional[asyncio.StreamWriter] = None
+        self._pipe_reader = asyncio.StreamReader()
+        super().__init__(self._pipe_reader, self._client_connected_cb)
 
-    def connection_made(self, transport):
-        """Called when a client connects to the named pipe."""
-        self._transport = transport
-
-        # Create StreamReader/StreamWriter pair
-        loop = asyncio.get_event_loop()
-        self._reader = asyncio.StreamReader(loop=loop)
-        self._writer = asyncio.StreamWriter(
-            transport, self, self._reader, loop
-        )
-
+    def _client_connected_cb(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        """Called when the stream reader/writer are ready."""
         # Handle the client in a task
         asyncio.create_task(
-            self._server._handle_pipe_client(self._reader, self._writer)
+            self._server._handle_pipe_client(reader, writer)
         )
-
-    def data_received(self, data: bytes):
-        """Called when data is received from the client."""
-        if self._reader:
-            self._reader.feed_data(data)
-
-    def connection_lost(self, exc):
-        """Called when the connection is closed."""
-        if self._reader:
-            if exc:
-                self._reader.set_exception(exc)
-            else:
-                self._reader.feed_eof()
 
 
 class JaatoIPCServer:
