@@ -65,8 +65,8 @@ from server.events import (
 HEADER_SIZE = 4
 MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB max
 
-# Windows named pipe prefix
-WINDOWS_PIPE_PREFIX = r"\\.\pipe\\"
+# Windows named pipe prefix (no trailing backslash - we add the pipe name directly)
+WINDOWS_PIPE_PREFIX = r"\\.\pipe\"
 
 # Platform-specific defaults
 if sys.platform == "win32":
@@ -136,13 +136,16 @@ class IPCClient:
         Returns:
             Tuple of (reader, writer) for the pipe connection.
         """
+        print(f"DEBUG: Connecting to Windows pipe: {pipe_path}")
         loop = asyncio.get_running_loop()
+        print(f"DEBUG: Client event loop type: {type(loop).__name__}")
 
         # Use a Future to capture the reader/writer from the protocol callback
         connected_future: asyncio.Future = loop.create_future()
 
         def client_connected_cb(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
             """Called when the protocol is ready with properly initialized streams."""
+            print("DEBUG: Client protocol callback called, streams ready")
             connected_future.set_result((reader, writer))
 
         # Create a protocol with callback to get properly initialized writer
@@ -150,13 +153,17 @@ class IPCClient:
         protocol = asyncio.StreamReaderProtocol(reader, client_connected_cb)
 
         # Connect to the named pipe - this triggers connection_made -> callback
-        await loop.create_pipe_connection(
+        print("DEBUG: Client calling create_pipe_connection...")
+        transport, _ = await loop.create_pipe_connection(
             lambda: protocol,
             pipe_path,
         )
+        print(f"DEBUG: Client create_pipe_connection returned, transport={transport}")
 
         # Wait for the callback to provide the reader/writer
-        return await connected_future
+        result = await connected_future
+        print("DEBUG: Client got reader/writer from callback")
+        return result
 
     @property
     def is_connected(self) -> bool:
