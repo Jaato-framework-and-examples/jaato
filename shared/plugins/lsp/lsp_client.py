@@ -582,23 +582,46 @@ class LSPClient:
                 "changes": changes
             })
 
-    async def ensure_workspace_indexed(self, directory: str) -> None:
-        """Open all Python files in a directory to ensure they're indexed.
+    async def ensure_workspace_indexed(self, directory: str, extensions: Optional[List[str]] = None) -> None:
+        """Open all files of supported types in a directory to ensure they're indexed.
 
         This is needed for find_references to work across files that
         haven't been explicitly opened yet.
 
         Args:
-            directory: Directory to scan for Python files.
+            directory: Directory to scan for files.
+            extensions: List of file extensions to include (e.g., ['.py', '.pyi']).
+                       If None, uses all extensions this server supports.
         """
         import glob
-        pattern = os.path.join(directory, "**", "*.py")
-        py_files = glob.glob(pattern, recursive=True)
 
-        for py_file in py_files:
-            uri = self.uri_from_path(py_file)
-            if uri not in self._open_documents:
-                await self.open_document(py_file)
+        if extensions is None:
+            # Use the language ID to determine supported extensions
+            lang_to_exts = {
+                'python': ['.py', '.pyi', '.pyw'],
+                'javascript': ['.js', '.mjs', '.cjs'],
+                'typescript': ['.ts', '.mts', '.cts'],
+                'typescriptreact': ['.tsx'],
+                'javascriptreact': ['.jsx'],
+                'go': ['.go'],
+                'rust': ['.rs'],
+                'java': ['.java'],
+                'c': ['.c', '.h'],
+                'cpp': ['.cpp', '.hpp', '.cc', '.hh'],
+                'ruby': ['.rb'],
+                'php': ['.php'],
+            }
+            lang = self.config.language_id
+            extensions = lang_to_exts.get(lang, []) if lang else []
+
+        for ext in extensions:
+            pattern = os.path.join(directory, "**", f"*{ext}")
+            files = glob.glob(pattern, recursive=True)
+
+            for file_path in files:
+                uri = self.uri_from_path(file_path)
+                if uri not in self._open_documents:
+                    await self.open_document(file_path)
 
     def _guess_language_id(self, path: str) -> str:
         """Guess the language ID from file extension."""
