@@ -170,9 +170,8 @@ class TemplatePlugin:
             ToolSchema(
                 name="renderTemplateToFile",
                 description=(
-                    "Render a template with variable substitution and write the result directly to a file. "
-                    "This is a convenience tool that combines template rendering and file writing in one operation. "
-                    "Use simple {{variable_name}} syntax for variable substitution. "
+                    "Render a template with full Jinja2 support and write directly to a file. "
+                    "Supports variables ({{name}}), conditionals ({% if %}), loops ({% for %}), and filters. "
                     "Provide either 'template' for inline content or 'template_path' for a template file."
                 ),
                 parameters={
@@ -227,8 +226,8 @@ patterns. Manual coding when a template exists is NOT acceptable.
   - Supports Jinja2 features: variables, conditionals, loops, filters
   - Returns: {"success": true, "output_path": "...", "size": 1234, "lines": 42}
 
-**renderTemplateToFile(output_path, template_path, variables)** - Simple render and write
-  - Uses simple {{variable}} substitution only
+**renderTemplateToFile(output_path, template_path, variables)** - Render with full Jinja2 and write
+  - Supports full Jinja2 features: variables, conditionals, loops, filters
   - Checks if file exists (use overwrite=true to replace)
   - Returns: {"success": true, "output_path": "...", "bytes_written": 1234}
 
@@ -279,12 +278,8 @@ renderTemplateToFile(
 )
 ```
 
-### Template Syntax
-**For renderTemplateToFile (simple):**
-- Variables: {{variable_name}} - replaced with value
-- Escape literal {{: \\{{
-
-**For renderTemplate (full Jinja2):**
+### Template Syntax (Jinja2)
+Both renderTemplate and renderTemplateToFile support full Jinja2 syntax:
 - Variables: {{ variable_name }}
 - Conditionals: {% if condition %}...{% endif %}
 - Loops: {% for item in items %}...{% endfor %}
@@ -752,6 +747,58 @@ Template rendering requires approval since it writes files."""
 
         return sorted(variables)
 
+    # ==================== Jinja2 Rendering ====================
+
+    def _render_with_jinja2(self, template: str, variables: Dict[str, Any]) -> Tuple[str, Optional[Dict]]:
+        """Render template using Jinja2.
+
+        Args:
+            template: Template content string.
+            variables: Key-value pairs for template variable substitution.
+
+        Returns:
+            Tuple of (rendered_content, error_dict).
+            If error_dict is not None, rendering failed.
+        """
+        # Try to import Jinja2
+        try:
+            from jinja2 import StrictUndefined, TemplateSyntaxError, UndefinedError
+            from jinja2.sandbox import SandboxedEnvironment
+        except ImportError:
+            return "", {
+                "error": "Jinja2 is not installed. Install with: pip install Jinja2",
+                "status": "dependency_missing"
+            }
+
+        # Create sandboxed environment (safer execution)
+        env = SandboxedEnvironment(undefined=StrictUndefined)
+
+        # Disable dangerous features
+        env.globals = {}  # No built-in globals
+
+        try:
+            # Compile and render template
+            jinja_template = env.from_string(template)
+            rendered = jinja_template.render(**variables)
+            return rendered, None
+        except TemplateSyntaxError as e:
+            return "", {
+                "error": f"Template syntax error at line {e.lineno}: {e.message}",
+                "status": "syntax_error"
+            }
+        except UndefinedError as e:
+            # Try to suggest similar variable names
+            return "", {
+                "error": f"Undefined variable: {e.message}",
+                "available_variables": list(variables.keys()),
+                "status": "undefined_variable"
+            }
+        except Exception as e:
+            return "", {
+                "error": f"Template render error: {str(e)}",
+                "status": "render_error"
+            }
+
     # ==================== Tool Executors ====================
 
     def _execute_render_template(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -783,43 +830,10 @@ Template rendering requires approval since it writes files."""
             except IOError as e:
                 return {"error": f"Failed to read template: {e}"}
 
-        # Try to import Jinja2
-        try:
-            from jinja2 import Environment, StrictUndefined, TemplateSyntaxError, UndefinedError
-            from jinja2.sandbox import SandboxedEnvironment
-        except ImportError:
-            return {
-                "error": "Jinja2 is not installed. Install with: pip install Jinja2",
-                "status": "dependency_missing"
-            }
-
-        # Create sandboxed environment (safer execution)
-        env = SandboxedEnvironment(undefined=StrictUndefined)
-
-        # Disable dangerous features
-        env.globals = {}  # No built-in globals
-
-        try:
-            # Compile and render template
-            jinja_template = env.from_string(template)
-            rendered = jinja_template.render(**variables)
-        except TemplateSyntaxError as e:
-            return {
-                "error": f"Template syntax error at line {e.lineno}: {e.message}",
-                "status": "syntax_error"
-            }
-        except UndefinedError as e:
-            # Try to suggest similar variable names
-            return {
-                "error": f"Undefined variable: {e.message}",
-                "available_variables": list(variables.keys()),
-                "status": "undefined_variable"
-            }
-        except Exception as e:
-            return {
-                "error": f"Template render error: {str(e)}",
-                "status": "render_error"
-            }
+        # Render using Jinja2
+        rendered, error = self._render_with_jinja2(template, variables)
+        if error:
+            return error
 
         # Write output
         try:
@@ -880,8 +894,8 @@ Template rendering requires approval since it writes files."""
     def _execute_render_template_to_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute renderTemplateToFile tool.
 
-        Renders a template using simple {{variable}} substitution and writes
-        the result to a file.
+        Renders a template using full Jinja2 syntax and writes the result to a file.
+        Supports variables, conditionals, loops, and filters.
         """
         output_path = args.get("output_path", "")
         template = args.get("template")
@@ -935,35 +949,13 @@ Template rendering requires approval since it writes files."""
                 "output_path": str(out_path)
             }
 
-        # Perform simple {{variable}} substitution
-        rendered = template
-        variables_used = []
-        undefined_vars = []
-
-        # Find all {{variable}} patterns
-        var_pattern = re.compile(r'\{\{(\w+)\}\}')
-        matches = var_pattern.findall(template)
-        unique_vars = set(matches)
-
-        for var_name in unique_vars:
-            if var_name in variables:
-                # Replace all occurrences of {{var_name}} with the value
-                pattern = r'\{\{' + re.escape(var_name) + r'\}\}'
-                rendered = re.sub(pattern, str(variables[var_name]), rendered)
-                variables_used.append(var_name)
-            else:
-                undefined_vars.append(var_name)
-
-        # Handle escaped {{ (literal \{{)
-        rendered = rendered.replace(r'\{{', '{{')
-
-        # Check for undefined variables
-        if undefined_vars:
-            return {
-                "error": f"Undefined variable: {undefined_vars[0]}",
-                "template_path": template_path if template_path else None,
-                "variables_provided": list(variables.keys())
-            }
+        # Render using Jinja2
+        rendered, error = self._render_with_jinja2(template, variables)
+        if error:
+            # Add template_path to error response if applicable
+            if template_path:
+                error["template_path"] = template_path
+            return error
 
         # Create parent directories if needed
         try:
@@ -995,7 +987,7 @@ Template rendering requires approval since it writes files."""
             "success": True,
             "output_path": str(out_path),
             "bytes_written": bytes_written,
-            "variables_used": sorted(variables_used),
+            "variables_used": sorted(variables.keys()),
             "template_source": template_source
         }
 
