@@ -209,12 +209,27 @@ class OutputBuffer:
         rendered = Text()
         if source == "model":
             if is_turn_start:
-                # Header line takes full width, actual text on next line
-                return 2  # Header + first content line (minimum)
+                # Header line (1) + wrapped content lines + potential blank line before header
+                # The blank line is added for non-first items in the visible set (see render loop)
+                # We conservatively include it to avoid underestimating height
+                rendered.append(text)
+                with self._measure_console.capture() as capture:
+                    self._measure_console.print(rendered, end='')
+                output = capture.get()
+                content_lines = output.count('\n') + 1 if output else 1
+                # 1 (potential blank line) + 1 (header) + content lines
+                return 2 + content_lines
             rendered.append(text)
         elif source == "user":
             if is_turn_start:
-                return 2  # Header + first content line
+                # Header line (1) + wrapped content lines + potential blank line before header
+                rendered.append(text)
+                with self._measure_console.capture() as capture:
+                    self._measure_console.print(rendered, end='')
+                output = capture.get()
+                content_lines = output.count('\n') + 1 if output else 1
+                # 1 (potential blank line) + 1 (header) + content lines
+                return 2 + content_lines
             rendered.append(text)
         elif source == "system":
             rendered.append(text)
@@ -1502,6 +1517,10 @@ class OutputBuffer:
 
     def _render_impl(self, height: Optional[int] = None, width: Optional[int] = None) -> RenderableType:
         """Internal render implementation (called within rendering guard)."""
+        # Update width BEFORE measuring current block lines (important for accurate measurement)
+        if width and width != self._console_width:
+            self.set_width(width)
+
         # Get current block lines without flushing (preserves streaming state)
         current_block_lines = self._get_current_block_lines()
 
@@ -1514,10 +1533,6 @@ class OutputBuffer:
                 output.append("thinking...", style="dim italic")
                 return output
             return Text("Waiting for output...", style="dim italic")
-
-        # Update width if provided
-        if width and width != self._console_width:
-            self.set_width(width)
 
         # Store visible height for auto-scroll calculations
         if height:
