@@ -1,4 +1,4 @@
-"""IPC Server using Unix Domain Sockets or Windows Named Pipes.
+r"""IPC Server using Unix Domain Sockets or Windows Named Pipes.
 
 This module provides a local IPC server for fast, secure communication
 with local clients (rich-client, IDE extensions, etc.).
@@ -131,7 +131,7 @@ class _PipeServerProtocol(asyncio.StreamReaderProtocol):
 
 
 class JaatoIPCServer:
-    """IPC server using Unix domain sockets or Windows named pipes.
+    r"""IPC server using Unix domain sockets or Windows named pipes.
 
     Provides fast local communication for:
     - rich-client TUI
