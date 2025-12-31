@@ -15,4 +15,5 @@ pyyaml
 azure-ai-inference>=1.0.0b7  # GitHub Models API via Azure AI Inference SDK
 websockets>=12.0  # WebSocket server for headless mode
 anthropic>=0.40.0  # Anthropic Claude API
+chevron>=0.14.0  # Mustache/Handlebars template rendering
 
