@@ -725,14 +725,11 @@ class PTDisplay:
             if self._agent_registry:
                 buffer = self._agent_registry.get_selected_buffer()
                 if buffer:
-                    total_lines = sum(line.display_lines for line in buffer._lines)
-                    buffer.scroll_up(lines=total_lines)
+                    buffer.scroll_to_top()
                 else:
-                    total_lines = sum(line.display_lines for line in self._output_buffer._lines)
-                    self._output_buffer.scroll_up(lines=total_lines)
+                    self._output_buffer.scroll_to_top()
             else:
-                total_lines = sum(line.display_lines for line in self._output_buffer._lines)
-                self._output_buffer.scroll_up(lines=total_lines)
+                self._output_buffer.scroll_to_top()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("scroll_bottom"))
