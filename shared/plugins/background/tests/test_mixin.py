@@ -393,3 +393,249 @@ class TestBackgroundCapableMixin:
 
         assert plugin._bg_executor is None
         assert plugin._bg_initialized is False
+
+
+class TestOutputStreaming:
+    """Tests for output streaming functionality."""
+
+    def test_append_output_stdout(self):
+        """Test appending to stdout buffer."""
+        plugin = MockBackgroundPlugin()
+
+        handle = plugin.start_background(
+            "slow_tool",
+            {"duration": 5.0},
+            executor_fn=plugin._execute_slow
+        )
+
+        # Append some output
+        plugin.append_output(handle.task_id, stdout=b"Hello, ")
+        plugin.append_output(handle.task_id, stdout=b"World!\n")
+
+        # Read output
+        output = plugin.get_output(handle.task_id)
+
+        assert output.stdout == "Hello, World!\n"
+        assert output.stdout_offset == 14
+        assert output.has_more is True  # Task still running
+
+        # Cancel task
+        plugin.cancel(handle.task_id)
+
+    def test_append_output_stderr(self):
+        """Test appending to stderr buffer."""
+        plugin = MockBackgroundPlugin()
+
+        handle = plugin.start_background(
+            "slow_tool",
+            {"duration": 5.0},
+            executor_fn=plugin._execute_slow
+        )
+
+        # Append to stderr
+        stderr_msg = b"Error: something went wrong\n"
+        plugin.append_output(handle.task_id, stderr=stderr_msg)
+
+        # Read output
+        output = plugin.get_output(handle.task_id, stream="stderr")
+
+        assert output.stderr == "Error: something went wrong\n"
+        assert output.stderr_offset == len(stderr_msg)
+        assert output.stdout == ""
+
+        plugin.cancel(handle.task_id)
+
+    def test_append_output_both_streams(self):
+        """Test appending to both stdout and stderr."""
+        plugin = MockBackgroundPlugin()
+
+        handle = plugin.start_background(
+            "slow_tool",
+            {"duration": 5.0},
+            executor_fn=plugin._execute_slow
+        )
+
+        plugin.append_output(handle.task_id, stdout=b"stdout line\n", stderr=b"stderr line\n")
+
+        output = plugin.get_output(handle.task_id)
+
+        assert output.stdout == "stdout line\n"
+        assert output.stderr == "stderr line\n"
+        assert output.stdout_offset == 12
+        assert output.stderr_offset == 12
+
+        plugin.cancel(handle.task_id)
+
+    def test_get_output_with_offset(self):
+        """Test reading output from specific offset."""
+        plugin = MockBackgroundPlugin()
+
+        handle = plugin.start_background(
+            "slow_tool",
+            {"duration": 5.0},
+            executor_fn=plugin._execute_slow
+        )
+
+        # Append output in chunks
+        plugin.append_output(handle.task_id, stdout=b"Line 1\n")
+        plugin.append_output(handle.task_id, stdout=b"Line 2\n")
+
+        # Read from start
+        output1 = plugin.get_output(handle.task_id, stdout_offset=0)
+        assert output1.stdout == "Line 1\nLine 2\n"
+        assert output1.stdout_offset == 14
+
+        # Read from offset (should get nothing new)
+        output2 = plugin.get_output(handle.task_id, stdout_offset=14)
+        assert output2.stdout == ""
+        assert output2.stdout_offset == 14
+
+        # Append more
+        plugin.append_output(handle.task_id, stdout=b"Line 3\n")
+
+        # Read from offset (should get new data)
+        output3 = plugin.get_output(handle.task_id, stdout_offset=14)
+        assert output3.stdout == "Line 3\n"
+        assert output3.stdout_offset == 21
+
+        plugin.cancel(handle.task_id)
+
+    def test_get_output_stream_filter(self):
+        """Test filtering by stream type."""
+        plugin = MockBackgroundPlugin()
+
+        handle = plugin.start_background(
+            "slow_tool",
+            {"duration": 5.0},
+            executor_fn=plugin._execute_slow
+        )
+
+        plugin.append_output(handle.task_id, stdout=b"stdout\n", stderr=b"stderr\n")
+
+        # Read stdout only
+        output_stdout = plugin.get_output(handle.task_id, stream="stdout")
+        assert output_stdout.stdout == "stdout\n"
+        assert output_stdout.stderr == ""
+
+        # Read stderr only
+        output_stderr = plugin.get_output(handle.task_id, stream="stderr")
+        assert output_stderr.stdout == ""
+        assert output_stderr.stderr == "stderr\n"
+
+        # Read both
+        output_both = plugin.get_output(handle.task_id, stream="both")
+        assert output_both.stdout == "stdout\n"
+        assert output_both.stderr == "stderr\n"
+
+        plugin.cancel(handle.task_id)
+
+    def test_get_output_after_completion(self):
+        """Test reading output after task completes."""
+        plugin = MockBackgroundPlugin()
+
+        # Use slow_tool with minimal duration to avoid race condition
+        # between start_background setting started_at/status and
+        # _execute_background_task setting completed_at/status
+        handle = plugin.start_background(
+            "slow_tool",
+            {"duration": 0.1},
+            executor_fn=plugin._execute_slow
+        )
+
+        # Append output before completion
+        plugin.append_output(handle.task_id, stdout=b"Task output\n")
+
+        # Wait for completion with explicit wait
+        result = plugin.get_result(handle.task_id, wait=True)
+        assert result.status == TaskStatus.COMPLETED
+
+        # Read output after completion
+        output = plugin.get_output(handle.task_id)
+        assert output.stdout == "Task output\n"
+        assert output.status == TaskStatus.COMPLETED
+        assert output.has_more is False
+
+    def test_set_returncode(self):
+        """Test setting return code."""
+        plugin = MockBackgroundPlugin()
+
+        handle = plugin.start_background(
+            "slow_tool",
+            {"duration": 5.0},
+            executor_fn=plugin._execute_slow
+        )
+
+        # Set return code
+        plugin.set_returncode(handle.task_id, 42)
+
+        # Check in output
+        output = plugin.get_output(handle.task_id)
+        assert output.returncode == 42
+
+        plugin.cancel(handle.task_id)
+
+    def test_output_buffer_truncation(self):
+        """Test that output buffer is truncated when exceeding max size."""
+        # Create plugin with small buffer
+        plugin = MockBackgroundPlugin()
+        plugin._bg_max_output_buffer = 100  # 100 bytes max
+
+        handle = plugin.start_background(
+            "slow_tool",
+            {"duration": 5.0},
+            executor_fn=plugin._execute_slow
+        )
+
+        # Write more than buffer size
+        plugin.append_output(handle.task_id, stdout=b"A" * 50)
+        plugin.append_output(handle.task_id, stdout=b"B" * 60)
+
+        # Buffer should be truncated to last 100 bytes
+        output = plugin.get_output(handle.task_id)
+        assert len(output.stdout) <= 100
+        # Should have more B's than A's due to truncation from start
+        assert output.stdout.count("B") > output.stdout.count("A")
+
+        plugin.cancel(handle.task_id)
+
+    def test_get_output_not_found(self):
+        """Test get_output raises KeyError for unknown task."""
+        plugin = MockBackgroundPlugin()
+
+        with pytest.raises(KeyError, match="not found"):
+            plugin.get_output("nonexistent-task-id")
+
+    def test_concurrent_output_writes(self):
+        """Test concurrent writes to output buffer."""
+        plugin = MockBackgroundPlugin()
+
+        handle = plugin.start_background(
+            "slow_tool",
+            {"duration": 5.0},
+            executor_fn=plugin._execute_slow
+        )
+
+        def write_output(prefix: str, count: int):
+            for i in range(count):
+                plugin.append_output(
+                    handle.task_id,
+                    stdout=f"{prefix}{i}\n".encode()
+                )
+
+        # Start concurrent writers
+        threads = []
+        for prefix in ["A", "B", "C"]:
+            t = threading.Thread(target=write_output, args=(prefix, 10))
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        # All writes should have been recorded
+        output = plugin.get_output(handle.task_id)
+        # Should have 30 lines total (10 from each prefix)
+        lines = [l for l in output.stdout.split('\n') if l]
+        assert len(lines) == 30
+
+        plugin.cancel(handle.task_id)

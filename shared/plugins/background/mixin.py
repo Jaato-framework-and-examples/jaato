@@ -10,7 +10,11 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from .protocol import BackgroundCapable, TaskHandle, TaskResult, TaskStatus
+from .protocol import BackgroundCapable, TaskHandle, TaskOutput, TaskResult, TaskStatus
+
+
+# Default maximum output buffer size per stream (1MB)
+DEFAULT_MAX_OUTPUT_BUFFER = 1024 * 1024
 
 
 class BackgroundCapableMixin:
@@ -43,17 +47,21 @@ class BackgroundCapableMixin:
     def __init__(
         self,
         max_workers: int = 4,
-        default_timeout: Optional[float] = 300.0
+        default_timeout: Optional[float] = 300.0,
+        max_output_buffer: int = DEFAULT_MAX_OUTPUT_BUFFER
     ):
         """Initialize the background mixin.
 
         Args:
             max_workers: Maximum concurrent background tasks.
             default_timeout: Default timeout for background tasks in seconds.
+            max_output_buffer: Maximum size of stdout/stderr buffers in bytes.
+                              Oldest data is discarded when exceeded.
         """
         self._bg_executor: Optional[ThreadPoolExecutor] = None
         self._bg_max_workers = max_workers
         self._bg_default_timeout = default_timeout
+        self._bg_max_output_buffer = max_output_buffer
         self._bg_tasks: Dict[str, Dict[str, Any]] = {}
         self._bg_lock = threading.Lock()
         self._bg_initialized = False
@@ -174,6 +182,11 @@ class BackgroundCapableMixin:
                 "started_at": None,
                 "completed_at": None,
                 "timeout": timeout,
+                # Output streaming buffers
+                "stdout_buffer": bytearray(),
+                "stderr_buffer": bytearray(),
+                "output_lock": threading.Lock(),
+                "returncode": None,
             }
 
         # Submit to thread pool
@@ -226,7 +239,28 @@ class BackgroundCapableMixin:
             timeout: Timeout in seconds (for logging, actual timeout handled by Future).
         """
         try:
-            result = executor_fn(arguments)
+            # Check if plugin provides a streaming executor for this tool
+            streaming_executor = self._get_streaming_executor(tool_name)
+            if streaming_executor:
+                # Use streaming executor with output callbacks
+                def on_stdout(data: bytes) -> None:
+                    self.append_output(task_id, stdout=data)
+
+                def on_stderr(data: bytes) -> None:
+                    self.append_output(task_id, stderr=data)
+
+                def on_returncode(code: int) -> None:
+                    self.set_returncode(task_id, code)
+
+                result = streaming_executor(
+                    arguments,
+                    on_stdout=on_stdout,
+                    on_stderr=on_stderr,
+                    on_returncode=on_returncode
+                )
+            else:
+                # Fall back to non-streaming execution
+                result = executor_fn(arguments)
 
             with self._bg_lock:
                 if task_id in self._bg_tasks:
@@ -240,6 +274,29 @@ class BackgroundCapableMixin:
                     self._bg_tasks[task_id]["status"] = TaskStatus.FAILED
                     self._bg_tasks[task_id]["error"] = str(e)
                     self._bg_tasks[task_id]["completed_at"] = datetime.now()
+
+    def _get_streaming_executor(
+        self,
+        tool_name: str
+    ) -> Optional[Callable[..., Any]]:
+        """Get a streaming executor for a tool.
+
+        Override in subclass to provide streaming executors that capture
+        output incrementally during execution.
+
+        The streaming executor should accept:
+        - arguments: Dict[str, Any] - the tool arguments
+        - on_stdout: Callable[[bytes], None] - callback for stdout data
+        - on_stderr: Callable[[bytes], None] - callback for stderr data
+        - on_returncode: Callable[[int], None] - callback for exit code
+
+        Args:
+            tool_name: Name of the tool.
+
+        Returns:
+            A streaming executor function, or None to use regular executor.
+        """
+        return None  # Default: no streaming support
 
     def get_status(self, task_id: str) -> TaskStatus:
         """Get the current status of a background task.
@@ -302,6 +359,136 @@ class BackgroundCapableMixin:
                 completed_at=completed_at,
                 duration_seconds=duration,
             )
+
+    def append_output(
+        self,
+        task_id: str,
+        stdout: bytes = b'',
+        stderr: bytes = b''
+    ) -> None:
+        """Append output to task buffers (thread-safe).
+
+        Called by streaming executors to record incremental output.
+        Buffers are automatically truncated if they exceed max_output_buffer.
+
+        Args:
+            task_id: The task identifier.
+            stdout: Bytes to append to stdout buffer.
+            stderr: Bytes to append to stderr buffer.
+        """
+        with self._bg_lock:
+            if task_id not in self._bg_tasks:
+                return
+            task = self._bg_tasks[task_id]
+
+        output_lock = task.get("output_lock")
+        if output_lock is None:
+            return
+
+        with output_lock:
+            if stdout:
+                task["stdout_buffer"].extend(stdout)
+                # Truncate from the beginning if exceeding max size
+                if len(task["stdout_buffer"]) > self._bg_max_output_buffer:
+                    excess = len(task["stdout_buffer"]) - self._bg_max_output_buffer
+                    del task["stdout_buffer"][:excess]
+
+            if stderr:
+                task["stderr_buffer"].extend(stderr)
+                if len(task["stderr_buffer"]) > self._bg_max_output_buffer:
+                    excess = len(task["stderr_buffer"]) - self._bg_max_output_buffer
+                    del task["stderr_buffer"][:excess]
+
+    def set_returncode(self, task_id: str, returncode: int) -> None:
+        """Set the return code for a task (for subprocess-based tasks).
+
+        Args:
+            task_id: The task identifier.
+            returncode: The process exit code.
+        """
+        with self._bg_lock:
+            if task_id in self._bg_tasks:
+                self._bg_tasks[task_id]["returncode"] = returncode
+
+    def get_output(
+        self,
+        task_id: str,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        stream: str = "both"
+    ) -> TaskOutput:
+        """Get incremental output from a background task.
+
+        Returns new output since the specified offsets.
+
+        Args:
+            task_id: ID from the TaskHandle.
+            stdout_offset: Byte offset to start reading stdout from.
+            stderr_offset: Byte offset to start reading stderr from.
+            stream: Which streams to include: "stdout", "stderr", or "both".
+
+        Returns:
+            TaskOutput with new content and updated offsets.
+
+        Raises:
+            KeyError: If task_id is not found.
+        """
+        with self._bg_lock:
+            if task_id not in self._bg_tasks:
+                raise KeyError(f"Task '{task_id}' not found")
+            task = self._bg_tasks[task_id]
+            status = task["status"]
+            returncode = task.get("returncode")
+
+        # Determine if more output is expected
+        has_more = status in (TaskStatus.PENDING, TaskStatus.RUNNING)
+
+        output_lock = task.get("output_lock")
+        if output_lock is None:
+            # No output lock means no streaming support for this task
+            return TaskOutput(
+                task_id=task_id,
+                status=status,
+                stdout="",
+                stderr="",
+                stdout_offset=stdout_offset,
+                stderr_offset=stderr_offset,
+                has_more=has_more,
+                returncode=returncode,
+            )
+
+        with output_lock:
+            stdout_buffer = task.get("stdout_buffer", bytearray())
+            stderr_buffer = task.get("stderr_buffer", bytearray())
+
+            # Read from offset
+            stdout_data = ""
+            stderr_data = ""
+            new_stdout_offset = stdout_offset
+            new_stderr_offset = stderr_offset
+
+            if stream in ("stdout", "both"):
+                if stdout_offset < len(stdout_buffer):
+                    stdout_bytes = bytes(stdout_buffer[stdout_offset:])
+                    stdout_data = stdout_bytes.decode('utf-8', errors='replace')
+                new_stdout_offset = len(stdout_buffer)
+
+            if stream in ("stderr", "both"):
+                if stderr_offset < len(stderr_buffer):
+                    stderr_bytes = bytes(stderr_buffer[stderr_offset:])
+                    stderr_data = stderr_bytes.decode('utf-8', errors='replace')
+                new_stderr_offset = len(stderr_buffer)
+
+        return TaskOutput(
+            task_id=task_id,
+            status=status,
+            stdout=stdout_data,
+            stderr=stderr_data,
+            stdout_offset=new_stdout_offset,
+            stderr_offset=new_stderr_offset,
+            has_more=has_more,
+            returncode=returncode,
+        )
 
     def cancel(self, task_id: str) -> bool:
         """Cancel a running background task.
@@ -420,6 +607,11 @@ class BackgroundCapableMixin:
                 "started_at": now,  # Approximate, task was already running
                 "completed_at": None,
                 "timeout": None,
+                # Output streaming buffers
+                "stdout_buffer": bytearray(),
+                "stderr_buffer": bytearray(),
+                "output_lock": threading.Lock(),
+                "returncode": None,
             }
 
         # Add callback to update status when future completes
@@ -431,8 +623,22 @@ class BackgroundCapableMixin:
                 task["completed_at"] = datetime.now()
                 try:
                     result = f.result()
-                    task["status"] = TaskStatus.COMPLETED
-                    task["result"] = result
+                    # Handle ToolExecutor's (ok, result) tuple format
+                    if isinstance(result, tuple) and len(result) == 2:
+                        ok, actual_result = result
+                        if not ok:
+                            task["status"] = TaskStatus.FAILED
+                            if isinstance(actual_result, dict) and 'error' in actual_result:
+                                task["error"] = actual_result.get('error')
+                            else:
+                                task["error"] = str(actual_result)
+                            task["result"] = actual_result
+                        else:
+                            task["status"] = TaskStatus.COMPLETED
+                            task["result"] = actual_result
+                    else:
+                        task["status"] = TaskStatus.COMPLETED
+                        task["result"] = result
                 except Exception as e:
                     task["status"] = TaskStatus.FAILED
                     task["error"] = str(e)
