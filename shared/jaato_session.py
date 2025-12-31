@@ -692,6 +692,11 @@ class JaatoSession:
         # Wrap usage callback to check GC threshold
         wrapped_usage_callback = self._wrap_usage_callback_with_gc_check(on_usage_update)
 
+        # Set output callback on registry BEFORE prompt enrichment
+        # so enrichment notifications are visible to the user
+        if self._runtime.registry and on_output:
+            self._runtime.registry.set_output_callback(on_output, self._terminal_width)
+
         # Run prompt enrichment if registry is available
         processed_message = self._enrich_and_clean_prompt(message)
 
