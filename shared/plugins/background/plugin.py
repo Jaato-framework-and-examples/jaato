@@ -142,58 +142,31 @@ Returns a task_id you can use to check status or get results later.""",
                 }
             ),
             ToolSchema(
-                name="getBackgroundTaskStatus",
-                description="Check the current status of a background task.",
+                name="getBackgroundTask",
+                description="""Get status, output, and result of a background task.
+
+This single tool handles everything - works the same whether the task
+is running or completed:
+- While running: returns current status + stdout/stderr so far
+- When completed: returns final status + full output + returncode
+
+Use stdout_offset to get incremental output (for monitoring progress).
+Set wait=true to block until the task completes.
+
+Response fields:
+- status: "pending", "running", "completed", "failed", "cancelled"
+- stdout/stderr: output since the specified offset
+- stdout_offset/stderr_offset: use these for the next call
+- has_more: true if task still running (more output expected)
+- returncode: exit code when completed (null while running)
+- error: error message if failed
+- duration_seconds: execution time when completed""",
                 parameters={
                     "type": "object",
                     "properties": {
                         "task_id": {
                             "type": "string",
-                            "description": "Task ID returned from startBackgroundTask"
-                        },
-                    },
-                    "required": ["task_id"]
-                }
-            ),
-            ToolSchema(
-                name="getBackgroundTaskResult",
-                description="""Get the result of a background task.
-
-If the task is still running, returns current status without blocking.
-Use this after checking status shows COMPLETED or FAILED.""",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "task_id": {
-                            "type": "string",
-                            "description": "Task ID returned from startBackgroundTask"
-                        },
-                        "wait": {
-                            "type": "boolean",
-                            "description": "If true, block until task completes (default: false)"
-                        },
-                    },
-                    "required": ["task_id"]
-                }
-            ),
-            ToolSchema(
-                name="getBackgroundTaskOutput",
-                description="""Get incremental stdout/stderr from a running background task.
-
-Use this to monitor task progress in real-time. Returns output since
-the specified offset. Call repeatedly with the returned offset to
-stream output incrementally.
-
-Example workflow:
-1. Call with offset=0 to get output from start
-2. Use returned stdout_offset for next call
-3. Repeat until has_more is false""",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "task_id": {
-                            "type": "string",
-                            "description": "Task ID to get output from"
+                            "description": "Task ID returned from startBackgroundTask or auto-backgrounded command"
                         },
                         "stdout_offset": {
                             "type": "integer",
@@ -203,10 +176,9 @@ Example workflow:
                             "type": "integer",
                             "description": "Byte offset to read stderr from (default: 0)"
                         },
-                        "stream": {
-                            "type": "string",
-                            "enum": ["stdout", "stderr", "both"],
-                            "description": "Which stream(s) to read (default: both)"
+                        "wait": {
+                            "type": "boolean",
+                            "description": "If true, block until task completes (default: false)"
                         },
                     },
                     "required": ["task_id"]
@@ -255,9 +227,7 @@ Use this to discover which tools can be run in background mode.""",
         """Return executor mapping for background task tools."""
         return {
             "startBackgroundTask": self._start_task,
-            "getBackgroundTaskStatus": self._get_status,
-            "getBackgroundTaskResult": self._get_result,
-            "getBackgroundTaskOutput": self._get_output,
+            "getBackgroundTask": self._get_task,
             "cancelBackgroundTask": self._cancel_task,
             "listBackgroundTasks": self._list_tasks,
             "listBackgroundCapableTools": self._list_capable_tools,
@@ -320,119 +290,70 @@ Use this to discover which tools can be run in background mode.""",
                 "error": str(e)
             }
 
-    def _get_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Get status of a background task.
-
-        Args:
-            args: Dict containing task_id.
-
-        Returns:
-            Dict with task status or error.
-        """
-        task_id = args.get("task_id")
-        self._trace(f"getBackgroundTaskStatus: task_id={task_id}")
-        if not task_id:
-            return {"error": "task_id is required"}
-
-        # Search all capable plugins for the task
-        for plugin_name, plugin in self._capable_plugins.items():
-            try:
-                status = plugin.get_status(task_id)
-                return {
-                    "task_id": task_id,
-                    "plugin_name": plugin_name,
-                    "status": status.value,
-                }
-            except KeyError:
-                continue
-
-        return {"error": f"Task '{task_id}' not found"}
-
-    def _get_result(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Get result of a background task.
-
-        Args:
-            args: Dict containing task_id and optional wait flag.
-
-        Returns:
-            Dict with task result or error.
-        """
-        task_id = args.get("task_id")
-        wait = args.get("wait", False)
-        self._trace(f"getBackgroundTaskResult: task_id={task_id}, wait={wait}")
-
-        if not task_id:
-            return {"error": "task_id is required"}
-
-        for plugin_name, plugin in self._capable_plugins.items():
-            try:
-                result = plugin.get_result(task_id, wait=wait)
-                return {
-                    "task_id": task_id,
-                    "plugin_name": plugin_name,
-                    "status": result.status.value,
-                    "result": result.result,
-                    "error": result.error,
-                    "duration_seconds": result.duration_seconds,
-                }
-            except KeyError:
-                continue
-
-        return {"error": f"Task '{task_id}' not found"}
-
-    def _get_output(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Get incremental output from a background task.
+    def _get_task(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get unified status, output, and result of a background task.
 
         Args:
             args: Dict containing task_id, and optional stdout_offset,
-                  stderr_offset, and stream.
+                  stderr_offset, and wait flag.
 
         Returns:
-            Dict with incremental output and updated offsets.
+            Dict with task info including status, output, and result.
         """
         task_id = args.get("task_id")
         stdout_offset = args.get("stdout_offset", 0)
         stderr_offset = args.get("stderr_offset", 0)
-        stream = args.get("stream", "both")
+        wait = args.get("wait", False)
         self._trace(
-            f"getBackgroundTaskOutput: task_id={task_id}, "
+            f"getBackgroundTask: task_id={task_id}, "
             f"stdout_offset={stdout_offset}, stderr_offset={stderr_offset}, "
-            f"stream={stream}"
+            f"wait={wait}"
         )
 
         if not task_id:
             return {"error": "task_id is required"}
 
-        # Validate stream parameter
-        if stream not in ("stdout", "stderr", "both"):
-            return {"error": f"Invalid stream value: {stream}. Use 'stdout', 'stderr', or 'both'."}
+        # Refresh capable plugins list
+        self._discover_capable_plugins()
 
         for plugin_name, plugin in self._capable_plugins.items():
             try:
-                # Check if task exists
-                plugin.get_status(task_id)
-
-                # Check if plugin supports get_output
-                if not hasattr(plugin, 'get_output'):
+                # Check if plugin supports get_task
+                if not hasattr(plugin, 'get_task'):
+                    # Fall back to get_status for basic info
+                    status = plugin.get_status(task_id)
                     return {
-                        "error": f"Plugin '{plugin_name}' does not support output streaming"
+                        "task_id": task_id,
+                        "plugin_name": plugin_name,
+                        "status": status.value,
+                        "stdout": "",
+                        "stderr": "",
+                        "stdout_offset": 0,
+                        "stderr_offset": 0,
+                        "has_more": status.value in ("pending", "running"),
+                        "returncode": None,
+                        "error": None,
+                        "duration_seconds": None,
                     }
 
-                output = plugin.get_output(
+                info = plugin.get_task(
                     task_id,
                     stdout_offset=stdout_offset,
                     stderr_offset=stderr_offset,
-                    stream=stream
+                    wait=wait
                 )
                 return {
-                    "task_id": output.task_id,
-                    "status": output.status.value,
-                    "stdout": output.stdout,
-                    "stderr": output.stderr,
-                    "stdout_offset": output.stdout_offset,
-                    "stderr_offset": output.stderr_offset,
-                    "has_more": output.has_more,
-                    "returncode": output.returncode,
+                    "task_id": info.task_id,
+                    "plugin_name": plugin_name,
+                    "status": info.status.value,
+                    "stdout": info.stdout,
+                    "stderr": info.stderr,
+                    "stdout_offset": info.stdout_offset,
+                    "stderr_offset": info.stderr_offset,
+                    "has_more": info.has_more,
+                    "returncode": info.returncode,
+                    "error": info.error,
+                    "duration_seconds": info.duration_seconds,
                 }
             except KeyError:
                 continue
@@ -551,58 +472,56 @@ You have the ability to run long-running tool executions in the background.
 - External API calls with high latency
 - Operations where you can do other useful work while waiting
 
-**Workflow:**
-1. Call `startBackgroundTask` with the tool_name and arguments
-2. Continue with other work or inform the user the task is running
-3. Periodically check `getBackgroundTaskStatus`
-4. Once complete, use `getBackgroundTaskResult` to get the output
-
 **Available tools:**
-- `listBackgroundCapableTools` - See which tools support background mode
 - `startBackgroundTask` - Start a task in background
-- `getBackgroundTaskStatus` - Check if a task is done
-- `getBackgroundTaskOutput` - Stream stdout/stderr incrementally (see below)
-- `getBackgroundTaskResult` - Get the final result
-- `cancelBackgroundTask` - Cancel if no longer needed
+- `getBackgroundTask` - Get status, output, and result (single tool for everything)
+- `cancelBackgroundTask` - Cancel a running task
 - `listBackgroundTasks` - See all active background tasks
+- `listBackgroundCapableTools` - See which tools support background mode
 
-**Monitoring Background Tasks with Output Streaming:**
+**Workflow:**
+1. Run a command (it may auto-background if it takes >10s) or use `startBackgroundTask`
+2. Use `getBackgroundTask(task_id)` to check status and get output
+3. Repeat step 2 until `has_more` is false (task completed)
 
-For long-running builds, you can monitor progress in real-time using `getBackgroundTaskOutput`:
+**Example - monitoring a build:**
 
 ```
 1. cli_based_tool(command="mvn clean install")
    → {"auto_backgrounded": true, "task_id": "abc-123", ...}
 
-2. getBackgroundTaskOutput(task_id="abc-123", stdout_offset=0)
-   → {"status": "RUNNING", "stdout": "Downloading dependencies...", "stdout_offset": 1024, "has_more": true}
+2. getBackgroundTask(task_id="abc-123")
+   → {"status": "running", "stdout": "Downloading dependencies...",
+      "stdout_offset": 1024, "has_more": true}
 
-3. getBackgroundTaskOutput(task_id="abc-123", stdout_offset=1024)
-   → {"status": "RUNNING", "stdout": "[ERROR] Compilation failed at Foo.java:42", "stdout_offset": 2048, "has_more": true}
-   → React to errors early! Consider canceling: cancelBackgroundTask(task_id="abc-123")
+3. getBackgroundTask(task_id="abc-123", stdout_offset=1024)
+   → {"status": "running", "stdout": "[INFO] Building module...",
+      "stdout_offset": 2048, "has_more": true}
 
-4. When has_more is false and status is COMPLETED:
-   → {"status": "COMPLETED", "stdout": "BUILD SUCCESS", "has_more": false, "returncode": 0}
+4. getBackgroundTask(task_id="abc-123", stdout_offset=2048)
+   → {"status": "completed", "stdout": "BUILD SUCCESS",
+      "has_more": false, "returncode": 0, "duration_seconds": 45.2}
 ```
 
-Use the returned `stdout_offset` for subsequent calls to get only new output.
-This allows you to:
-- See build progress in real-time
-- Detect errors early and react before the build finishes
-- Make informed decisions about whether to continue or cancel
+**Response fields:**
+- `status`: "pending", "running", "completed", "failed", "cancelled"
+- `stdout`/`stderr`: output since your offset (use for incremental reading)
+- `stdout_offset`/`stderr_offset`: pass these to your next call
+- `has_more`: true while task is running (more output coming)
+- `returncode`: exit code when completed (null while running)
+- `error`: error message if failed
+- `duration_seconds`: execution time when completed
 
 **Auto-backgrounding:**
-Some tools may automatically move to background if they exceed a time threshold.
-When this happens, you'll receive a response with `auto_backgrounded: true` and
-a `task_id`. Treat this the same as if you had explicitly started a background task.
+Some tools automatically move to background if they exceed a time threshold.
+When this happens, you'll receive `auto_backgrounded: true` and a `task_id`.
 """
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return list of tools that should be auto-approved."""
         # Status checks, output reading, and listing are safe - no side effects
         return [
-            "getBackgroundTaskStatus",
-            "getBackgroundTaskOutput",
+            "getBackgroundTask",
             "listBackgroundTasks",
             "listBackgroundCapableTools",
         ]

@@ -126,6 +126,52 @@ class TaskOutput:
         }
 
 
+@dataclass
+class TaskInfo:
+    """Unified information about a background task.
+
+    Combines status, output streaming, and result into a single response.
+    Works the same whether the task is running or completed.
+
+    Attributes:
+        task_id: Unique identifier for the task.
+        status: Current status of the task.
+        stdout: Stdout content since offset (or full output if completed).
+        stderr: Stderr content since offset (or full output if completed).
+        stdout_offset: Current offset in stdout buffer after this read.
+        stderr_offset: Current offset in stderr buffer after this read.
+        has_more: True if task is still running (more output expected).
+        returncode: Exit code if task is completed, None otherwise.
+        error: Error message if task failed.
+        duration_seconds: Total execution duration (when completed).
+    """
+    task_id: str
+    status: TaskStatus
+    stdout: str = ""
+    stderr: str = ""
+    stdout_offset: int = 0
+    stderr_offset: int = 0
+    has_more: bool = True
+    returncode: Optional[int] = None
+    error: Optional[str] = None
+    duration_seconds: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "task_id": self.task_id,
+            "status": self.status.value,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "stdout_offset": self.stdout_offset,
+            "stderr_offset": self.stderr_offset,
+            "has_more": self.has_more,
+            "returncode": self.returncode,
+            "error": self.error,
+            "duration_seconds": self.duration_seconds,
+        }
+
+
 @runtime_checkable
 class BackgroundCapable(Protocol):
     """Protocol for plugins that support background task execution.
@@ -310,6 +356,33 @@ class BackgroundCapable(Protocol):
         """
         ...
 
+    def get_task(
+        self,
+        task_id: str,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        wait: bool = False
+    ) -> 'TaskInfo':
+        """Get unified information about a background task.
+
+        This is the preferred method for querying task state. It combines
+        status, output streaming, and result into a single response that
+        works the same whether the task is running or completed.
+
+        Args:
+            task_id: ID from the TaskHandle.
+            stdout_offset: Byte offset to start reading stdout from.
+            stderr_offset: Byte offset to start reading stderr from.
+            wait: If True, block until task completes.
+
+        Returns:
+            TaskInfo with current state, output, and result (if completed).
+
+        Raises:
+            KeyError: If task_id is not found.
+        """
+        ...
+
     def register_running_task(
         self,
         future: Future,
@@ -341,5 +414,6 @@ __all__ = [
     'TaskHandle',
     'TaskResult',
     'TaskOutput',
+    'TaskInfo',
     'BackgroundCapable',
 ]
