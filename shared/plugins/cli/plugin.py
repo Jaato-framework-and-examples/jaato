@@ -456,24 +456,25 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             def read_stdout():
                 """Read stdout in a thread and call callback."""
                 try:
-                    while True:
-                        chunk = proc.stdout.read(4096)
-                        if not chunk:
+                    # Use line-by-line reading for real-time streaming
+                    # read(n) blocks until n bytes are available, which doesn't
+                    # work well for slow-producing commands
+                    for line in iter(proc.stdout.readline, b''):
+                        if not line:
                             break
-                        stdout_chunks.append(chunk)
-                        on_stdout(chunk)
+                        stdout_chunks.append(line)
+                        on_stdout(line)
                 finally:
                     stdout_done.set()
 
             def read_stderr():
                 """Read stderr in a thread and call callback."""
                 try:
-                    while True:
-                        chunk = proc.stderr.read(4096)
-                        if not chunk:
+                    for line in iter(proc.stderr.readline, b''):
+                        if not line:
                             break
-                        stderr_chunks.append(chunk)
-                        on_stderr(chunk)
+                        stderr_chunks.append(line)
+                        on_stderr(line)
                 finally:
                     stderr_done.set()
 
