@@ -928,6 +928,14 @@ class OutputBuffer:
         if not self._active_tools:
             return
 
+        # Don't finalize if any tool has pending permission or clarification
+        any_pending = any(
+            tool.permission_state == "pending" or tool.clarification_state == "pending"
+            for tool in self._active_tools
+        )
+        if any_pending:
+            return
+
         # Create a copy of the tools for the ToolBlock
         import copy
         tools_copy = copy.deepcopy(self._active_tools)
