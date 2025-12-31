@@ -239,7 +239,28 @@ class BackgroundCapableMixin:
             timeout: Timeout in seconds (for logging, actual timeout handled by Future).
         """
         try:
-            result = executor_fn(arguments)
+            # Check if plugin provides a streaming executor for this tool
+            streaming_executor = self._get_streaming_executor(tool_name)
+            if streaming_executor:
+                # Use streaming executor with output callbacks
+                def on_stdout(data: bytes) -> None:
+                    self.append_output(task_id, stdout=data)
+
+                def on_stderr(data: bytes) -> None:
+                    self.append_output(task_id, stderr=data)
+
+                def on_returncode(code: int) -> None:
+                    self.set_returncode(task_id, code)
+
+                result = streaming_executor(
+                    arguments,
+                    on_stdout=on_stdout,
+                    on_stderr=on_stderr,
+                    on_returncode=on_returncode
+                )
+            else:
+                # Fall back to non-streaming execution
+                result = executor_fn(arguments)
 
             with self._bg_lock:
                 if task_id in self._bg_tasks:
@@ -253,6 +274,29 @@ class BackgroundCapableMixin:
                     self._bg_tasks[task_id]["status"] = TaskStatus.FAILED
                     self._bg_tasks[task_id]["error"] = str(e)
                     self._bg_tasks[task_id]["completed_at"] = datetime.now()
+
+    def _get_streaming_executor(
+        self,
+        tool_name: str
+    ) -> Optional[Callable[..., Any]]:
+        """Get a streaming executor for a tool.
+
+        Override in subclass to provide streaming executors that capture
+        output incrementally during execution.
+
+        The streaming executor should accept:
+        - arguments: Dict[str, Any] - the tool arguments
+        - on_stdout: Callable[[bytes], None] - callback for stdout data
+        - on_stderr: Callable[[bytes], None] - callback for stderr data
+        - on_returncode: Callable[[int], None] - callback for exit code
+
+        Args:
+            tool_name: Name of the tool.
+
+        Returns:
+            A streaming executor function, or None to use regular executor.
+        """
+        return None  # Default: no streaming support
 
     def get_status(self, task_id: str) -> TaskStatus:
         """Get the current status of a background task.
@@ -579,8 +623,22 @@ class BackgroundCapableMixin:
                 task["completed_at"] = datetime.now()
                 try:
                     result = f.result()
-                    task["status"] = TaskStatus.COMPLETED
-                    task["result"] = result
+                    # Handle ToolExecutor's (ok, result) tuple format
+                    if isinstance(result, tuple) and len(result) == 2:
+                        ok, actual_result = result
+                        if not ok:
+                            task["status"] = TaskStatus.FAILED
+                            if isinstance(actual_result, dict) and 'error' in actual_result:
+                                task["error"] = actual_result.get('error')
+                            else:
+                                task["error"] = str(actual_result)
+                            task["result"] = actual_result
+                        else:
+                            task["status"] = TaskStatus.COMPLETED
+                            task["result"] = actual_result
+                    else:
+                        task["status"] = TaskStatus.COMPLETED
+                        task["result"] = result
                 except Exception as e:
                     task["status"] = TaskStatus.FAILED
                     task["error"] = str(e)
