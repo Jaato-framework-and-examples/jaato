@@ -564,6 +564,42 @@ class LSPClient:
             "textDocument": {"uri": uri}
         })
 
+    async def notify_files_created(self, paths: List[str]) -> None:
+        """Notify the server that files were created.
+
+        This triggers the server to index the new files so they can be
+        found by workspace-wide operations like find_references.
+
+        Args:
+            paths: List of file paths that were created.
+        """
+        changes = [
+            {"uri": self.uri_from_path(p), "type": 1}  # 1 = Created
+            for p in paths
+        ]
+        if changes:
+            await self._send_notification("workspace/didChangeWatchedFiles", {
+                "changes": changes
+            })
+
+    async def ensure_workspace_indexed(self, directory: str) -> None:
+        """Open all Python files in a directory to ensure they're indexed.
+
+        This is needed for find_references to work across files that
+        haven't been explicitly opened yet.
+
+        Args:
+            directory: Directory to scan for Python files.
+        """
+        import glob
+        pattern = os.path.join(directory, "**", "*.py")
+        py_files = glob.glob(pattern, recursive=True)
+
+        for py_file in py_files:
+            uri = self.uri_from_path(py_file)
+            if uri not in self._open_documents:
+                await self.open_document(py_file)
+
     def _guess_language_id(self, path: str) -> str:
         """Guess the language ID from file extension."""
         ext = os.path.splitext(path)[1].lower()

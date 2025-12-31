@@ -1087,6 +1087,12 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             self._trace(f"get_file_dependents: unsupported file type {ext}")
             return []
 
+        # Ensure all Python files in the workspace are indexed
+        # This is needed for find_references to work across files
+        workspace_dir = os.path.dirname(os.path.abspath(file_path))
+        self._trace(f"get_file_dependents: ensuring workspace indexed at {workspace_dir}")
+        self._execute_method('_ensure_workspace_indexed', {'directory': workspace_dir})
+
         # Get document symbols
         symbols_result = self._execute_method('document_symbols', {'file_path': file_path})
         if isinstance(symbols_result, dict) and symbols_result.get("error"):
@@ -1812,6 +1818,15 @@ Example:
         elif method == 'get_diagnostics':
             diagnostics = client.get_diagnostics(file_path)
             return self._format_diagnostics(diagnostics)
+
+        elif method == '_ensure_workspace_indexed':
+            # Internal method to index all Python files in a directory
+            directory = args.get('directory', '')
+            if directory:
+                await client.ensure_workspace_indexed(directory)
+                # Give pyright time to index the files
+                await asyncio.sleep(0.5)
+            return {"success": True}
 
         elif method == 'document_symbols':
             symbols = await client.get_document_symbols(file_path)
