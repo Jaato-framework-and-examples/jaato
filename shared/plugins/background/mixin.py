@@ -10,7 +10,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from .protocol import BackgroundCapable, TaskHandle, TaskOutput, TaskResult, TaskStatus
+from .protocol import BackgroundCapable, TaskHandle, TaskInfo, TaskOutput, TaskResult, TaskStatus
 
 
 # Default maximum output buffer size per stream (1MB)
@@ -488,6 +488,97 @@ class BackgroundCapableMixin:
             stderr_offset=new_stderr_offset,
             has_more=has_more,
             returncode=returncode,
+        )
+
+    def get_task(
+        self,
+        task_id: str,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        wait: bool = False
+    ) -> TaskInfo:
+        """Get unified information about a background task.
+
+        Combines status, output streaming, and result into a single response.
+        Works the same whether the task is running or completed.
+
+        Args:
+            task_id: ID from the TaskHandle.
+            stdout_offset: Byte offset to start reading stdout from.
+            stderr_offset: Byte offset to start reading stderr from.
+            wait: If True, block until task completes.
+
+        Returns:
+            TaskInfo with current state, output, and result (if completed).
+
+        Raises:
+            KeyError: If task_id is not found.
+        """
+        with self._bg_lock:
+            if task_id not in self._bg_tasks:
+                raise KeyError(f"Task '{task_id}' not found")
+            task = self._bg_tasks[task_id]
+            future = task.get("future")
+
+        # If wait requested and task is still running, wait for completion
+        if wait and future is not None:
+            try:
+                future.result()  # Block until done
+            except Exception:
+                pass  # Error is already captured in task state
+
+        # Re-acquire lock to get final state
+        with self._bg_lock:
+            if task_id not in self._bg_tasks:
+                raise KeyError(f"Task '{task_id}' not found")
+            task = self._bg_tasks[task_id]
+            status = task["status"]
+            returncode = task.get("returncode")
+            error = task.get("error")
+            started_at = task.get("started_at")
+            completed_at = task.get("completed_at")
+
+        # Calculate duration
+        duration = None
+        if started_at and completed_at:
+            duration = (completed_at - started_at).total_seconds()
+
+        # Determine if more output is expected
+        has_more = status in (TaskStatus.PENDING, TaskStatus.RUNNING)
+
+        # Get output from buffers
+        output_lock = task.get("output_lock")
+        stdout_data = ""
+        stderr_data = ""
+        new_stdout_offset = stdout_offset
+        new_stderr_offset = stderr_offset
+
+        if output_lock is not None:
+            with output_lock:
+                stdout_buffer = task.get("stdout_buffer", bytearray())
+                stderr_buffer = task.get("stderr_buffer", bytearray())
+
+                if stdout_offset < len(stdout_buffer):
+                    stdout_bytes = bytes(stdout_buffer[stdout_offset:])
+                    stdout_data = stdout_bytes.decode('utf-8', errors='replace')
+                new_stdout_offset = len(stdout_buffer)
+
+                if stderr_offset < len(stderr_buffer):
+                    stderr_bytes = bytes(stderr_buffer[stderr_offset:])
+                    stderr_data = stderr_bytes.decode('utf-8', errors='replace')
+                new_stderr_offset = len(stderr_buffer)
+
+        return TaskInfo(
+            task_id=task_id,
+            status=status,
+            stdout=stdout_data,
+            stderr=stderr_data,
+            stdout_offset=new_stdout_offset,
+            stderr_offset=new_stderr_offset,
+            has_more=has_more,
+            returncode=returncode,
+            error=error,
+            duration_seconds=duration,
         )
 
     def cancel(self, task_id: str) -> bool:
