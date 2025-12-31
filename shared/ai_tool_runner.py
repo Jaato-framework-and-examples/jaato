@@ -10,6 +10,7 @@ execution with support for:
 import json
 import os
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
 
@@ -232,6 +233,9 @@ class ToolExecutor:
     ) -> Tuple[bool, Any]:
         """Execute a tool with auto-background on timeout.
 
+        Uses the plugin's streaming executor from the start so that output
+        is captured incrementally even if the task gets auto-backgrounded.
+
         Args:
             name: Tool name.
             args: Arguments dict.
@@ -243,59 +247,70 @@ class ToolExecutor:
             Tuple of (success, result). If auto-backgrounded, result contains
             task handle info with auto_backgrounded=True.
         """
-        pool = self._get_auto_background_pool()
+        # Get the executor function for this tool
+        executor_fn = None
+        if hasattr(plugin, 'get_executors'):
+            executors = plugin.get_executors()
+            executor_fn = executors.get(name)
 
-        # Submit to thread pool
-        future = pool.submit(self._execute_sync, name, args)
+        if executor_fn is None:
+            # Fall back to sync execution if no executor found
+            return self._execute_sync(name, args)
 
         try:
-            # Wait up to threshold seconds
-            ok, result = future.result(timeout=threshold)
+            # Start as background task immediately - this uses the streaming
+            # executor which captures output incrementally
+            handle = plugin.start_background(name, args, executor_fn=executor_fn)
+            task_id = handle.task_id
 
-            # Inject permission metadata if available
-            if permission_meta and isinstance(result, dict):
-                result['_permission'] = permission_meta
-
-            return ok, result
-
-        except FuturesTimeoutError:
-            # Task exceeded threshold - convert to background
-            try:
-                handle = plugin.register_running_task(future, name, args)
-
-                result = {
-                    "auto_backgrounded": True,
-                    "task_id": handle.task_id,
-                    "plugin_name": handle.plugin_name,
-                    "tool_name": handle.tool_name,
-                    "threshold_seconds": threshold,
-                    "message": f"Task exceeded {threshold}s threshold, continuing in background. "
-                               f"Use task_id '{handle.task_id}' to check status."
-                }
-
-                # Inject permission metadata
-                if permission_meta:
-                    result['_permission'] = permission_meta
-
-                # Record auto-background event
-                if self._ledger:
-                    self._ledger._record('auto-background', {
-                        'tool': name,
-                        'task_id': handle.task_id,
-                        'threshold': threshold,
-                    })
-
-                return True, result
-
-            except Exception as e:
-                # Failed to register - wait for result and return normally
-                try:
-                    ok, result = future.result(timeout=300)  # Give it more time
+            # Wait up to threshold seconds for completion
+            start_time = time.time()
+            while time.time() - start_time < threshold:
+                status = plugin.get_status(task_id)
+                if status.value not in ('pending', 'running'):
+                    # Task completed within threshold - get full result
+                    task_result = plugin.get_result(task_id)
+                    result = task_result.result
+                    if task_result.status.value == 'failed':
+                        if permission_meta and isinstance(result, dict):
+                            result['_permission'] = permission_meta
+                        return False, result or {'error': task_result.error}
                     if permission_meta and isinstance(result, dict):
                         result['_permission'] = permission_meta
-                    return ok, result
-                except Exception as inner_e:
-                    return False, {'error': f'Auto-background failed: {e}, execution failed: {inner_e}'}
+                    return True, result
+                time.sleep(0.1)  # Small poll interval
+
+            # Task exceeded threshold - return as auto-backgrounded
+            result = {
+                "auto_backgrounded": True,
+                "task_id": task_id,
+                "plugin_name": handle.plugin_name,
+                "tool_name": handle.tool_name,
+                "threshold_seconds": threshold,
+                "message": f"Task exceeded {threshold}s threshold, continuing in background. "
+                           f"Use task_id '{task_id}' to check status and output."
+            }
+
+            # Inject permission metadata
+            if permission_meta:
+                result['_permission'] = permission_meta
+
+            # Record auto-background event
+            if self._ledger:
+                self._ledger._record('auto-background', {
+                    'tool': name,
+                    'task_id': task_id,
+                    'threshold': threshold,
+                })
+
+            return True, result
+
+        except Exception as e:
+            # If start_background fails, fall back to sync execution
+            try:
+                return self._execute_sync(name, args)
+            except Exception as inner_e:
+                return False, {'error': f'Background start failed: {e}, sync fallback failed: {inner_e}'}
 
     def execute(self, name: str, args: Dict[str, Any]) -> Tuple[bool, Any]:
         debug = False
