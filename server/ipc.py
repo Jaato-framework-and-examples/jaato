@@ -283,18 +283,26 @@ class JaatoIPCServer:
     async def _start_windows_pipe_server(self) -> None:
         """Start the Windows named pipe server."""
         pipe_path = self._get_pipe_path()
+        logger.info(f"Starting Windows pipe server at {pipe_path}")
 
         # Use proactor event loop's pipe server
         loop = asyncio.get_running_loop()
+        logger.info(f"Event loop type: {type(loop).__name__}")
 
         def protocol_factory():
+            logger.info("Protocol factory called - creating new protocol instance")
             return _PipeServerProtocol(self)
 
         # Start serving on the named pipe
-        self._pipe_server = await loop.start_serving_pipe(
-            protocol_factory,
-            pipe_path,
-        )
+        try:
+            self._pipe_server = await loop.start_serving_pipe(
+                protocol_factory,
+                pipe_path,
+            )
+            logger.info(f"Pipe server created: {self._pipe_server}")
+        except Exception as e:
+            logger.error(f"Failed to start pipe server: {e}", exc_info=True)
+            raise
 
         # Run server in background
         asyncio.create_task(self._run_windows_pipe_server())
