@@ -4,10 +4,29 @@ Manages a ring buffer of output lines for display in the scrolling
 region of the TUI.
 """
 
+import os
+import tempfile
 import textwrap
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, List, Optional, Tuple, Union
+
+
+def _trace(msg: str) -> None:
+    """Write trace message to log file for debugging."""
+    trace_path = os.environ.get(
+        'JAATO_TRACE_LOG',
+        os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+    )
+    if trace_path:
+        try:
+            with open(trace_path, "a") as f:
+                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                f.write(f"[{ts}] [OutputBuffer] {msg}\n")
+                f.flush()
+        except (IOError, OSError):
+            pass
 
 from rich.console import Console, RenderableType
 from rich.text import Text
@@ -914,6 +933,14 @@ class OutputBuffer:
         if not self._active_tools:
             return
 
+        # Don't finalize if any tool has pending permission or clarification
+        any_pending = any(
+            tool.permission_state == "pending" or tool.clarification_state == "pending"
+            for tool in self._active_tools
+        )
+        if any_pending:
+            return
+
         # Create a copy of the tools for the ToolBlock
         import copy
         tools_copy = copy.deepcopy(self._active_tools)
@@ -951,6 +978,8 @@ class OutputBuffer:
             prompt_lines: Lines of the permission prompt to display.
             format_hint: Optional hint for display format ("diff" for colored diff).
         """
+        _trace(f"set_tool_permission_pending: looking for tool={tool_name}")
+        _trace(f"set_tool_permission_pending: active_tools={[(t.name, t.completed) for t in self._active_tools]}")
         for tool in self._active_tools:
             if tool.name == tool_name and not tool.completed:
                 tool.permission_state = "pending"
@@ -958,7 +987,9 @@ class OutputBuffer:
                 tool.permission_format_hint = format_hint
                 # Scroll to bottom to show the prompt
                 self._scroll_offset = 0
+                _trace(f"set_tool_permission_pending: FOUND and set pending for {tool_name}")
                 return
+        _trace(f"set_tool_permission_pending: NO MATCH for {tool_name}")
 
     def set_tool_permission_resolved(self, tool_name: str, granted: bool,
                                       method: str) -> None:
@@ -1750,6 +1781,11 @@ class OutputBuffer:
                 if tool.permission_state == "pending" or tool.clarification_state == "pending":
                     pending_tool = tool
                     break
+
+            # Trace for debugging permission display issues
+            if self._active_tools:
+                tool_states = [(t.name, t.permission_state, t.completed) for t in self._active_tools]
+                _trace(f"render_tool_tree: active_tools={tool_states}, pending_tool={pending_tool.name if pending_tool else None}")
 
             tool_count = len(self._active_tools)
             # Check if any tools are still executing (not completed)
