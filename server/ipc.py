@@ -122,12 +122,43 @@ class _PipeServerProtocol(asyncio.StreamReaderProtocol):
         self._pipe_reader = asyncio.StreamReader()
         super().__init__(self._pipe_reader, self._client_connected_cb)
 
+    def connection_made(self, transport):
+        """Called when a pipe client connects."""
+        logger.info("Windows pipe: connection_made called")
+        super().connection_made(transport)
+
+    def connection_lost(self, exc):
+        """Called when the pipe connection is lost."""
+        logger.info(f"Windows pipe: connection_lost called, exc={exc}")
+        super().connection_lost(exc)
+
     def _client_connected_cb(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Called when the stream reader/writer are ready."""
-        # Handle the client in a task
-        asyncio.create_task(
-            self._server._handle_pipe_client(reader, writer)
+        logger.info("Windows pipe: _client_connected_cb called")
+        # Handle the client in a task with error handling
+        task = asyncio.create_task(
+            self._handle_client_with_logging(reader, writer)
         )
+        # Log any exceptions from the task
+        task.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task: asyncio.Task):
+        """Log any exceptions from the client handler task."""
+        try:
+            exc = task.exception()
+            if exc:
+                logger.error(f"Windows pipe client handler error: {exc}", exc_info=exc)
+        except asyncio.CancelledError:
+            pass
+
+    async def _handle_client_with_logging(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        """Handle client with exception logging."""
+        try:
+            logger.info("Windows pipe: starting client handler")
+            await self._server._handle_pipe_client(reader, writer)
+        except Exception as e:
+            logger.error(f"Windows pipe client handler exception: {e}", exc_info=True)
+            raise
 
 
 class JaatoIPCServer:
@@ -349,7 +380,9 @@ class JaatoIPCServer:
                     "socket_path": self.socket_path,
                 },
             )
+            logger.info(f"Sending ConnectedEvent to {client_id}...")
             await self._send_to_client(client_id, connected_event)
+            logger.info(f"ConnectedEvent sent to {client_id}")
 
             # Start broadcast task for this client
             broadcast_task = asyncio.create_task(
@@ -426,8 +459,11 @@ class JaatoIPCServer:
         """Write a length-prefixed message to the stream."""
         payload = message.encode("utf-8")
         header = struct.pack(">I", len(payload))
+        logger.debug(f"_write_message: writing {len(payload)} bytes")
         writer.write(header + payload)
+        logger.debug("_write_message: calling drain()")
         await writer.drain()
+        logger.debug("_write_message: drain() completed")
 
     async def _handle_message(self, client_id: str, message: str) -> None:
         """Handle an incoming message from a client."""
