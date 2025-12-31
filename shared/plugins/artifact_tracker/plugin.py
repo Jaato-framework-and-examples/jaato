@@ -1011,12 +1011,12 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         return True
 
     def get_tool_result_enrichment_priority(self) -> int:
-        """Run AFTER LSP plugin (priority 30) to use its results.
+        """Run BEFORE LSP plugin (priority 30) to extract paths from clean JSON.
 
-        Priority 50 ensures LSP diagnostics are added first, then we add
-        dependency tracking.
+        Priority 20 ensures we can parse the JSON before LSP appends
+        markdown text which would break JSON parsing.
         """
-        return 50
+        return 20
 
     def enrich_tool_result(
         self,
@@ -1122,10 +1122,15 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         Returns:
             List of file paths that were modified.
         """
+        self._trace(f"_extract_file_paths: result preview: {result[:200] if len(result) > 200 else result}")
+
         try:
             data = json.loads(result)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            self._trace(f"_extract_file_paths: JSON decode error: {e}")
             return []
+
+        self._trace(f"_extract_file_paths: parsed data type={type(data).__name__}, keys={list(data.keys()) if isinstance(data, dict) else 'N/A'}")
 
         file_paths = []
 
@@ -1133,10 +1138,12 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             # Handle updateFile/writeNewFile: {"path": "...", "success": true}
             if 'path' in data:
                 file_paths.append(data['path'])
+                self._trace(f"_extract_file_paths: found path={data['path']}")
 
             # Handle lsp_rename_symbol/lsp_apply_code_action: {"files_modified": [...]}
             if 'files_modified' in data:
                 file_paths.extend(data['files_modified'])
+                self._trace(f"_extract_file_paths: found files_modified={data['files_modified']}")
 
             # Also check changes array
             changes = data.get("changes", [])
@@ -1144,6 +1151,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
                 if isinstance(change, dict) and change.get("file"):
                     file_paths.append(change["file"])
 
+        self._trace(f"_extract_file_paths: returning {len(file_paths)} paths: {file_paths}")
         return [_normalize_path(p) for p in file_paths if p]
 
     def _flag_dependent_for_review(self, dep_path: str, source_path: str) -> None:
