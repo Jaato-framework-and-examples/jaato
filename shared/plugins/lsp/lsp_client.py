@@ -758,13 +758,17 @@ class LSPClient:
             # Debug logging for symbol parsing - write to trace file
             sel_range = item.get("selectionRange")
             range_data = item.get("range")
+            used_range = sel_range if sel_range else range_data
             import os, tempfile
             from datetime import datetime
             trace_path = os.environ.get('JAATO_TRACE_LOG', os.path.join(tempfile.gettempdir(), "rich_client_trace.log"))
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [LSP_CLIENT] {item.get('name')}: selectionRange={sel_range}, range={range_data}\n")
+                    f.write(f"[{ts}] [LSP_CLIENT] {item.get('name')}: selectionRange={sel_range}, range={range_data}, using={used_range}\n")
+                    if used_range:
+                        start = used_range.get('start', {})
+                        f.write(f"[{ts}] [LSP_CLIENT] {item.get('name')}: start.line={start.get('line')}, start.character={start.get('character')}\n")
             except:
                 pass
             sym = SymbolInformation.from_dict(item, file_uri)
