@@ -1,4 +1,4 @@
-"""IPC Client for connecting to Jaato Server.
+r"""IPC Client for connecting to Jaato Server.
 
 This module provides a client for connecting to the Jaato server
 via Unix domain socket (Unix/Linux/macOS) or named pipe (Windows).
@@ -10,7 +10,7 @@ Usage:
     client = IPCClient("/tmp/jaato.sock")
 
     # On Windows:
-    client = IPCClient("jaato")  # connects to \\\\.\\pipe\\jaato
+    client = IPCClient("jaato")  # connects to \\.\pipe\jaato
 
     await client.connect()
 
@@ -78,7 +78,7 @@ else:
 
 
 class IPCClient:
-    """Client for connecting to Jaato server via IPC.
+    r"""Client for connecting to Jaato server via IPC.
 
     Provides async methods for:
     - Connecting to server
@@ -88,7 +88,7 @@ class IPCClient:
 
     Platform support:
     - Unix/Linux/macOS: Unix domain sockets
-    - Windows: Named pipes
+    - Windows: Named pipes (\\.\pipe\pipename)
     """
 
     def __init__(
@@ -128,10 +128,10 @@ class IPCClient:
         return sys.platform == "win32"
 
     async def _connect_windows_pipe(self, pipe_path: str):
-        """Connect to a Windows named pipe.
+        r"""Connect to a Windows named pipe.
 
         Args:
-            pipe_path: Full path to the named pipe (e.g., \\\\.\\pipe\\jaato)
+            pipe_path: Full path to the named pipe (e.g., \\.\pipe\jaato)
 
         Returns:
             Tuple of (reader, writer) for the pipe connection.
