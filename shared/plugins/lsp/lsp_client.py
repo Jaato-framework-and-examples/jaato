@@ -547,6 +547,10 @@ class LSPClient:
 
         If the document is already open, this is a no-op. Use update_document()
         to notify the server of content changes.
+
+        For new files, this also sends didChangeWatchedFiles to notify the
+        server about the file's existence (some servers like pylsp need this
+        for cross-file reference tracking).
         """
         uri = self.uri_from_path(path)
 
@@ -557,6 +561,12 @@ class LSPClient:
         if text is None:
             with open(path, 'r', encoding='utf-8', errors='replace') as f:
                 text = f.read()
+
+        # Notify server about new file existence BEFORE opening
+        # This is important for servers like pylsp/jedi to track cross-file references
+        await self._send_notification("workspace/didChangeWatchedFiles", {
+            "changes": [{"uri": uri, "type": 1}]  # 1 = Created
+        })
 
         lang_id = self.config.language_id or self._guess_language_id(path)
         self._open_documents[uri] = 1  # Start at version 1
