@@ -664,14 +664,22 @@ class LSPClient:
             lang = self.config.language_id
             extensions = lang_to_exts.get(lang, []) if lang else []
 
+        # Collect all files to index
+        all_files = []
         for ext in extensions:
             pattern = os.path.join(directory, "**", f"*{ext}")
-            files = glob.glob(pattern, recursive=True)
+            all_files.extend(glob.glob(pattern, recursive=True))
 
-            for file_path in files:
-                uri = self.uri_from_path(file_path)
-                if uri not in self._open_documents:
-                    await self.open_document(file_path)
+        # Close already-open documents in this directory first
+        # This forces re-analysis with updated configuration (e.g., extra_paths)
+        for file_path in all_files:
+            uri = self.uri_from_path(file_path)
+            if uri in self._open_documents:
+                await self.close_document(file_path)
+
+        # Now open all documents fresh
+        for file_path in all_files:
+            await self.open_document(file_path)
 
     def _guess_language_id(self, path: str) -> str:
         """Guess the language ID from file extension."""
