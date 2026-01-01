@@ -1,0 +1,339 @@
+[19:45:02.741] [session:main] SESSION_SEND_MESSAGE len=17 streaming=True
+[19:45:02.741] [PluginRegistry] set_output_callback: callback=True, terminal_width=136
+[19:45:02.742] [PluginRegistry] _emit_enrichment_notifications: 0 notifications, callback=True
+[19:45:02.742] [PluginRegistry] set_output_callback: callback=True, terminal_width=136
+[19:45:02.742] [session:main] STREAMING on_usage_update=set
+[19:45:04.967] [session:main] SESSION_STREAMING_COMPLETE parts_count=1 finish=FinishReason.TOOL_USE
+[19:45:04.967] [session:main] SESSION_PARTS_PROCESSING parts_count=1
+[19:45:04.967] [session:main] SESSION_PART[0] text=None fc=cli_based_tool
+[19:45:04.967] [session:main] SESSION_OUTPUT_FLUSH before tool cli_based_tool
+[19:45:04.967] [session:main] SESSION_TOOL_START name=cli_based_tool call_id=0eeb6a2a
+[19:45:04.968] [CLI] set_tool_output_callback: callback=SET
+[19:45:04.968] [PERMISSION] check_permission: tool=cli_based_tool
+[19:45:05.159] [LSP] Starting LSP server 'go': command=gopls, args=['serve']
+[19:45:05.160] [LSP] Starting LSP server 'cobol': command=cobol-language-support, args=['--stdio']
+[19:45:07.036] [CLI] execute_streaming: mkdir src
+[19:45:07.137] [CLI] set_tool_output_callback: callback=CLEARED
+[19:45:09.661] [session:main] SESSION_TOOL_RESULT_OUTPUT mode=write len=137 preview='I have created the `src` folder for you. What woul'
+[19:45:30.043] [session:main] SESSION_SEND_MESSAGE len=51 streaming=True
+[19:45:30.043] [PluginRegistry] set_output_callback: callback=True, terminal_width=136
+[19:45:30.043] [PluginRegistry] _emit_enrichment_notifications: 0 notifications, callback=True
+[19:45:30.043] [PluginRegistry] set_output_callback: callback=True, terminal_width=136
+[19:45:30.044] [session:main] STREAMING on_usage_update=set
+[19:45:33.136] [session:main] SESSION_STREAMING_COMPLETE parts_count=1 finish=FinishReason.TOOL_USE
+[19:45:33.136] [session:main] SESSION_PARTS_PROCESSING parts_count=1
+[19:45:33.136] [session:main] SESSION_PART[0] text=None fc=writeNewFile
+[19:45:33.136] [session:main] SESSION_OUTPUT_FLUSH before tool writeNewFile
+[19:45:33.136] [session:main] SESSION_TOOL_START name=writeNewFile call_id=a5dc750b
+[19:45:33.137] [CLI] set_tool_output_callback: callback=SET
+[19:45:33.137] [PERMISSION] check_permission: tool=writeNewFile
+[19:45:37.441] [FILE_EDIT] writeNewFile: path=src/lib.py, content_len=31
+[19:45:37.442] [CLI] set_tool_output_callback: callback=CLEARED
+[19:45:37.443] [ARTIFACT_TRACKER] enrich_tool_result: processing writeNewFile
+[19:45:37.443] [ARTIFACT_TRACKER] _extract_file_paths: result preview: {"success": true, "path": "src/lib.py", "size": 31, "lines": 2, "_permission": {"decision": "allowed", "reason": "User chose: yes", "method": "user_approved"}}
+[19:45:37.443] [ARTIFACT_TRACKER] _extract_file_paths: parsed data type=dict, keys=['success', 'path', 'size', 'lines', '_permission']
+[19:45:37.443] [ARTIFACT_TRACKER] _extract_file_paths: found path=src/lib.py
+[19:45:37.443] [ARTIFACT_TRACKER] _extract_file_paths: returning 1 paths: ['src/lib.py']
+[19:45:37.443] [ARTIFACT_TRACKER] enrich_tool_result: analyzing dependencies for ['src/lib.py']
+[19:45:37.443] [LSP] get_file_dependents: analyzing src/lib.py
+[19:45:37.443] [LSP] get_file_dependents: ensuring workspace indexed at /home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src
+[19:45:37.444] [LSP] execute: _ensure_workspace_indexed args={'directory': '/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src', 'extension': '.py', 'file_path': 'src/lib.py'}
+[19:45:37.644] [LSP] _ensure_workspace_indexed: indexing [/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src] for python (extraPathsKey=pylsp.plugins.jedi.extra_paths)
+[19:45:37.645] [LSP] execute: _ensure_workspace_indexed OK
+[19:45:37.645] [LSP] execute: document_symbols args={'file_path': 'src/lib.py'}
+[19:45:38.604] [LSP_CLIENT] hello: selectionRange=None, range=None, using=None
+[19:45:38.604] [LSP] document_symbols: hello location.range.start = line 0, char 0
+[19:45:38.604] [LSP] execute: document_symbols OK
+[19:45:38.604] [LSP] get_file_dependents: found 1 exportable symbols
+[19:45:38.605] [LSP] _find_symbol_name_in_line: found 'hello' at char 4 (was 0)
+[19:45:38.605] [LSP] get_file_dependents: checking references for hello at line 0, char 4
+[19:45:38.605] [LSP] execute: find_references args={'file_path': 'src/lib.py', 'line': 0, 'character': 4, 'include_declaration': False}
+[19:45:39.702] [LSP] execute: find_references EMPTY - No references found at src/lib.py:1:4. Server 'python' is connected but returned no results.
+[19:45:39.702] [LSP] get_file_dependents: find_references for hello returned: dict, value={'error': "No references found at src/lib.py:1:4. Server 'python' is connected but returned no results."}
+[19:45:39.703] [LSP] get_file_dependents: find_references error: No references found at src/lib.py:1:4. Server 'python' is connected but returned no results.
+[19:45:39.703] [LSP] get_file_dependents: found 0 dependent files
+[19:45:39.703] [ARTIFACT_TRACKER] enrich_tool_result: src/lib.py has 0 dependents from LSP
+[19:45:39.703] [ARTIFACT_TRACKER] enrich_tool_result: no dependents found
+[19:45:39.703] [LSP] enrich_tool_result: checking writeNewFile
+[19:45:39.703] [LSP] enrich_tool_result: found files ['src/lib.py']
+[19:45:39.703] [LSP] enrich_tool_result: checking diagnostics for ['src/lib.py']
+[19:45:39.703] [LSP] execute: get_diagnostics args={'file_path': 'src/lib.py'}
+[19:45:40.505] [LSP] execute: get_diagnostics OK
+[19:45:40.505] [LSP] enrich_tool_result: found 1 files with diagnostics
+[19:45:40.505] [TEMPLATE] enrich_tool_result [writeNewFile]: 266 chars, preview: {"success": true, "path": "src/lib.py", "size": 31, "lines": 2, "_permission": {"decision": "allowed...
+[19:45:40.505] [TEMPLATE]   no code blocks found in tool result
+[19:45:40.505] [PluginRegistry] _emit_enrichment_notifications: 1 notifications, callback=True
+[19:45:40.505] [PluginRegistry] _emit_enrichment_notifications: formatted='  ── result ← lsp: found 1 warning in src/lib.py (107b)'
+[19:45:43.645] [session:main] SESSION_PART[0] text=None fc=updateFile
+[19:45:43.645] [session:main] SESSION_OUTPUT_FLUSH before tool updateFile
+[19:45:43.645] [session:main] SESSION_TOOL_START name=updateFile call_id=4c23cef6
+[19:45:43.646] [CLI] set_tool_output_callback: callback=SET
+[19:45:43.646] [PERMISSION] check_permission: tool=updateFile
+[19:45:45.337] [FILE_EDIT] updateFile: path=src/lib.py, content_len=32
+[19:45:45.343] [CLI] set_tool_output_callback: callback=CLEARED
+[19:45:45.343] [ARTIFACT_TRACKER] enrich_tool_result: processing updateFile
+[19:45:45.343] [ARTIFACT_TRACKER] _extract_file_paths: result preview: {"success": true, "path": "src/lib.py", "size": 32, "lines": 2, "backup": "/home/apanoia/Sources/jaato/.jaato/backups/home_apanoia_Sources_jaato_tests_enablement_2.0_test_2_src_lib.py_2026-01-01T19-45
+[19:45:45.344] [ARTIFACT_TRACKER] _extract_file_paths: parsed data type=dict, keys=['success', 'path', 'size', 'lines', 'backup', '_permission']
+[19:45:45.344] [ARTIFACT_TRACKER] _extract_file_paths: found path=src/lib.py
+[19:45:45.344] [ARTIFACT_TRACKER] _extract_file_paths: returning 1 paths: ['src/lib.py']
+[19:45:45.344] [ARTIFACT_TRACKER] enrich_tool_result: analyzing dependencies for ['src/lib.py']
+[19:45:45.344] [LSP] get_file_dependents: analyzing src/lib.py
+[19:45:45.344] [LSP] get_file_dependents: ensuring workspace indexed at /home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src
+[19:45:45.344] [LSP] execute: _ensure_workspace_indexed args={'directory': '/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src', 'extension': '.py', 'file_path': 'src/lib.py'}
+[19:45:45.545] [LSP] _ensure_workspace_indexed: indexing [/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src] for python (extraPathsKey=pylsp.plugins.jedi.extra_paths)
+[19:45:45.546] [LSP] execute: _ensure_workspace_indexed OK
+[19:45:45.546] [LSP] execute: document_symbols args={'file_path': 'src/lib.py'}
+[19:45:46.350] [LSP_CLIENT] hello: selectionRange=None, range=None, using=None
+[19:45:46.350] [LSP] document_symbols: hello location.range.start = line 0, char 0
+[19:45:46.350] [LSP] execute: document_symbols OK
+[19:45:46.350] [LSP] get_file_dependents: found 1 exportable symbols
+[19:45:46.351] [LSP] _find_symbol_name_in_line: found 'hello' at char 4 (was 0)
+[19:45:46.351] [LSP] get_file_dependents: checking references for hello at line 0, char 4
+[19:45:46.351] [LSP] execute: find_references args={'file_path': 'src/lib.py', 'line': 0, 'character': 4, 'include_declaration': False}
+[19:45:47.320] [LSP] execute: find_references EMPTY - No references found at src/lib.py:1:4. Server 'python' is connected but returned no results.
+[19:45:47.320] [LSP] get_file_dependents: find_references for hello returned: dict, value={'error': "No references found at src/lib.py:1:4. Server 'python' is connected but returned no results."}
+[19:45:47.320] [LSP] get_file_dependents: find_references error: No references found at src/lib.py:1:4. Server 'python' is connected but returned no results.
+[19:45:47.320] [LSP] get_file_dependents: found 0 dependent files
+[19:45:47.320] [ARTIFACT_TRACKER] enrich_tool_result: src/lib.py has 0 dependents from LSP
+[19:45:47.320] [ARTIFACT_TRACKER] enrich_tool_result: no dependents found
+[19:45:47.321] [LSP] enrich_tool_result: checking updateFile
+[19:45:47.321] [LSP] enrich_tool_result: found files ['src/lib.py']
+[19:45:47.321] [LSP] enrich_tool_result: checking diagnostics for ['src/lib.py']
+[19:45:47.321] [LSP] execute: get_diagnostics args={'file_path': 'src/lib.py'}
+[19:45:48.122] [LSP] execute: get_diagnostics OK
+[19:45:48.123] [LSP] enrich_tool_result: found 0 files with diagnostics
+[19:45:48.123] [TEMPLATE] enrich_tool_result [updateFile]: 305 chars, preview: {"success": true, "path": "src/lib.py", "size": 32, "lines": 2, "backup": "/home/apanoia/Sources/jaa...
+[19:45:48.123] [TEMPLATE]   no code blocks found in tool result
+[19:45:48.123] [PluginRegistry] _emit_enrichment_notifications: 0 notifications, callback=True
+[19:45:50.546] [session:main] SESSION_TOOL_RESULT_OUTPUT mode=write len=114 preview="I've created the `lib.py` file in the `src` direct"
+[19:46:11.962] [session:main] SESSION_SEND_MESSAGE len=67 streaming=True
+[19:46:11.962] [PluginRegistry] set_output_callback: callback=True, terminal_width=136
+[19:46:11.962] [PluginRegistry] _emit_enrichment_notifications: 0 notifications, callback=True
+[19:46:11.962] [PluginRegistry] set_output_callback: callback=True, terminal_width=136
+[19:46:11.962] [session:main] STREAMING on_usage_update=set
+[19:46:14.816] [session:main] SESSION_STREAMING_COMPLETE parts_count=1 finish=FinishReason.TOOL_USE
+[19:46:14.816] [session:main] SESSION_PARTS_PROCESSING parts_count=1
+[19:46:14.816] [session:main] SESSION_PART[0] text=None fc=writeNewFile
+[19:46:14.817] [session:main] SESSION_OUTPUT_FLUSH before tool writeNewFile
+[19:46:14.817] [session:main] SESSION_TOOL_START name=writeNewFile call_id=1c9f518c
+[19:46:14.817] [CLI] set_tool_output_callback: callback=SET
+[19:46:14.817] [PERMISSION] check_permission: tool=writeNewFile
+[19:46:17.954] [FILE_EDIT] writeNewFile: path=src/main.py, content_len=23
+[19:46:17.954] [CLI] set_tool_output_callback: callback=CLEARED
+[19:46:17.955] [ARTIFACT_TRACKER] enrich_tool_result: processing writeNewFile
+[19:46:17.955] [ARTIFACT_TRACKER] _extract_file_paths: result preview: {"success": true, "path": "src/main.py", "size": 23, "lines": 3, "_permission": {"decision": "allowed", "reason": "User chose: yes", "method": "user_approved"}}
+[19:46:17.955] [ARTIFACT_TRACKER] _extract_file_paths: parsed data type=dict, keys=['success', 'path', 'size', 'lines', '_permission']
+[19:46:17.955] [ARTIFACT_TRACKER] _extract_file_paths: found path=src/main.py
+[19:46:17.955] [ARTIFACT_TRACKER] _extract_file_paths: returning 1 paths: ['src/main.py']
+[19:46:17.955] [ARTIFACT_TRACKER] enrich_tool_result: analyzing dependencies for ['src/main.py']
+[19:46:17.956] [LSP] get_file_dependents: analyzing src/main.py
+[19:46:17.956] [LSP] get_file_dependents: ensuring workspace indexed at /home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src
+[19:46:17.956] [LSP] execute: _ensure_workspace_indexed args={'directory': '/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src', 'extension': '.py', 'file_path': 'src/main.py'}
+[19:46:18.157] [LSP] _ensure_workspace_indexed: indexing [/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src] for python (extraPathsKey=pylsp.plugins.jedi.extra_paths)
+[19:46:18.157] [LSP] execute: _ensure_workspace_indexed OK
+[19:46:18.157] [LSP] execute: document_symbols args={'file_path': 'src/main.py'}
+[19:46:18.960] [LSP_CLIENT] lib: selectionRange=None, range=None, using=None
+[19:46:18.960] [LSP] document_symbols: lib location.range.start = line 0, char 0
+[19:46:18.960] [LSP] execute: document_symbols OK
+[19:46:18.961] [LSP] get_file_dependents: found 1 exportable symbols
+[19:46:18.961] [LSP] get_file_dependents: skipping imported symbol 'lib' (line: import lib)
+[19:46:18.961] [LSP] get_file_dependents: found 0 dependent files
+[19:46:18.961] [ARTIFACT_TRACKER] enrich_tool_result: src/main.py has 0 dependents from LSP
+[19:46:18.961] [ARTIFACT_TRACKER] enrich_tool_result: no dependents found
+[19:46:18.961] [LSP] enrich_tool_result: checking writeNewFile
+[19:46:18.961] [LSP] enrich_tool_result: found files ['src/main.py']
+[19:46:18.961] [LSP] enrich_tool_result: checking diagnostics for ['src/main.py']
+[19:46:18.961] [LSP] execute: get_diagnostics args={'file_path': 'src/main.py'}
+[19:46:19.763] [LSP] execute: get_diagnostics OK
+[19:46:19.764] [LSP] enrich_tool_result: found 1 files with diagnostics
+[19:46:19.764] [TEMPLATE] enrich_tool_result [writeNewFile]: 268 chars, preview: {"success": true, "path": "src/main.py", "size": 23, "lines": 3, "_permission": {"decision": "allowe...
+[19:46:19.764] [TEMPLATE]   no code blocks found in tool result
+[19:46:19.764] [PluginRegistry] _emit_enrichment_notifications: 1 notifications, callback=True
+[19:46:19.764] [PluginRegistry] _emit_enrichment_notifications: formatted='  ── result ← lsp: found 1 warning in src/main.py (108b)'
+[19:46:22.555] [session:main] SESSION_PART[0] text=None fc=updateFile
+[19:46:22.555] [session:main] SESSION_OUTPUT_FLUSH before tool updateFile
+[19:46:22.555] [session:main] SESSION_TOOL_START name=updateFile call_id=9a167adf
+[19:46:22.555] [CLI] set_tool_output_callback: callback=SET
+[19:46:22.555] [PERMISSION] check_permission: tool=updateFile
+[19:46:28.743] [FILE_EDIT] updateFile: path=src/main.py, content_len=24
+[19:46:28.746] [CLI] set_tool_output_callback: callback=CLEARED
+[19:46:28.746] [ARTIFACT_TRACKER] enrich_tool_result: processing updateFile
+[19:46:28.746] [ARTIFACT_TRACKER] _extract_file_paths: result preview: {"success": true, "path": "src/main.py", "size": 24, "lines": 3, "backup": "/home/apanoia/Sources/jaato/.jaato/backups/home_apanoia_Sources_jaato_tests_enablement_2.0_test_2_src_main.py_2026-01-01T19-
+[19:46:28.747] [ARTIFACT_TRACKER] _extract_file_paths: parsed data type=dict, keys=['success', 'path', 'size', 'lines', 'backup', '_permission']
+[19:46:28.747] [ARTIFACT_TRACKER] _extract_file_paths: found path=src/main.py
+[19:46:28.747] [ARTIFACT_TRACKER] _extract_file_paths: returning 1 paths: ['src/main.py']
+[19:46:28.747] [ARTIFACT_TRACKER] enrich_tool_result: analyzing dependencies for ['src/main.py']
+[19:46:28.747] [LSP] get_file_dependents: analyzing src/main.py
+[19:46:28.747] [LSP] get_file_dependents: ensuring workspace indexed at /home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src
+[19:46:28.747] [LSP] execute: _ensure_workspace_indexed args={'directory': '/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src', 'extension': '.py', 'file_path': 'src/main.py'}
+[19:46:28.948] [LSP] _ensure_workspace_indexed: indexing [/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src] for python (extraPathsKey=pylsp.plugins.jedi.extra_paths)
+[19:46:28.948] [LSP] execute: _ensure_workspace_indexed OK
+[19:46:28.949] [LSP] execute: document_symbols args={'file_path': 'src/main.py'}
+[19:46:29.752] [LSP_CLIENT] lib: selectionRange=None, range=None, using=None
+[19:46:29.752] [LSP] document_symbols: lib location.range.start = line 0, char 0
+[19:46:29.752] [LSP] execute: document_symbols OK
+[19:46:29.752] [LSP] get_file_dependents: found 1 exportable symbols
+[19:46:29.753] [LSP] get_file_dependents: skipping imported symbol 'lib' (line: import lib)
+[19:46:29.753] [LSP] get_file_dependents: found 0 dependent files
+[19:46:29.753] [ARTIFACT_TRACKER] enrich_tool_result: src/main.py has 0 dependents from LSP
+[19:46:29.753] [ARTIFACT_TRACKER] enrich_tool_result: no dependents found
+[19:46:29.753] [LSP] enrich_tool_result: checking updateFile
+[19:46:29.753] [LSP] enrich_tool_result: found files ['src/main.py']
+[19:46:29.753] [LSP] enrich_tool_result: checking diagnostics for ['src/main.py']
+[19:46:29.753] [LSP] execute: get_diagnostics args={'file_path': 'src/main.py'}
+[19:46:30.555] [LSP] execute: get_diagnostics OK
+[19:46:30.555] [LSP] enrich_tool_result: found 0 files with diagnostics
+[19:46:30.555] [TEMPLATE] enrich_tool_result [updateFile]: 307 chars, preview: {"success": true, "path": "src/main.py", "size": 24, "lines": 3, "backup": "/home/apanoia/Sources/ja...
+[19:46:30.555] [TEMPLATE]   no code blocks found in tool result
+[19:46:30.555] [PluginRegistry] _emit_enrichment_notifications: 0 notifications, callback=True
+[19:46:34.037] [session:main] SESSION_PART[0] text=None fc=cli_based_tool
+[19:46:34.037] [session:main] SESSION_OUTPUT_FLUSH before tool cli_based_tool
+[19:46:34.037] [session:main] SESSION_TOOL_START name=cli_based_tool call_id=b8edd12f
+[19:46:34.038] [CLI] set_tool_output_callback: callback=SET
+[19:46:34.038] [PERMISSION] check_permission: tool=cli_based_tool
+[19:46:39.315] [CLI] execute_streaming: ls -R src
+[19:46:39.414] [CLI] set_tool_output_callback: callback=CLEARED
+[19:46:43.014] [session:main] SESSION_TOOL_RESULT_OUTPUT mode=write len=235 preview='I have created `main.py` in the `src` directory, w'
+[19:46:43.089] [session:main] SESSION_TOOL_RESULT_OUTPUT mode=append len=1 preview='?'
+[19:47:07.556] [session:main] SESSION_SEND_MESSAGE len=39 streaming=True
+[19:47:07.557] [PluginRegistry] set_output_callback: callback=True, terminal_width=136
+[19:47:07.557] [PluginRegistry] _emit_enrichment_notifications: 1 notifications, callback=True
+[19:47:07.557] [PluginRegistry] _emit_enrichment_notifications: formatted='  ── prompt ← session: requested session description (turn threshold reached) (247b)'
+[19:47:07.557] [PluginRegistry] set_output_callback: callback=True, terminal_width=136
+[19:47:07.557] [session:main] STREAMING on_usage_update=set
+[19:47:10.887] [session:main] SESSION_STREAMING_COMPLETE parts_count=1 finish=FinishReason.TOOL_USE
+[19:47:10.887] [session:main] SESSION_PARTS_PROCESSING parts_count=1
+[19:47:10.888] [session:main] SESSION_PART[0] text=None fc=session_describe
+[19:47:10.888] [session:main] SESSION_OUTPUT_FLUSH before tool session_describe
+[19:47:10.888] [session:main] SESSION_TOOL_START name=session_describe call_id=8c345864
+[19:47:10.889] [CLI] set_tool_output_callback: callback=SET
+[19:47:10.889] [PERMISSION] check_permission: tool=session_describe
+[19:47:10.889] [CLI] set_tool_output_callback: callback=CLEARED
+[19:47:30.624] [session:main] SESSION_SEND_MESSAGE len=1 streaming=True
+[19:47:30.625] [PluginRegistry] set_output_callback: callback=True, terminal_width=136
+[19:47:30.626] [PluginRegistry] _emit_enrichment_notifications: 0 notifications, callback=True
+[19:47:30.626] [PluginRegistry] set_output_callback: callback=True, terminal_width=136
+[19:47:30.626] [session:main] STREAMING on_usage_update=set
+[19:47:33.745] [session:main] SESSION_STREAMING_COMPLETE parts_count=0 finish=FinishReason.TOOL_USE
+[19:47:33.745] [session:main] SESSION_PARTS_PROCESSING parts_count=0
+[19:47:45.258] [session:main] SESSION_SEND_MESSAGE len=5 streaming=True
+[19:47:45.258] [PluginRegistry] set_output_callback: callback=True, terminal_width=136
+[19:47:45.258] [PluginRegistry] _emit_enrichment_notifications: 0 notifications, callback=True
+[19:47:45.258] [PluginRegistry] set_output_callback: callback=True, terminal_width=136
+[19:47:45.258] [session:main] STREAMING on_usage_update=set
+[19:47:47.913] [session:main] SESSION_STREAMING_COMPLETE parts_count=1 finish=FinishReason.TOOL_USE
+[19:47:47.913] [session:main] SESSION_PARTS_PROCESSING parts_count=1
+[19:47:47.913] [session:main] SESSION_PART[0] text=None fc=readFile
+[19:47:47.913] [session:main] SESSION_OUTPUT_FLUSH before tool readFile
+[19:47:47.914] [session:main] SESSION_TOOL_START name=readFile call_id=7f6f7e08
+[19:47:47.914] [CLI] set_tool_output_callback: callback=SET
+[19:47:47.914] [PERMISSION] check_permission: tool=readFile
+[19:47:47.914] [FILE_EDIT] readFile: path=src/lib.py
+[19:47:47.915] [CLI] set_tool_output_callback: callback=CLEARED
+[19:47:50.469] [session:main] SESSION_PART[0] text=None fc=updateFile
+[19:47:50.469] [session:main] SESSION_OUTPUT_FLUSH before tool updateFile
+[19:47:50.469] [session:main] SESSION_TOOL_START name=updateFile call_id=0c45fa12
+[19:47:50.470] [CLI] set_tool_output_callback: callback=SET
+[19:47:50.470] [PERMISSION] check_permission: tool=updateFile
+[19:48:00.976] [FILE_EDIT] updateFile: path=src/lib.py, content_len=61
+[19:48:00.980] [CLI] set_tool_output_callback: callback=CLEARED
+[19:48:00.980] [ARTIFACT_TRACKER] enrich_tool_result: processing updateFile
+[19:48:00.980] [ARTIFACT_TRACKER] _extract_file_paths: result preview: {"success": true, "path": "src/lib.py", "size": 61, "lines": 5, "backup": "/home/apanoia/Sources/jaato/.jaato/backups/home_apanoia_Sources_jaato_tests_enablement_2.0_test_2_src_lib.py_2026-01-01T19-48
+[19:48:00.980] [ARTIFACT_TRACKER] _extract_file_paths: parsed data type=dict, keys=['success', 'path', 'size', 'lines', 'backup', '_permission']
+[19:48:00.980] [ARTIFACT_TRACKER] _extract_file_paths: found path=src/lib.py
+[19:48:00.980] [ARTIFACT_TRACKER] _extract_file_paths: returning 1 paths: ['src/lib.py']
+[19:48:00.980] [ARTIFACT_TRACKER] enrich_tool_result: analyzing dependencies for ['src/lib.py']
+[19:48:00.981] [LSP] get_file_dependents: analyzing src/lib.py
+[19:48:00.981] [LSP] get_file_dependents: ensuring workspace indexed at /home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src
+[19:48:00.981] [LSP] execute: _ensure_workspace_indexed args={'directory': '/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src', 'extension': '.py', 'file_path': 'src/lib.py'}
+[19:48:01.181] [LSP] _ensure_workspace_indexed: indexing [/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src] for python (extraPathsKey=pylsp.plugins.jedi.extra_paths)
+[19:48:01.182] [LSP] execute: _ensure_workspace_indexed OK
+[19:48:01.182] [LSP] execute: document_symbols args={'file_path': 'src/lib.py'}
+[19:48:01.985] [LSP_CLIENT] hello: selectionRange=None, range=None, using=None
+[19:48:01.986] [LSP_CLIENT] bye: selectionRange=None, range=None, using=None
+[19:48:01.986] [LSP] document_symbols: hello location.range.start = line 0, char 0
+[19:48:01.986] [LSP] document_symbols: bye location.range.start = line 3, char 0
+[19:48:01.986] [LSP] execute: document_symbols OK
+[19:48:01.986] [LSP] get_file_dependents: found 2 exportable symbols
+[19:48:01.986] [LSP] _find_symbol_name_in_line: found 'hello' at char 4 (was 0)
+[19:48:01.987] [LSP] get_file_dependents: checking references for hello at line 0, char 4
+[19:48:01.987] [LSP] execute: find_references args={'file_path': 'src/lib.py', 'line': 0, 'character': 4, 'include_declaration': False}
+[19:48:02.958] [LSP] execute: find_references EMPTY - No references found at src/lib.py:1:4. Server 'python' is connected but returned no results.
+[19:48:02.958] [LSP] get_file_dependents: find_references for hello returned: dict, value={'error': "No references found at src/lib.py:1:4. Server 'python' is connected but returned no results."}
+[19:48:02.958] [LSP] get_file_dependents: find_references error: No references found at src/lib.py:1:4. Server 'python' is connected but returned no results.
+[19:48:02.958] [LSP] _find_symbol_name_in_line: found 'bye' at char 4 (was 0)
+[19:48:02.958] [LSP] get_file_dependents: checking references for bye at line 3, char 4
+[19:48:02.958] [LSP] execute: find_references args={'file_path': 'src/lib.py', 'line': 3, 'character': 4, 'include_declaration': False}
+[19:48:03.918] [LSP] execute: find_references EMPTY - No references found at src/lib.py:4:4. Server 'python' is connected but returned no results.
+[19:48:03.919] [LSP] get_file_dependents: find_references for bye returned: dict, value={'error': "No references found at src/lib.py:4:4. Server 'python' is connected but returned no results."}
+[19:48:03.919] [LSP] get_file_dependents: find_references error: No references found at src/lib.py:4:4. Server 'python' is connected but returned no results.
+[19:48:03.919] [LSP] get_file_dependents: found 0 dependent files
+[19:48:03.919] [ARTIFACT_TRACKER] enrich_tool_result: src/lib.py has 0 dependents from LSP
+[19:48:03.919] [ARTIFACT_TRACKER] enrich_tool_result: no dependents found
+[19:48:03.919] [LSP] enrich_tool_result: checking updateFile
+[19:48:03.919] [LSP] enrich_tool_result: found files ['src/lib.py']
+[19:48:03.919] [LSP] enrich_tool_result: checking diagnostics for ['src/lib.py']
+[19:48:03.919] [LSP] execute: get_diagnostics args={'file_path': 'src/lib.py'}
+[19:48:04.720] [LSP] execute: get_diagnostics OK
+[19:48:04.720] [LSP] enrich_tool_result: found 1 files with diagnostics
+[19:48:04.721] [TEMPLATE] enrich_tool_result [updateFile]: 418 chars, preview: {"success": true, "path": "src/lib.py", "size": 61, "lines": 5, "backup": "/home/apanoia/Sources/jaa...
+[19:48:04.721] [TEMPLATE]   no code blocks found in tool result
+[19:48:04.721] [PluginRegistry] _emit_enrichment_notifications: 1 notifications, callback=True
+[19:48:04.721] [PluginRegistry] _emit_enrichment_notifications: formatted='  ── result ← lsp: found 1 warning in src/lib.py (113b)'
+[19:48:07.752] [session:main] SESSION_PART[0] text=None fc=updateFile
+[19:48:07.752] [session:main] SESSION_OUTPUT_FLUSH before tool updateFile
+[19:48:07.752] [session:main] SESSION_TOOL_START name=updateFile call_id=85cc038a
+[19:48:07.753] [CLI] set_tool_output_callback: callback=SET
+[19:48:07.753] [PERMISSION] check_permission: tool=updateFile
+[19:48:13.337] [FILE_EDIT] updateFile: path=src/lib.py, content_len=62
+[19:48:13.340] [CLI] set_tool_output_callback: callback=CLEARED
+[19:48:13.340] [ARTIFACT_TRACKER] enrich_tool_result: processing updateFile
+[19:48:13.340] [ARTIFACT_TRACKER] _extract_file_paths: result preview: {"success": true, "path": "src/lib.py", "size": 62, "lines": 6, "backup": "/home/apanoia/Sources/jaato/.jaato/backups/home_apanoia_Sources_jaato_tests_enablement_2.0_test_2_src_lib.py_2026-01-01T19-48
+[19:48:13.341] [ARTIFACT_TRACKER] _extract_file_paths: parsed data type=dict, keys=['success', 'path', 'size', 'lines', 'backup', '_permission']
+[19:48:13.341] [ARTIFACT_TRACKER] _extract_file_paths: found path=src/lib.py
+[19:48:13.341] [ARTIFACT_TRACKER] _extract_file_paths: returning 1 paths: ['src/lib.py']
+[19:48:13.341] [ARTIFACT_TRACKER] enrich_tool_result: analyzing dependencies for ['src/lib.py']
+[19:48:13.341] [LSP] get_file_dependents: analyzing src/lib.py
+[19:48:13.341] [LSP] get_file_dependents: ensuring workspace indexed at /home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src
+[19:48:13.341] [LSP] execute: _ensure_workspace_indexed args={'directory': '/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src', 'extension': '.py', 'file_path': 'src/lib.py'}
+[19:48:13.542] [LSP] _ensure_workspace_indexed: indexing [/home/apanoia/Sources/jaato/tests_enablement_2.0/test_2/src] for python (extraPathsKey=pylsp.plugins.jedi.extra_paths)
+[19:48:13.543] [LSP] execute: _ensure_workspace_indexed OK
+[19:48:13.543] [LSP] execute: document_symbols args={'file_path': 'src/lib.py'}
+[19:48:14.346] [LSP_CLIENT] hello: selectionRange=None, range=None, using=None
+[19:48:14.347] [LSP_CLIENT] bye: selectionRange=None, range=None, using=None
+[19:48:14.347] [LSP] document_symbols: hello location.range.start = line 0, char 0
+[19:48:14.347] [LSP] document_symbols: bye location.range.start = line 4, char 0
+[19:48:14.347] [LSP] execute: document_symbols OK
+[19:48:14.347] [LSP] get_file_dependents: found 2 exportable symbols
+[19:48:14.347] [LSP] _find_symbol_name_in_line: found 'hello' at char 4 (was 0)
+[19:48:14.347] [LSP] get_file_dependents: checking references for hello at line 0, char 4
+[19:48:14.347] [LSP] execute: find_references args={'file_path': 'src/lib.py', 'line': 0, 'character': 4, 'include_declaration': False}
+[19:48:15.319] [LSP] execute: find_references EMPTY - No references found at src/lib.py:1:4. Server 'python' is connected but returned no results.
+[19:48:15.319] [LSP] get_file_dependents: find_references for hello returned: dict, value={'error': "No references found at src/lib.py:1:4. Server 'python' is connected but returned no results."}
+[19:48:15.319] [LSP] get_file_dependents: find_references error: No references found at src/lib.py:1:4. Server 'python' is connected but returned no results.
+[19:48:15.319] [LSP] _find_symbol_name_in_line: found 'bye' at char 4 (was 0)
+[19:48:15.319] [LSP] get_file_dependents: checking references for bye at line 4, char 4
+[19:48:15.319] [LSP] execute: find_references args={'file_path': 'src/lib.py', 'line': 4, 'character': 4, 'include_declaration': False}
+[19:48:16.317] [LSP] execute: find_references EMPTY - No references found at src/lib.py:5:4. Server 'python' is connected but returned no results.
+[19:48:16.317] [LSP] get_file_dependents: find_references for bye returned: dict, value={'error': "No references found at src/lib.py:5:4. Server 'python' is connected but returned no results."}
+[19:48:16.317] [LSP] get_file_dependents: find_references error: No references found at src/lib.py:5:4. Server 'python' is connected but returned no results.
+[19:48:16.318] [LSP] get_file_dependents: found 0 dependent files
+[19:48:16.318] [ARTIFACT_TRACKER] enrich_tool_result: src/lib.py has 0 dependents from LSP
+[19:48:16.318] [ARTIFACT_TRACKER] enrich_tool_result: no dependents found
+[19:48:16.318] [LSP] enrich_tool_result: checking updateFile
+[19:48:16.318] [LSP] enrich_tool_result: found files ['src/lib.py']
+[19:48:16.318] [LSP] enrich_tool_result: checking diagnostics for ['src/lib.py']
+[19:48:16.318] [LSP] execute: get_diagnostics args={'file_path': 'src/lib.py'}
+[19:48:17.119] [LSP] execute: get_diagnostics OK
+[19:48:17.119] [LSP] enrich_tool_result: found 0 files with diagnostics
+[19:48:17.119] [TEMPLATE] enrich_tool_result [updateFile]: 305 chars, preview: {"success": true, "path": "src/lib.py", "size": 62, "lines": 6, "backup": "/home/apanoia/Sources/jaa...
+[19:48:17.119] [TEMPLATE]   no code blocks found in tool result
+[19:48:17.119] [PluginRegistry] _emit_enrichment_notifications: 0 notifications, callback=True
+[19:48:19.512] [session:main] SESSION_PART[0] text=None fc=readFile
+[19:48:19.512] [session:main] SESSION_OUTPUT_FLUSH before tool readFile
+[19:48:19.512] [session:main] SESSION_TOOL_START name=readFile call_id=c8f9ca31
+[19:48:19.513] [CLI] set_tool_output_callback: callback=SET
+[19:48:19.513] [PERMISSION] check_permission: tool=readFile
+[19:48:19.513] [FILE_EDIT] readFile: path=src/lib.py
+[19:48:19.514] [CLI] set_tool_output_callback: callback=CLEARED
+[19:48:21.377] [session:main] SESSION_TOOL_RESULT_OUTPUT mode=write len=146 preview='I have added the `bye()` method to `lib.py`. The f'
