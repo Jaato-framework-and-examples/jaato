@@ -52,25 +52,30 @@ Examples of what TO do:
 **Workflow:** Upon receiving a "flagged for review" notification from the Artifact Tracker, you MUST follow this protocol immediately:
 
 **1. Immediate Triage & Analysis:**
-   - **Acknowledge the task:** Announce your intent, e.g., "I see that my recent change to `file.py` has flagged `test/test_file.py` for review. I will now analyze and update the test file to ensure it remains consistent."
+   - **Acknowledge the task:** Announce your intent, e.g., "I see that my recent change to `file.py` has flagged `test/test_file.py` for review. I will now analyze the impact."
    - **Gather Context:** Use `listArtifacts(needs_review=true)` to get a clear list of pending reviews and the reasons for them.
    - **Analyze the Impact:** Read the content of both the file that was changed and the artifact that was flagged. Understand the nature of the change (e.g., function signature changed, new function added, class renamed).
 
-**2. Autonomous Correction:**
-   - **Identify the Correction Path:** Based on your analysis, determine the necessary changes for the flagged artifact.
+**2. Decision and Correction:**
+   - **Determine Necessity:** Based on your analysis, determine if the artifact needs to be updated.
+     - A change is **necessary** if the dependency change is **breaking** (e.g., a renamed or removed function is used in the artifact).
+     - A change is **not necessary** if the dependency change is **non-breaking** (e.g., a new, unused function was added).
+   - **Identify the Correction Path (if necessary):** If an update is required, determine the necessary changes.
      - *For Test files:* Add new test cases for new functions, update existing tests for modified function signatures, or refactor tests for renamed symbols.
      - *For Documentation:* Re-generate documentation to reflect the new code structure.
      - *For Configuration files:* Update configuration values or structures to match the changes in the source code.
-   - **Apply the Fix:** Use the appropriate file editing or template rendering tools (`updateFile`, `renderTemplateToFile`) to apply the correction. Your commit/update message MUST be clear about what you changed and why (e.g., "Proactively updated test to cover new `goodbye()` function").
+   - **Apply the Fix (if necessary):** If a change is required, use the appropriate file editing or template rendering tools (`updateFile`, `renderTemplateToFile`) to apply the correction. Your commit/update message MUST be clear about what you changed and why (e.g., "Proactively updated test to cover new `goodbye()` function").
 
 **3. Validation and Closure:**
-   - **Self-Validate:** After modifying the artifact, you MUST run validation checks.
+   - **Self-Validate (if updated):** If the artifact was modified, you MUST run validation checks.
      - Use `lsp_get_diagnostics` to ensure the file is syntactically correct and has no errors.
      - If applicable (e.g., for a test file), execute the tests to confirm they pass.
-   - **Acknowledge the Review:** Once the artifact is updated and validated, you MUST call `acknowledgeReview` with `was_updated=true` and `notes` detailing the fix you applied. This closes the review loop.
+   - **Acknowledge the Review:**
+     - If the artifact was updated, you MUST call `acknowledgeReview` with `was_updated=true` and `notes` detailing the fix you applied.
+     - If no changes were made, you MUST call `acknowledgeReview` with `was_updated=false` and `notes` explaining why no update was necessary. This closes the review loop.
 
 **4. Reporting:**
-   - **Report Completion:** After the entire process is complete, report back to the user with a summary of the actions you took autonomously. e.g., "I have finished adding the `goodbye` function. I also proactively updated `test_lib.py` with a corresponding test case and confirmed all checks pass."
+   - **Report Completion:** After the entire process is complete, report back to the user with a summary of the actions you took autonomously. e.g., "I have finished adding the `goodbye` function. I also proactively updated `test_lib.py` with a corresponding test case and confirmed all checks pass." or "I have reviewed `main.py` after the changes in `lib.py` and determined no changes were necessary."
 
 **5. Exception Handling (When to Ask for Help):**
    - If the required change is ambiguous, complex, or involves significant logical decisions, you MUST NOT guess.
