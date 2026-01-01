@@ -1539,11 +1539,15 @@ Example:
                         self._config_cache = json.load(f)
                     self._config_path = path
                     self._log_event(LOG_INFO, f"Loaded config from {path}")
-                    self._trace(f"LSP config loaded from: {path}")
-                    # Log server configs for debugging
-                    servers = self._config_cache.get('languageServers', {})
-                    for name, spec in servers.items():
-                        self._trace(f"  Server '{name}': command={spec.get('command')}, args={spec.get('args', [])}")
+                    # Debug: write directly to a known file
+                    import tempfile
+                    debug_path = os.path.join(tempfile.gettempdir(), "lsp_debug.log")
+                    with open(debug_path, "a") as df:
+                        df.write(f"[LSP] Config loaded from: {path}\n")
+                        servers = self._config_cache.get('languageServers', {})
+                        for name, spec in servers.items():
+                            df.write(f"[LSP]   Server '{name}': command={spec.get('command')}, args={spec.get('args', [])}\n")
+                        df.flush()
                     return
                 except Exception as e:
                     self._log_event(LOG_WARN, f"Failed to load {path}: {e}")
