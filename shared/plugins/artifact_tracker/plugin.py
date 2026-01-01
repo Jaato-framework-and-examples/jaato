@@ -1227,14 +1227,19 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         if not dependents:
             return "no dependents found"
 
-        # Use basenames for brevity
-        names = [os.path.basename(p) for p in dependents]
+        # Format each dependent, marking non-existent files
+        formatted_names = []
+        for p in dependents:
+            name = os.path.basename(p)
+            if not os.path.exists(p):
+                name = f"{name} (missing)"
+            formatted_names.append(name)
 
-        if len(names) <= 4:
-            return f"flagged for review: {', '.join(names)}"
+        if len(formatted_names) <= 4:
+            return f"flagged for review: {', '.join(formatted_names)}"
         else:
-            shown = ', '.join(names[:4])
-            return f"flagged for review: {shown} +{len(names) - 4} more"
+            shown = ', '.join(formatted_names[:4])
+            return f"flagged for review: {shown} +{len(formatted_names) - 4} more"
 
 
 def create_plugin() -> ArtifactTrackerPlugin:
