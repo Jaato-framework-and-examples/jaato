@@ -592,6 +592,14 @@ class LSPClient:
         Args:
             settings: The settings object to send to the server.
         """
+        # Log the configuration being sent for debugging
+        import json
+        import tempfile
+        debug_path = os.path.join(tempfile.gettempdir(), "lsp_debug.log")
+        with open(debug_path, "a") as df:
+            df.write(f"[LSP] update_configuration: {json.dumps(settings, indent=2)}\n")
+            df.flush()
+
         await self._send_notification("workspace/didChangeConfiguration", {
             "settings": settings
         })
@@ -608,10 +616,15 @@ class LSPClient:
         if not self.config.extra_paths_key:
             return  # No extra_paths configuration for this server
 
-        # Use the configured key (e.g., "pylsp.plugins.jedi.extra_paths")
-        settings = {
-            self.config.extra_paths_key: extra_paths
-        }
+        # Convert dotted key (e.g., "pylsp.plugins.jedi.extra_paths") to nested structure
+        # LSP servers expect nested dicts, not flat dotted keys
+        key_parts = self.config.extra_paths_key.split('.')
+        settings: Dict[str, Any] = {}
+        current = settings
+        for part in key_parts[:-1]:
+            current[part] = {}
+            current = current[part]
+        current[key_parts[-1]] = extra_paths
 
         await self.update_configuration(settings)
 

@@ -26,9 +26,10 @@
     },
     "python": {
       "command": "pylsp",
-      "args": [],
+      "args": ["-v", "--log-file", "/tmp/pylsp.log"],
       "languageId": "python",
-      "autoConnect": true
+      "autoConnect": true,
+      "extraPathsKey": "pylsp.plugins.jedi.extra_paths"
     },
     "typescript": {
       "command": "typescript-language-server",
