@@ -1595,8 +1595,6 @@ Example:
                         root_uri=spec.get('rootUri'),
                         language_id=spec.get('languageId'),
                         extra_paths_key=spec.get('extraPathsKey'),
-                        delay_after_file_notification=spec.get('delayAfterFileNotification', 0.0),
-                        delay_after_document_open=spec.get('delayAfterDocumentOpen', 0.0),
                     )
                     self._trace(f"Starting LSP server '{name}': command={config.command}, args={config.args}")
                     client = LSPClient(config, errlog=self._errlog)
