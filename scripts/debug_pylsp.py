@@ -233,13 +233,27 @@ def goodbye():
     await client.notify_file_created(str(lib_py))
     await client.open_document(str(lib_py))
 
+    # TEST 1: find_references BEFORE main.py exists (this is what the plugin does!)
+    print(f"\n5. Testing find_references BEFORE main.py exists...")
+    symbols = await client.get_document_symbols(str(lib_py))
+    for s in symbols:
+        name = s.get("name", "?")
+        loc = s.get("location", {}).get("range", {}).get("start", {})
+        line = loc.get("line", 0)
+        char = 4 if loc.get("character", 0) == 0 else loc.get("character", 0)
+        refs = await client.find_references(str(lib_py), line, char)
+        if refs:
+            print(f"    {name}: found {len(refs)} references!")
+        else:
+            print(f"    {name}: NO REFERENCES (expected - main.py doesn't exist yet)")
+
     # Create main.py (simulating writeNewFile tool)
     main_py = Path(workspace_dir) / "main.py"
     main_content = '''from lib import hello
 
 hello()
 '''
-    print(f"\n5. Creating main.py...")
+    print(f"\n6. Creating main.py...")
     with open(main_py, "w") as f:
         f.write(main_content)
     print(f"  Written: {main_py}")
@@ -248,20 +262,8 @@ hello()
     await client.notify_file_created(str(main_py))
     await client.open_document(str(main_py))
 
-    # Get symbols from lib.py
-    print(f"\n6. Getting symbols from lib.py...")
-    symbols = await client.get_document_symbols(str(lib_py))
-    print(f"  Found {len(symbols)} symbols:")
-    for s in symbols:
-        name = s.get("name", "?")
-        kind = s.get("kind", "?")
-        loc = s.get("location", {}).get("range", {}).get("start", {})
-        line = loc.get("line", 0)
-        char = loc.get("character", 0)
-        print(f"    - {name} (kind={kind}) at line {line}, char {char}")
-
-    # Try find_references for each symbol
-    print(f"\n7. Testing find_references for each symbol...")
+    # TEST 2: find_references AFTER main.py exists
+    print(f"\n7. Testing find_references AFTER main.py exists...")
     for s in symbols:
         name = s.get("name", "?")
         loc = s.get("location", {}).get("range", {}).get("start", {})
@@ -285,7 +287,7 @@ hello()
             print(f"    {name}: NO REFERENCES FOUND")
 
     # Stop
-    print("\n8. Stopping pylsp...")
+    print("\n9. Stopping pylsp...")
     await client.stop()
     print("\nDone!")
 
