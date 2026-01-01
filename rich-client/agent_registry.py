@@ -171,6 +171,20 @@ class AgentRegistry:
         """Deprecated: Use set_formatter_pipeline_all instead."""
         self.set_formatter_pipeline_all(formatter)
 
+    def format_text(self, text: str, format_hint: Optional[str] = None) -> str:
+        """Format text through the formatter pipeline.
+
+        Args:
+            text: Text to format.
+            format_hint: Optional hint for formatting (e.g., "diff").
+
+        Returns:
+            Formatted text with ANSI codes, or original text if no pipeline.
+        """
+        if self._formatter_pipeline and hasattr(self._formatter_pipeline, 'format'):
+            return self._formatter_pipeline.format(text, format_hint=format_hint)
+        return text
+
     def get_selected_agent(self) -> Optional[AgentInfo]:
         """Get currently selected agent.
 
