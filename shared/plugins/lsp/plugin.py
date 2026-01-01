@@ -1910,7 +1910,8 @@ Example:
                 # LSP servers need time to analyze cross-file imports after:
                 # 1. Configuration update (extra_paths)
                 # 2. Documents being closed and reopened
-                await asyncio.sleep(2.0)
+                # Note: 5 seconds seems long but jedi needs time to build cross-file index
+                await asyncio.sleep(5.0)
             return {"success": True}
 
         elif method == 'document_symbols':
