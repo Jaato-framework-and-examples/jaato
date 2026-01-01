@@ -543,23 +543,56 @@ class LSPClient:
         return f"file://{abs_path}"
 
     async def open_document(self, path: str, text: Optional[str] = None) -> None:
-        """Notify the server that a document is open."""
+        """Notify the server that a document is open.
+
+        If the document is already open, this is a no-op. Use update_document()
+        to notify the server of content changes.
+        """
         uri = self.uri_from_path(path)
+
+        # Don't re-open documents that are already open
+        if uri in self._open_documents:
+            return
+
         if text is None:
             with open(path, 'r', encoding='utf-8', errors='replace') as f:
                 text = f.read()
 
         lang_id = self.config.language_id or self._guess_language_id(path)
-        version = self._open_documents.get(uri, 0) + 1
-        self._open_documents[uri] = version
+        self._open_documents[uri] = 1  # Start at version 1
 
         await self._send_notification("textDocument/didOpen", {
             "textDocument": {
                 "uri": uri,
                 "languageId": lang_id,
-                "version": version,
+                "version": 1,
                 "text": text
             }
+        })
+
+    async def update_document(self, path: str, text: Optional[str] = None) -> None:
+        """Notify the server that a document's content has changed.
+
+        If the document isn't open yet, this will open it first.
+        """
+        uri = self.uri_from_path(path)
+
+        # If not open, open it first
+        if uri not in self._open_documents:
+            await self.open_document(path, text)
+            return
+
+        if text is None:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                text = f.read()
+
+        # Increment version
+        version = self._open_documents[uri] + 1
+        self._open_documents[uri] = version
+
+        await self._send_notification("textDocument/didChange", {
+            "textDocument": {"uri": uri, "version": version},
+            "contentChanges": [{"text": text}]
         })
 
     async def close_document(self, path: str) -> None:
