@@ -1587,6 +1587,7 @@ Example:
                         language_id=spec.get('languageId'),
                         extra_paths_key=spec.get('extraPathsKey'),
                     )
+                    self._trace(f"Starting LSP server '{name}': command={config.command}, args={config.args}")
                     client = LSPClient(config, errlog=self._errlog)
                     await asyncio.wait_for(client.start(), timeout=15.0)
                     self._clients[name] = client
