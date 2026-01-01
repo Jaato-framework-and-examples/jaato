@@ -189,7 +189,7 @@ class LSPClient:
 async def main():
     if len(sys.argv) < 2:
         print("Usage: python scripts/debug_pylsp.py <workspace_dir>")
-        print("Example: python scripts/debug_pylsp.py /path/to/src")
+        print("Example: python scripts/debug_pylsp.py /tmp/test_lsp")
         sys.exit(1)
 
     workspace_dir = os.path.abspath(sys.argv[1])
@@ -198,15 +198,10 @@ async def main():
     print(f"\n=== Debug pylsp ===")
     print(f"Workspace: {workspace_dir}")
 
-    # Find Python files
-    py_files = list(Path(workspace_dir).glob("*.py"))
-    print(f"Found {len(py_files)} Python files: {[f.name for f in py_files]}")
+    # Create workspace directory if needed
+    os.makedirs(workspace_dir, exist_ok=True)
 
-    if not py_files:
-        print("No Python files found!")
-        sys.exit(1)
-
-    # Start client
+    # Start client FIRST (before creating files, like the real client does)
     client = LSPClient()
     await client.start()
     print("\n1. Starting pylsp...")
@@ -221,61 +216,73 @@ async def main():
     print("\n3. Configuring extra_paths...")
     await client.configure_extra_paths([workspace_dir])
 
-    # Notify about files
-    print("\n4. Notifying about files...")
-    for f in py_files:
-        await client.notify_file_created(str(f))
+    # Create lib.py (simulating writeNewFile tool)
+    lib_py = Path(workspace_dir) / "lib.py"
+    lib_content = '''def hello():
+    print("Hello")
 
-    # Open all documents
-    print("\n5. Opening documents...")
-    for f in py_files:
-        await client.open_document(str(f))
+def goodbye():
+    print("Goodbye")
+'''
+    print(f"\n4. Creating lib.py...")
+    with open(lib_py, "w") as f:
+        f.write(lib_content)
+    print(f"  Written: {lib_py}")
 
-    # Find lib.py
-    lib_py = None
-    for f in py_files:
-        if f.name == "lib.py":
-            lib_py = f
-            break
+    # Notify about lib.py and open it
+    await client.notify_file_created(str(lib_py))
+    await client.open_document(str(lib_py))
 
-    if lib_py:
-        print(f"\n6. Getting symbols from {lib_py.name}...")
-        symbols = await client.get_document_symbols(str(lib_py))
-        print(f"  Found {len(symbols)} symbols:")
-        for s in symbols:
-            name = s.get("name", "?")
-            kind = s.get("kind", "?")
-            loc = s.get("location", {}).get("range", {}).get("start", {})
-            line = loc.get("line", 0)
-            char = loc.get("character", 0)
-            print(f"    - {name} (kind={kind}) at line {line}, char {char}")
+    # Create main.py (simulating writeNewFile tool)
+    main_py = Path(workspace_dir) / "main.py"
+    main_content = '''from lib import hello
 
-        # Try find_references for each symbol
-        print(f"\n7. Testing find_references for each symbol...")
-        for s in symbols:
-            name = s.get("name", "?")
-            loc = s.get("location", {}).get("range", {}).get("start", {})
-            line = loc.get("line", 0)
-            char = loc.get("character", 0)
+hello()
+'''
+    print(f"\n5. Creating main.py...")
+    with open(main_py, "w") as f:
+        f.write(main_content)
+    print(f"  Written: {main_py}")
 
-            # Adjust char to point to the symbol name (after 'def ')
-            if char == 0:
-                char = 4  # 'def ' is 4 chars
+    # Notify about main.py and open it
+    await client.notify_file_created(str(main_py))
+    await client.open_document(str(main_py))
 
-            refs = await client.find_references(str(lib_py), line, char)
-            if refs:
-                print(f"    {name}: found {len(refs)} references!")
-                for ref in refs:
-                    ref_uri = ref.get("uri", "")
-                    ref_range = ref.get("range", {}).get("start", {})
-                    ref_line = ref_range.get("line", 0)
-                    ref_char = ref_range.get("character", 0)
-                    print(f"      - {os.path.basename(ref_uri)}:{ref_line+1}:{ref_char}")
-            else:
-                print(f"    {name}: NO REFERENCES FOUND")
+    # Get symbols from lib.py
+    print(f"\n6. Getting symbols from lib.py...")
+    symbols = await client.get_document_symbols(str(lib_py))
+    print(f"  Found {len(symbols)} symbols:")
+    for s in symbols:
+        name = s.get("name", "?")
+        kind = s.get("kind", "?")
+        loc = s.get("location", {}).get("range", {}).get("start", {})
+        line = loc.get("line", 0)
+        char = loc.get("character", 0)
+        print(f"    - {name} (kind={kind}) at line {line}, char {char}")
 
-    else:
-        print("\n  No lib.py found, skipping symbol test")
+    # Try find_references for each symbol
+    print(f"\n7. Testing find_references for each symbol...")
+    for s in symbols:
+        name = s.get("name", "?")
+        loc = s.get("location", {}).get("range", {}).get("start", {})
+        line = loc.get("line", 0)
+        char = loc.get("character", 0)
+
+        # Adjust char to point to the symbol name (after 'def ')
+        if char == 0:
+            char = 4  # 'def ' is 4 chars
+
+        refs = await client.find_references(str(lib_py), line, char)
+        if refs:
+            print(f"    {name}: found {len(refs)} references!")
+            for ref in refs:
+                ref_uri = ref.get("uri", "")
+                ref_range = ref.get("range", {}).get("start", {})
+                ref_line = ref_range.get("line", 0)
+                ref_char = ref_range.get("character", 0)
+                print(f"      - {os.path.basename(ref_uri)}:{ref_line+1}:{ref_char}")
+        else:
+            print(f"    {name}: NO REFERENCES FOUND")
 
     # Stop
     print("\n8. Stopping pylsp...")
