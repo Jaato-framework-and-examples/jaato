@@ -150,9 +150,24 @@ Stop tracking an artifact.
 
 When files are modified via `updateFile`, `writeNewFile`, `lsp_rename_symbol`, or `lsp_apply_code_action`, the artifact tracker automatically:
 
-1. Uses LSP to discover which files depend on the modified file
-2. Flags those dependent files for review
-3. Shows a notification listing flagged files
+1. Uses LSP to discover which files depend on the modified file (via `find_references`)
+2. Also checks the tracked artifact registry for previously known relationships
+3. Flags those dependent files for review
+4. Shows a notification listing flagged files
+
+### Dual-Source Dependency Discovery
+
+The plugin uses two sources to find dependents:
+
+| Source | Purpose | Finds |
+|--------|---------|-------|
+| **LSP** | Real-time code analysis | New files that import/reference the modified file |
+| **Artifact Registry** | Tracked relationships | Previously known dependents, including deleted files |
+
+This ensures that:
+- New dependencies are discovered automatically via LSP
+- Deleted files that were previously tracked show as "(missing)" in the notification
+- No dependent is missed due to stale LSP index or deleted files
 
 ```
 File A.py modified via updateFile
@@ -183,6 +198,14 @@ When dependencies are discovered, users see:
   ╭ result ← lsp: checked api.py, no issues found
   ╰ result ← artifact_tracker: flagged for review: test_api.py, handler.py
 ```
+
+If a previously tracked dependent file has been deleted:
+
+```
+  ╰ result ← artifact_tracker: flagged for review: test_api.py, old_handler.py (missing)
+```
+
+The "(missing)" marker alerts the user that a dependent file no longer exists.
 
 ### System Instructions
 

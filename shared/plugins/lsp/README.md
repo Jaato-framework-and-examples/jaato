@@ -203,6 +203,25 @@ structure that LSP servers expect:
 }
 ```
 
+### Cross-File Reference Support
+
+For `find_references` to work across multiple files (essential for dependency tracking),
+the LSP client implements several mechanisms:
+
+1. **Workspace Folders**: During initialization, the client sends `workspaceFolders` to
+   the server, enabling it to index files across the workspace.
+
+2. **Dynamic Folder Addition**: When documents are opened from directories outside the
+   initial workspace root, the client sends `workspace/didChangeWorkspaceFolders` to
+   add those directories.
+
+3. **Extra Paths Configuration**: For Python servers, `extra_paths` tells Jedi/Pyright
+   where to look for module imports.
+
+4. **Document Tracking**: The client tracks open documents and sends appropriate
+   `textDocument/didOpen`, `textDocument/didChange`, and `workspace/didChangeWatchedFiles`
+   notifications.
+
 ### Configuration Search Order
 
 1. Custom path from `plugin_configs` (see below)
