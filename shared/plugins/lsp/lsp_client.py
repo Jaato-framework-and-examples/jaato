@@ -697,27 +697,27 @@ class LSPClient:
         # Find files that aren't already open - these are "new" to the LSP server
         new_files = [f for f in all_files if self.uri_from_path(f) not in self._open_documents]
 
+        # Log debug info
+        with open(debug_path, "a") as df:
+            df.write(f"[LSP] ensure_workspace_indexed: already open: {list(self._open_documents.keys())}\n")
+            df.write(f"[LSP] ensure_workspace_indexed: new_files: {new_files}\n")
+            df.flush()
+
         # Notify LSP about new files via workspace/didChangeWatchedFiles
-        # This triggers jedi to recognize new files and rebuild cross-file references
+        # This triggers servers to recognize new files and rebuild cross-file references
         if new_files:
             await self.notify_files_created(new_files)
             # Some servers need time to process file notifications before opening documents
             if self.config.delay_after_file_notification > 0:
                 await asyncio.sleep(self.config.delay_after_file_notification)
 
-        # Close already-open documents in this directory first
-        # This forces re-analysis with updated configuration (e.g., extra_paths)
-        for file_path in all_files:
-            uri = self.uri_from_path(file_path)
-            if uri in self._open_documents:
-                await self.close_document(file_path)
-
-        # Now open all documents fresh
-        for file_path in all_files:
+        # Only open files that aren't already open
+        # Don't close/reopen - that can disrupt the server's analysis state
+        for file_path in new_files:
             await self.open_document(file_path)
 
         # Some servers need time to analyze opened documents before queries work
-        if all_files and self.config.delay_after_document_open > 0:
+        if new_files and self.config.delay_after_document_open > 0:
             await asyncio.sleep(self.config.delay_after_document_open)
 
     def _guess_language_id(self, path: str) -> str:
