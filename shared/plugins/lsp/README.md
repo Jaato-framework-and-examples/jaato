@@ -158,6 +158,69 @@ Create `.lsp.json` in your project root or home directory:
 | `env` | object | Additional environment variables |
 | `rootUri` | string | Workspace root URI (defaults to cwd) |
 | `autoConnect` | boolean | Connect on plugin initialization (default: true) |
+| `extraPathsKey` | string | Settings key for extra module paths (for dependency tracking) |
+
+### Extra Paths Configuration
+
+For cross-file dependency tracking to work, the LSP server needs to know about
+additional module paths. Configure this using `extraPathsKey` with the server-specific
+settings key:
+
+```json
+{
+  "languageServers": {
+    "python": {
+      "command": "pylsp",
+      "languageId": "python",
+      "extraPathsKey": "pylsp.plugins.jedi.extra_paths"
+    },
+    "python-pyright": {
+      "command": "pyright-langserver",
+      "args": ["--stdio"],
+      "languageId": "python",
+      "extraPathsKey": "python.analysis.extraPaths"
+    }
+  }
+}
+```
+
+When analyzing file dependencies, the plugin sends a `workspace/didChangeConfiguration`
+notification to tell the server about the workspace paths. The dotted key format
+(e.g., `pylsp.plugins.jedi.extra_paths`) is automatically converted to a nested
+structure that LSP servers expect:
+
+```json
+{
+  "settings": {
+    "pylsp": {
+      "plugins": {
+        "jedi": {
+          "extra_paths": ["/path/to/workspace"]
+        }
+      }
+    }
+  }
+}
+```
+
+### Cross-File Reference Support
+
+For `find_references` to work across multiple files (essential for dependency tracking),
+the LSP client implements several mechanisms:
+
+1. **Workspace Folders**: During initialization, the client sends `workspaceFolders` to
+   the server, enabling it to index files across the workspace.
+
+2. **Dynamic Folder Addition**: When documents are opened from directories outside the
+   initial workspace root, the client sends `workspace/didChangeWorkspaceFolders` to
+   add those directories.
+
+3. **Extra Paths Configuration**: For Python servers, `extra_paths` tells Jedi/Pyright
+   where to look for module imports.
+
+4. **Document Tracking**: The client tracks open documents and sends appropriate
+   `textDocument/didOpen`, `textDocument/didChange`, and `workspace/didChangeWatchedFiles`
+   notifications.
 
 ### Configuration Search Order
 
@@ -491,6 +554,60 @@ schemas = plugin.get_tool_schemas()
 
 # Get executors for integration
 executors = plugin.get_executors()
+```
+
+## Programmatic API for Plugin Integration
+
+The LSP plugin exposes methods that other plugins can use for cross-plugin integration.
+
+### get_file_dependents(file_path)
+
+Find all files that depend on (reference) a given file. This is useful for:
+- Understanding impact of changes before modifying code
+- Automatically tracking related artifacts
+- Building dependency graphs
+
+```python
+# Get the LSP plugin from registry
+lsp_plugin = registry.get_plugin("lsp")
+
+# Find files that import/reference api.py
+dependents = lsp_plugin.get_file_dependents("/path/to/api.py")
+# Returns: ["/path/to/handler.py", "/path/to/tests/test_api.py", ...]
+```
+
+**How it works:**
+1. Gets all document symbols from the file (via `textDocument/documentSymbol`)
+2. Filters to "exportable" symbol kinds: Class, Function, Method, Enum, Interface, Constant, Struct, Module
+3. For each symbol, finds all references across the workspace (via `textDocument/references`)
+4. Returns deduplicated list of files containing those references
+
+**Integration with Artifact Tracker:**
+
+The artifact tracker plugin uses this method to automatically discover dependencies when files are modified:
+
+```
+File A.py modified via updateFile
+         │
+         ▼
+┌─────────────────────────────────────────────┐
+│  LSP Plugin (priority 30)                    │
+│  • Runs diagnostics                          │
+└─────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────┐
+│  Artifact Tracker (priority 50)              │
+│  • Calls lsp.get_file_dependents("A.py")     │
+│  • Flags dependent files for review          │
+│  • Shows notification to user                │
+└─────────────────────────────────────────────┘
+```
+
+User sees:
+```
+  ╭ result ← lsp: checked A.py, no issues found
+  ╰ result ← artifact_tracker: flagged for review: B.py, C.py
 ```
 
 ## Language Server Capabilities

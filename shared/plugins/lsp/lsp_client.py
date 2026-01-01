@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, TextIO, Tuple
+from typing import Any, Dict, List, Optional, Set, TextIO, Tuple
 
 
 @dataclass
@@ -345,6 +345,7 @@ class ServerConfig:
     env: Optional[Dict[str, str]] = None
     root_uri: Optional[str] = None
     language_id: Optional[str] = None  # e.g., "python", "typescript"
+    extra_paths_key: Optional[str] = None  # e.g., "pylsp.plugins.jedi.extra_paths"
 
 
 class LSPClient:
@@ -361,6 +362,8 @@ class LSPClient:
         self._capabilities: Optional[ServerCapabilities] = None
         self._diagnostics: Dict[str, List[Diagnostic]] = {}  # uri -> diagnostics
         self._open_documents: Dict[str, int] = {}  # uri -> version
+        self._configured_extra_paths: Set[str] = set()  # paths already sent to server
+        self._workspace_folders: Set[str] = set()  # workspace folder URIs added
 
     async def start(self) -> None:
         """Start the language server process."""
@@ -407,6 +410,7 @@ class LSPClient:
     async def _initialize(self) -> None:
         """Send initialize request to server."""
         root_uri = self.config.root_uri or f"file://{os.getcwd()}"
+        workspace_name = os.path.basename(root_uri.replace("file://", "")) or "workspace"
 
         params = {
             "processId": os.getpid(),
@@ -421,13 +425,20 @@ class LSPClient:
                     "publishDiagnostics": {"relatedInformation": True}
                 },
                 "workspace": {
-                    "symbol": {}
+                    "symbol": {},
+                    "workspaceFolders": True,
+                    "didChangeConfiguration": {"dynamicRegistration": False},
+                    "didChangeWatchedFiles": {"dynamicRegistration": False}
                 }
-            }
+            },
+            "workspaceFolders": [{"uri": root_uri, "name": workspace_name}]
         }
 
         result = await self._send_request("initialize", params)
         self._capabilities = ServerCapabilities.from_dict(result.get("capabilities", {}))
+
+        # Track the initial workspace folder
+        self._workspace_folders.add(root_uri)
 
         # Send initialized notification
         await self._send_notification("initialized", {})
@@ -537,23 +548,75 @@ class LSPClient:
         return f"file://{abs_path}"
 
     async def open_document(self, path: str, text: Optional[str] = None) -> None:
-        """Notify the server that a document is open."""
+        """Notify the server that a document is open.
+
+        If the document is already open, this is a no-op. Use update_document()
+        to notify the server of content changes.
+
+        For new files, this also:
+        1. Configures extra_paths for the directory (for cross-file imports)
+        2. Sends didChangeWatchedFiles to notify about file existence
+        3. Sends didOpen with the file content
+        """
         uri = self.uri_from_path(path)
+
+        # Don't re-open documents that are already open
+        if uri in self._open_documents:
+            return
+
         if text is None:
             with open(path, 'r', encoding='utf-8', errors='replace') as f:
                 text = f.read()
 
+        # Configure extra_paths for this file's directory BEFORE opening
+        # This is critical for cross-file imports to work (like in debug_pylsp.py)
+        directory = os.path.dirname(os.path.abspath(path))
+        await self.configure_extra_paths([directory])
+
+        # Add directory as workspace folder for better cross-file indexing
+        await self.add_workspace_folder(directory)
+
+        # Notify server about new file existence BEFORE opening
+        # This is important for servers like pylsp/jedi to track cross-file references
+        await self._send_notification("workspace/didChangeWatchedFiles", {
+            "changes": [{"uri": uri, "type": 1}]  # 1 = Created
+        })
+
         lang_id = self.config.language_id or self._guess_language_id(path)
-        version = self._open_documents.get(uri, 0) + 1
-        self._open_documents[uri] = version
+        self._open_documents[uri] = 1  # Start at version 1
 
         await self._send_notification("textDocument/didOpen", {
             "textDocument": {
                 "uri": uri,
                 "languageId": lang_id,
-                "version": version,
+                "version": 1,
                 "text": text
             }
+        })
+
+    async def update_document(self, path: str, text: Optional[str] = None) -> None:
+        """Notify the server that a document's content has changed.
+
+        If the document isn't open yet, this will open it first.
+        """
+        uri = self.uri_from_path(path)
+
+        # If not open, open it first
+        if uri not in self._open_documents:
+            await self.open_document(path, text)
+            return
+
+        if text is None:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                text = f.read()
+
+        # Increment version
+        version = self._open_documents[uri] + 1
+        self._open_documents[uri] = version
+
+        await self._send_notification("textDocument/didChange", {
+            "textDocument": {"uri": uri, "version": version},
+            "contentChanges": [{"text": text}]
         })
 
     async def close_document(self, path: str) -> None:
@@ -563,6 +626,144 @@ class LSPClient:
         await self._send_notification("textDocument/didClose", {
             "textDocument": {"uri": uri}
         })
+
+    async def notify_files_created(self, paths: List[str]) -> None:
+        """Notify the server that files were created.
+
+        This triggers the server to index the new files so they can be
+        found by workspace-wide operations like find_references.
+
+        Args:
+            paths: List of file paths that were created.
+        """
+        changes = [
+            {"uri": self.uri_from_path(p), "type": 1}  # 1 = Created
+            for p in paths
+        ]
+        if changes:
+            await self._send_notification("workspace/didChangeWatchedFiles", {
+                "changes": changes
+            })
+
+    async def update_configuration(self, settings: Dict[str, Any]) -> None:
+        """Send workspace/didChangeConfiguration notification.
+
+        This updates the language server's configuration dynamically.
+        Useful for setting extra_paths for Python servers like pylsp.
+
+        Args:
+            settings: The settings object to send to the server.
+        """
+        await self._send_notification("workspace/didChangeConfiguration", {
+            "settings": settings
+        })
+
+    async def configure_extra_paths(self, extra_paths: List[str]) -> None:
+        """Configure extra paths for module resolution using server-specific key.
+
+        The key is read from the server's extraPathsKey configuration in .lsp.json.
+        If no key is configured, this method does nothing. Paths that have already
+        been configured are skipped to avoid redundant updates.
+
+        Args:
+            extra_paths: List of directory paths to add to the module search path.
+        """
+        if not self.config.extra_paths_key:
+            return  # No extra_paths configuration for this server
+
+        # Check if all paths are already configured
+        new_paths = [p for p in extra_paths if p not in self._configured_extra_paths]
+        if not new_paths:
+            return  # All paths already configured
+
+        # Update the cache
+        self._configured_extra_paths.update(new_paths)
+
+        # Send all configured paths (not just new ones) since LSP expects the full list
+        all_paths = list(self._configured_extra_paths)
+
+        # Convert dotted key (e.g., "pylsp.plugins.jedi.extra_paths") to nested structure
+        # LSP servers expect nested dicts, not flat dotted keys
+        key_parts = self.config.extra_paths_key.split('.')
+        settings: Dict[str, Any] = {}
+        current = settings
+        for part in key_parts[:-1]:
+            current[part] = {}
+            current = current[part]
+        current[key_parts[-1]] = all_paths
+
+        await self.update_configuration(settings)
+
+    async def add_workspace_folder(self, directory: str) -> None:
+        """Add a directory as a workspace folder.
+
+        This is useful when working with files outside the original rootUri.
+        Some servers like pylsp need workspace folders to properly index cross-file references.
+        """
+        uri = self.uri_from_path(directory)
+        name = os.path.basename(directory) or "workspace"
+
+        # Track added workspace folders to avoid duplicates
+        if uri in self._workspace_folders:
+            return
+
+        self._workspace_folders.add(uri)
+
+        await self._send_notification("workspace/didChangeWorkspaceFolders", {
+            "event": {
+                "added": [{"uri": uri, "name": name}],
+                "removed": []
+            }
+        })
+
+    async def ensure_workspace_indexed(self, directory: str, extensions: Optional[List[str]] = None) -> None:
+        """Open all files of supported types in a directory to ensure they're indexed.
+
+        This is needed for find_references to work across files that
+        haven't been explicitly opened yet.
+
+        Args:
+            directory: Directory to scan for files.
+            extensions: List of file extensions to include (e.g., ['.py', '.pyi']).
+                       If None, uses all extensions this server supports.
+        """
+        import glob
+
+        # Configure extra_paths if the server supports it (via extraPathsKey in .lsp.json)
+        await self.configure_extra_paths([directory])
+
+        if extensions is None:
+            # Use the language ID to determine supported extensions
+            lang_to_exts = {
+                'python': ['.py', '.pyi', '.pyw'],
+                'javascript': ['.js', '.mjs', '.cjs'],
+                'typescript': ['.ts', '.mts', '.cts'],
+                'typescriptreact': ['.tsx'],
+                'javascriptreact': ['.jsx'],
+                'go': ['.go'],
+                'rust': ['.rs'],
+                'java': ['.java'],
+                'c': ['.c', '.h'],
+                'cpp': ['.cpp', '.hpp', '.cc', '.hh'],
+                'ruby': ['.rb'],
+                'php': ['.php'],
+            }
+            lang = self.config.language_id
+            extensions = lang_to_exts.get(lang, []) if lang else []
+
+        # Collect all files to index
+        all_files = []
+        for ext in extensions:
+            pattern = os.path.join(directory, "**", f"*{ext}")
+            all_files.extend(glob.glob(pattern, recursive=True))
+
+        # Find files that aren't already open - these are "new" to the LSP server
+        new_files = [f for f in all_files if self.uri_from_path(f) not in self._open_documents]
+
+        # Open files that aren't already open
+        # open_document handles: configure_extra_paths, didChangeWatchedFiles, didOpen
+        for file_path in new_files:
+            await self.open_document(file_path)
 
     def _guess_language_id(self, path: str) -> str:
         """Guess the language ID from file extension."""
@@ -696,6 +897,22 @@ class LSPClient:
             container_name: Name of the containing symbol (for nested symbols)
         """
         for item in items:
+            # Debug logging for symbol parsing - write to trace file
+            sel_range = item.get("selectionRange")
+            range_data = item.get("range")
+            used_range = sel_range if sel_range else range_data
+            import os, tempfile
+            from datetime import datetime
+            trace_path = os.environ.get('JAATO_TRACE_LOG', os.path.join(tempfile.gettempdir(), "rich_client_trace.log"))
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [LSP_CLIENT] {item.get('name')}: selectionRange={sel_range}, range={range_data}, using={used_range}\n")
+                    if used_range:
+                        start = used_range.get('start', {})
+                        f.write(f"[{ts}] [LSP_CLIENT] {item.get('name')}: start.line={start.get('line')}, start.character={start.get('character')}\n")
+            except:
+                pass
             sym = SymbolInformation.from_dict(item, file_uri)
             if container_name:
                 sym.container_name = container_name
