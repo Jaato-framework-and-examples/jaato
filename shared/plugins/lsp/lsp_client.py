@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, TextIO, Tuple
+from typing import Any, Dict, List, Optional, Set, TextIO, Tuple
 
 
 @dataclass
@@ -362,6 +362,7 @@ class LSPClient:
         self._capabilities: Optional[ServerCapabilities] = None
         self._diagnostics: Dict[str, List[Diagnostic]] = {}  # uri -> diagnostics
         self._open_documents: Dict[str, int] = {}  # uri -> version
+        self._configured_extra_paths: Set[str] = set()  # paths already sent to server
 
     async def start(self) -> None:
         """Start the language server process."""
@@ -608,13 +609,25 @@ class LSPClient:
         """Configure extra paths for module resolution using server-specific key.
 
         The key is read from the server's extraPathsKey configuration in .lsp.json.
-        If no key is configured, this method does nothing.
+        If no key is configured, this method does nothing. Paths that have already
+        been configured are skipped to avoid redundant updates.
 
         Args:
             extra_paths: List of directory paths to add to the module search path.
         """
         if not self.config.extra_paths_key:
             return  # No extra_paths configuration for this server
+
+        # Check if all paths are already configured
+        new_paths = [p for p in extra_paths if p not in self._configured_extra_paths]
+        if not new_paths:
+            return  # All paths already configured
+
+        # Update the cache
+        self._configured_extra_paths.update(new_paths)
+
+        # Send all configured paths (not just new ones) since LSP expects the full list
+        all_paths = list(self._configured_extra_paths)
 
         # Convert dotted key (e.g., "pylsp.plugins.jedi.extra_paths") to nested structure
         # LSP servers expect nested dicts, not flat dotted keys
@@ -624,7 +637,7 @@ class LSPClient:
         for part in key_parts[:-1]:
             current[part] = {}
             current = current[part]
-        current[key_parts[-1]] = extra_paths
+        current[key_parts[-1]] = all_paths
 
         await self.update_configuration(settings)
 
