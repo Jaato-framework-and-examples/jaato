@@ -712,6 +712,11 @@ class LSPClient:
         for file_path in all_files:
             await self.open_document(file_path)
 
+        # Wait for jedi to analyze the opened documents
+        # This is critical for find_references to work across files
+        if all_files:
+            await asyncio.sleep(3.0)
+
     def _guess_language_id(self, path: str) -> str:
         """Guess the language ID from file extension."""
         ext = os.path.splitext(path)[1].lower()

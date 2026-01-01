@@ -1906,12 +1906,8 @@ Example:
                 extra_paths_info = f" (extraPathsKey={client.config.extra_paths_key})" if client.config.extra_paths_key else ""
                 self._trace(f"_ensure_workspace_indexed: indexing [{directory}] for {client.config.language_id}{extra_paths_info}")
                 await client.ensure_workspace_indexed(directory, extensions)
-                # Give the LSP server time to process config and re-analyze files
-                # LSP servers need time to analyze cross-file imports after:
-                # 1. Configuration update (extra_paths)
-                # 2. Documents being closed and reopened
-                # Note: 5 seconds seems long but jedi needs time to build cross-file index
-                await asyncio.sleep(5.0)
+                # Note: ensure_workspace_indexed now includes appropriate delays
+                # for jedi to process file notifications and analyze documents
             return {"success": True}
 
         elif method == 'document_symbols':
