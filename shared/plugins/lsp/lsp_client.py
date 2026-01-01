@@ -346,10 +346,6 @@ class ServerConfig:
     root_uri: Optional[str] = None
     language_id: Optional[str] = None  # e.g., "python", "typescript"
     extra_paths_key: Optional[str] = None  # e.g., "pylsp.plugins.jedi.extra_paths"
-    # Optional delays for servers that need time to build indexes (e.g., pylsp/jedi)
-    # Most servers don't need these, so defaults are 0
-    delay_after_file_notification: float = 0.0  # Delay after didChangeWatchedFiles
-    delay_after_document_open: float = 0.0  # Delay after opening documents
 
 
 class LSPClient:
@@ -768,10 +764,6 @@ class LSPClient:
         # open_document handles: configure_extra_paths, didChangeWatchedFiles, didOpen
         for file_path in new_files:
             await self.open_document(file_path)
-
-        # Some servers need time to analyze opened documents before queries work
-        if new_files and self.config.delay_after_document_open > 0:
-            await asyncio.sleep(self.config.delay_after_document_open)
 
     def _guess_language_id(self, path: str) -> str:
         """Guess the language ID from file extension."""
