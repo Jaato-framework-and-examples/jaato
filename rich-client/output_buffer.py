@@ -968,8 +968,11 @@ class OutputBuffer:
         )
 
         # Add separator and the tool block to the buffer
+        # First flush any pending content (like enrichment notifications)
+        # so they appear AFTER the tool block, not before
         self._add_line("system", "", "")
         self._lines.append(tool_block)
+        self._flush_current_block()  # Flush enrichment notifications after tool block
         self._add_line("system", "", "")
 
         # Clear active tools so they don't render separately anymore
