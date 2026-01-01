@@ -604,19 +604,20 @@ class LSPClient:
         Args:
             extra_paths: List of directory paths to add to Python's module search path.
         """
-        # pylsp format (uses Jedi)
-        pylsp_settings = {
+        # pylsp uses flat key format (per CONFIGURATION.md)
+        # Also include nested format for compatibility
+        settings = {
+            # Flat format (what pylsp documentation shows)
+            "pylsp.plugins.jedi.extra_paths": extra_paths,
+            # Nested format (some clients use this)
             "pylsp": {
                 "plugins": {
                     "jedi": {
                         "extra_paths": extra_paths
                     }
                 }
-            }
-        }
-
-        # pyright format
-        pyright_settings = {
+            },
+            # pyright format
             "python": {
                 "analysis": {
                     "extraPaths": extra_paths
@@ -624,9 +625,7 @@ class LSPClient:
             }
         }
 
-        # Send both formats - servers will ignore unknown settings
-        combined_settings = {**pylsp_settings, **pyright_settings}
-        await self.update_configuration(combined_settings)
+        await self.update_configuration(settings)
 
     async def ensure_workspace_indexed(self, directory: str, extensions: Optional[List[str]] = None) -> None:
         """Open all files of supported types in a directory to ensure they're indexed.
