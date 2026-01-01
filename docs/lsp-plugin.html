@@ -455,7 +455,53 @@ return result
                     <td>boolean</td>
                     <td>Connect on plugin initialization (default: true)</td>
                 </tr>
+                <tr>
+                    <td><code>extraPathsKey</code></td>
+                    <td>string</td>
+                    <td>Server-specific settings key for module resolution paths (e.g., <code>pylsp.plugins.jedi.extra_paths</code>)</td>
+                </tr>
             </table>
+
+            <h3>Cross-File Reference Support</h3>
+            <p>
+                For <code>find_references</code> to work across multiple files (essential for dependency tracking),
+                the LSP client implements several mechanisms:
+            </p>
+            <table>
+                <tr>
+                    <th>Mechanism</th>
+                    <th>LSP Notification</th>
+                    <th>Purpose</th>
+                </tr>
+                <tr>
+                    <td><strong>Workspace Folders</strong></td>
+                    <td>Sent in <code>initialize</code></td>
+                    <td>Registers initial workspace for server to index</td>
+                </tr>
+                <tr>
+                    <td><strong>Dynamic Folders</strong></td>
+                    <td><code>workspace/didChangeWorkspaceFolders</code></td>
+                    <td>Adds new directories when opening files outside initial workspace</td>
+                </tr>
+                <tr>
+                    <td><strong>Extra Paths</strong></td>
+                    <td><code>workspace/didChangeConfiguration</code></td>
+                    <td>Configures server-specific module resolution (via <code>extraPathsKey</code>)</td>
+                </tr>
+                <tr>
+                    <td><strong>Document Tracking</strong></td>
+                    <td><code>textDocument/didOpen</code>, <code>didChange</code>, etc.</td>
+                    <td>Keeps server aware of file contents and changes</td>
+                </tr>
+            </table>
+
+            <div class="note">
+                <div class="note-title">Python Configuration</div>
+                <p>
+                    For Python with pylsp/Jedi, set <code>"extraPathsKey": "pylsp.plugins.jedi.extra_paths"</code>.<br>
+                    For pyright, use <code>"extraPathsKey": "python.analysis.extraPaths"</code>.
+                </p>
+            </div>
         </section>
 
         <section id="tools">
@@ -678,18 +724,44 @@ File A.py modified via updateFile
 ┌─────────────────────────────────────────────────────────────┐
 │  Artifact Tracker (priority 50)                              │
 │  • Calls lsp.get_file_dependents("A.py")                     │
-│  • Discovers: B.py, C.py, D.py import from A.py              │
+│  • Also checks tracked artifact relationships                │
+│  • Discovers: B.py, C.py import from A.py                    │
 │  • Flags dependent files for review                          │
-│  • Notification: "flagged for review: B.py, C.py, D.py"      │
+│  • Notification: "flagged for review: B.py, C.py"            │
 └─────────────────────────────────────────────────────────────┘
 </pre>
             </div>
 
+            <h3>Dual-Source Dependency Discovery</h3>
+            <p>
+                The artifact tracker uses <strong>two sources</strong> to find dependents, ensuring
+                no dependency is missed:
+            </p>
+            <table>
+                <tr>
+                    <th>Source</th>
+                    <th>Purpose</th>
+                    <th>Finds</th>
+                </tr>
+                <tr>
+                    <td><strong>LSP</strong></td>
+                    <td>Real-time code analysis</td>
+                    <td>New files that import/reference the modified file</td>
+                </tr>
+                <tr>
+                    <td><strong>Artifact Registry</strong></td>
+                    <td>Tracked relationships</td>
+                    <td>Previously known dependents, including deleted files</td>
+                </tr>
+            </table>
+
             <div class="note">
-                <div class="note-title">User Visibility</div>
+                <div class="note-title">Missing File Detection</div>
                 <p>
-                    Both plugins emit notifications visible in the output panel, so users see
-                    exactly which files were checked and which dependencies were discovered.
+                    If a previously tracked dependent file has been deleted, it appears with a
+                    <code>(missing)</code> marker in the notification:
+                    <br><br>
+                    <code>artifact_tracker: flagged for review: test_api.py, old_handler.py (missing)</code>
                 </p>
             </div>
         </section>
