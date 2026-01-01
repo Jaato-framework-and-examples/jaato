@@ -1075,21 +1075,35 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         all_dependents: List[str] = []
 
         for file_path in file_paths:
-            dependents = lsp_plugin.get_file_dependents(file_path)
-            self._trace(f"enrich_tool_result: {file_path} has {len(dependents)} dependents from LSP")
+            # 1. Get dependents from LSP (discovers new relationships)
+            lsp_dependents = lsp_plugin.get_file_dependents(file_path)
+            self._trace(f"enrich_tool_result: {file_path} has {len(lsp_dependents)} dependents from LSP")
 
-            for dep_path in dependents:
-                # Only skip if the file doesn't actually exist (stale LSP index)
-                if not os.path.exists(dep_path):
-                    self._trace(f"enrich_tool_result: skipping {dep_path} - file doesn't exist")
-                    continue
+            # 2. Get dependents from tracked artifacts (finds existing relationships, including deleted files)
+            tracked_dependents: List[str] = []
+            if self._registry:
+                affected_artifacts = self._registry.find_affected_by_change(file_path)
+                for artifact in affected_artifacts:
+                    # Skip the source file itself
+                    if artifact.path != file_path and artifact.path not in tracked_dependents:
+                        tracked_dependents.append(artifact.path)
+                self._trace(f"enrich_tool_result: {file_path} has {len(tracked_dependents)} dependents from tracked artifacts")
 
+            # 3. Merge both sources (LSP + tracked), LSP first to prioritize live files
+            for dep_path in lsp_dependents:
                 if dep_path not in all_dependents:
                     all_dependents.append(dep_path)
-
                     # Flag for review - the source file changed
                     # This will auto-register the artifact if not already tracked
                     self._flag_dependent_for_review(dep_path, file_path)
+
+            # Add tracked dependents that weren't found by LSP (may include deleted files)
+            for dep_path in tracked_dependents:
+                if dep_path not in all_dependents:
+                    all_dependents.append(dep_path)
+                    # Flag for review if the file still exists
+                    if os.path.exists(dep_path):
+                        self._flag_dependent_for_review(dep_path, file_path)
 
         if not all_dependents:
             self._trace("enrich_tool_result: no dependents found")
