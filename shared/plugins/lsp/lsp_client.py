@@ -690,6 +690,14 @@ class LSPClient:
             df.write(f"[LSP] ensure_workspace_indexed: found {len(all_files)} files: {all_files}\n")
             df.flush()
 
+        # Find files that aren't already open - these are "new" to the LSP server
+        new_files = [f for f in all_files if self.uri_from_path(f) not in self._open_documents]
+
+        # Notify LSP about new files via workspace/didChangeWatchedFiles
+        # This triggers jedi to recognize new files and rebuild cross-file references
+        if new_files:
+            await self.notify_files_created(new_files)
+
         # Close already-open documents in this directory first
         # This forces re-analysis with updated configuration (e.g., extra_paths)
         for file_path in all_files:
