@@ -345,6 +345,7 @@ class ServerConfig:
     env: Optional[Dict[str, str]] = None
     root_uri: Optional[str] = None
     language_id: Optional[str] = None  # e.g., "python", "typescript"
+    extra_paths_key: Optional[str] = None  # e.g., "pylsp.plugins.jedi.extra_paths"
 
 
 class LSPClient:
@@ -595,34 +596,21 @@ class LSPClient:
             "settings": settings
         })
 
-    async def configure_python_extra_paths(self, extra_paths: List[str]) -> None:
-        """Configure extra Python paths for module resolution.
+    async def configure_extra_paths(self, extra_paths: List[str]) -> None:
+        """Configure extra paths for module resolution using server-specific key.
 
-        Sends configuration to both pylsp and pyright formats to support
-        whichever Python language server is being used.
+        The key is read from the server's extraPathsKey configuration in .lsp.json.
+        If no key is configured, this method does nothing.
 
         Args:
-            extra_paths: List of directory paths to add to Python's module search path.
+            extra_paths: List of directory paths to add to the module search path.
         """
-        # pylsp uses flat key format (per CONFIGURATION.md)
-        # Also include nested format for compatibility
+        if not self.config.extra_paths_key:
+            return  # No extra_paths configuration for this server
+
+        # Use the configured key (e.g., "pylsp.plugins.jedi.extra_paths")
         settings = {
-            # Flat format (what pylsp documentation shows)
-            "pylsp.plugins.jedi.extra_paths": extra_paths,
-            # Nested format (some clients use this)
-            "pylsp": {
-                "plugins": {
-                    "jedi": {
-                        "extra_paths": extra_paths
-                    }
-                }
-            },
-            # pyright format
-            "python": {
-                "analysis": {
-                    "extraPaths": extra_paths
-                }
-            }
+            self.config.extra_paths_key: extra_paths
         }
 
         await self.update_configuration(settings)
@@ -640,9 +628,8 @@ class LSPClient:
         """
         import glob
 
-        # For Python, configure extra_paths so the server can resolve imports
-        if self.config.language_id == 'python':
-            await self.configure_python_extra_paths([directory])
+        # Configure extra_paths if the server supports it (via extraPathsKey in .lsp.json)
+        await self.configure_extra_paths([directory])
 
         if extensions is None:
             # Use the language ID to determine supported extensions
