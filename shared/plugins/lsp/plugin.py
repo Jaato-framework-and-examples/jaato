@@ -1857,9 +1857,10 @@ Example:
         # get_diagnostics also needs time for server to analyze and publish diagnostics
         needs_parsing = method in ('hover', 'document_symbols', 'goto_definition', 'find_references', 'get_diagnostics')
 
-        # Ensure document is open if needed
+        # Ensure document is open and up-to-date
+        # update_document opens if not open, or sends didChange if already open
         if file_path and method not in ('workspace_symbols',):
-            await client.open_document(file_path)
+            await client.update_document(file_path)
             # Wait for server to process the document
             # Longer delay for operations that need full parsing/diagnostics
             await asyncio.sleep(0.8 if needs_parsing else 0.2)
