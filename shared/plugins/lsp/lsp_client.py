@@ -346,6 +346,10 @@ class ServerConfig:
     root_uri: Optional[str] = None
     language_id: Optional[str] = None  # e.g., "python", "typescript"
     extra_paths_key: Optional[str] = None  # e.g., "pylsp.plugins.jedi.extra_paths"
+    # Optional delays for servers that need time to build indexes (e.g., pylsp/jedi)
+    # Most servers don't need these, so defaults are 0
+    delay_after_file_notification: float = 0.0  # Delay after didChangeWatchedFiles
+    delay_after_document_open: float = 0.0  # Delay after opening documents
 
 
 class LSPClient:
@@ -697,9 +701,9 @@ class LSPClient:
         # This triggers jedi to recognize new files and rebuild cross-file references
         if new_files:
             await self.notify_files_created(new_files)
-            # Wait for jedi to process the file notifications before opening documents
-            # This delay is critical - jedi needs time to register new files
-            await asyncio.sleep(2.0)
+            # Some servers need time to process file notifications before opening documents
+            if self.config.delay_after_file_notification > 0:
+                await asyncio.sleep(self.config.delay_after_file_notification)
 
         # Close already-open documents in this directory first
         # This forces re-analysis with updated configuration (e.g., extra_paths)
@@ -712,10 +716,9 @@ class LSPClient:
         for file_path in all_files:
             await self.open_document(file_path)
 
-        # Wait for jedi to analyze the opened documents
-        # This is critical for find_references to work across files
-        if all_files:
-            await asyncio.sleep(3.0)
+        # Some servers need time to analyze opened documents before queries work
+        if all_files and self.config.delay_after_document_open > 0:
+            await asyncio.sleep(self.config.delay_after_document_open)
 
     def _guess_language_id(self, path: str) -> str:
         """Guess the language ID from file extension."""

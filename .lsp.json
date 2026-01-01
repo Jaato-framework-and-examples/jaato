@@ -29,7 +29,9 @@
       "args": ["-v", "--log-file", "/tmp/pylsp.log"],
       "languageId": "python",
       "autoConnect": true,
-      "extraPathsKey": "pylsp.plugins.jedi.extra_paths"
+      "extraPathsKey": "pylsp.plugins.jedi.extra_paths",
+      "delayAfterFileNotification": 2.0,
+      "delayAfterDocumentOpen": 3.0
     },
     "typescript": {
       "command": "typescript-language-server",
