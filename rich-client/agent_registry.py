@@ -62,7 +62,7 @@ class AgentRegistry:
         self._agent_order: List[str] = []  # Maintains display order
         self._selected_agent_id: str = "main"
         self._lock = threading.RLock()  # Reentrant lock for nested calls
-        self._output_formatter: Any = None  # Shared output formatter for all agents
+        self._formatter_pipeline: Any = None  # Shared formatter pipeline for all agents
 
     def create_agent(
         self,
@@ -114,9 +114,9 @@ class AgentRegistry:
             self._agents[agent_id] = agent_info
             self._agent_order.append(agent_id)
 
-            # Apply output formatter if set
-            if self._output_formatter and agent_info.output_buffer:
-                agent_info.output_buffer.set_output_formatter(self._output_formatter)
+            # Apply formatter pipeline if set
+            if self._formatter_pipeline and agent_info.output_buffer:
+                agent_info.output_buffer.set_formatter_pipeline(self._formatter_pipeline)
 
             # If this is the first agent (main), select it
             if len(self._agents) == 1:
@@ -154,17 +154,22 @@ class AgentRegistry:
                 if agent.output_buffer:
                     agent.output_buffer.set_keybinding_config(config)
 
-    def set_output_formatter_all(self, formatter: Any) -> None:
-        """Set output formatter on all agent output buffers.
+    def set_formatter_pipeline_all(self, pipeline: Any) -> None:
+        """Set formatter pipeline on all agent output buffers.
 
         Args:
-            formatter: OutputFormatterPlugin instance for syntax highlighting.
+            pipeline: FormatterPipeline instance for output processing.
         """
-        self._output_formatter = formatter
+        self._formatter_pipeline = pipeline
         with self._lock:
             for agent in self._agents.values():
                 if agent.output_buffer:
-                    agent.output_buffer.set_output_formatter(formatter)
+                    agent.output_buffer.set_formatter_pipeline(pipeline)
+
+    # Legacy alias for backwards compatibility
+    def set_output_formatter_all(self, formatter: Any) -> None:
+        """Deprecated: Use set_formatter_pipeline_all instead."""
+        self.set_formatter_pipeline_all(formatter)
 
     def get_selected_agent(self) -> Optional[AgentInfo]:
         """Get currently selected agent.
