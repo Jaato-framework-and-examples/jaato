@@ -752,16 +752,8 @@ class LSPClient:
             df.write(f"[LSP] ensure_workspace_indexed: new_files: {new_files}\n")
             df.flush()
 
-        # Notify LSP about new files via workspace/didChangeWatchedFiles
-        # This triggers servers to recognize new files and rebuild cross-file references
-        if new_files:
-            await self.notify_files_created(new_files)
-            # Some servers need time to process file notifications before opening documents
-            if self.config.delay_after_file_notification > 0:
-                await asyncio.sleep(self.config.delay_after_file_notification)
-
-        # Only open files that aren't already open
-        # Don't close/reopen - that can disrupt the server's analysis state
+        # Open files that aren't already open
+        # open_document handles: configure_extra_paths, didChangeWatchedFiles, didOpen
         for file_path in new_files:
             await self.open_document(file_path)
 
