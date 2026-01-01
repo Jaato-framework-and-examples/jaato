@@ -1231,7 +1231,9 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         formatted_names = []
         for p in dependents:
             name = os.path.basename(p)
-            if not os.path.exists(p):
+            exists = os.path.exists(p)
+            self._trace(f"_format_dependents_message: checking {p} exists={exists}")
+            if not exists:
                 name = f"{name} (missing)"
             formatted_names.append(name)
 
