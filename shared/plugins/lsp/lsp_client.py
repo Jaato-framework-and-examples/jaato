@@ -548,9 +548,10 @@ class LSPClient:
         If the document is already open, this is a no-op. Use update_document()
         to notify the server of content changes.
 
-        For new files, this also sends didChangeWatchedFiles to notify the
-        server about the file's existence (some servers like pylsp need this
-        for cross-file reference tracking).
+        For new files, this also:
+        1. Configures extra_paths for the directory (for cross-file imports)
+        2. Sends didChangeWatchedFiles to notify about file existence
+        3. Sends didOpen with the file content
         """
         uri = self.uri_from_path(path)
 
@@ -561,6 +562,11 @@ class LSPClient:
         if text is None:
             with open(path, 'r', encoding='utf-8', errors='replace') as f:
                 text = f.read()
+
+        # Configure extra_paths for this file's directory BEFORE opening
+        # This is critical for cross-file imports to work (like in debug_pylsp.py)
+        directory = os.path.dirname(os.path.abspath(path))
+        await self.configure_extra_paths([directory])
 
         # Notify server about new file existence BEFORE opening
         # This is important for servers like pylsp/jedi to track cross-file references
