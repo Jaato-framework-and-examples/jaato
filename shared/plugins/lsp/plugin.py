@@ -1894,9 +1894,11 @@ Example:
                 extensions = [extension] if extension else None
                 self._trace(f"_ensure_workspace_indexed: configuring extra_paths=[{directory}] for {client.config.language_id}")
                 await client.ensure_workspace_indexed(directory, extensions)
-                # Give the LSP server time to process config and index the files
-                # pylsp/Jedi needs time to analyze cross-file imports after config update
-                await asyncio.sleep(1.0)
+                # Give the LSP server time to process config and re-analyze files
+                # pylsp/Jedi needs time to analyze cross-file imports after:
+                # 1. Configuration update (extra_paths)
+                # 2. Documents being closed and reopened
+                await asyncio.sleep(2.0)
             return {"success": True}
 
         elif method == 'document_symbols':
