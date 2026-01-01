@@ -697,6 +697,9 @@ class LSPClient:
         # This triggers jedi to recognize new files and rebuild cross-file references
         if new_files:
             await self.notify_files_created(new_files)
+            # Wait for jedi to process the file notifications before opening documents
+            # This delay is critical - jedi needs time to register new files
+            await asyncio.sleep(2.0)
 
         # Close already-open documents in this directory first
         # This forces re-analysis with updated configuration (e.g., extra_paths)
