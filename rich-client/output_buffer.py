@@ -128,6 +128,8 @@ class OutputBuffer:
         self._selected_tool_index: Optional[int] = None  # Which tool within selected block
         # Keybinding config for dynamic UI hints
         self._keybinding_config: Optional[Any] = None
+        # Pending enrichment notifications (queued while tools are active)
+        self._pending_enrichments: List[Tuple[str, str, str]] = []  # (source, text, mode)
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -282,6 +284,12 @@ class OutputBuffer:
 
         # Skip clarification messages - they're shown inline under tool calls in the tree
         if source == "clarification":
+            return
+
+        # Queue enrichment notifications while tools are active
+        # They should appear AFTER the tool tree, not before
+        if source == "enrichment" and self._active_tools:
+            self._pending_enrichments.append((source, text, mode))
             return
 
         # If this is new user input, exit navigation mode and finalize any remaining tools
@@ -970,6 +978,16 @@ class OutputBuffer:
         # Add separator and the tool block to the buffer
         self._add_line("system", "", "")
         self._lines.append(tool_block)
+
+        # Flush any pending enrichment notifications
+        # These were queued while tools were active so they appear AFTER the tool tree
+        if self._pending_enrichments:
+            for enrich_source, enrich_text, enrich_mode in self._pending_enrichments:
+                # Add enrichment directly to lines (not via append, to avoid re-queueing)
+                for line in enrich_text.split('\n'):
+                    self._add_line(enrich_source, line, "line")
+            self._pending_enrichments.clear()
+
         self._add_line("system", "", "")
 
         # Clear active tools so they don't render separately anymore

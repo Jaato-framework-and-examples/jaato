@@ -27,17 +27,26 @@ from .models import (
     ReviewStatus,
 )
 from ..model_provider.types import ToolSchema
-from ..base import UserCommand
+from ..base import UserCommand, ToolResultEnrichmentResult
 
 
 # Default storage location (inside .jaato directory)
 DEFAULT_STORAGE_PATH = ".jaato/.artifact_tracker.json"
 
+# Tools that write/modify files - same as LSP plugin for consistency
+FILE_WRITING_TOOLS = {
+    'updateFile',
+    'writeNewFile',
+    'lsp_rename_symbol',
+    'lsp_apply_code_action',
+}
+
 
 def _normalize_path(path: str) -> str:
-    """Normalize a path to prevent duplicates.
+    """Normalize a path to absolute path to prevent duplicates.
 
     Handles:
+    - Converts relative paths to absolute paths
     - Removes leading ./
     - Normalizes path separators
     - Removes trailing slashes (except for root)
@@ -47,18 +56,16 @@ def _normalize_path(path: str) -> str:
         path: The path to normalize
 
     Returns:
-        Normalized path string
+        Normalized absolute path string
     """
     if not path:
         return path
 
-    # Use os.path.normpath to handle .., redundant separators, etc.
-    normalized = os.path.normpath(path)
+    # Convert to absolute path first to ensure consistency
+    abs_path = os.path.abspath(path)
 
-    # normpath keeps leading ./ as just the path, but we want consistency
-    # Also handle the case where path starts with ./
-    if normalized == '.':
-        return '.'
+    # Use os.path.normpath to handle .., redundant separators, etc.
+    normalized = os.path.normpath(abs_path)
 
     return normalized
 
@@ -88,6 +95,7 @@ class ArtifactTrackerPlugin:
         self._storage_path: Optional[str] = None
         self._initialized = False
         self._agent_name: Optional[str] = None
+        self._plugin_registry = None  # Set via set_plugin_registry() for cross-plugin access
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
@@ -975,6 +983,277 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
                 if flagged else None
             ),
         }
+
+    # ==================== Plugin Registry Integration ====================
+
+    def set_plugin_registry(self, registry) -> None:
+        """Set the plugin registry for cross-plugin access.
+
+        This enables the artifact tracker to discover file dependencies
+        by calling the LSP plugin's get_file_dependents() method.
+
+        Args:
+            registry: The PluginRegistry instance.
+        """
+        self._plugin_registry = registry
+        self._trace(f"set_plugin_registry: registry set")
+
+    # ==================== Tool Result Enrichment ====================
+
+    def subscribes_to_tool_result_enrichment(self) -> bool:
+        """Subscribe to tool result enrichment for automatic dependency discovery.
+
+        When a file is modified, this plugin will use the LSP plugin to discover
+        which other files depend on the modified file, and automatically flag
+        them for review.
+        """
+        return True
+
+    def get_tool_result_enrichment_priority(self) -> int:
+        """Run BEFORE LSP plugin (priority 30) to extract paths from clean JSON.
+
+        Priority 20 ensures we can parse the JSON before LSP appends
+        markdown text which would break JSON parsing.
+        """
+        return 20
+
+    def enrich_tool_result(
+        self,
+        tool_name: str,
+        result: str
+    ) -> ToolResultEnrichmentResult:
+        """Auto-discover dependents when files are modified.
+
+        When a file-writing tool completes, this method:
+        1. Extracts the modified file path from the result
+        2. Uses LSP to find files that depend on the modified file
+        3. Flags those dependent files for review
+        4. Appends a summary to the result for user visibility
+
+        Args:
+            tool_name: Name of the tool that produced the result.
+            result: The tool's output as a string (JSON-serialized dict).
+
+        Returns:
+            ToolResultEnrichmentResult with dependency info appended if applicable.
+        """
+        # Only process file-writing tools
+        if tool_name not in FILE_WRITING_TOOLS:
+            return ToolResultEnrichmentResult(result=result)
+
+        self._trace(f"enrich_tool_result: processing {tool_name}")
+
+        # Need both registries to work
+        if not self._plugin_registry:
+            self._trace("enrich_tool_result: skipped - _plugin_registry not set (call set_plugin_registry())")
+            return ToolResultEnrichmentResult(result=result)
+
+        if not self._registry:
+            self._trace("enrich_tool_result: skipped - _registry not set (plugin not initialized?)")
+            return ToolResultEnrichmentResult(result=result)
+
+        # Get LSP plugin for dependency discovery
+        lsp_plugin = self._plugin_registry.get_plugin("lsp")
+        if not lsp_plugin:
+            self._trace("enrich_tool_result: skipped - LSP plugin not found in registry")
+            return ToolResultEnrichmentResult(result=result)
+
+        if not hasattr(lsp_plugin, 'get_file_dependents'):
+            self._trace("enrich_tool_result: skipped - LSP plugin missing get_file_dependents method")
+            return ToolResultEnrichmentResult(result=result)
+
+        # Extract file paths from result
+        file_paths = self._extract_file_paths_from_result(tool_name, result)
+        if not file_paths:
+            self._trace("enrich_tool_result: no file paths found")
+            return ToolResultEnrichmentResult(result=result)
+
+        self._trace(f"enrich_tool_result: analyzing dependencies for {file_paths}")
+
+        # Collect all dependents across all modified files
+        all_dependents: List[str] = []
+
+        for file_path in file_paths:
+            # 1. Get dependents from LSP (discovers new relationships)
+            lsp_dependents = lsp_plugin.get_file_dependents(file_path)
+            self._trace(f"enrich_tool_result: {file_path} has {len(lsp_dependents)} dependents from LSP")
+
+            # 2. Get dependents from tracked artifacts (finds existing relationships, including deleted files)
+            tracked_dependents: List[str] = []
+            if self._registry:
+                affected_artifacts = self._registry.find_affected_by_change(file_path)
+                for artifact in affected_artifacts:
+                    # Skip the source file itself
+                    if artifact.path != file_path and artifact.path not in tracked_dependents:
+                        tracked_dependents.append(artifact.path)
+                self._trace(f"enrich_tool_result: {file_path} has {len(tracked_dependents)} dependents from tracked artifacts")
+
+            # 3. Merge both sources (LSP + tracked), LSP first to prioritize live files
+            for dep_path in lsp_dependents:
+                if dep_path not in all_dependents:
+                    all_dependents.append(dep_path)
+                    # Flag for review - the source file changed
+                    # This will auto-register the artifact if not already tracked
+                    self._flag_dependent_for_review(dep_path, file_path)
+
+            # Add tracked dependents that weren't found by LSP (may include deleted files)
+            for dep_path in tracked_dependents:
+                if dep_path not in all_dependents:
+                    all_dependents.append(dep_path)
+                    # Flag for review if the file still exists
+                    if os.path.exists(dep_path):
+                        self._flag_dependent_for_review(dep_path, file_path)
+
+        if not all_dependents:
+            self._trace("enrich_tool_result: no dependents found")
+            return ToolResultEnrichmentResult(result=result)
+
+        # Save state after flagging
+        self._save_state()
+
+        # Build enriched result with dependency summary
+        enriched_result = self._append_dependency_summary(result, all_dependents)
+
+        # Build notification for user visibility
+        notification_message = self._format_dependents_message(all_dependents)
+
+        metadata = {
+            "dependents_flagged": all_dependents,
+            "notification": {
+                "message": notification_message
+            }
+        }
+
+        self._trace(f"enrich_tool_result: flagged {len(all_dependents)} dependents")
+        return ToolResultEnrichmentResult(result=enriched_result, metadata=metadata)
+
+    def _extract_file_paths_from_result(
+        self,
+        tool_name: str,
+        result: str
+    ) -> List[str]:
+        """Extract file paths from a tool result.
+
+        Args:
+            tool_name: The tool that produced the result.
+            result: The tool's output as a JSON string.
+
+        Returns:
+            List of file paths that were modified.
+        """
+        self._trace(f"_extract_file_paths: result preview: {result[:200] if len(result) > 200 else result}")
+
+        try:
+            data = json.loads(result)
+        except json.JSONDecodeError as e:
+            self._trace(f"_extract_file_paths: JSON decode error: {e}")
+            return []
+
+        self._trace(f"_extract_file_paths: parsed data type={type(data).__name__}, keys={list(data.keys()) if isinstance(data, dict) else 'N/A'}")
+
+        file_paths = []
+
+        if isinstance(data, dict):
+            # Handle updateFile/writeNewFile: {"path": "...", "success": true}
+            if 'path' in data:
+                file_paths.append(data['path'])
+                self._trace(f"_extract_file_paths: found path={data['path']}")
+
+            # Handle lsp_rename_symbol/lsp_apply_code_action: {"files_modified": [...]}
+            if 'files_modified' in data:
+                file_paths.extend(data['files_modified'])
+                self._trace(f"_extract_file_paths: found files_modified={data['files_modified']}")
+
+            # Also check changes array
+            changes = data.get("changes", [])
+            for change in changes:
+                if isinstance(change, dict) and change.get("file"):
+                    file_paths.append(change["file"])
+
+        self._trace(f"_extract_file_paths: returning {len(file_paths)} paths: {file_paths}")
+        return [_normalize_path(p) for p in file_paths if p]
+
+    def _flag_dependent_for_review(self, dep_path: str, source_path: str) -> None:
+        """Flag a dependent file for review.
+
+        If the file is already tracked as an artifact, flag it for review.
+        If not tracked, auto-register it as an artifact.
+
+        Args:
+            dep_path: Path to the dependent file.
+            source_path: Path to the source file that changed.
+        """
+        dep_path = _normalize_path(dep_path)
+        source_path = _normalize_path(source_path)
+
+        # Check if already tracked
+        artifact = self._registry.get_by_path(dep_path)
+
+        if artifact:
+            # Already tracked - add relationship if not present and flag for review
+            if source_path not in artifact.related_to:
+                artifact.related_to.append(source_path)
+            artifact.mark_for_review(f"Dependency {os.path.basename(source_path)} was modified")
+        else:
+            # Auto-track as a new artifact using factory method
+            artifact = ArtifactRecord.create(
+                path=dep_path,
+                artifact_type=ArtifactType.CODE,
+                description=f"Auto-tracked: depends on {os.path.basename(source_path)}",
+                related_to=[source_path],
+            )
+            artifact.mark_for_review(f"Dependency {os.path.basename(source_path)} was modified")
+            self._registry.add(artifact)
+
+    def _append_dependency_summary(self, result: str, dependents: List[str]) -> str:
+        """Append a dependency summary to the tool result.
+
+        Args:
+            result: The original tool result (JSON string).
+            dependents: List of dependent file paths.
+
+        Returns:
+            Result with dependency summary appended.
+        """
+        # Get basenames for readability
+        names = [os.path.basename(p) for p in dependents]
+
+        if len(names) <= 5:
+            files_str = ", ".join(names)
+        else:
+            files_str = ", ".join(names[:5]) + f" +{len(names) - 5} more"
+
+        summary = f"\n\n[Artifact Tracker: Flagged {len(dependents)} dependent file(s) for review: {files_str}]"
+
+        return result + summary
+
+    def _format_dependents_message(self, dependents: List[str]) -> str:
+        """Format dependents list for notification display.
+
+        Args:
+            dependents: List of dependent file paths.
+
+        Returns:
+            Human-readable message for the notification.
+        """
+        if not dependents:
+            return "no dependents found"
+
+        # Format each dependent, marking non-existent files
+        formatted_names = []
+        for p in dependents:
+            name = os.path.basename(p)
+            exists = os.path.exists(p)
+            self._trace(f"_format_dependents_message: checking {p} exists={exists}")
+            if not exists:
+                name = f"{name} (missing)"
+            formatted_names.append(name)
+
+        if len(formatted_names) <= 4:
+            return f"flagged for review: {', '.join(formatted_names)}"
+        else:
+            shown = ', '.join(formatted_names[:4])
+            return f"flagged for review: {shown} +{len(formatted_names) - 4} more"
 
 
 def create_plugin() -> ArtifactTrackerPlugin:

@@ -30,6 +30,20 @@ FILE_WRITING_TOOLS = {
     'lsp_apply_code_action',
 }
 
+# Symbol kinds that represent exportable/referenceable entities
+# Used by get_file_dependents() to find symbols worth checking for external references
+# See LSP SymbolKind enum: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#symbolKind
+DEPENDENCY_SYMBOL_KINDS = {
+    2,   # Module
+    5,   # Class
+    6,   # Method
+    10,  # Enum
+    11,  # Interface
+    12,  # Function
+    14,  # Constant
+    23,  # Struct
+}
+
 # Mapping of file extensions to language IDs for LSP server matching
 EXT_TO_LANGUAGE = {
     '.py': 'python',
@@ -1035,6 +1049,206 @@ Use 'lsp status' to see connected language servers and their capabilities."""
 
         return "\n".join(lines)
 
+    # ==================== Dependency Discovery ====================
+
+    def get_file_dependents(self, file_path: str) -> List[str]:
+        """Find files that depend on the given file via exported symbols.
+
+        Uses LSP to discover which other files reference symbols defined in
+        this file. This is useful for understanding the impact of changes
+        and tracking related artifacts.
+
+        Algorithm:
+        1. Get all document symbols for the file
+        2. Filter to "exportable" symbol kinds (Class, Function, etc.)
+        3. For each symbol, find all references across the codebase
+        4. Collect and deduplicate the files that contain those references
+
+        Args:
+            file_path: Path to the source file to analyze.
+
+        Returns:
+            List of file paths that depend on (reference) this file.
+            Returns empty list if LSP is not available or file has no
+            exported symbols with external references.
+        """
+        self._trace(f"get_file_dependents: analyzing {file_path}")
+
+        if not self._initialized:
+            self.initialize()
+
+        if not self._connected_servers:
+            self._trace("get_file_dependents: no servers connected")
+            return []
+
+        # Check if file type is supported
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext not in EXT_TO_LANGUAGE:
+            self._trace(f"get_file_dependents: unsupported file type {ext}")
+            return []
+
+        # Ensure all files of the same type in the workspace are indexed
+        # This is needed for find_references to work across files
+        workspace_dir = os.path.dirname(os.path.abspath(file_path))
+        self._trace(f"get_file_dependents: ensuring workspace indexed at {workspace_dir}")
+        self._execute_method('_ensure_workspace_indexed', {
+            'directory': workspace_dir,
+            'extension': ext,  # Pass the file extension to filter by language
+            'file_path': file_path  # Pass file_path so correct LSP server is selected
+        })
+
+        # Get document symbols
+        symbols_result = self._execute_method('document_symbols', {'file_path': file_path})
+        if isinstance(symbols_result, dict) and symbols_result.get("error"):
+            self._trace(f"get_file_dependents: failed to get symbols: {symbols_result['error']}")
+            return []
+
+        if not isinstance(symbols_result, list):
+            self._trace("get_file_dependents: no symbols found")
+            return []
+
+        # Filter to exportable symbol kinds
+        exportable_symbols = [
+            s for s in symbols_result
+            if self._get_symbol_kind_value(s.get('kind', '')) in DEPENDENCY_SYMBOL_KINDS
+        ]
+
+        self._trace(f"get_file_dependents: found {len(exportable_symbols)} exportable symbols")
+
+        if not exportable_symbols:
+            return []
+
+        # Collect all files that reference any of these symbols
+        dependent_files: set = set()
+
+        # Read file content once to check for import lines
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                file_lines = f.readlines()
+        except (IOError, OSError):
+            file_lines = []
+
+        for symbol in exportable_symbols:
+            symbol_name = symbol.get('name', '')
+            if not symbol_name:
+                continue
+
+            # Parse location to get line and character (format: "path:line:character")
+            location = symbol.get('location', '')
+            parts = location.split(':')
+            if len(parts) >= 2:
+                try:
+                    line = int(parts[1]) - 1  # Convert to 0-indexed
+                    # Character position from LSP - may point to start of definition, not symbol name
+                    character = int(parts[2]) if len(parts) >= 3 else 0
+                except (ValueError, IndexError):
+                    continue
+            else:
+                continue
+
+            # Skip imported symbols - they are not defined in this file
+            # Check if the symbol's line is an import statement
+            if 0 <= line < len(file_lines):
+                line_content = file_lines[line].strip()
+                if line_content.startswith('import ') or line_content.startswith('from '):
+                    self._trace(f"get_file_dependents: skipping imported symbol '{symbol_name}' (line: {line_content[:50]})")
+                    continue
+
+            # For SymbolInformation format, the character position often points to the
+            # start of the entire definition (e.g., "def" in "def hello():") rather than
+            # the symbol name. We need to find the actual position of the symbol name.
+            character = self._find_symbol_name_in_line(file_path, line, symbol_name, character)
+
+            self._trace(f"get_file_dependents: checking references for {symbol_name} at line {line}, char {character}")
+
+            # Find references to this symbol
+            refs_result = self._execute_method('find_references', {
+                'file_path': file_path,
+                'line': line,
+                'character': character,
+                'include_declaration': False  # Skip the definition itself
+            })
+
+            self._trace(f"get_file_dependents: find_references for {symbol_name} returned: {type(refs_result).__name__}, value={refs_result}")
+
+            if isinstance(refs_result, dict) and refs_result.get("error"):
+                # No references found is not an error for our purposes
+                self._trace(f"get_file_dependents: find_references error: {refs_result.get('error')}")
+                continue
+
+            if isinstance(refs_result, list):
+                self._trace(f"get_file_dependents: find_references returned {len(refs_result)} references")
+                for ref in refs_result:
+                    ref_file = ref.get('file', '')
+                    self._trace(f"get_file_dependents: ref_file={ref_file}")
+                    if ref_file and ref_file != file_path:
+                        dependent_files.add(ref_file)
+
+        self._trace(f"get_file_dependents: found {len(dependent_files)} dependent files")
+        return list(dependent_files)
+
+    def _get_symbol_kind_value(self, kind_name: str) -> int:
+        """Convert a symbol kind name back to its numeric value.
+
+        Args:
+            kind_name: Human-readable kind name (e.g., 'Function', 'Class').
+
+        Returns:
+            The LSP SymbolKind numeric value, or 0 if not recognized.
+        """
+        kind_map = {
+            "File": 1, "Module": 2, "Namespace": 3, "Package": 4,
+            "Class": 5, "Method": 6, "Property": 7, "Field": 8,
+            "Constructor": 9, "Enum": 10, "Interface": 11, "Function": 12,
+            "Variable": 13, "Constant": 14, "String": 15, "Number": 16,
+            "Boolean": 17, "Array": 18, "Object": 19, "Key": 20,
+            "Null": 21, "EnumMember": 22, "Struct": 23, "Event": 24,
+            "Operator": 25, "TypeParameter": 26
+        }
+        return kind_map.get(kind_name, 0)
+
+    def _find_symbol_name_in_line(
+        self,
+        file_path: str,
+        line_num: int,
+        symbol_name: str,
+        default_char: int
+    ) -> int:
+        """Find the character position of a symbol name within a specific line.
+
+        For SymbolInformation format, the LSP range often covers the entire
+        definition (e.g., the whole "def hello():" line) rather than just
+        the symbol name. This method finds where the symbol name actually
+        appears in the line.
+
+        Args:
+            file_path: Path to the source file.
+            line_num: 0-indexed line number.
+            symbol_name: Name of the symbol to find.
+            default_char: Default character position to return if not found.
+
+        Returns:
+            The 0-indexed character position of the symbol name in the line.
+        """
+        import re
+
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                lines = f.readlines()
+
+            if 0 <= line_num < len(lines):
+                line_content = lines[line_num]
+                # Search for symbol name as a word boundary match
+                pattern = re.compile(r'\b' + re.escape(symbol_name) + r'\b')
+                match = pattern.search(line_content)
+                if match:
+                    self._trace(f"_find_symbol_name_in_line: found '{symbol_name}' at char {match.start()} (was {default_char})")
+                    return match.start()
+        except (IOError, OSError) as e:
+            self._trace(f"_find_symbol_name_in_line: error reading {file_path}: {e}")
+
+        return default_char
+
     def get_user_commands(self) -> List[UserCommand]:
         return [
             UserCommand(
@@ -1325,6 +1539,15 @@ Example:
                         self._config_cache = json.load(f)
                     self._config_path = path
                     self._log_event(LOG_INFO, f"Loaded config from {path}")
+                    # Debug: write directly to a known file
+                    import tempfile
+                    debug_path = os.path.join(tempfile.gettempdir(), "lsp_debug.log")
+                    with open(debug_path, "a") as df:
+                        df.write(f"[LSP] Config loaded from: {path}\n")
+                        servers = self._config_cache.get('languageServers', {})
+                        for name, spec in servers.items():
+                            df.write(f"[LSP]   Server '{name}': command={spec.get('command')}, args={spec.get('args', [])}\n")
+                        df.flush()
                     return
                 except Exception as e:
                     self._log_event(LOG_WARN, f"Failed to load {path}: {e}")
@@ -1371,7 +1594,9 @@ Example:
                         env=spec.get('env'),
                         root_uri=spec.get('rootUri'),
                         language_id=spec.get('languageId'),
+                        extra_paths_key=spec.get('extraPathsKey'),
                     )
+                    self._trace(f"Starting LSP server '{name}': command={config.command}, args={config.args}")
                     client = LSPClient(config, errlog=self._errlog)
                     await asyncio.wait_for(client.start(), timeout=15.0)
                     self._clients[name] = client
@@ -1630,9 +1855,10 @@ Example:
         # get_diagnostics also needs time for server to analyze and publish diagnostics
         needs_parsing = method in ('hover', 'document_symbols', 'goto_definition', 'find_references', 'get_diagnostics')
 
-        # Ensure document is open if needed
+        # Ensure document is open and up-to-date
+        # update_document opens if not open, or sends didChange if already open
         if file_path and method not in ('workspace_symbols',):
-            await client.open_document(file_path)
+            await client.update_document(file_path)
             # Wait for server to process the document
             # Longer delay for operations that need full parsing/diagnostics
             await asyncio.sleep(0.8 if needs_parsing else 0.2)
@@ -1671,18 +1897,33 @@ Example:
             diagnostics = client.get_diagnostics(file_path)
             return self._format_diagnostics(diagnostics)
 
+        elif method == '_ensure_workspace_indexed':
+            # Internal method to index all files of a type in a directory
+            directory = args.get('directory', '')
+            extension = args.get('extension')
+            if directory:
+                # Pass extension as a list if provided
+                extensions = [extension] if extension else None
+                extra_paths_info = f" (extraPathsKey={client.config.extra_paths_key})" if client.config.extra_paths_key else ""
+                self._trace(f"_ensure_workspace_indexed: indexing [{directory}] for {client.config.language_id}{extra_paths_info}")
+                await client.ensure_workspace_indexed(directory, extensions)
+                # Note: ensure_workspace_indexed now includes appropriate delays
+                # for jedi to process file notifications and analyze documents
+            return {"success": True}
+
         elif method == 'document_symbols':
             symbols = await client.get_document_symbols(file_path)
             if not symbols:
                 return {"error": self._build_empty_result_error(file_path, "No symbols found", f" in {file_path}")}
-            return [
-                {
+            result = []
+            for s in symbols:
+                self._trace(f"document_symbols: {s.name} location.range.start = line {s.location.range.start.line}, char {s.location.range.start.character}")
+                result.append({
                     "name": s.name,
                     "kind": s.kind_name,
-                    "location": f"{self._uri_to_path(s.location.uri)}:{s.location.range.start.line + 1}"
-                }
-                for s in symbols
-            ]
+                    "location": f"{self._uri_to_path(s.location.uri)}:{s.location.range.start.line + 1}:{s.location.range.start.character}"
+                })
+            return result
 
         elif method == 'workspace_symbols':
             query = args['query']

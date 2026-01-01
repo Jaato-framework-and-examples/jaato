@@ -424,6 +424,14 @@ class RichClient:
         self.registry.expose_all(plugin_configs)
         self.todo_plugin = self.registry.get_plugin("todo")
 
+        # Wire up artifact tracker with registry for cross-plugin access (LSP integration)
+        artifact_tracker = self.registry.get_plugin("artifact_tracker")
+        if artifact_tracker and hasattr(artifact_tracker, 'set_plugin_registry'):
+            artifact_tracker.set_plugin_registry(self.registry)
+            self.log(f"[plugin] artifact_tracker wired with registry (LSP integration enabled)")
+        else:
+            self.log(f"[plugin] artifact_tracker not found or missing set_plugin_registry - LSP integration disabled")
+
         # Initialize permission plugin with queue channel for TUI integration
         self.permission_plugin = PermissionPlugin()
         self.permission_plugin.initialize({

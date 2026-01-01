@@ -254,6 +254,7 @@
                 <li><a href="#configuration">Configuration</a></li>
                 <li><a href="#tools">Tools</a></li>
                 <li><a href="#refactoring">Refactoring</a></li>
+                <li><a href="#integration">Integration</a></li>
                 <li><a href="#commands">Commands</a></li>
                 <li><a href="#servers">Language Servers</a></li>
             </ul>
@@ -454,7 +455,53 @@ return result
                     <td>boolean</td>
                     <td>Connect on plugin initialization (default: true)</td>
                 </tr>
+                <tr>
+                    <td><code>extraPathsKey</code></td>
+                    <td>string</td>
+                    <td>Server-specific settings key for module resolution paths (e.g., <code>pylsp.plugins.jedi.extra_paths</code>)</td>
+                </tr>
             </table>
+
+            <h3>Cross-File Reference Support</h3>
+            <p>
+                For <code>find_references</code> to work across multiple files (essential for dependency tracking),
+                the LSP client implements several mechanisms:
+            </p>
+            <table>
+                <tr>
+                    <th>Mechanism</th>
+                    <th>LSP Notification</th>
+                    <th>Purpose</th>
+                </tr>
+                <tr>
+                    <td><strong>Workspace Folders</strong></td>
+                    <td>Sent in <code>initialize</code></td>
+                    <td>Registers initial workspace for server to index</td>
+                </tr>
+                <tr>
+                    <td><strong>Dynamic Folders</strong></td>
+                    <td><code>workspace/didChangeWorkspaceFolders</code></td>
+                    <td>Adds new directories when opening files outside initial workspace</td>
+                </tr>
+                <tr>
+                    <td><strong>Extra Paths</strong></td>
+                    <td><code>workspace/didChangeConfiguration</code></td>
+                    <td>Configures server-specific module resolution (via <code>extraPathsKey</code>)</td>
+                </tr>
+                <tr>
+                    <td><strong>Document Tracking</strong></td>
+                    <td><code>textDocument/didOpen</code>, <code>didChange</code>, etc.</td>
+                    <td>Keeps server aware of file contents and changes</td>
+                </tr>
+            </table>
+
+            <div class="note">
+                <div class="note-title">Python Configuration</div>
+                <p>
+                    For Python with pylsp/Jedi, set <code>"extraPathsKey": "pylsp.plugins.jedi.extra_paths"</code>.<br>
+                    For pyright, use <code>"extraPathsKey": "python.analysis.extraPaths"</code>.
+                </p>
+            </div>
         </section>
 
         <section id="tools">
@@ -604,6 +651,117 @@ return result
                 <p>
                     Symbol-based tools automatically locate symbols in your codebase. If a symbol appears
                     in multiple files, provide the optional <code>file_path</code> parameter to disambiguate.
+                </p>
+            </div>
+        </section>
+
+        <section id="integration">
+            <h2>Plugin Integration API</h2>
+            <p>
+                The LSP plugin exposes methods that other plugins can use for cross-plugin integration,
+                enabling features like automatic dependency discovery.
+            </p>
+
+            <h3>get_file_dependents(file_path)</h3>
+            <p>
+                Find all files that depend on (reference) a given file. This is useful for understanding
+                the impact of changes before modifying code.
+            </p>
+            <pre><code># Get the LSP plugin from registry
+lsp_plugin = registry.get_plugin("lsp")
+
+# Find files that import/reference api.py
+dependents = lsp_plugin.get_file_dependents("/path/to/api.py")
+# Returns: ["/path/to/handler.py", "/path/to/tests/test_api.py", ...]</code></pre>
+
+            <h3>How It Works</h3>
+            <table>
+                <tr>
+                    <th>Step</th>
+                    <th>LSP Method</th>
+                    <th>Purpose</th>
+                </tr>
+                <tr>
+                    <td>1</td>
+                    <td><code>textDocument/documentSymbol</code></td>
+                    <td>Get all symbols defined in the file</td>
+                </tr>
+                <tr>
+                    <td>2</td>
+                    <td>Filter</td>
+                    <td>Keep exportable kinds: Class, Function, Method, Enum, Interface, Constant, Struct</td>
+                </tr>
+                <tr>
+                    <td>3</td>
+                    <td><code>textDocument/references</code></td>
+                    <td>For each symbol, find all references across the workspace</td>
+                </tr>
+                <tr>
+                    <td>4</td>
+                    <td>Deduplicate</td>
+                    <td>Return unique list of files containing those references</td>
+                </tr>
+            </table>
+
+            <h3>Artifact Tracker Integration</h3>
+            <p>
+                The <strong>artifact_tracker</strong> plugin uses this method to automatically discover
+                dependencies when files are modified. When you edit a file, dependent files are flagged for review.
+            </p>
+
+            <div class="diagram">
+<pre>
+File A.py modified via updateFile
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  LSP Plugin (priority 30)                                    │
+│  • Runs diagnostics on modified file                         │
+│  • Notification: "checked A.py, no issues found"             │
+└─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Artifact Tracker (priority 50)                              │
+│  • Calls lsp.get_file_dependents("A.py")                     │
+│  • Also checks tracked artifact relationships                │
+│  • Discovers: B.py, C.py import from A.py                    │
+│  • Flags dependent files for review                          │
+│  • Notification: "flagged for review: B.py, C.py"            │
+└─────────────────────────────────────────────────────────────┘
+</pre>
+            </div>
+
+            <h3>Dual-Source Dependency Discovery</h3>
+            <p>
+                The artifact tracker uses <strong>two sources</strong> to find dependents, ensuring
+                no dependency is missed:
+            </p>
+            <table>
+                <tr>
+                    <th>Source</th>
+                    <th>Purpose</th>
+                    <th>Finds</th>
+                </tr>
+                <tr>
+                    <td><strong>LSP</strong></td>
+                    <td>Real-time code analysis</td>
+                    <td>New files that import/reference the modified file</td>
+                </tr>
+                <tr>
+                    <td><strong>Artifact Registry</strong></td>
+                    <td>Tracked relationships</td>
+                    <td>Previously known dependents, including deleted files</td>
+                </tr>
+            </table>
+
+            <div class="note">
+                <div class="note-title">Missing File Detection</div>
+                <p>
+                    If a previously tracked dependent file has been deleted, it appears with a
+                    <code>(missing)</code> marker in the notification:
+                    <br><br>
+                    <code>artifact_tracker: flagged for review: test_api.py, old_handler.py (missing)</code>
                 </p>
             </div>
         </section>
