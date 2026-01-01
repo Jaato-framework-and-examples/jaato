@@ -367,6 +367,7 @@ class LSPClient:
         self._diagnostics: Dict[str, List[Diagnostic]] = {}  # uri -> diagnostics
         self._open_documents: Dict[str, int] = {}  # uri -> version
         self._configured_extra_paths: Set[str] = set()  # paths already sent to server
+        self._workspace_folders: Set[str] = set()  # workspace folder URIs added
 
     async def start(self) -> None:
         """Start the language server process."""
@@ -413,6 +414,15 @@ class LSPClient:
     async def _initialize(self) -> None:
         """Send initialize request to server."""
         root_uri = self.config.root_uri or f"file://{os.getcwd()}"
+        workspace_name = os.path.basename(root_uri.replace("file://", "")) or "workspace"
+
+        # Log initialization for debugging
+        import tempfile
+        debug_path = os.path.join(tempfile.gettempdir(), "lsp_debug.log")
+        with open(debug_path, "a") as df:
+            df.write(f"[LSP] _initialize: server={self.config.name}, rootUri={root_uri}\n")
+            df.write(f"[LSP] _initialize: cwd={os.getcwd()}\n")
+            df.flush()
 
         params = {
             "processId": os.getpid(),
@@ -427,13 +437,20 @@ class LSPClient:
                     "publishDiagnostics": {"relatedInformation": True}
                 },
                 "workspace": {
-                    "symbol": {}
+                    "symbol": {},
+                    "workspaceFolders": True,
+                    "didChangeConfiguration": {"dynamicRegistration": False},
+                    "didChangeWatchedFiles": {"dynamicRegistration": False}
                 }
-            }
+            },
+            "workspaceFolders": [{"uri": root_uri, "name": workspace_name}]
         }
 
         result = await self._send_request("initialize", params)
         self._capabilities = ServerCapabilities.from_dict(result.get("capabilities", {}))
+
+        # Track the initial workspace folder
+        self._workspace_folders.add(root_uri)
 
         # Send initialized notification
         await self._send_notification("initialized", {})
@@ -568,6 +585,9 @@ class LSPClient:
         directory = os.path.dirname(os.path.abspath(path))
         await self.configure_extra_paths([directory])
 
+        # Add directory as workspace folder for better cross-file indexing
+        await self.add_workspace_folder(directory)
+
         # Notify server about new file existence BEFORE opening
         # This is important for servers like pylsp/jedi to track cross-file references
         await self._send_notification("workspace/didChangeWatchedFiles", {
@@ -693,6 +713,35 @@ class LSPClient:
         current[key_parts[-1]] = all_paths
 
         await self.update_configuration(settings)
+
+    async def add_workspace_folder(self, directory: str) -> None:
+        """Add a directory as a workspace folder.
+
+        This is useful when working with files outside the original rootUri.
+        Some servers like pylsp need workspace folders to properly index cross-file references.
+        """
+        uri = self.uri_from_path(directory)
+        name = os.path.basename(directory) or "workspace"
+
+        # Log the addition for debugging
+        import tempfile
+        debug_path = os.path.join(tempfile.gettempdir(), "lsp_debug.log")
+        with open(debug_path, "a") as df:
+            df.write(f"[LSP] add_workspace_folder: uri={uri}, name={name}\n")
+            df.flush()
+
+        # Track added workspace folders to avoid duplicates
+        if uri in self._workspace_folders:
+            return
+
+        self._workspace_folders.add(uri)
+
+        await self._send_notification("workspace/didChangeWorkspaceFolders", {
+            "event": {
+                "added": [{"uri": uri, "name": name}],
+                "removed": []
+            }
+        })
 
     async def ensure_workspace_indexed(self, directory: str, extensions: Optional[List[str]] = None) -> None:
         """Open all files of supported types in a directory to ensure they're indexed.
@@ -827,7 +876,22 @@ class LSPClient:
             "context": {"includeDeclaration": include_declaration}
         }
 
+        # Log find_references request for debugging
+        import tempfile
+        debug_path = os.path.join(tempfile.gettempdir(), "lsp_debug.log")
+        with open(debug_path, "a") as df:
+            df.write(f"[LSP] find_references: path={path}, line={line}, char={character}\n")
+            df.write(f"[LSP] find_references: uri={uri}\n")
+            df.write(f"[LSP] find_references: open_documents={list(self._open_documents.keys())}\n")
+            df.flush()
+
         result = await self._send_request("textDocument/references", params)
+
+        # Log result
+        with open(debug_path, "a") as df:
+            df.write(f"[LSP] find_references: result={result}\n")
+            df.flush()
+
         if result is None:
             return []
         return [Location.from_dict(loc) for loc in result]
