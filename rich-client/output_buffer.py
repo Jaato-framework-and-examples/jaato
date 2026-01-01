@@ -130,8 +130,8 @@ class OutputBuffer:
         self._keybinding_config: Optional[Any] = None
         # Pending enrichment notifications (queued while tools are active)
         self._pending_enrichments: List[Tuple[str, str, str]] = []  # (source, text, mode)
-        # Output formatter for syntax highlighting (optional)
-        self._output_formatter: Optional[Any] = None
+        # Formatter pipeline for output processing (optional)
+        self._formatter_pipeline: Optional[Any] = None
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -141,9 +141,9 @@ class OutputBuffer:
         """
         self._console_width = width
         self._measure_console = Console(width=width, force_terminal=True)
-        # Sync width with output formatter if set
-        if self._output_formatter and hasattr(self._output_formatter, 'set_console_width'):
-            self._output_formatter.set_console_width(width)
+        # Sync width with formatter pipeline if set
+        if self._formatter_pipeline and hasattr(self._formatter_pipeline, 'set_console_width'):
+            self._formatter_pipeline.set_console_width(width)
 
     def set_keybinding_config(self, config: Any) -> None:
         """Set the keybinding config for dynamic UI hints.
@@ -153,16 +153,21 @@ class OutputBuffer:
         """
         self._keybinding_config = config
 
-    def set_output_formatter(self, formatter: Any) -> None:
-        """Set the output formatter for syntax highlighting code blocks.
+    def set_formatter_pipeline(self, pipeline: Any) -> None:
+        """Set the formatter pipeline for output processing.
 
         Args:
-            formatter: OutputFormatterPlugin instance or None to disable.
+            pipeline: FormatterPipeline instance or None to disable.
         """
-        self._output_formatter = formatter
-        # Sync console width with formatter if it has the method
-        if formatter and hasattr(formatter, 'set_console_width'):
-            formatter.set_console_width(self._console_width)
+        self._formatter_pipeline = pipeline
+        # Sync console width with pipeline if it has the method
+        if pipeline and hasattr(pipeline, 'set_console_width'):
+            pipeline.set_console_width(self._console_width)
+
+    # Legacy alias for backwards compatibility
+    def set_output_formatter(self, formatter: Any) -> None:
+        """Deprecated: Use set_formatter_pipeline instead."""
+        self.set_formatter_pipeline(formatter)
 
     def _format_key_hint(self, action: str) -> str:
         """Format a keybinding for display in UI hints.
@@ -372,10 +377,10 @@ class OutputBuffer:
             # Then split by newlines for display
             full_text = ''.join(parts)
 
-            # Apply output formatter for model output with code blocks
-            if source == "model" and self._output_formatter:
-                if hasattr(self._output_formatter, 'format_output'):
-                    full_text = self._output_formatter.format_output(full_text)
+            # Apply formatter pipeline for model output
+            if source == "model" and self._formatter_pipeline:
+                if hasattr(self._formatter_pipeline, 'format'):
+                    full_text = self._formatter_pipeline.format(full_text)
 
             lines = full_text.split('\n')
             for i, line in enumerate(lines):
@@ -397,11 +402,11 @@ class OutputBuffer:
         # Concatenate streaming chunks directly (no separator)
         full_text = ''.join(parts)
 
-        # Apply output formatter for model output with code blocks
+        # Apply formatter pipeline for model output
         # This handles complete code blocks during streaming
-        if source == "model" and self._output_formatter:
-            if hasattr(self._output_formatter, 'format_output'):
-                full_text = self._output_formatter.format_output(full_text)
+        if source == "model" and self._formatter_pipeline:
+            if hasattr(self._formatter_pipeline, 'format'):
+                full_text = self._formatter_pipeline.format(full_text)
 
         lines_text = full_text.split('\n')
 
