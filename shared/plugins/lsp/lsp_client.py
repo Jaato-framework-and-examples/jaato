@@ -416,14 +416,6 @@ class LSPClient:
         root_uri = self.config.root_uri or f"file://{os.getcwd()}"
         workspace_name = os.path.basename(root_uri.replace("file://", "")) or "workspace"
 
-        # Log initialization for debugging
-        import tempfile
-        debug_path = os.path.join(tempfile.gettempdir(), "lsp_debug.log")
-        with open(debug_path, "a") as df:
-            df.write(f"[LSP] _initialize: server={self.config.name}, rootUri={root_uri}\n")
-            df.write(f"[LSP] _initialize: cwd={os.getcwd()}\n")
-            df.flush()
-
         params = {
             "processId": os.getpid(),
             "rootUri": root_uri,
@@ -666,14 +658,6 @@ class LSPClient:
         Args:
             settings: The settings object to send to the server.
         """
-        # Log the configuration being sent for debugging
-        import json
-        import tempfile
-        debug_path = os.path.join(tempfile.gettempdir(), "lsp_debug.log")
-        with open(debug_path, "a") as df:
-            df.write(f"[LSP] update_configuration: {json.dumps(settings, indent=2)}\n")
-            df.flush()
-
         await self._send_notification("workspace/didChangeConfiguration", {
             "settings": settings
         })
@@ -722,13 +706,6 @@ class LSPClient:
         """
         uri = self.uri_from_path(directory)
         name = os.path.basename(directory) or "workspace"
-
-        # Log the addition for debugging
-        import tempfile
-        debug_path = os.path.join(tempfile.gettempdir(), "lsp_debug.log")
-        with open(debug_path, "a") as df:
-            df.write(f"[LSP] add_workspace_folder: uri={uri}, name={name}\n")
-            df.flush()
 
         # Track added workspace folders to avoid duplicates
         if uri in self._workspace_folders:
@@ -784,22 +761,8 @@ class LSPClient:
             pattern = os.path.join(directory, "**", f"*{ext}")
             all_files.extend(glob.glob(pattern, recursive=True))
 
-        # Log files being indexed for debugging
-        import tempfile
-        debug_path = os.path.join(tempfile.gettempdir(), "lsp_debug.log")
-        with open(debug_path, "a") as df:
-            df.write(f"[LSP] ensure_workspace_indexed: directory={directory}, extensions={extensions}\n")
-            df.write(f"[LSP] ensure_workspace_indexed: found {len(all_files)} files: {all_files}\n")
-            df.flush()
-
         # Find files that aren't already open - these are "new" to the LSP server
         new_files = [f for f in all_files if self.uri_from_path(f) not in self._open_documents]
-
-        # Log debug info
-        with open(debug_path, "a") as df:
-            df.write(f"[LSP] ensure_workspace_indexed: already open: {list(self._open_documents.keys())}\n")
-            df.write(f"[LSP] ensure_workspace_indexed: new_files: {new_files}\n")
-            df.flush()
 
         # Open files that aren't already open
         # open_document handles: configure_extra_paths, didChangeWatchedFiles, didOpen
@@ -876,22 +839,7 @@ class LSPClient:
             "context": {"includeDeclaration": include_declaration}
         }
 
-        # Log find_references request for debugging
-        import tempfile
-        debug_path = os.path.join(tempfile.gettempdir(), "lsp_debug.log")
-        with open(debug_path, "a") as df:
-            df.write(f"[LSP] find_references: path={path}, line={line}, char={character}\n")
-            df.write(f"[LSP] find_references: uri={uri}\n")
-            df.write(f"[LSP] find_references: open_documents={list(self._open_documents.keys())}\n")
-            df.flush()
-
         result = await self._send_request("textDocument/references", params)
-
-        # Log result
-        with open(debug_path, "a") as df:
-            df.write(f"[LSP] find_references: result={result}\n")
-            df.flush()
-
         if result is None:
             return []
         return [Location.from_dict(loc) for loc in result]
