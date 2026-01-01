@@ -158,6 +158,34 @@ Create `.lsp.json` in your project root or home directory:
 | `env` | object | Additional environment variables |
 | `rootUri` | string | Workspace root URI (defaults to cwd) |
 | `autoConnect` | boolean | Connect on plugin initialization (default: true) |
+| `extraPathsKey` | string | Settings key for extra module paths (for dependency tracking) |
+
+### Extra Paths Configuration
+
+For cross-file dependency tracking to work, the LSP server needs to know about
+additional module paths. Configure this using `extraPathsKey` with the server-specific
+settings key:
+
+```json
+{
+  "languageServers": {
+    "python": {
+      "command": "pylsp",
+      "languageId": "python",
+      "extraPathsKey": "pylsp.plugins.jedi.extra_paths"
+    },
+    "python-pyright": {
+      "command": "pyright-langserver",
+      "args": ["--stdio"],
+      "languageId": "python",
+      "extraPathsKey": "python.analysis.extraPaths"
+    }
+  }
+}
+```
+
+When analyzing file dependencies, the plugin sends a `workspace/didChangeConfiguration`
+notification with the configured key to tell the server about the workspace paths.
 
 ### Configuration Search Order
 

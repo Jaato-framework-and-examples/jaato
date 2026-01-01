@@ -1585,6 +1585,7 @@ Example:
                         env=spec.get('env'),
                         root_uri=spec.get('rootUri'),
                         language_id=spec.get('languageId'),
+                        extra_paths_key=spec.get('extraPathsKey'),
                     )
                     client = LSPClient(config, errlog=self._errlog)
                     await asyncio.wait_for(client.start(), timeout=15.0)
@@ -1892,10 +1893,11 @@ Example:
             if directory:
                 # Pass extension as a list if provided
                 extensions = [extension] if extension else None
-                self._trace(f"_ensure_workspace_indexed: configuring extra_paths=[{directory}] for {client.config.language_id}")
+                extra_paths_info = f" (extraPathsKey={client.config.extra_paths_key})" if client.config.extra_paths_key else ""
+                self._trace(f"_ensure_workspace_indexed: indexing [{directory}] for {client.config.language_id}{extra_paths_info}")
                 await client.ensure_workspace_indexed(directory, extensions)
                 # Give the LSP server time to process config and re-analyze files
-                # pylsp/Jedi needs time to analyze cross-file imports after:
+                # LSP servers need time to analyze cross-file imports after:
                 # 1. Configuration update (extra_paths)
                 # 2. Documents being closed and reopened
                 await asyncio.sleep(2.0)
