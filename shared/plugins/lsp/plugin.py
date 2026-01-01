@@ -1121,6 +1121,13 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         # Collect all files that reference any of these symbols
         dependent_files: set = set()
 
+        # Read file content once to check for import lines
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                file_lines = f.readlines()
+        except (IOError, OSError):
+            file_lines = []
+
         for symbol in exportable_symbols:
             symbol_name = symbol.get('name', '')
             if not symbol_name:
@@ -1138,6 +1145,14 @@ Use 'lsp status' to see connected language servers and their capabilities."""
                     continue
             else:
                 continue
+
+            # Skip imported symbols - they are not defined in this file
+            # Check if the symbol's line is an import statement
+            if 0 <= line < len(file_lines):
+                line_content = file_lines[line].strip()
+                if line_content.startswith('import ') or line_content.startswith('from '):
+                    self._trace(f"get_file_dependents: skipping imported symbol '{symbol_name}' (line: {line_content[:50]})")
+                    continue
 
             # For SymbolInformation format, the character position often points to the
             # start of the entire definition (e.g., "def" in "def hello():") rather than
