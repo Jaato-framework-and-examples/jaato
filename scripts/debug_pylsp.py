@@ -226,18 +226,10 @@ async def main():
     for f in py_files:
         await client.notify_file_created(str(f))
 
-    # Wait a bit
-    print("\n5. Waiting 2s for jedi to process...")
-    await asyncio.sleep(2.0)
-
     # Open all documents
-    print("\n6. Opening documents...")
+    print("\n5. Opening documents...")
     for f in py_files:
         await client.open_document(str(f))
-
-    # Wait more
-    print("\n7. Waiting 3s for jedi to analyze...")
-    await asyncio.sleep(3.0)
 
     # Find lib.py
     lib_py = None
@@ -247,7 +239,7 @@ async def main():
             break
 
     if lib_py:
-        print(f"\n8. Getting symbols from {lib_py.name}...")
+        print(f"\n6. Getting symbols from {lib_py.name}...")
         symbols = await client.get_document_symbols(str(lib_py))
         print(f"  Found {len(symbols)} symbols:")
         for s in symbols:
@@ -259,7 +251,7 @@ async def main():
             print(f"    - {name} (kind={kind}) at line {line}, char {char}")
 
         # Try find_references for each symbol
-        print(f"\n9. Testing find_references for each symbol...")
+        print(f"\n7. Testing find_references for each symbol...")
         for s in symbols:
             name = s.get("name", "?")
             loc = s.get("location", {}).get("range", {}).get("start", {})
@@ -286,7 +278,7 @@ async def main():
         print("\n  No lib.py found, skipping symbol test")
 
     # Stop
-    print("\n10. Stopping pylsp...")
+    print("\n8. Stopping pylsp...")
     await client.stop()
     print("\nDone!")
 
