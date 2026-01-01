@@ -43,9 +43,10 @@ FILE_WRITING_TOOLS = {
 
 
 def _normalize_path(path: str) -> str:
-    """Normalize a path to prevent duplicates.
+    """Normalize a path to absolute path to prevent duplicates.
 
     Handles:
+    - Converts relative paths to absolute paths
     - Removes leading ./
     - Normalizes path separators
     - Removes trailing slashes (except for root)
@@ -55,18 +56,16 @@ def _normalize_path(path: str) -> str:
         path: The path to normalize
 
     Returns:
-        Normalized path string
+        Normalized absolute path string
     """
     if not path:
         return path
 
-    # Use os.path.normpath to handle .., redundant separators, etc.
-    normalized = os.path.normpath(path)
+    # Convert to absolute path first to ensure consistency
+    abs_path = os.path.abspath(path)
 
-    # normpath keeps leading ./ as just the path, but we want consistency
-    # Also handle the case where path starts with ./
-    if normalized == '.':
-        return '.'
+    # Use os.path.normpath to handle .., redundant separators, etc.
+    normalized = os.path.normpath(abs_path)
 
     return normalized
 
