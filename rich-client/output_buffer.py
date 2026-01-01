@@ -2096,13 +2096,12 @@ class OutputBuffer:
                             output.append("\n")
                             padding = box_width - len(display_line) - 4
                             output.append(f"  {continuation}     │ ", style="dim")
-                            # Color diff lines appropriately
-                            if display_line.startswith('+') and not display_line.startswith('+++'):
-                                output.append(display_line, style="green")
-                            elif display_line.startswith('-') and not display_line.startswith('---'):
-                                output.append(display_line, style="red")
-                            elif display_line.startswith('@@'):
-                                output.append(display_line, style="cyan")
+                            # Color diff lines via formatter pipeline or fallback
+                            if tool.permission_format_hint == "diff" and self._formatter_pipeline:
+                                formatted_line = self._formatter_pipeline.format(
+                                    display_line, format_hint="diff"
+                                )
+                                output.append_text(Text.from_ansi(formatted_line))
                             # Color options line (contains [y]es, [n]o, etc.)
                             elif display_line.strip().startswith('[') and ']' in display_line:
                                 output.append(display_line, style="cyan")
