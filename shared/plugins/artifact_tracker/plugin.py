@@ -1072,8 +1072,6 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         self._trace(f"enrich_tool_result: analyzing dependencies for {file_paths}")
 
         # Collect all dependents across all modified files
-        # Only include dependents that are already tracked artifacts in this session
-        # This avoids flagging stale files from previous sessions that LSP still has indexed
         all_dependents: List[str] = []
 
         for file_path in file_paths:
@@ -1081,15 +1079,16 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             self._trace(f"enrich_tool_result: {file_path} has {len(dependents)} dependents from LSP")
 
             for dep_path in dependents:
-                # Only flag if this dependent is a tracked artifact in the current session
-                if not self._registry or not self._registry.get_by_path(dep_path):
-                    self._trace(f"enrich_tool_result: skipping {dep_path} - not a tracked artifact")
+                # Only skip if the file doesn't actually exist (stale LSP index)
+                if not os.path.exists(dep_path):
+                    self._trace(f"enrich_tool_result: skipping {dep_path} - file doesn't exist")
                     continue
 
                 if dep_path not in all_dependents:
                     all_dependents.append(dep_path)
 
                     # Flag for review - the source file changed
+                    # This will auto-register the artifact if not already tracked
                     self._flag_dependent_for_review(dep_path, file_path)
 
         if not all_dependents:
