@@ -120,7 +120,7 @@ class LSPClient:
         await self.send_notification("initialized", {})
         return result
 
-    async def open_document(self, path: str):
+    async def open_document(self, path: str, version: int = 1):
         """Open a document."""
         uri = Path(path).as_uri()
         with open(path, "r") as f:
@@ -129,11 +129,22 @@ class LSPClient:
             "textDocument": {
                 "uri": uri,
                 "languageId": "python",
-                "version": 1,
+                "version": version,
                 "text": content,
             }
         })
         print(f"  Opened: {path}")
+
+    async def update_document(self, path: str, version: int):
+        """Notify about document change (simulates updateFile tool)."""
+        uri = Path(path).as_uri()
+        with open(path, "r") as f:
+            content = f.read()
+        await self.send_notification("textDocument/didChange", {
+            "textDocument": {"uri": uri, "version": version},
+            "contentChanges": [{"text": content}]
+        })
+        print(f"  Updated: {path} (version {version})")
 
     async def configure_extra_paths(self, paths: list):
         """Send extra_paths configuration."""
@@ -262,18 +273,50 @@ hello()
     await client.notify_file_created(str(main_py))
     await client.open_document(str(main_py))
 
-    # TEST 2: find_references AFTER main.py exists
-    print(f"\n7. Testing find_references AFTER main.py exists...")
+    # TEST 2: find_references AFTER main.py exists (but without updating lib.py)
+    print(f"\n7. Testing find_references AFTER main.py exists (no lib.py update)...")
     for s in symbols:
         name = s.get("name", "?")
         loc = s.get("location", {}).get("range", {}).get("start", {})
         line = loc.get("line", 0)
-        char = loc.get("character", 0)
+        char = 4 if loc.get("character", 0) == 0 else loc.get("character", 0)
+        refs = await client.find_references(str(lib_py), line, char)
+        if refs:
+            print(f"    {name}: found {len(refs)} references!")
+            for ref in refs:
+                ref_uri = ref.get("uri", "")
+                ref_range = ref.get("range", {}).get("start", {})
+                ref_line = ref_range.get("line", 0)
+                ref_char = ref_range.get("character", 0)
+                print(f"      - {os.path.basename(ref_uri)}:{ref_line+1}:{ref_char}")
+        else:
+            print(f"    {name}: NO REFERENCES FOUND")
 
-        # Adjust char to point to the symbol name (after 'def ')
-        if char == 0:
-            char = 4  # 'def ' is 4 chars
+    # TEST 3: Update lib.py and test find_references (this is the real use case!)
+    lib_content_v2 = '''def hello():
+    print("Hello World!")  # Modified
 
+def goodbye():
+    print("Goodbye")
+
+def new_function():
+    print("New!")
+'''
+    print(f"\n8. Updating lib.py (simulating updateFile tool)...")
+    with open(lib_py, "w") as f:
+        f.write(lib_content_v2)
+    await client.update_document(str(lib_py), version=2)
+
+    # Get new symbols after update
+    symbols = await client.get_document_symbols(str(lib_py))
+    print(f"  Now has {len(symbols)} symbols")
+
+    print(f"\n9. Testing find_references AFTER updating lib.py...")
+    for s in symbols:
+        name = s.get("name", "?")
+        loc = s.get("location", {}).get("range", {}).get("start", {})
+        line = loc.get("line", 0)
+        char = 4 if loc.get("character", 0) == 0 else loc.get("character", 0)
         refs = await client.find_references(str(lib_py), line, char)
         if refs:
             print(f"    {name}: found {len(refs)} references!")
@@ -287,7 +330,7 @@ hello()
             print(f"    {name}: NO REFERENCES FOUND")
 
     # Stop
-    print("\n9. Stopping pylsp...")
+    print("\n10. Stopping pylsp...")
     await client.stop()
     print("\nDone!")
 
