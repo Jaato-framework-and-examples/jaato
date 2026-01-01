@@ -185,7 +185,23 @@ settings key:
 ```
 
 When analyzing file dependencies, the plugin sends a `workspace/didChangeConfiguration`
-notification with the configured key to tell the server about the workspace paths.
+notification to tell the server about the workspace paths. The dotted key format
+(e.g., `pylsp.plugins.jedi.extra_paths`) is automatically converted to a nested
+structure that LSP servers expect:
+
+```json
+{
+  "settings": {
+    "pylsp": {
+      "plugins": {
+        "jedi": {
+          "extra_paths": ["/path/to/workspace"]
+        }
+      }
+    }
+  }
+}
+```
 
 ### Configuration Search Order
 
