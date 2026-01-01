@@ -682,6 +682,14 @@ class LSPClient:
             pattern = os.path.join(directory, "**", f"*{ext}")
             all_files.extend(glob.glob(pattern, recursive=True))
 
+        # Log files being indexed for debugging
+        import tempfile
+        debug_path = os.path.join(tempfile.gettempdir(), "lsp_debug.log")
+        with open(debug_path, "a") as df:
+            df.write(f"[LSP] ensure_workspace_indexed: directory={directory}, extensions={extensions}\n")
+            df.write(f"[LSP] ensure_workspace_indexed: found {len(all_files)} files: {all_files}\n")
+            df.flush()
+
         # Close already-open documents in this directory first
         # This forces re-analysis with updated configuration (e.g., extra_paths)
         for file_path in all_files:
