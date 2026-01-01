@@ -1093,7 +1093,8 @@ Use 'lsp status' to see connected language servers and their capabilities."""
         self._trace(f"get_file_dependents: ensuring workspace indexed at {workspace_dir}")
         self._execute_method('_ensure_workspace_indexed', {
             'directory': workspace_dir,
-            'extension': ext  # Pass the file extension to filter by language
+            'extension': ext,  # Pass the file extension to filter by language
+            'file_path': file_path  # Pass file_path so correct LSP server is selected
         })
 
         # Get document symbols
