@@ -480,46 +480,46 @@ Template rendering requires approval since it writes files."""
             # Generate template ID and path
             content_hash = self._hash_content(content)
 
-            # Skip if already extracted this content
+            # Check if already processed this content in this session
             if content_hash in self._extracted_templates:
                 template_path = self._extracted_templates[content_hash]
-                self._trace(f"  skipping already-extracted: {template_path.name}")
-                continue
+                self._trace(f"  reusing already-extracted: {template_path.name}")
+            else:
+                # Determine template filename and extract
+                template_name = self._generate_template_name(instructions, content, lang, start)
+                template_path, is_new = self._extract_template(template_name, content, lang)
 
-            # Determine template filename
-            template_name = self._generate_template_name(instructions, content, lang, start)
-            template_path, is_new = self._extract_template(template_name, content, lang)
+                if template_path:
+                    self._extracted_templates[content_hash] = template_path
+                    if is_new:
+                        self._trace(f"  extracted new: {template_path.name}")
+                    else:
+                        self._trace(f"  found existing on disk: {template_path.name}")
 
+            # Always add annotation for available templates (new or existing)
             if template_path:
-                self._extracted_templates[content_hash] = template_path
+                variables = self._extract_variables(content)
+                extracted.append((content_hash, template_path, variables))
 
-                # Only add annotation for newly created templates
-                if is_new:
-                    variables = self._extract_variables(content)
-                    extracted.append((content_hash, template_path, variables))
+                # Build annotation
+                rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
+                var_list = ", ".join(variables[:5])
+                if len(variables) > 5:
+                    var_list += f", ... ({len(variables)} total)"
 
-                    # Build annotation
-                    rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
-                    var_list = ", ".join(variables[:5])
-                    if len(variables) > 5:
-                        var_list += f", ... ({len(variables)} total)"
-
-                    annotations.append(
-                        f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
-                        f"  Variables: {var_list or '(none detected)'}\n"
-                        f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                        f"  Code generated without this template will be REJECTED as non-compliant.\n"
-                        f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
-                    )
-                    self._trace(f"  extracted: {template_path.name} with {len(variables)} variables")
-                else:
-                    self._trace(f"  reusing existing: {template_path.name}")
+                annotations.append(
+                    f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
+                    f"  Variables: {var_list or '(none detected)'}\n"
+                    f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
+                    f"  Code generated without this template will be REJECTED as non-compliant.\n"
+                    f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
+                )
 
         if not annotations:
             return SystemInstructionEnrichmentResult(instructions=instructions)
 
         # Append annotations to instructions
-        annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES EXTRACTED - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
+        annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES AVAILABLE - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
         enriched_instructions = instructions + annotation_block
 
         return SystemInstructionEnrichmentResult(
@@ -591,42 +591,44 @@ Template rendering requires approval since it writes files."""
         for lang, content, start, end in template_blocks:
             content_hash = self._hash_content(content)
 
+            # Check if already processed this content in this session
             if content_hash in self._extracted_templates:
                 template_path = self._extracted_templates[content_hash]
-                self._trace(f"  skipping already-extracted: {template_path.name}")
-                continue
+                self._trace(f"  reusing already-extracted: {template_path.name}")
+            else:
+                # Determine template filename and extract
+                template_name = self._generate_template_name(result, content, lang, start)
+                template_path, is_new = self._extract_template(template_name, content, lang)
 
-            template_name = self._generate_template_name(result, content, lang, start)
-            template_path, is_new = self._extract_template(template_name, content, lang)
+                if template_path:
+                    self._extracted_templates[content_hash] = template_path
+                    if is_new:
+                        self._trace(f"  extracted new: {template_path.name}")
+                    else:
+                        self._trace(f"  found existing on disk: {template_path.name}")
 
+            # Always add annotation for available templates (new or existing)
             if template_path:
-                self._extracted_templates[content_hash] = template_path
+                variables = self._extract_variables(content)
+                extracted.append((content_hash, template_path, variables))
 
-                # Only add annotation for newly created templates
-                if is_new:
-                    variables = self._extract_variables(content)
-                    extracted.append((content_hash, template_path, variables))
+                rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
+                var_list = ", ".join(variables[:5])
+                if len(variables) > 5:
+                    var_list += f", ... ({len(variables)} total)"
 
-                    rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
-                    var_list = ", ".join(variables[:5])
-                    if len(variables) > 5:
-                        var_list += f", ... ({len(variables)} total)"
-
-                    annotations.append(
-                        f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
-                        f"  Variables: {var_list or '(none detected)'}\n"
-                        f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                        f"  Code generated without this template will be REJECTED as non-compliant.\n"
-                        f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
-                    )
-                    self._trace(f"  extracted: {template_path.name} with {len(variables)} variables")
-                else:
-                    self._trace(f"  reusing existing: {template_path.name}")
+                annotations.append(
+                    f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
+                    f"  Variables: {var_list or '(none detected)'}\n"
+                    f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
+                    f"  Code generated without this template will be REJECTED as non-compliant.\n"
+                    f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
+                )
 
         if not annotations:
             return ToolResultEnrichmentResult(result=result)
 
-        annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES EXTRACTED - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
+        annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES AVAILABLE - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
         enriched_result = result + annotation_block
 
         return ToolResultEnrichmentResult(
