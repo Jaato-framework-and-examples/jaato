@@ -2947,7 +2947,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 # Handle workspace mismatch response
                 if pending_workspace_mismatch_request:
                     ipc_trace(f"Sending workspace mismatch response: {text} for {pending_workspace_mismatch_request['request_id']}")
-                    await client.send_event(WorkspaceMismatchResponseRequest(
+                    await client._send_event(WorkspaceMismatchResponseRequest(
                         request_id=pending_workspace_mismatch_request["request_id"],
                         response=text,
                     ))
