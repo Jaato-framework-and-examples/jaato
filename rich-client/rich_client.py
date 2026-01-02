@@ -2659,7 +2659,15 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     ]
 
                     for s in sessions:
-                        status = "●" if s.get('is_loaded') else "○"
+                        is_current = s.get('is_current', False)
+                        is_loaded = s.get('is_loaded', False)
+                        # Use arrow for current session, bullet for loaded, circle for unloaded
+                        if is_current:
+                            status = "▶"
+                        elif is_loaded:
+                            status = "●"
+                        else:
+                            status = "○"
                         sid = s.get('id', 'unknown')
                         # Prefer description (model-generated) over name
                         desc = s.get('description', '') or s.get('name', '')
@@ -2672,7 +2680,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         turns = s.get('turn_count', 0)
                         turns_part = f", {turns} turns" if turns else ""
 
-                        status_style = "green" if s.get('is_loaded') else "dim"
+                        # Highlight current session
+                        if is_current:
+                            status_style = "bold cyan"
+                        elif is_loaded:
+                            status_style = "green"
+                        else:
+                            status_style = "dim"
                         lines.append((f"  {status} {sid}{desc_part}{model_part}{clients_part}{turns_part}", status_style))
 
                     display.show_lines(lines)

@@ -481,8 +481,10 @@ class SessionManager:
         # Send complete SessionInfoEvent with state snapshot
         self._emit_to_client(client_id, self._build_session_info_event(session))
 
+        # Build attach message with description if available
+        desc_part = f" - {session.description}" if session.description else ""
         self._emit_to_client(client_id, SystemMessageEvent(
-            message=f"Attached to session: {session.name} ({session_id})",
+            message=f"Attached to session: {session_id}{desc_part}",
             style="info",
         ))
 
