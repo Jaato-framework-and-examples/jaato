@@ -515,6 +515,9 @@ class ClientConfigRequest(Event):
     terminal_width: Optional[int] = None
     # Client's working directory (for finding config files like .lsp.json)
     working_dir: Optional[str] = None
+    # Path to client's .env file - server loads this for session creation
+    # This provides all provider-related env vars (PROJECT_ID, JAATO_PROVIDER, etc.)
+    env_file: Optional[str] = None
 
 
 # =============================================================================
