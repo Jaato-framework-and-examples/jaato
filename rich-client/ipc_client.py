@@ -558,7 +558,7 @@ class IPCClient:
         """
         args = [name] if name else []
         await self._send_event(CommandRequest(
-            command="session.create",
+            command="session.new",
             args=args,
         ))
 

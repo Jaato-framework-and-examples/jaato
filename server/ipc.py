@@ -511,17 +511,22 @@ class JaatoIPCServer:
         # CommandRequest and ClientConfigRequest are allowed without session_id
         if self._on_session_request:
             if session_id or isinstance(event, (CommandRequest, ClientConfigRequest)):
-                # Run in executor to not block the event loop.
-                # This allows _broadcast_to_client to send events while
-                # the session request (e.g., initialization) is running.
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(
-                    None,  # Default executor
-                    self._on_session_request,
-                    client_id,
-                    session_id or "",
-                    event,
-                )
+                # ClientConfigRequest must be processed synchronously to ensure
+                # client's env_file is registered before session creation
+                if isinstance(event, ClientConfigRequest):
+                    self._on_session_request(client_id, session_id or "", event)
+                else:
+                    # Run other requests in executor to not block the event loop.
+                    # This allows _broadcast_to_client to send events while
+                    # the session request (e.g., initialization) is running.
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(
+                        None,  # Default executor
+                        self._on_session_request,
+                        client_id,
+                        session_id or "",
+                        event,
+                    )
             else:
                 await self._send_error(
                     client_id,

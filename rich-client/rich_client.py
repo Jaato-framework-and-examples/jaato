@@ -2179,9 +2179,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         ErrorEvent,
         SessionListEvent,
         SessionInfoEvent,
+        SessionDescriptionUpdatedEvent,
         CommandListEvent,
         ToolStatusEvent,
         HistoryEvent,
+        WorkspaceMismatchRequestedEvent,
+        WorkspaceMismatchResponseRequest,
     )
 
     # Load keybindings
@@ -2214,6 +2217,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     pending_permission_request: Optional[dict] = None
     pending_clarification_request: Optional[dict] = None
     pending_reference_selection_request: Optional[dict] = None
+    pending_workspace_mismatch_request: Optional[dict] = None
     model_running = False
     should_exit = False
     server_commands: list = []  # Commands from server for help display
@@ -2227,11 +2231,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     def get_sessions_for_completion():
         """Provider for session ID completion."""
         # Return session objects with session_id and description attributes
+        # Prefer description (model-generated) over name for display
         class SessionInfo:
             def __init__(self, session_id, description=""):
                 self.session_id = session_id
                 self.description = description
-        return [SessionInfo(s.get('id', ''), s.get('name', '')) for s in available_sessions]
+        return [SessionInfo(s.get('id', ''), s.get('description', '') or s.get('name', '')) for s in available_sessions]
 
     # Set up session provider for completion
     input_handler.set_session_provider(get_sessions_for_completion)
@@ -2315,6 +2320,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     async def handle_events():
         """Handle events from the server."""
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
+        nonlocal pending_workspace_mismatch_request
         nonlocal model_running, should_exit
         nonlocal init_shown_header, init_current_step
 
@@ -2657,10 +2663,19 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     ]
 
                     for s in sessions:
-                        status = "●" if s.get('is_loaded') else "○"
+                        is_current = s.get('is_current', False)
+                        is_loaded = s.get('is_loaded', False)
+                        # Use arrow for current session, bullet for loaded, circle for unloaded
+                        if is_current:
+                            status = "▶"
+                        elif is_loaded:
+                            status = "●"
+                        else:
+                            status = "○"
                         sid = s.get('id', 'unknown')
-                        name = s.get('name', '')
-                        name_part = f" ({name})" if name else ""
+                        # Prefer description (model-generated) over name
+                        desc = s.get('description', '') or s.get('name', '')
+                        desc_part = f" - {desc}" if desc else ""
                         provider = s.get('model_provider', '')
                         model = s.get('model_name', '')
                         model_part = f" [{provider}/{model}]" if provider else ""
@@ -2668,9 +2683,28 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         clients_part = f", {clients} client(s)" if clients else ""
                         turns = s.get('turn_count', 0)
                         turns_part = f", {turns} turns" if turns else ""
+                        workspace = s.get('workspace_path', '')
 
-                        status_style = "green" if s.get('is_loaded') else "dim"
-                        lines.append((f"  {status} {sid}{name_part}{model_part}{clients_part}{turns_part}", status_style))
+                        # Highlight current session
+                        if is_current:
+                            status_style = "bold cyan"
+                        elif is_loaded:
+                            status_style = "green"
+                        else:
+                            status_style = "dim"
+                        lines.append((f"  {status} {sid}{desc_part}{model_part}{clients_part}{turns_part}", status_style))
+                        # Show workspace on second line if available
+                        if workspace:
+                            # Shorten home directory to ~
+                            import os
+                            home = os.path.expanduser("~")
+                            if workspace.startswith(home):
+                                workspace = "~" + workspace[len(home):]
+                            lines.append((f"      {workspace}", "dim"))
+
+                    # Add legend
+                    lines.append(("", ""))
+                    lines.append(("  ▶ current  ● loaded  ○ on disk", "dim"))
 
                     display.show_lines(lines)
 
@@ -2686,7 +2720,49 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     available_models = event.models
                 # Update status bar with model info
                 display.set_model_info(event.model_provider, event.model_name)
+                # Update session bar with current session info
+                current_session = next(
+                    (s for s in event.sessions if s.get('id') == event.session_id),
+                    None
+                )
+                if current_session:
+                    display.set_session_info(
+                        session_id=event.session_id,
+                        description=current_session.get('description', ''),
+                        workspace=current_session.get('workspace_path', ''),
+                    )
+                else:
+                    display.set_session_info(session_id=event.session_id)
                 display.refresh()
+
+            elif isinstance(event, SessionDescriptionUpdatedEvent):
+                # Update session description in local cache
+                for s in available_sessions:
+                    if s.get('id') == event.session_id:
+                        s['description'] = event.description
+                        # Update session bar if this is the current session
+                        if display._session_id == event.session_id:
+                            display.set_session_info(
+                                session_id=event.session_id,
+                                description=event.description,
+                                workspace=display._session_workspace,
+                            )
+                        break
+
+            elif isinstance(event, WorkspaceMismatchRequestedEvent):
+                ipc_trace(f"  WorkspaceMismatchRequestedEvent: session={event.session_id}")
+                # Store pending request
+                pending_workspace_mismatch_request = {
+                    "request_id": event.request_id,
+                    "session_id": event.session_id,
+                    "options": event.response_options,
+                }
+                # Show the prompt in output panel (not pager)
+                prompt_text = "\n".join(event.prompt_lines)
+                display.append_output("system", prompt_text, "write")
+                display.refresh()
+                # Enable input mode for response
+                display.set_waiting_for_channel_input(True, event.response_options)
 
             elif isinstance(event, CommandListEvent):
                 # Register server/plugin commands for tab completion
@@ -2810,6 +2886,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     async def handle_input():
         """Handle user input from the queue."""
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
+        nonlocal pending_workspace_mismatch_request
         nonlocal model_running, should_exit
 
         # Yield control to let handle_events() start listening before we trigger session init
@@ -2865,6 +2942,17 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         pending_permission_request["request_id"],
                         text
                     )
+                    continue
+
+                # Handle workspace mismatch response
+                if pending_workspace_mismatch_request:
+                    ipc_trace(f"Sending workspace mismatch response: {text} for {pending_workspace_mismatch_request['request_id']}")
+                    await client._send_event(WorkspaceMismatchResponseRequest(
+                        request_id=pending_workspace_mismatch_request["request_id"],
+                        response=text,
+                    ))
+                    pending_workspace_mismatch_request = None
+                    display.set_waiting_for_channel_input(False)
                     continue
 
                 # Handle clarification response
