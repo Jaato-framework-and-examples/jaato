@@ -882,6 +882,7 @@ class SessionManager:
             "is_loaded": s.is_loaded,
             "client_count": s.client_count,
             "turn_count": s.turn_count,
+            "workspace_path": s.workspace_path or "",
         } for s in self.list_sessions()]
 
         # Get tools list from the session's server
