@@ -347,6 +347,56 @@ class SessionManager:
 
         return session_id
 
+    def get_session_workspace(self, session_id: str) -> Optional[str]:
+        """Get the workspace path of a session.
+
+        Args:
+            session_id: The session ID.
+
+        Returns:
+            The session's workspace path, or None if session not found.
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session:
+                return session.workspace_path
+        return None
+
+    def check_workspace_mismatch(
+        self,
+        session_id: str,
+        client_workspace: Optional[str],
+    ) -> Optional[tuple]:
+        """Check if there's a workspace mismatch between client and session.
+
+        Args:
+            session_id: The session to check.
+            client_workspace: The client's workspace path.
+
+        Returns:
+            Tuple of (session_workspace, client_workspace) if there's a mismatch,
+            None if no mismatch or session not found.
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return None
+
+            session_workspace = session.workspace_path
+            if not session_workspace or not client_workspace:
+                # No mismatch if either is not set
+                return None
+
+            # Normalize paths for comparison
+            import os
+            session_workspace_normalized = os.path.normpath(os.path.abspath(session_workspace))
+            client_workspace_normalized = os.path.normpath(os.path.abspath(client_workspace))
+
+            if session_workspace_normalized != client_workspace_normalized:
+                return (session_workspace, client_workspace)
+
+        return None
+
     def attach_session(
         self,
         client_id: str,

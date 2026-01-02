@@ -55,6 +55,11 @@ class EventType(str, Enum):
     REFERENCE_SELECTION_RESOLVED = "reference_selection.resolved"
     REFERENCE_SELECTION_RESPONSE = "reference_selection.response"  # Client -> Server
 
+    # Workspace mismatch flow (Server <-> Client)
+    WORKSPACE_MISMATCH_REQUESTED = "workspace_mismatch.requested"
+    WORKSPACE_MISMATCH_RESOLVED = "workspace_mismatch.resolved"
+    WORKSPACE_MISMATCH_RESPONSE = "workspace_mismatch.response"  # Client -> Server
+
     # Plan updates (Server -> Client)
     PLAN_UPDATED = "plan.updated"
     PLAN_CLEARED = "plan.cleared"
@@ -289,6 +294,43 @@ class ReferenceSelectionResolvedEvent(Event):
 
 
 @dataclass
+class WorkspaceMismatchResponseOption:
+    """A valid response option for workspace mismatch prompts."""
+    key: str  # Single char like "s", "n"
+    label: str  # Display label like "switch", "new session"
+    action: str  # Action type: "switch", "new_session", "cancel"
+    description: Optional[str] = None
+
+
+@dataclass
+class WorkspaceMismatchRequestedEvent(Event):
+    """Workspace mismatch detected when attaching to a session.
+
+    Sent when a client tries to attach to a session that was created
+    with a different workspace path. The client must choose to either
+    switch to the session's workspace or create a new session.
+    """
+    type: EventType = field(default=EventType.WORKSPACE_MISMATCH_REQUESTED)
+    request_id: str = ""
+    session_id: str = ""
+    session_workspace: str = ""  # The session's current workspace
+    client_workspace: str = ""   # The client's workspace
+    response_options: List[Dict[str, str]] = field(default_factory=list)
+    # ^ List of {key, label, action, description?}
+    prompt_lines: List[str] = field(default_factory=list)
+
+
+@dataclass
+class WorkspaceMismatchResolvedEvent(Event):
+    """Workspace mismatch has been resolved."""
+    type: EventType = field(default=EventType.WORKSPACE_MISMATCH_RESOLVED)
+    request_id: str = ""
+    session_id: str = ""
+    action: str = ""  # "switch", "new_session", "cancel"
+    new_session_id: Optional[str] = None  # Set if action is "new_session"
+
+
+@dataclass
 class PlanStepData:
     """A single step in a plan."""
     content: str
@@ -445,6 +487,14 @@ class ReferenceSelectionResponseRequest(Event):
 
 
 @dataclass
+class WorkspaceMismatchResponseRequest(Event):
+    """Respond to a workspace mismatch request."""
+    type: EventType = field(default=EventType.WORKSPACE_MISMATCH_RESPONSE)
+    request_id: str = ""
+    response: str = ""  # "s" (switch), "n" (new session), "c" (cancel)
+
+
+@dataclass
 class StopRequest(Event):
     """Stop current operation (cancel generation)."""
     type: EventType = field(default=EventType.STOP)
@@ -542,6 +592,9 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.REFERENCE_SELECTION_REQUESTED.value: ReferenceSelectionRequestedEvent,
     EventType.REFERENCE_SELECTION_RESOLVED.value: ReferenceSelectionResolvedEvent,
     EventType.REFERENCE_SELECTION_RESPONSE.value: ReferenceSelectionResponseRequest,
+    EventType.WORKSPACE_MISMATCH_REQUESTED.value: WorkspaceMismatchRequestedEvent,
+    EventType.WORKSPACE_MISMATCH_RESOLVED.value: WorkspaceMismatchResolvedEvent,
+    EventType.WORKSPACE_MISMATCH_RESPONSE.value: WorkspaceMismatchResponseRequest,
     EventType.PLAN_UPDATED.value: PlanUpdatedEvent,
     EventType.PLAN_CLEARED.value: PlanClearedEvent,
     EventType.CONTEXT_UPDATED.value: ContextUpdatedEvent,
