@@ -81,6 +81,7 @@ from .events import (
     InitProgressEvent,
     ErrorEvent,
     SessionInfoEvent,
+    SessionDescriptionUpdatedEvent,
     SendMessageRequest,
     PermissionResponseRequest,
     ClarificationResponseRequest,
@@ -524,6 +525,16 @@ class JaatoServer:
             logger.debug("  _setup_session_plugin: setting session plugin on jaato...")
             self._jaato.set_session_plugin(session_plugin, session_config)
             logger.debug("  _setup_session_plugin: session plugin set")
+
+            # Set up callback to emit event when description changes
+            if hasattr(session_plugin, 'set_description_callback'):
+                def on_description_changed(session_id: str, description: str) -> None:
+                    self.emit(SessionDescriptionUpdatedEvent(
+                        session_id=session_id,
+                        description=description,
+                    ))
+                session_plugin.set_description_callback(on_description_changed)
+                logger.debug("  _setup_session_plugin: description callback set")
 
             if self.registry:
                 logger.debug("  _setup_session_plugin: registering session plugin with registry...")

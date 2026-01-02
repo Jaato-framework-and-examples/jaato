@@ -44,6 +44,7 @@ from .events import (
     SystemMessageEvent,
     ErrorEvent,
     SessionInfoEvent,
+    SessionDescriptionUpdatedEvent,
 )
 
 
@@ -170,6 +171,13 @@ class SessionManager:
         with self._lock:
             session = self._sessions.get(session_id)
             if session:
+                # Handle session description updates - update in-memory Session
+                if isinstance(event, SessionDescriptionUpdatedEvent):
+                    if event.session_id == session_id:
+                        session.description = event.description
+                        session.is_dirty = True
+                        logger.debug(f"Updated session {session_id} description: {event.description}")
+
                 for client_id in session.attached_clients:
                     self._emit_to_client(client_id, event)
 

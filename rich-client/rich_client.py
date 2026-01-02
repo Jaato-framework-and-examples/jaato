@@ -2179,6 +2179,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         ErrorEvent,
         SessionListEvent,
         SessionInfoEvent,
+        SessionDescriptionUpdatedEvent,
         CommandListEvent,
         ToolStatusEvent,
         HistoryEvent,
@@ -2689,6 +2690,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 # Update status bar with model info
                 display.set_model_info(event.model_provider, event.model_name)
                 display.refresh()
+
+            elif isinstance(event, SessionDescriptionUpdatedEvent):
+                # Update session description in local cache
+                for s in available_sessions:
+                    if s.get('id') == event.session_id:
+                        s['description'] = event.description
+                        break
 
             elif isinstance(event, CommandListEvent):
                 # Register server/plugin commands for tab completion
