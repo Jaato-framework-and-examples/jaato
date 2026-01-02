@@ -371,29 +371,19 @@ class JaatoServer:
             ))
             return False
 
-        api_key = os.environ.get("GOOGLE_GENAI_API_KEY")
+        # Get provider-specific settings (may be None for non-Google providers)
         project_id = os.environ.get("PROJECT_ID")
         location = os.environ.get("LOCATION")
-
-        if not api_key and (not project_id or not location):
-            self._emit_init_progress("Loading configuration", "error", 1, total_steps,
-                                     "Missing credentials")
-            self.emit(ErrorEvent(
-                error="Set GOOGLE_GENAI_API_KEY for AI Studio, or PROJECT_ID and LOCATION for Vertex AI",
-                error_type="ConfigurationError",
-                recoverable=False,
-            ))
-            return False
         self._emit_init_progress("Loading configuration", "done", 1, total_steps)
 
         # Step 2: Connect to model provider
+        # Credential validation is handled by each provider during connect()
         self._emit_init_progress("Connecting to model provider", "running", 2, total_steps)
         try:
             self._jaato = JaatoClient(provider_name=self._provider)
-            if api_key:
-                self._jaato.connect(model=model_name)
-            else:
-                self._jaato.connect(project_id, location, model_name)
+            # Pass project/location for providers that need them (Google/Vertex)
+            # Other providers ignore these and use their own env vars
+            self._jaato.connect(project_id, location, model_name)
         except Exception as e:
             self._emit_init_progress("Connecting to model provider", "error", 2, total_steps,
                                      str(e))
