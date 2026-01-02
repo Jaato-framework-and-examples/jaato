@@ -2716,6 +2716,19 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     available_models = event.models
                 # Update status bar with model info
                 display.set_model_info(event.model_provider, event.model_name)
+                # Update session bar with current session info
+                current_session = next(
+                    (s for s in event.sessions if s.get('id') == event.session_id),
+                    None
+                )
+                if current_session:
+                    display.set_session_info(
+                        session_id=event.session_id,
+                        description=current_session.get('description', ''),
+                        workspace=current_session.get('workspace_path', ''),
+                    )
+                else:
+                    display.set_session_info(session_id=event.session_id)
                 display.refresh()
 
             elif isinstance(event, SessionDescriptionUpdatedEvent):
@@ -2723,6 +2736,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 for s in available_sessions:
                     if s.get('id') == event.session_id:
                         s['description'] = event.description
+                        # Update session bar if this is the current session
+                        if display._session_id == event.session_id:
+                            display.set_session_info(
+                                session_id=event.session_id,
+                                description=event.description,
+                                workspace=display._session_workspace,
+                            )
                         break
 
             elif isinstance(event, CommandListEvent):
