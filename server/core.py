@@ -510,7 +510,11 @@ class JaatoServer:
         # ServerAgentHooks.on_agent_created() when set_ui_hooks() is called
 
     def _setup_session_plugin(self) -> None:
-        """Set up session persistence plugin."""
+        """Set up session persistence plugin.
+
+        Each JaatoServer has its own session plugin instance for tool operations.
+        SessionManager has a separate plugin instance for persistence operations.
+        """
         if not self._jaato:
             logger.debug("  _setup_session_plugin: no _jaato, returning early")
             return
