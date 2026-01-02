@@ -2217,6 +2217,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     pending_permission_request: Optional[dict] = None
     pending_clarification_request: Optional[dict] = None
     pending_reference_selection_request: Optional[dict] = None
+    pending_workspace_mismatch_request: Optional[dict] = None
     model_running = False
     should_exit = False
     server_commands: list = []  # Commands from server for help display
@@ -2319,6 +2320,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     async def handle_events():
         """Handle events from the server."""
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
+        nonlocal pending_workspace_mismatch_request
         nonlocal model_running, should_exit
         nonlocal init_shown_header, init_current_step
 
@@ -2747,6 +2749,20 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                             )
                         break
 
+            elif isinstance(event, WorkspaceMismatchRequestedEvent):
+                ipc_trace(f"  WorkspaceMismatchRequestedEvent: session={event.session_id}")
+                # Store pending request
+                pending_workspace_mismatch_request = {
+                    "request_id": event.request_id,
+                    "session_id": event.session_id,
+                    "options": event.response_options,
+                }
+                # Show the prompt
+                lines = [(line, "") for line in event.prompt_lines]
+                display.show_lines(lines)
+                # Enable input mode for response
+                display.set_waiting_for_channel_input(True, event.response_options)
+
             elif isinstance(event, CommandListEvent):
                 # Register server/plugin commands for tab completion
                 nonlocal server_commands
@@ -2869,6 +2885,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     async def handle_input():
         """Handle user input from the queue."""
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
+        nonlocal pending_workspace_mismatch_request
         nonlocal model_running, should_exit
 
         # Yield control to let handle_events() start listening before we trigger session init
@@ -2924,6 +2941,17 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         pending_permission_request["request_id"],
                         text
                     )
+                    continue
+
+                # Handle workspace mismatch response
+                if pending_workspace_mismatch_request:
+                    ipc_trace(f"Sending workspace mismatch response: {text} for {pending_workspace_mismatch_request['request_id']}")
+                    await client.send_event(WorkspaceMismatchResponseRequest(
+                        request_id=pending_workspace_mismatch_request["request_id"],
+                        response=text,
+                    ))
+                    pending_workspace_mismatch_request = None
+                    display.set_waiting_for_channel_input(False)
                     continue
 
                 # Handle clarification response
