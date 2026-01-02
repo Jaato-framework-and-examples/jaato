@@ -567,9 +567,17 @@ Template rendering requires approval since it writes files."""
         # Find all code blocks in the result
         code_blocks = self._find_code_blocks(result)
 
+        # If no code blocks found, check if the raw content itself is a template
+        # This handles cases like readFile on a .tpl file
         if not code_blocks:
-            self._trace("  no code blocks found in tool result")
-            return ToolResultEnrichmentResult(result=result)
+            if self._is_template(result):
+                self._trace("  no code blocks, but raw content is a template")
+                # Treat the entire result as a single template block
+                # Use empty lang, full content, position 0
+                code_blocks = [("", result, 0, len(result))]
+            else:
+                self._trace("  no code blocks found in tool result")
+                return ToolResultEnrichmentResult(result=result)
 
         # Filter to blocks that contain template syntax
         template_blocks = [
