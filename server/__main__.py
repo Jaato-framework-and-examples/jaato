@@ -112,13 +112,15 @@ class JaatoDaemon:
 
     async def start(self) -> None:
         """Start the daemon and run until shutdown."""
-        # Load environment
-        load_dotenv(self.env_file)
+        # Note: We don't load_dotenv here - the daemon is provider-agnostic.
+        # Each session gets its config from the client's workspace .env file.
+        # The server's env_file is only used as a fallback for sessions
+        # without their own env file.
 
         # Initialize session manager
         self._session_manager = SessionManager(
-            env_file=self.env_file,
-            provider=self.provider,
+            env_file=self.env_file,  # Fallback env_file for sessions
+            provider=None,  # No default provider - each session uses its own
         )
 
         # Set up event routing
