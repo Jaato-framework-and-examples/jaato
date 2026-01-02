@@ -526,6 +526,11 @@ class JaatoServer:
             self._jaato.set_session_plugin(session_plugin, session_config)
             logger.debug("  _setup_session_plugin: session plugin set")
 
+            # Set session ID on plugin so it knows the current session
+            if self._session_id and hasattr(session_plugin, 'set_session_id'):
+                session_plugin.set_session_id(self._session_id)
+                logger.debug(f"  _setup_session_plugin: session_id set to {self._session_id}")
+
             # Set up callback to emit event when description changes
             if hasattr(session_plugin, 'set_description_callback'):
                 def on_description_changed(session_id: str, description: str) -> None:

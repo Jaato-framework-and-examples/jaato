@@ -91,6 +91,17 @@ class FileSessionPlugin:
         """
         self._on_description_changed = callback
 
+    def set_session_id(self, session_id: str) -> None:
+        """Set the current session ID.
+
+        This is called by JaatoServer to inform the plugin of the session ID
+        so that callbacks can use it before save() is called.
+
+        Args:
+            session_id: The session ID to set.
+        """
+        self._current_session_id = session_id
+
     # ==================== Plugin Lifecycle ====================
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
