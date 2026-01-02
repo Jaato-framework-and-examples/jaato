@@ -865,16 +865,18 @@ Template rendering requires approval since it writes files."""
             return self._render_jinja2(template, variables)
 
     def _render_mustache(self, template: str, variables: Dict[str, Any]) -> Tuple[str, Optional[Dict]]:
-        """Render template using Mustache/Handlebars syntax.
+        """Render template using Handlebars syntax.
 
-        Supports:
+        Supports full Handlebars syntax:
         - Variables: {{variable_name}}
         - Sections/loops: {{#items}}...{{/items}}
+        - Conditionals: {{#if condition}}...{{/if}}
+        - Each loops: {{#each items}}...{{/each}}
         - Inverted sections: {{^isEmpty}}...{{/isEmpty}}
-        - Current item: {{.}}
+        - Current item: {{.}}, {{this}}
 
         Args:
-            template: Template content string with Mustache syntax.
+            template: Template content string with Handlebars syntax.
             variables: Key-value pairs for template variable substitution.
 
         Returns:
@@ -882,19 +884,21 @@ Template rendering requires approval since it writes files."""
             If error_dict is not None, rendering failed.
         """
         try:
-            import chevron
+            from pybars import Compiler
         except ImportError:
             return "", {
-                "error": "Mustache template detected but chevron not installed. Install with: pip install chevron",
+                "error": "Handlebars template detected but pybars3 not installed. Install with: pip install pybars3",
                 "status": "dependency_missing"
             }
 
         try:
-            rendered = chevron.render(template, variables)
+            compiler = Compiler()
+            compiled_template = compiler.compile(template)
+            rendered = compiled_template(variables)
             return rendered, None
         except Exception as e:
             return "", {
-                "error": f"Mustache render error: {str(e)}",
+                "error": f"Handlebars render error: {str(e)}",
                 "status": "render_error"
             }
 
