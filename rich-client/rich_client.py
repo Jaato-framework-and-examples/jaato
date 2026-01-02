@@ -2689,6 +2689,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                             status_style = "dim"
                         lines.append((f"  {status} {sid}{desc_part}{model_part}{clients_part}{turns_part}", status_style))
 
+                    # Add legend
+                    lines.append(("", ""))
+                    lines.append(("  ▶ current  ● loaded  ○ on disk", "dim"))
+
                     display.show_lines(lines)
 
             elif isinstance(event, SessionInfoEvent):
