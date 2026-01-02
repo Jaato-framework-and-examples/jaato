@@ -363,6 +363,8 @@ class LSPToolPlugin:
         self._log_lock = threading.Lock()
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
+        # Session ID for multi-session log disambiguation
+        self._session_id: Optional[str] = None
         # Stderr capture for LSP server output
         self._errlog: Optional[LogCapture] = None
 
@@ -402,8 +404,14 @@ class LSPToolPlugin:
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
-                    f.write(f"[{ts}] [LSP{agent_prefix}] {msg}\n")
+                    # Build prefix: [LSP:session@agent] or [LSP:session] or [LSP@agent] or [LSP]
+                    parts = ["LSP"]
+                    if self._session_id:
+                        parts[0] = f"LSP:{self._session_id}"
+                    if self._agent_name:
+                        parts.append(f"@{self._agent_name}")
+                    prefix = "".join(parts)
+                    f.write(f"[{ts}] [{prefix}] {msg}\n")
                     f.flush()
             except (IOError, OSError):
                 pass  # Silently skip if trace file cannot be written
@@ -415,6 +423,7 @@ class LSPToolPlugin:
             config: Optional configuration dict. Supports:
                 - config_path: Path to .lsp.json file (overrides default search)
                 - workspace_path: Client's working directory for finding .lsp.json
+                - session_id: Session identifier for log disambiguation
                 - agent_name: Name for trace logging
         """
         if self._initialized:
@@ -425,6 +434,7 @@ class LSPToolPlugin:
 
         # Extract config values
         self._agent_name = config.get('agent_name')
+        self._session_id = config.get('session_id')
         self._custom_config_path = config.get('config_path')
         self._workspace_path = config.get('workspace_path')
 
@@ -1542,11 +1552,12 @@ Example:
                     # Debug: write directly to a known file
                     import tempfile
                     debug_path = os.path.join(tempfile.gettempdir(), "lsp_debug.log")
+                    session_tag = f":{self._session_id}" if self._session_id else ""
                     with open(debug_path, "a") as df:
-                        df.write(f"[LSP] Config loaded from: {path}\n")
+                        df.write(f"[LSP{session_tag}] Config loaded from: {path}\n")
                         servers = self._config_cache.get('languageServers', {})
                         for name, spec in servers.items():
-                            df.write(f"[LSP]   Server '{name}': command={spec.get('command')}, args={spec.get('args', [])}\n")
+                            df.write(f"[LSP{session_tag}]   Server '{name}': command={spec.get('command')}, args={spec.get('args', [])}\n")
                         df.flush()
                     return
                 except Exception as e:

@@ -198,6 +198,8 @@ class MCPToolPlugin:
         self._log_lock = threading.Lock()
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
+        # Session ID for multi-session log disambiguation
+        self._session_id: Optional[str] = None
 
     def _log_event(
         self,
@@ -239,8 +241,14 @@ class MCPToolPlugin:
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
-                    f.write(f"[{ts}] [MCP{agent_prefix}] {msg}\n")
+                    # Build prefix: [MCP:session@agent] or [MCP:session] or [MCP@agent] or [MCP]
+                    parts = ["MCP"]
+                    if self._session_id:
+                        parts[0] = f"MCP:{self._session_id}"
+                    if self._agent_name:
+                        parts.append(f"@{self._agent_name}")
+                    prefix = "".join(parts)
+                    f.write(f"[{ts}] [{prefix}] {msg}\n")
                     f.flush()
             except (IOError, OSError):
                 pass
@@ -252,6 +260,7 @@ class MCPToolPlugin:
             config: Optional configuration dict. Supports:
                 - config_path: Path to .mcp.json file (overrides default search)
                 - workspace_path: Client's working directory for finding .mcp.json
+                - session_id: Session identifier for log disambiguation
                 - agent_name: Name for trace logging
         """
         if self._initialized:
@@ -260,6 +269,7 @@ class MCPToolPlugin:
         config = expand_variables(config) if config else {}
         # Extract config from plugin_configs
         self._agent_name = config.get("agent_name")
+        self._session_id = config.get("session_id")
         self._custom_config_path = config.get("config_path")
         self._workspace_path = config.get("workspace_path")
         self._trace("initialize: starting background thread")

@@ -59,6 +59,9 @@ class FileSessionPlugin:
         # Reference to JaatoClient for user command execution
         self._client = None  # Set via set_client()
 
+        # Callback for description changes (for notifying SessionManager)
+        self._on_description_changed: Optional[Callable[[str, str], None]] = None
+
     @property
     def name(self) -> str:
         return self._name
@@ -73,6 +76,31 @@ class FileSessionPlugin:
             client: The JaatoClient instance.
         """
         self._client = client
+
+    def set_description_callback(
+        self,
+        callback: Optional[Callable[[str, str], None]]
+    ) -> None:
+        """Set callback to be notified when session description changes.
+
+        This allows the SessionManager to update its in-memory Session.description
+        when the model calls session_describe.
+
+        Args:
+            callback: Function(session_id, description) to call on description change.
+        """
+        self._on_description_changed = callback
+
+    def set_session_id(self, session_id: str) -> None:
+        """Set the current session ID.
+
+        This is called by JaatoServer to inform the plugin of the session ID
+        so that callbacks can use it before save() is called.
+
+        Args:
+            session_id: The session ID to set.
+        """
+        self._current_session_id = session_id
 
     # ==================== Plugin Lifecycle ====================
 
@@ -605,6 +633,13 @@ class FileSessionPlugin:
                 self._current_session_id = session_id
             except Exception:
                 pass  # Don't fail the describe call if save fails
+
+        # Notify SessionManager of description change (for in-memory Session update)
+        if self._current_session_id and self._on_description_changed:
+            try:
+                self._on_description_changed(self._current_session_id, description)
+            except Exception:
+                pass  # Don't fail if callback fails
 
         return {
             "status": "ok",

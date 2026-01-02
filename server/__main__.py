@@ -107,15 +107,20 @@ class JaatoDaemon:
         # Shutdown flag
         self._shutdown_event = asyncio.Event()
 
+        # Pending workspace mismatch requests: client_id -> {request_id, session_id, ...}
+        self._pending_workspace_mismatch: dict = {}
+
     async def start(self) -> None:
         """Start the daemon and run until shutdown."""
-        # Load environment
-        load_dotenv(self.env_file)
+        # Note: We don't load_dotenv here - the daemon is provider-agnostic.
+        # Each session gets its config from the client's workspace .env file.
+        # The server's env_file is only used as a fallback for sessions
+        # without their own env file.
 
         # Initialize session manager
         self._session_manager = SessionManager(
-            env_file=self.env_file,
-            provider=self.provider,
+            env_file=self.env_file,  # Fallback env_file for sessions
+            provider=None,  # No default provider - each session uses its own
         )
 
         # Set up event routing
@@ -278,7 +283,7 @@ class JaatoDaemon:
             if self._ipc_server:
                 workspace_path = self._ipc_server.get_client_workspace(client_id)
 
-            if cmd == "session.create":
+            if cmd == "session.new":
                 name = event.args[0] if event.args else None
                 new_session_id = self._session_manager.create_session(
                     client_id, name, workspace_path=workspace_path
@@ -289,26 +294,72 @@ class JaatoDaemon:
 
             elif cmd == "session.attach":
                 if event.args:
+                    target_session_id = event.args[0]
+                    # Check for workspace mismatch
+                    mismatch = self._session_manager.check_workspace_mismatch(
+                        target_session_id, workspace_path
+                    )
+                    if mismatch:
+                        session_workspace, client_workspace = mismatch
+                        # Emit mismatch event and wait for user response
+                        import uuid
+                        request_id = str(uuid.uuid4())
+                        self._pending_workspace_mismatch[client_id] = {
+                            "request_id": request_id,
+                            "session_id": target_session_id,
+                            "session_workspace": session_workspace,
+                            "client_workspace": client_workspace,
+                        }
+                        from server.events import WorkspaceMismatchRequestedEvent
+                        self._route_event(client_id, WorkspaceMismatchRequestedEvent(
+                            request_id=request_id,
+                            session_id=target_session_id,
+                            session_workspace=session_workspace,
+                            client_workspace=client_workspace,
+                            response_options=[
+                                {"key": "s", "label": "switch", "action": "switch",
+                                 "description": f"Switch to session workspace: {session_workspace}"},
+                                {"key": "c", "label": "cancel", "action": "cancel",
+                                 "description": "Stay in current session"},
+                            ],
+                            prompt_lines=[
+                                f"Workspace mismatch detected:",
+                                f"  Session workspace: {session_workspace}",
+                                f"  Your workspace:    {client_workspace}",
+                                f"",
+                                f"Choose an option:",
+                                f"  [s] Switch to session's workspace",
+                                f"  [c] Cancel and stay in current session",
+                            ],
+                        ))
+                        return
+                    # No mismatch, proceed with attach
                     if self._session_manager.attach_session(
-                        client_id, event.args[0], workspace_path=workspace_path
+                        client_id, target_session_id, workspace_path=workspace_path
                     ):
                         if self._ipc_server:
-                            self._ipc_server.set_client_session(client_id, event.args[0])
+                            self._ipc_server.set_client_session(client_id, target_session_id)
                 return
 
             elif cmd == "session.list":
                 sessions = self._session_manager.list_sessions()
                 from server.events import SessionListEvent
 
+                # Get client's current session to mark it in the list
+                current_session_id = session_id  # From the event
+
                 # Send structured session data - client handles formatting
                 session_data = [{
                     "id": s.session_id,
                     "name": s.name or "",
+                    "description": s.description or "",
                     "model_provider": s.model_provider or "",
                     "model_name": s.model_name or "",
                     "is_loaded": s.is_loaded,
+                    "is_current": s.session_id == current_session_id,
                     "client_count": s.client_count,
                     "turn_count": s.turn_count,
+                    "workspace_path": s.workspace_path or "",
                 } for s in sessions]
 
                 self._route_event(client_id, SessionListEvent(sessions=session_data))
@@ -373,6 +424,50 @@ class JaatoDaemon:
                         style="dim",
                     ))
                 return
+
+        # Handle WorkspaceMismatchResponseRequest
+        from server.events import WorkspaceMismatchResponseRequest, WorkspaceMismatchResolvedEvent
+        if isinstance(event, WorkspaceMismatchResponseRequest):
+            pending = self._pending_workspace_mismatch.pop(client_id, None)
+            if not pending or pending["request_id"] != event.request_id:
+                logger.warning(f"No pending workspace mismatch request for client {client_id}")
+                return
+
+            response = event.response.lower()
+            target_session_id = pending["session_id"]
+            session_workspace = pending["session_workspace"]
+            client_workspace = pending["client_workspace"]
+
+            if response in ("s", "switch"):
+                # User chose to switch to session's workspace
+                # Attach without passing workspace_path (use session's workspace)
+                if self._session_manager.attach_session(client_id, target_session_id):
+                    if self._ipc_server:
+                        self._ipc_server.set_client_session(client_id, target_session_id)
+                    self._route_event(client_id, WorkspaceMismatchResolvedEvent(
+                        request_id=event.request_id,
+                        session_id=target_session_id,
+                        action="switch",
+                    ))
+                    from server.events import SystemMessageEvent
+                    self._route_event(client_id, SystemMessageEvent(
+                        message=f"Attached to session. Working directory: {session_workspace}",
+                        style="info",
+                    ))
+
+            else:
+                # Cancel or unknown response
+                self._route_event(client_id, WorkspaceMismatchResolvedEvent(
+                    request_id=event.request_id,
+                    session_id=target_session_id,
+                    action="cancel",
+                ))
+                from server.events import SystemMessageEvent
+                self._route_event(client_id, SystemMessageEvent(
+                    message="Attach cancelled.",
+                    style="dim",
+                ))
+            return
 
         # Handle HistoryRequest
         from server.events import HistoryRequest, HistoryEvent

@@ -81,6 +81,7 @@ from .events import (
     InitProgressEvent,
     ErrorEvent,
     SessionInfoEvent,
+    SessionDescriptionUpdatedEvent,
     SendMessageRequest,
     PermissionResponseRequest,
     ClarificationResponseRequest,
@@ -139,6 +140,7 @@ class JaatoServer:
         provider: Optional[str] = None,
         on_event: Optional[EventCallback] = None,
         workspace_path: Optional[str] = None,
+        session_id: Optional[str] = None,
     ):
         """Initialize the server.
 
@@ -149,11 +151,13 @@ class JaatoServer:
             workspace_path: Client's working directory for file operations.
                            If provided, the server will chdir to this path
                            when processing requests.
+            session_id: Unique identifier for this session (used in logs).
         """
         self.env_file = env_file
         self._provider = provider
         self._on_event = on_event or (lambda e: None)
         self._workspace_path = workspace_path
+        self._session_id = session_id
 
         # Core components
         self._jaato: Optional[JaatoClient] = None
@@ -357,30 +361,51 @@ class JaatoServer:
 
         # Step 1: Load configuration
         self._emit_init_progress("Loading configuration", "running", 1, total_steps)
-        load_dotenv(self.env_file)
-        active_bundle = active_cert_bundle(verbose=False)
 
-        model_name = os.environ.get("MODEL_NAME")
-        if not model_name:
-            self._emit_init_progress("Loading configuration", "error", 1, total_steps,
-                                     "Missing MODEL_NAME")
-            self.emit(ErrorEvent(
-                error="Missing required environment variable: MODEL_NAME",
-                error_type="ConfigurationError",
-                recoverable=False,
-            ))
-            return False
+        # Read session's env file without modifying global os.environ permanently
+        # This allows each session to have its own config
+        from dotenv import dotenv_values
+        session_env = dotenv_values(self.env_file) if self.env_file else {}
 
-        # Get provider-specific settings (may be None for non-Google providers)
-        project_id = os.environ.get("PROJECT_ID")
-        location = os.environ.get("LOCATION")
-        self._emit_init_progress("Loading configuration", "done", 1, total_steps)
+        def get_config(key: str) -> Optional[str]:
+            """Get config value from session env, falling back to global env."""
+            return session_env.get(key) or os.environ.get(key)
 
-        # Step 2: Connect to model provider
-        # Credential validation is handled by each provider during connect()
-        self._emit_init_progress("Connecting to model provider", "running", 2, total_steps)
+        # Temporarily apply session env vars for provider initialization
+        # Save original values to restore later
+        original_env = {}
+        for key, value in session_env.items():
+            if value is not None:
+                original_env[key] = os.environ.get(key)
+                os.environ[key] = value
+
         try:
-            self._jaato = JaatoClient(provider_name=self._provider)
+            active_bundle = active_cert_bundle(verbose=False)
+
+            model_name = get_config("MODEL_NAME")
+            if not model_name:
+                self._emit_init_progress("Loading configuration", "error", 1, total_steps,
+                                         "Missing MODEL_NAME")
+                self.emit(ErrorEvent(
+                    error="Missing required environment variable: MODEL_NAME",
+                    error_type="ConfigurationError",
+                    recoverable=False,
+                ))
+                return False
+
+            # Get provider from session env (takes precedence over constructor arg)
+            session_provider = get_config("JAATO_PROVIDER")
+            provider_to_use = session_provider or self._provider
+
+            # Get provider-specific settings (may be None for non-Google providers)
+            project_id = get_config("PROJECT_ID")
+            location = get_config("LOCATION")
+            self._emit_init_progress("Loading configuration", "done", 1, total_steps)
+
+            # Step 2: Connect to model provider
+            # Credential validation is handled by each provider during connect()
+            self._emit_init_progress("Connecting to model provider", "running", 2, total_steps)
+            self._jaato = JaatoClient(provider_name=provider_to_use)
             # Pass project/location for providers that need them (Google/Vertex)
             # Other providers ignore these and use their own env vars
             self._jaato.connect(project_id, location, model_name)
@@ -393,6 +418,13 @@ class JaatoServer:
                 recoverable=False,
             ))
             return False
+        finally:
+            # Restore original environment variables
+            for key, orig_value in original_env.items():
+                if orig_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = orig_value
 
         self._model_name = self._jaato.model_name or model_name
         self._model_provider = self._jaato.provider_name
@@ -414,6 +446,17 @@ class JaatoServer:
             },
             "clarification": {
                 "channel_type": "queue",
+            },
+            # Pass workspace_path and session_id to LSP and MCP plugins so they:
+            # 1. Load config files from the client's workspace, not the server's cwd
+            # 2. Include session_id in log messages for multi-session debugging
+            "lsp": {
+                "workspace_path": self._workspace_path,
+                "session_id": self._session_id,
+            },
+            "mcp": {
+                "workspace_path": self._workspace_path,
+                "session_id": self._session_id,
             },
         }
         self.registry.expose_all(plugin_configs)
@@ -495,7 +538,11 @@ class JaatoServer:
         # ServerAgentHooks.on_agent_created() when set_ui_hooks() is called
 
     def _setup_session_plugin(self) -> None:
-        """Set up session persistence plugin."""
+        """Set up session persistence plugin.
+
+        Each JaatoServer has its own session plugin instance for tool operations.
+        SessionManager has a separate plugin instance for persistence operations.
+        """
         if not self._jaato:
             logger.debug("  _setup_session_plugin: no _jaato, returning early")
             return
@@ -510,6 +557,21 @@ class JaatoServer:
             logger.debug("  _setup_session_plugin: setting session plugin on jaato...")
             self._jaato.set_session_plugin(session_plugin, session_config)
             logger.debug("  _setup_session_plugin: session plugin set")
+
+            # Set session ID on plugin so it knows the current session
+            if self._session_id and hasattr(session_plugin, 'set_session_id'):
+                session_plugin.set_session_id(self._session_id)
+                logger.debug(f"  _setup_session_plugin: session_id set to {self._session_id}")
+
+            # Set up callback to emit event when description changes
+            if hasattr(session_plugin, 'set_description_callback'):
+                def on_description_changed(session_id: str, description: str) -> None:
+                    self.emit(SessionDescriptionUpdatedEvent(
+                        session_id=session_id,
+                        description=description,
+                    ))
+                session_plugin.set_description_callback(on_description_changed)
+                logger.debug("  _setup_session_plugin: description callback set")
 
             if self.registry:
                 logger.debug("  _setup_session_plugin: registering session plugin with registry...")
