@@ -317,10 +317,8 @@ class JaatoDaemon:
                             response_options=[
                                 {"key": "s", "label": "switch", "action": "switch",
                                  "description": f"Switch to session workspace: {session_workspace}"},
-                                {"key": "n", "label": "new", "action": "new_session",
-                                 "description": f"Create new session for: {client_workspace}"},
                                 {"key": "c", "label": "cancel", "action": "cancel",
-                                 "description": "Cancel attach operation"},
+                                 "description": "Stay in current session"},
                             ],
                             prompt_lines=[
                                 f"Workspace mismatch detected:",
@@ -329,8 +327,7 @@ class JaatoDaemon:
                                 f"",
                                 f"Choose an option:",
                                 f"  [s] Switch to session's workspace",
-                                f"  [n] Create a new session for your workspace",
-                                f"  [c] Cancel",
+                                f"  [c] Cancel and stay in current session",
                             ],
                         ))
                         return
@@ -455,20 +452,6 @@ class JaatoDaemon:
                         message=f"Attached to session. Working directory: {session_workspace}",
                         style="info",
                     ))
-
-            elif response in ("n", "new"):
-                # User chose to create a new session
-                new_session_id = self._session_manager.create_session(
-                    client_id, workspace_path=client_workspace
-                )
-                if self._ipc_server and new_session_id:
-                    self._ipc_server.set_client_session(client_id, new_session_id)
-                self._route_event(client_id, WorkspaceMismatchResolvedEvent(
-                    request_id=event.request_id,
-                    session_id=target_session_id,
-                    action="new_session",
-                    new_session_id=new_session_id,
-                ))
 
             else:
                 # Cancel or unknown response
