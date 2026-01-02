@@ -156,6 +156,11 @@ class PTDisplay:
         self._model_name: str = ""
         self._context_usage: Dict[str, Any] = {}
 
+        # Session bar info
+        self._session_id: str = ""
+        self._session_description: str = ""
+        self._session_workspace: str = ""
+
         # Temporary status message (for copy feedback, etc.)
         self._status_message: Optional[str] = None
         self._status_message_expires: float = 0.0
@@ -335,6 +340,33 @@ class PTDisplay:
     def _current_plan_has_data(self) -> bool:
         """Check if there's plan data for the current agent."""
         return self._get_current_plan_data() is not None
+
+    def _get_session_bar_content(self):
+        """Get session bar content as formatted text."""
+        if not self._session_id:
+            return [("class:session-bar.dim", " No session")]
+
+        # Build: Session: <id> - <description>  │  Workspace: <path>
+        result = [
+            ("class:session-bar.label", " Session: "),
+            ("class:session-bar.id", self._session_id),
+        ]
+
+        if self._session_description:
+            result.extend([
+                ("class:session-bar.separator", " - "),
+                ("class:session-bar.description", self._session_description),
+            ])
+
+        if self._session_workspace:
+            result.extend([
+                ("class:session-bar.separator", "  │  "),
+                ("class:session-bar.label", "Workspace: "),
+                ("class:session-bar.workspace", self._session_workspace),
+            ])
+
+        result.append(("class:session-bar", " "))
+        return result
 
     def _get_status_bar_content(self):
         """Get status bar content as formatted text."""
@@ -866,6 +898,13 @@ class PTDisplay:
             filter=Condition(lambda: self._agent_tab_bar is not None),
         )
 
+        # Session bar (shows current session and workspace)
+        session_bar = Window(
+            FormattedTextControl(self._get_session_bar_content),
+            height=1,
+            style="class:session-bar",
+        )
+
         # Status bar (always visible, 1 line)
         status_bar = Window(
             FormattedTextControl(self._get_status_bar_content),
@@ -957,11 +996,12 @@ class PTDisplay:
             filter=Condition(lambda: self._agent_tab_bar is not None and self._agent_tab_bar.is_popup_visible),
         )
 
-        # Root layout with tab bar at top, then status bar, output, input
+        # Root layout with tab bar at top, then session bar, status bar, output, input
         from prompt_toolkit.layout.containers import FloatContainer, Float
         root = FloatContainer(
             content=HSplit([
                 agent_tab_bar,   # Agent tabs (conditional)
+                session_bar,     # Session info bar
                 status_bar,      # Status bar
                 output_window,   # Output panel (100% width now)
                 input_row,       # Input area
@@ -973,7 +1013,7 @@ class PTDisplay:
                     content=CompletionsMenu(max_height=8),
                 ),
                 Float(
-                    top=2,  # Below tab bar and status bar
+                    top=3,  # Below tab bar, session bar, and status bar
                     left=2,
                     content=plan_popup_window,
                 ),
@@ -1013,6 +1053,14 @@ class PTDisplay:
             "agent-popup.status.awaiting": "#5fd7ff",
             "agent-popup.status.finished": "#808080",
             "agent-popup.status.error": "#ff5f5f",
+            # Session bar
+            "session-bar": "bg:#1a1a1a",
+            "session-bar.label": "#808080",
+            "session-bar.id": "#5fd7ff",  # cyan for session ID
+            "session-bar.separator": "#404040",
+            "session-bar.description": "#87d787",  # light green for description
+            "session-bar.workspace": "#d7af87",  # tan/orange for workspace
+            "session-bar.dim": "#606060",
         })
 
         input_style = self._input_handler._pt_style if self._input_handler else None
@@ -1125,6 +1173,30 @@ class PTDisplay:
         """
         self._model_provider = provider
         self._model_name = model
+        self.refresh()
+
+    def set_session_info(
+        self,
+        session_id: str,
+        description: str = "",
+        workspace: str = ""
+    ) -> None:
+        """Set the session info for the session bar.
+
+        Args:
+            session_id: The session ID.
+            description: Optional session description.
+            workspace: Optional workspace path.
+        """
+        self._session_id = session_id
+        self._session_description = description
+        # Shorten home directory to ~
+        if workspace:
+            import os
+            home = os.path.expanduser("~")
+            if workspace.startswith(home):
+                workspace = "~" + workspace[len(home):]
+        self._session_workspace = workspace
         self.refresh()
 
     def set_stop_callbacks(
