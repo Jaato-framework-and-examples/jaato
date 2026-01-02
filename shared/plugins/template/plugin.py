@@ -41,10 +41,11 @@ JINJA2_COMMENT_PATTERN = re.compile(r'\{#.*#\}')
 
 # Mustache/Handlebars specific patterns (distinguish from Jinja2)
 # These patterns identify Mustache syntax that wouldn't appear in Jinja2
-MUSTACHE_SECTION_PATTERN = re.compile(r'\{\{#\w+\}\}')  # {{#section}}
-MUSTACHE_END_SECTION_PATTERN = re.compile(r'\{\{/\w+\}\}')  # {{/section}}
-MUSTACHE_INVERTED_PATTERN = re.compile(r'\{\{\^\w+\}\}')  # {{^inverted}}
-MUSTACHE_CURRENT_ITEM_PATTERN = re.compile(r'\{\{\.\}\}')  # {{.}} (current item)
+# Allow whitespace/newlines between {{ and control character (common in formatted templates)
+MUSTACHE_SECTION_PATTERN = re.compile(r'\{\{\s*#\s*\w+\s*\}\}')  # {{#section}} or {{ #section }}
+MUSTACHE_END_SECTION_PATTERN = re.compile(r'\{\{\s*/\s*\w+\s*\}\}')  # {{/section}} or {{ /section }}
+MUSTACHE_INVERTED_PATTERN = re.compile(r'\{\{\s*\^\s*\w+\s*\}\}')  # {{^inverted}} or {{ ^inverted }}
+MUSTACHE_CURRENT_ITEM_PATTERN = re.compile(r'\{\{\s*\.\s*\}\}')  # {{.}} or {{ . }}
 
 # Jinja2 specific patterns (distinguish from Mustache)
 JINJA2_FILTER_PATTERN = re.compile(r'\{\{.*\|.*\}\}')  # {{ var | filter }}
