@@ -279,19 +279,29 @@ class MemoryPlugin:
 
         enriched_prompt = prompt + "\n" + "\n".join(hint_lines)
 
-        # Build notification message with trigger keywords
-        keyword_summary = ", ".join(f'"{k}"' for k in keywords[:3])
-        if len(keywords) > 3:
-            keyword_summary += f" +{len(keywords) - 3} more"
+        # Collect unique tags from matched memories
+        matched_tags = []
+        seen_tags = set()
+        for m in matches:
+            for tag in m.tags:
+                tag_lower = tag.lower()
+                if tag_lower not in seen_tags:
+                    seen_tags.add(tag_lower)
+                    matched_tags.append(tag)
+
+        # Build notification message with matched tags
+        tag_summary = ", ".join(f'"{t}"' for t in matched_tags[:3])
+        if len(matched_tags) > 3:
+            tag_summary += f" +{len(matched_tags) - 3} more"
 
         return PromptEnrichmentResult(
             prompt=enriched_prompt,
             metadata={
                 "memory_matches": len(matches),
                 "matched_ids": [m.id for m in matches],
-                "trigger_keywords": keywords,
+                "trigger_keywords": matched_tags,
                 "notification": {
-                    "message": f"added context about {len(matches)} memories (triggered by {keyword_summary})"
+                    "message": f"added context about {len(matches)} memories (tags: {tag_summary})"
                 }
             }
         )
