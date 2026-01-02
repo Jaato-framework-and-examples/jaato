@@ -2227,11 +2227,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     def get_sessions_for_completion():
         """Provider for session ID completion."""
         # Return session objects with session_id and description attributes
+        # Prefer description (model-generated) over name for display
         class SessionInfo:
             def __init__(self, session_id, description=""):
                 self.session_id = session_id
                 self.description = description
-        return [SessionInfo(s.get('id', ''), s.get('name', '')) for s in available_sessions]
+        return [SessionInfo(s.get('id', ''), s.get('description', '') or s.get('name', '')) for s in available_sessions]
 
     # Set up session provider for completion
     input_handler.set_session_provider(get_sessions_for_completion)
@@ -2659,8 +2660,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     for s in sessions:
                         status = "●" if s.get('is_loaded') else "○"
                         sid = s.get('id', 'unknown')
-                        name = s.get('name', '')
-                        name_part = f" ({name})" if name else ""
+                        # Prefer description (model-generated) over name
+                        desc = s.get('description', '') or s.get('name', '')
+                        desc_part = f" - {desc}" if desc else ""
                         provider = s.get('model_provider', '')
                         model = s.get('model_name', '')
                         model_part = f" [{provider}/{model}]" if provider else ""
@@ -2670,7 +2672,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         turns_part = f", {turns} turns" if turns else ""
 
                         status_style = "green" if s.get('is_loaded') else "dim"
-                        lines.append((f"  {status} {sid}{name_part}{model_part}{clients_part}{turns_part}", status_style))
+                        lines.append((f"  {status} {sid}{desc_part}{model_part}{clients_part}{turns_part}", status_style))
 
                     display.show_lines(lines)
 
