@@ -386,19 +386,28 @@ class SessionManager:
             Tuple of (session_workspace, client_workspace) if there's a mismatch,
             None if no mismatch or session not found.
         """
+        session_workspace: Optional[str] = None
+
         with self._lock:
+            # First check in-memory sessions
             session = self._sessions.get(session_id)
-            if not session:
-                return None
+            if session:
+                session_workspace = session.workspace_path
+            else:
+                # Check persisted sessions on disk
+                persisted = self._get_persisted_sessions()
+                for s in persisted:
+                    if s.session_id == session_id:
+                        session_workspace = s.workspace_path
+                        break
 
-            session_workspace = session.workspace_path
-            if not session_workspace or not client_workspace:
-                # No mismatch if either is not set
-                return None
+        if not session_workspace or not client_workspace:
+            # No mismatch if either is not set
+            return None
 
-            # Use helper method to compare workspaces
-            if not self._workspaces_match(session_workspace, client_workspace):
-                return (session_workspace, client_workspace)
+        # Use helper method to compare workspaces
+        if not self._workspaces_match(session_workspace, client_workspace):
+            return (session_workspace, client_workspace)
 
         return None
 
@@ -461,8 +470,10 @@ class SessionManager:
             session.attached_clients.add(client_id)
             self._client_to_session[client_id] = session_id
 
-            # Update workspace path if provided
-            if workspace_path:
+            # Only set workspace if session doesn't have one yet.
+            # If session already has a workspace, it keeps it - clients are warned
+            # about workspace mismatches before attach via check_workspace_mismatch().
+            if workspace_path and not session.workspace_path:
                 session.workspace_path = workspace_path
                 session.server.workspace_path = workspace_path
 
