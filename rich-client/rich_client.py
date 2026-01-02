@@ -2183,6 +2183,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         CommandListEvent,
         ToolStatusEvent,
         HistoryEvent,
+        WorkspaceMismatchRequestedEvent,
+        WorkspaceMismatchResponseRequest,
     )
 
     # Load keybindings
