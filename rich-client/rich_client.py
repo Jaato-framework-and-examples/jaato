@@ -2679,6 +2679,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         clients_part = f", {clients} client(s)" if clients else ""
                         turns = s.get('turn_count', 0)
                         turns_part = f", {turns} turns" if turns else ""
+                        workspace = s.get('workspace_path', '')
 
                         # Highlight current session
                         if is_current:
@@ -2688,6 +2689,14 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         else:
                             status_style = "dim"
                         lines.append((f"  {status} {sid}{desc_part}{model_part}{clients_part}{turns_part}", status_style))
+                        # Show workspace on second line if available
+                        if workspace:
+                            # Shorten home directory to ~
+                            import os
+                            home = os.path.expanduser("~")
+                            if workspace.startswith(home):
+                                workspace = "~" + workspace[len(home):]
+                            lines.append((f"      {workspace}", "dim"))
 
                     # Add legend
                     lines.append(("", ""))

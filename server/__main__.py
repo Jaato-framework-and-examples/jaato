@@ -360,6 +360,7 @@ class JaatoDaemon:
                     "is_current": s.session_id == current_session_id,
                     "client_count": s.client_count,
                     "turn_count": s.turn_count,
+                    "workspace_path": s.workspace_path or "",
                 } for s in sessions]
 
                 self._route_event(client_id, SessionListEvent(sessions=session_data))

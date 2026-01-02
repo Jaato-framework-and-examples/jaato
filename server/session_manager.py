@@ -65,6 +65,7 @@ class RuntimeSessionInfo:
     is_loaded: bool  # True if currently in memory
     client_count: int
     turn_count: int
+    workspace_path: Optional[str] = None
 
 
 @dataclass
@@ -826,6 +827,7 @@ class SessionManager:
                 is_loaded=False,
                 client_count=0,
                 turn_count=info.turn_count,
+                workspace_path=info.workspace_path,
             )
 
         # Overlay in-memory sessions (have more current info)
@@ -843,6 +845,7 @@ class SessionManager:
                     is_loaded=True,
                     client_count=len(session.attached_clients),
                     turn_count=len(session.server.get_history()) // 2,
+                    workspace_path=session.workspace_path,
                 )
 
         # Sort by last activity
