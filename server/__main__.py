@@ -346,6 +346,9 @@ class JaatoDaemon:
                 sessions = self._session_manager.list_sessions()
                 from server.events import SessionListEvent
 
+                # Get client's current session to mark it in the list
+                current_session_id = session_id  # From the event
+
                 # Send structured session data - client handles formatting
                 session_data = [{
                     "id": s.session_id,
@@ -354,6 +357,7 @@ class JaatoDaemon:
                     "model_provider": s.model_provider or "",
                     "model_name": s.model_name or "",
                     "is_loaded": s.is_loaded,
+                    "is_current": s.session_id == current_session_id,
                     "client_count": s.client_count,
                     "turn_count": s.turn_count,
                 } for s in sessions]
