@@ -350,6 +350,7 @@ class JaatoDaemon:
                 session_data = [{
                     "id": s.session_id,
                     "name": s.name or "",
+                    "description": s.description or "",
                     "model_provider": s.model_provider or "",
                     "model_name": s.model_name or "",
                     "is_loaded": s.is_loaded,
