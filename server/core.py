@@ -139,6 +139,7 @@ class JaatoServer:
         provider: Optional[str] = None,
         on_event: Optional[EventCallback] = None,
         workspace_path: Optional[str] = None,
+        session_id: Optional[str] = None,
     ):
         """Initialize the server.
 
@@ -149,11 +150,13 @@ class JaatoServer:
             workspace_path: Client's working directory for file operations.
                            If provided, the server will chdir to this path
                            when processing requests.
+            session_id: Unique identifier for this session (used in logs).
         """
         self.env_file = env_file
         self._provider = provider
         self._on_event = on_event or (lambda e: None)
         self._workspace_path = workspace_path
+        self._session_id = session_id
 
         # Core components
         self._jaato: Optional[JaatoClient] = None
@@ -415,13 +418,16 @@ class JaatoServer:
             "clarification": {
                 "channel_type": "queue",
             },
-            # Pass workspace_path to LSP and MCP plugins so they load
-            # config files from the client's workspace, not the server's cwd
+            # Pass workspace_path and session_id to LSP and MCP plugins so they:
+            # 1. Load config files from the client's workspace, not the server's cwd
+            # 2. Include session_id in log messages for multi-session debugging
             "lsp": {
                 "workspace_path": self._workspace_path,
+                "session_id": self._session_id,
             },
             "mcp": {
                 "workspace_path": self._workspace_path,
+                "session_id": self._session_id,
             },
         }
         self.registry.expose_all(plugin_configs)

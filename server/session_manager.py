@@ -294,6 +294,7 @@ class SessionManager:
             # During init, emit directly to requesting client (not yet attached to session)
             on_event=lambda e: self._emit_to_client(client_id, e),
             workspace_path=workspace_path,
+            session_id=session_id,
         )
 
         # Initialize the server (events go directly to requesting client)
@@ -471,6 +472,7 @@ class SessionManager:
             env_file=self._env_file,
             provider=self._provider,
             on_event=init_callback,
+            session_id=session_id,
         )
         logger.debug(f"_load_session: JaatoServer created, calling initialize()...")
 
