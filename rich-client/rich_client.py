@@ -2530,6 +2530,14 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
             elif isinstance(event, PlanUpdatedEvent):
                 # Update plan display - convert event steps to dict format expected by PlanPanel
+                # Calculate progress from step statuses
+                total_steps = len(event.steps)
+                completed_steps = sum(
+                    1 for step in event.steps
+                    if step.get("status") == "completed"
+                )
+                percent = (completed_steps / total_steps * 100) if total_steps > 0 else 0
+
                 plan_data = {
                     "title": event.plan_name or "Plan",
                     "steps": [
@@ -2541,7 +2549,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         }
                         for i, step in enumerate(event.steps)
                     ],
-                    "progress": {"current": 0, "total": len(event.steps)},
+                    "progress": {
+                        "total": total_steps,
+                        "completed": completed_steps,
+                        "percent": round(percent, 1),
+                    },
                 }
                 agent_id = getattr(event, 'agent_id', None)
                 display.update_plan(plan_data, agent_id)
