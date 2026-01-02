@@ -62,6 +62,8 @@ class ReferencesPlugin:
         # Selection lifecycle hooks for UI integration
         self._on_selection_requested: Optional[Callable[[str, List[str]], None]] = None
         self._on_selection_resolved: Optional[Callable[[str, List[str]], None]] = None
+        # Project root for resolving relative paths (stored during initialize)
+        self._project_root: Optional[str] = None
 
     @property
     def name(self) -> str:
@@ -87,6 +89,87 @@ class ReferencesPlugin:
             except (IOError, OSError):
                 pass  # Silently skip if trace file cannot be written
 
+    def _resolve_source_for_context(self, source: ReferenceSource) -> None:
+        """Resolve a catalog source's path for the current project context.
+
+        When a source from the master catalog is added to the active sources,
+        its original relative path needs to be resolved against the current
+        project root to create an absolute path that will work from any CWD.
+
+        Args:
+            source: The reference source to resolve (modified in-place).
+        """
+        if source.type != SourceType.LOCAL or not source.path:
+            return
+
+        # If already has a resolved_path that exists, nothing to do
+        if source.resolved_path:
+            resolved_obj = Path(source.resolved_path)
+            if resolved_obj.is_absolute() and resolved_obj.exists():
+                return
+            # Also check resolved path relative to project root
+            if self._project_root:
+                from_root = Path(self._project_root) / source.resolved_path
+                if from_root.exists():
+                    source.resolved_path = str(from_root.resolve())
+                    return
+
+        # Try to resolve the original path against the project root
+        if self._project_root:
+            original_path = Path(source.path)
+            if not original_path.is_absolute():
+                from_root = Path(self._project_root) / source.path
+                if from_root.exists():
+                    source.resolved_path = str(from_root.resolve())
+                    self._trace(f"resolved catalog source '{source.id}': {source.path} -> {source.resolved_path}")
+                    return
+
+        self._trace(f"could not resolve catalog source '{source.id}': {source.path}")
+
+    def _resolve_path_for_access(self, source: ReferenceSource) -> Optional[Path]:
+        """Resolve a source's path to an accessible filesystem location.
+
+        Tries multiple strategies to find the file/directory:
+        1. resolved_path as-is (may be relative or absolute)
+        2. resolved_path relative to project root
+        3. original path relative to project root
+        4. original path as absolute
+
+        Args:
+            source: The reference source to resolve.
+
+        Returns:
+            Path object if found, None otherwise.
+        """
+        candidates = []
+
+        # Try resolved_path first
+        if source.resolved_path:
+            resolved_obj = Path(source.resolved_path)
+            candidates.append(resolved_obj)
+            # Also try relative to project root
+            if self._project_root and not resolved_obj.is_absolute():
+                candidates.append(Path(self._project_root) / source.resolved_path)
+
+        # Try original path
+        if source.path:
+            original_obj = Path(source.path)
+            if original_obj.is_absolute():
+                candidates.append(original_obj)
+            elif self._project_root:
+                candidates.append(Path(self._project_root) / source.path)
+
+        # Return first existing path
+        for path_obj in candidates:
+            try:
+                resolved = path_obj.resolve()
+                if resolved.exists():
+                    return resolved
+            except (OSError, ValueError):
+                continue
+
+        return None
+
     def _get_reference_content(self, source: ReferenceSource) -> Optional[str]:
         """Get the content of a reference source for transitive detection.
 
@@ -104,19 +187,18 @@ class ReferencesPlugin:
             return source.content
 
         if source.type == SourceType.LOCAL:
-            # Use resolved_path if available, otherwise original path
-            file_path = source.resolved_path or source.path
-            if not file_path:
+            if not source.path and not source.resolved_path:
                 self._trace(f"transitive:   '{source.id}' has no path")
                 return None
 
-            path_obj = Path(file_path)
+            # Use the path resolution helper to find the file
+            path_obj = self._resolve_path_for_access(source)
 
-            # Diagnostic: check path existence
-            if not path_obj.exists():
+            if not path_obj:
                 self._trace(
-                    f"transitive:   '{source.id}' path not found: {file_path} "
-                    f"(resolved={source.resolved_path}, original={source.path}, cwd={Path.cwd()})"
+                    f"transitive:   '{source.id}' path not found "
+                    f"(resolved={source.resolved_path}, original={source.path}, "
+                    f"project_root={self._project_root}, cwd={Path.cwd()})"
                 )
                 return None
 
@@ -148,7 +230,7 @@ class ReferencesPlugin:
                     self._trace(f"transitive:   '{source.id}' dir -> {doc_files_found} doc files, {sum(len(c) for c in contents)} chars")
                     return "\n".join(contents)
                 else:
-                    self._trace(f"transitive:   '{source.id}' dir -> no doc files found in {file_path}")
+                    self._trace(f"transitive:   '{source.id}' dir -> no doc files found in {path_obj}")
                     return None
 
             # Handle regular file
@@ -303,6 +385,16 @@ class ReferencesPlugin:
         # Extract agent name for trace logging
         self._agent_name = config.get("agent_name")
 
+        # Compute and store project root for path resolution
+        # This is used when resolving paths for catalog sources and in _get_reference_content
+        inline_base_path = config.get("base_path", os.getcwd())
+        base_path_obj = Path(inline_base_path).resolve()
+        if '.jaato' in base_path_obj.parts:
+            jaato_idx = base_path_obj.parts.index('.jaato')
+            self._project_root = str(Path(*base_path_obj.parts[:jaato_idx]))
+        else:
+            self._project_root = str(base_path_obj)
+
         # Try to load from file first (master catalog)
         config_path = config.get("config_path")
         try:
@@ -331,18 +423,13 @@ class ReferencesPlugin:
 
             # Resolve relative paths for inline sources against provided base or CWD
             # Make paths relative to project root (not CWD which may differ)
-            inline_base_path = config.get("base_path", os.getcwd())
-            # Detect project root: if base_path contains .jaato, use its parent
-            base_path_obj = Path(inline_base_path).resolve()
-            if '.jaato' in base_path_obj.parts:
-                jaato_idx = base_path_obj.parts.index('.jaato')
-                project_root = str(Path(*base_path_obj.parts[:jaato_idx]))
-            else:
-                project_root = str(base_path_obj)
-            resolve_source_paths(resolved_sources, inline_base_path, relative_to=project_root)
+            resolve_source_paths(resolved_sources, inline_base_path, relative_to=self._project_root)
             self._sources = resolved_sources
         else:
+            # Use sources from master catalog - resolve paths for current context
             self._sources = self._config.sources
+            for source in self._sources:
+                self._resolve_source_for_context(source)
 
         # Handle preselected - look up from catalog and add to sources if needed
         preselected = config.get("preselected", [])
@@ -350,8 +437,10 @@ class ReferencesPlugin:
             current_ids = {s.id for s in self._sources}
             for sid in preselected:
                 if sid not in current_ids and sid in catalog_by_id:
-                    # Add from master catalog
-                    self._sources.append(catalog_by_id[sid])
+                    # Add from master catalog - need to resolve paths for current context
+                    source = catalog_by_id[sid]
+                    self._resolve_source_for_context(source)
+                    self._sources.append(source)
                     current_ids.add(sid)
 
         # Initialize channel
@@ -416,7 +505,10 @@ class ReferencesPlugin:
                     self._selected_source_ids.append(ref_id)
                 # Ensure source is in self._sources
                 if ref_id not in current_source_ids and ref_id in full_catalog:
-                    self._sources.append(full_catalog[ref_id])
+                    source = full_catalog[ref_id]
+                    # Resolve paths for catalog sources added during transitive resolution
+                    self._resolve_source_for_context(source)
+                    self._sources.append(source)
                     current_source_ids.add(ref_id)
 
             # Log transitive injection results
