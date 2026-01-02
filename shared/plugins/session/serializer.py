@@ -198,6 +198,7 @@ def serialize_session_state(state: SessionState) -> Dict[str, Any]:
             'location': state.location,
             'model': state.model,
         },
+        'workspace_path': state.workspace_path,
         'history': serialize_history(state.history),
     }
 
@@ -234,6 +235,7 @@ def deserialize_session_state(data: Dict[str, Any]) -> SessionState:
         project=connection.get('project'),
         location=connection.get('location'),
         model=connection.get('model'),
+        workspace_path=data.get('workspace_path'),
     )
 
 
@@ -255,6 +257,7 @@ def serialize_session_info(state: SessionState) -> Dict[str, Any]:
         'updated_at': state.updated_at.isoformat(),
         'turn_count': state.turn_count,
         'model': state.model,
+        'workspace_path': state.workspace_path,
     }
 
 
@@ -274,4 +277,5 @@ def deserialize_session_info(data: Dict[str, Any]) -> SessionInfo:
         updated_at=datetime.fromisoformat(data['updated_at']),
         turn_count=data.get('turn_count', 0),
         model=data.get('model'),
+        workspace_path=data.get('workspace_path'),
     )
