@@ -356,8 +356,13 @@ class IPCClient:
         # Get client's working directory (for finding config files like .lsp.json)
         working_dir = os.getcwd()
 
-        # Resolve to absolute path for the server
-        env_file_abs = str(env_path.resolve()) if env_path.exists() else None
+        # Always resolve to absolute path - server will check if it exists
+        # This allows relative paths like "../.env" to work correctly
+        env_file_abs = str(env_path.resolve())
+
+        # Log for debugging
+        import logging
+        logging.getLogger(__name__).info(f"Sending env_file={env_file_abs} (exists={env_path.exists()})")
 
         # Send config to server
         await self._send_event(ClientConfigRequest(

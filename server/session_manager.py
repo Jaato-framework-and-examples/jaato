@@ -284,6 +284,9 @@ class SessionManager:
         # let JaatoClient read JAATO_PROVIDER from the env file
         session_provider = None if client_config.get('env_file') else self._provider
 
+        logger.info(f"Creating session for client {client_id}: env_file={session_env_file}, provider={session_provider}")
+        logger.info(f"  Client config: {client_config}")
+
         # Create JaatoServer for this session
         server = JaatoServer(
             env_file=session_env_file,
