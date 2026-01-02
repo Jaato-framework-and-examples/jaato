@@ -58,6 +58,9 @@ class SessionState:
     model: Optional[str] = None
     """Model name used for this session."""
 
+    workspace_path: Optional[str] = None
+    """Workspace path (directory) where this session was created."""
+
 
 @dataclass
 class SessionInfo:
@@ -83,6 +86,9 @@ class SessionInfo:
 
     model: Optional[str] = None
     """Model name used for this session."""
+
+    workspace_path: Optional[str] = None
+    """Workspace path (directory) where this session was created."""
 
     def display_name(self) -> str:
         """Return a display-friendly name for the session."""

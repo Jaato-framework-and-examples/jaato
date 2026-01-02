@@ -387,12 +387,8 @@ class SessionManager:
                 # No mismatch if either is not set
                 return None
 
-            # Normalize paths for comparison
-            import os
-            session_workspace_normalized = os.path.normpath(os.path.abspath(session_workspace))
-            client_workspace_normalized = os.path.normpath(os.path.abspath(client_workspace))
-
-            if session_workspace_normalized != client_workspace_normalized:
+            # Use helper method to compare workspaces
+            if not self._workspaces_match(session_workspace, client_workspace):
                 return (session_workspace, client_workspace)
 
         return None
@@ -556,6 +552,7 @@ class SessionManager:
             last_activity=state.updated_at.isoformat(),
             description=state.description,
             is_dirty=False,
+            workspace_path=state.workspace_path,
         )
 
         logger.info(f"Loaded session from disk: {session_id}")
@@ -588,6 +585,7 @@ class SessionManager:
                 turn_count=len(history) // 2,  # Approximate
                 turn_accounting=turn_accounting,
                 model=session.server.model_name if session.server else None,
+                workspace_path=session.workspace_path,
             )
 
             self._session_plugin.save(state)
@@ -685,15 +683,49 @@ class SessionManager:
         logger.info(f"Session deleted: {session_id}")
         return deleted or session is not None
 
+    def _normalize_workspace(self, path: Optional[str]) -> Optional[str]:
+        """Normalize a workspace path for comparison.
+
+        Args:
+            path: The path to normalize.
+
+        Returns:
+            Normalized absolute path, or None if path is None.
+        """
+        if not path:
+            return None
+        import os
+        return os.path.normpath(os.path.abspath(path))
+
+    def _workspaces_match(
+        self,
+        path1: Optional[str],
+        path2: Optional[str],
+    ) -> bool:
+        """Check if two workspace paths match.
+
+        Args:
+            path1: First path.
+            path2: Second path.
+
+        Returns:
+            True if both paths are set and point to the same directory.
+        """
+        norm1 = self._normalize_workspace(path1)
+        norm2 = self._normalize_workspace(path2)
+        if not norm1 or not norm2:
+            return False
+        return norm1 == norm2
+
     def get_or_create_default(
         self,
         client_id: str,
         workspace_path: Optional[str] = None,
     ) -> str:
-        """Get the most recent session, or create a new one.
+        """Get the default session for a workspace, or create a new one.
 
-        Attaches to the most recently used session (by updated_at).
-        Creates a new session if none exist.
+        Finds the most recently used session for the given workspace.
+        Creates a new session if no matching session exists.
 
         Args:
             client_id: The requesting client.
@@ -704,42 +736,51 @@ class SessionManager:
         """
         logger.debug(f"get_or_create_default called for client {client_id}, workspace={workspace_path}")
 
-        # Check in-memory sessions first - find most recently updated
+        # Check in-memory sessions first - find one matching the workspace
         with self._lock:
-            if self._sessions:
-                # Sort by name (which is the session description) to find most recent
-                # In-memory sessions don't have updated_at, so use the first one
-                session = next(iter(self._sessions.values()))
-                logger.debug(f"  found in-memory session: {session.session_id}")
-                session.attached_clients.add(client_id)
-                self._client_to_session[client_id] = session.session_id
-                # Update workspace path if provided (client may be from different dir)
-                if workspace_path:
-                    session.workspace_path = workspace_path
-                    session.server.workspace_path = workspace_path
-                # Emit current agent state to the newly attached client (skip SessionInfo, we'll send our own)
-                session.server.emit_current_state(
-                    lambda e: self._emit_to_client(client_id, e),
-                    skip_session_info=True
-                )
-                # Send complete SessionInfoEvent with state snapshot
-                self._emit_to_client(client_id, self._build_session_info_event(session))
-                return session.session_id
+            if self._sessions and workspace_path:
+                # Find sessions matching this workspace
+                matching_sessions = [
+                    s for s in self._sessions.values()
+                    if self._workspaces_match(s.workspace_path, workspace_path)
+                ]
+                if matching_sessions:
+                    # Use the first matching session (they're all for the same workspace)
+                    session = matching_sessions[0]
+                    logger.debug(f"  found in-memory session for workspace: {session.session_id}")
+                    session.attached_clients.add(client_id)
+                    self._client_to_session[client_id] = session.session_id
+                    # Emit current agent state to the newly attached client
+                    session.server.emit_current_state(
+                        lambda e: self._emit_to_client(client_id, e),
+                        skip_session_info=True
+                    )
+                    # Send complete SessionInfoEvent with state snapshot
+                    self._emit_to_client(client_id, self._build_session_info_event(session))
+                    return session.session_id
 
         # Check persisted sessions (already sorted by updated_at descending)
         logger.debug(f"  checking persisted sessions...")
         persisted = self._get_persisted_sessions()
         logger.debug(f"  found {len(persisted)} persisted session(s)")
 
-        if persisted:
-            # Use the most recent one (first in the list)
-            most_recent = persisted[0]
-            logger.debug(f"  attaching to most recent session: {most_recent.session_id}")
-            if self.attach_session(client_id, most_recent.session_id, workspace_path):
-                return most_recent.session_id
+        if persisted and workspace_path:
+            # Find sessions matching this workspace
+            matching_persisted = [
+                s for s in persisted
+                if self._workspaces_match(s.workspace_path, workspace_path)
+            ]
+            logger.debug(f"  found {len(matching_persisted)} session(s) for workspace")
 
-        # No sessions exist - create a new one
-        logger.debug(f"  creating new session...")
+            if matching_persisted:
+                # Use the most recent one for this workspace
+                most_recent = matching_persisted[0]
+                logger.debug(f"  attaching to workspace session: {most_recent.session_id}")
+                if self.attach_session(client_id, most_recent.session_id, workspace_path):
+                    return most_recent.session_id
+
+        # No matching sessions exist - create a new one for this workspace
+        logger.debug(f"  creating new session for workspace...")
         return self.create_session(client_id, workspace_path=workspace_path)
 
     # =========================================================================
