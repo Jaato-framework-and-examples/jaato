@@ -588,6 +588,12 @@ Template rendering requires approval since it writes files."""
         ]
 
         if not template_blocks:
+            # Debug: show what's in each code block
+            for i, (lang, content, start, end) in enumerate(code_blocks):
+                preview = content[:100].replace('\n', '\\n') + ('...' if len(content) > 100 else '')
+                has_var = bool(JINJA2_VARIABLE_PATTERN.search(content))
+                has_section = bool(MUSTACHE_SECTION_PATTERN.search(content))
+                self._trace(f"  block {i+1}/{len(code_blocks)} lang={lang!r}: var={has_var} section={has_section} preview={preview}")
             self._trace(f"  found {len(code_blocks)} code blocks but none with template syntax")
             return ToolResultEnrichmentResult(result=result)
 
