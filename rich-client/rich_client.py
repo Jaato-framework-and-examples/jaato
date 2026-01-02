@@ -2757,9 +2757,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     "session_id": event.session_id,
                     "options": event.response_options,
                 }
-                # Show the prompt
-                lines = [(line, "") for line in event.prompt_lines]
-                display.show_lines(lines)
+                # Show the prompt in output panel (not pager)
+                prompt_text = "\n".join(event.prompt_lines)
+                display.append_output("system", prompt_text, "write")
+                display.refresh()
                 # Enable input mode for response
                 display.set_waiting_for_channel_input(True, event.response_options)
 
