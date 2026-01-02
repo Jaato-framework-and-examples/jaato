@@ -328,8 +328,8 @@ class IPCClient:
     async def _send_client_config(self) -> None:
         """Send client configuration to the server.
 
-        Loads the client's .env file and sends relevant settings
-        (like JAATO_TRACE_LOG, PROVIDER_TRACE_LOG) to the server so plugins use client paths.
+        Sends the path to the client's .env file so the server can load
+        all provider-related settings when creating sessions.
         """
         import os
         import shutil
@@ -342,9 +342,13 @@ class IPCClient:
         else:
             client_env = {}
 
-        # Also check current environment (in case set via shell)
-        trace_log = client_env.get("JAATO_TRACE_LOG") or os.environ.get("JAATO_TRACE_LOG")
-        provider_trace = client_env.get("PROVIDER_TRACE_LOG") or os.environ.get("PROVIDER_TRACE_LOG")
+        # Helper to get value from .env or shell environment
+        def get_env(key: str) -> str | None:
+            return client_env.get(key) or os.environ.get(key)
+
+        # Trace paths (for backward compatibility, still sent explicitly)
+        trace_log = get_env("JAATO_TRACE_LOG")
+        provider_trace = get_env("PROVIDER_TRACE_LOG")
 
         # Get terminal width for formatting
         terminal_width, _ = shutil.get_terminal_size()
@@ -352,12 +356,16 @@ class IPCClient:
         # Get client's working directory (for finding config files like .lsp.json)
         working_dir = os.getcwd()
 
+        # Resolve to absolute path for the server
+        env_file_abs = str(env_path.resolve()) if env_path.exists() else None
+
         # Send config to server
         await self._send_event(ClientConfigRequest(
             trace_log_path=trace_log,
             provider_trace_log=provider_trace,
             terminal_width=terminal_width,
             working_dir=working_dir,
+            env_file=env_file_abs,
         ))
 
     async def _start_server(self) -> bool:

@@ -209,6 +209,11 @@ class SessionManager:
             self._client_config[client_id]['working_dir'] = event.working_dir
             logger.info(f"Client {client_id} set working_dir={event.working_dir}")
 
+        # Store client's env_file path for session creation
+        if event.env_file:
+            self._client_config[client_id]['env_file'] = event.env_file
+            logger.info(f"Client {client_id} set env_file={event.env_file}")
+
         # Apply to current session if client is attached to one
         session_id = self._client_to_session.get(client_id)
         if session_id:
@@ -271,10 +276,18 @@ class SessionManager:
             counter += 1
             session_id = f"{original_id}_{counter}"
 
+        # Get client's env_file (if provided, use client's .env; otherwise use server's)
+        client_config = self._client_config.get(client_id, {})
+        session_env_file = client_config.get('env_file') or self._env_file
+
+        # If client provided their own env_file, don't override provider -
+        # let JaatoClient read JAATO_PROVIDER from the env file
+        session_provider = None if client_config.get('env_file') else self._provider
+
         # Create JaatoServer for this session
         server = JaatoServer(
-            env_file=self._env_file,
-            provider=self._provider,
+            env_file=session_env_file,
+            provider=session_provider,
             # During init, emit directly to requesting client (not yet attached to session)
             on_event=lambda e: self._emit_to_client(client_id, e),
             workspace_path=workspace_path,
