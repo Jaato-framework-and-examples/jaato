@@ -415,6 +415,14 @@ class JaatoServer:
             "clarification": {
                 "channel_type": "queue",
             },
+            # Pass workspace_path to LSP and MCP plugins so they load
+            # config files from the client's workspace, not the server's cwd
+            "lsp": {
+                "workspace_path": self._workspace_path,
+            },
+            "mcp": {
+                "workspace_path": self._workspace_path,
+            },
         }
         self.registry.expose_all(plugin_configs)
         self.todo_plugin = self.registry.get_plugin("todo")
