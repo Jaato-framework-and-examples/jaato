@@ -996,12 +996,12 @@ class PTDisplay:
             filter=Condition(lambda: self._agent_tab_bar is not None and self._agent_tab_bar.is_popup_visible),
         )
 
-        # Root layout with tab bar at top, then session bar, status bar, output, input
+        # Root layout with session bar at top, then tab bar, status bar, output, input
         from prompt_toolkit.layout.containers import FloatContainer, Float
         root = FloatContainer(
             content=HSplit([
+                session_bar,     # Session info bar (top)
                 agent_tab_bar,   # Agent tabs (conditional)
-                session_bar,     # Session info bar
                 status_bar,      # Status bar
                 output_window,   # Output panel (100% width now)
                 input_row,       # Input area
@@ -1013,12 +1013,12 @@ class PTDisplay:
                     content=CompletionsMenu(max_height=8),
                 ),
                 Float(
-                    top=3,  # Below tab bar, session bar, and status bar
+                    top=3,  # Below session bar, tab bar, and status bar
                     left=2,
                     content=plan_popup_window,
                 ),
                 Float(
-                    top=1,  # Below tab bar, aligned with selected tab
+                    top=2,  # Below session bar, aligned with selected tab
                     left=1,
                     content=agent_popup_window,
                 ),
