@@ -237,15 +237,16 @@ class AnthropicProvider:
         """Create Anthropic client with appropriate auth method."""
         import anthropic
 
-        # Headers to match Claude Code CLI exactly
+        # Headers for OAuth authentication
+        # Uses oauth-2025-04-20 beta (required for OAuth tokens) instead of
+        # claude-code-20250219 which is restricted to official Claude Code clients
         oauth_headers = {
             "anthropic-beta": (
-                "claude-code-20250219,"
+                "oauth-2025-04-20,"
                 "interleaved-thinking-2025-05-14,"
                 "fine-grained-tool-streaming-2025-05-14"
             ),
-            # Override SDK's default User-Agent to match Claude Code CLI
-            "User-Agent": "claude-code/1.0.95",
+            "anthropic-dangerous-direct-browser-access": "true",
         }
 
         # Priority: PKCE OAuth > env var OAuth > API key
