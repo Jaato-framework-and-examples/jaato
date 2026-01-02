@@ -107,6 +107,9 @@ THINKING_CAPABLE_MODELS = [
 DEFAULT_MAX_TOKENS = 8192
 EXTENDED_MAX_TOKENS = 16000  # When thinking is enabled
 
+# Claude Code identity - required for OAuth tokens (server-side validation)
+CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+
 
 class AnthropicProvider:
     """Anthropic Claude provider.
@@ -572,6 +575,10 @@ class AnthropicProvider:
             self._handle_api_error(e)
             raise
 
+    def _is_using_oauth(self) -> bool:
+        """Check if OAuth authentication is being used."""
+        return self._use_pkce or bool(self._oauth_token)
+
     def _build_api_kwargs(self, response_schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Build kwargs for the messages.create() call."""
         kwargs: Dict[str, Any] = {}
@@ -583,7 +590,24 @@ class AnthropicProvider:
             kwargs["max_tokens"] = DEFAULT_MAX_TOKENS
 
         # System instruction
-        if self._system_instruction:
+        # When using OAuth tokens, prepend Claude Code identity (server-side validation)
+        if self._is_using_oauth():
+            # OAuth requires Claude Code identity + cache control format
+            system_parts = [
+                {
+                    "type": "text",
+                    "text": CLAUDE_CODE_IDENTITY,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+            if self._system_instruction:
+                system_parts.append({
+                    "type": "text",
+                    "text": self._system_instruction,
+                    "cache_control": {"type": "ephemeral"},
+                })
+            kwargs["system"] = system_parts
+        elif self._system_instruction:
             if self._enable_caching:
                 # Use cache control on system instruction
                 kwargs["system"] = [
