@@ -361,7 +361,8 @@ class JaatoServer:
 
         # Step 1: Load configuration
         self._emit_init_progress("Loading configuration", "running", 1, total_steps)
-        load_dotenv(self.env_file)
+        # Use override=True so client's .env takes precedence over server's env
+        load_dotenv(self.env_file, override=True)
         active_bundle = active_cert_bundle(verbose=False)
 
         model_name = os.environ.get("MODEL_NAME")
