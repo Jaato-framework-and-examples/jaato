@@ -51,6 +51,16 @@ from .plugins.model_provider.types import (
 from .ssl_helper import active_cert_bundle, normalize_ca_env_vars
 from .console_encoding import configure_utf8_output
 
+# Configure console output early when the shared package is imported.
+# This ensures stdout/stderr are set to UTF-8 on Windows to avoid
+# UnicodeEncodeError when printing characters unsupported by the
+# default Windows code page.
+try:
+    configure_utf8_output()
+except Exception:
+    # Best-effort: if configuration fails, continue without raising.
+    pass
+
 __all__ = [
     # Token accounting
     "TokenLedger",

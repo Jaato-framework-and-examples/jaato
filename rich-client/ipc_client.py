@@ -119,9 +119,42 @@ class IPCClient:
 
     def _get_pipe_path(self) -> str:
         """Get the full Windows named pipe path."""
-        if self.socket_path.startswith(WINDOWS_PIPE_PREFIX):
-            return self.socket_path
-        return f"{WINDOWS_PIPE_PREFIX}{self.socket_path}"
+        # Accept a variety of user inputs and normalize to the canonical
+        # Windows named pipe form: \\.\pipe\<name>
+        path = self.socket_path
+
+        # If user provided an absolute-looking pipe path but using a single
+        # leading backslash (e.g. \.\pipe\jaato) or accidental concatenation
+        # like \.pipejaato, try to normalize it.
+        # Strip surrounding whitespace
+        path = path.strip()
+
+        # If user passed the canonical prefix already, return as-is
+        if path.startswith(WINDOWS_PIPE_PREFIX):
+            return path
+
+        # If the user passed some variant containing the word 'pipe' (for
+        # example: "\\.pipejaato", "\\.\pipe\\jaato", "pipe\\jaato",
+        # or even "\\.\\pipe\\.pipejaato"), try to extract the final
+        # name after the last occurrence of "pipe" and use that as the
+        # canonical pipe name.
+        lower = path.lower()
+        idx = lower.rfind("pipe")
+        if idx != -1:
+            # everything after the last 'pipe' occurrence is the name
+            name = path[idx + len("pipe"):]
+            # strip separators and whitespace
+            name = name.lstrip("\\/ .")
+            if name:
+                return f"{WINDOWS_PIPE_PREFIX}{name}"
+
+        # Fallback: treat the whole cleaned path as a bare name
+        cleaned = path
+        # Remove any leading slashes/backslashes or dots
+        while cleaned and (cleaned[0] in "\\/."):
+            cleaned = cleaned[1:]
+
+        return f"{WINDOWS_PIPE_PREFIX}{cleaned}"
 
     def _is_windows_pipe(self) -> bool:
         """Check if we're using a Windows named pipe."""
@@ -136,7 +169,12 @@ class IPCClient:
         Returns:
             Tuple of (reader, writer) for the pipe connection.
         """
-        print(f"DEBUG: Connecting to Windows pipe: {pipe_path}")
+        # Log both the original configured socket_path and the resolved pipe_path
+        try:
+            original = self.socket_path
+        except Exception:
+            original = str(self.socket_path)
+        print(f"DEBUG: Connecting to Windows pipe. original socket_path={original!r}, resolved pipe_path={pipe_path}")
         loop = asyncio.get_running_loop()
         print(f"DEBUG: Client event loop type: {type(loop).__name__}")
 
@@ -463,12 +501,34 @@ class IPCClient:
 
         payload = message.encode("utf-8")
         header = struct.pack(">I", len(payload))
-        self._writer.write(header + payload)
-        await self._writer.drain()
+        try:
+            self._writer.write(header + payload)
+            await self._writer.drain()
+        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+            logger.debug(f"_write_message: connection lost while writing: {e}")
+            # Ensure we clean up the writer/reader state
+            try:
+                await self.disconnect()
+            except Exception:
+                logger.debug("_write_message: error while disconnecting after write failure", exc_info=True)
+            # Surface a ConnectionError to callers if they want to handle it
+            raise ConnectionError("Connection lost") from e
 
     async def _send_event(self, event: Event) -> None:
         """Send an event to the server."""
-        await self._write_message(serialize_event(event))
+        try:
+            await self._write_message(serialize_event(event))
+        except ConnectionError as e:
+            # Log and swallow the error to avoid unhandled exceptions in
+            # background tasks (stop()/other commands may be called when
+            # connection is already shutting down).
+            logger.debug(f"_send_event: failed to send event {type(event).__name__}: {e}")
+            # Ensure disconnected state
+            try:
+                await self.disconnect()
+            except Exception:
+                logger.debug("_send_event: error while disconnecting after send failure", exc_info=True)
+            return
 
     # =========================================================================
     # Session Management
