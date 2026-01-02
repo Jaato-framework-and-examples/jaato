@@ -76,6 +76,7 @@ class EventType(str, Enum):
     # Session management (Server -> Client)
     SESSION_LIST = "session.list"  # For user display (updates local cache too)
     SESSION_INFO = "session.info"  # Full state snapshot on connect/attach
+    SESSION_DESCRIPTION_UPDATED = "session.description_updated"  # Description changed
 
     # Client requests (Client -> Server)
     SEND_MESSAGE = "message.send"
@@ -448,6 +449,14 @@ class SessionInfoEvent(Event):
     # ^ ["gemini-2.5-flash", "gemini-2.5-pro", ...]
 
 
+@dataclass
+class SessionDescriptionUpdatedEvent(Event):
+    """Session description was updated (by model calling session_describe)."""
+    type: EventType = field(default=EventType.SESSION_DESCRIPTION_UPDATED)
+    session_id: str = ""
+    description: str = ""
+
+
 # =============================================================================
 # Client -> Server Events (Requests)
 # =============================================================================
@@ -604,6 +613,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.ERROR.value: ErrorEvent,
     EventType.SESSION_LIST.value: SessionListEvent,
     EventType.SESSION_INFO.value: SessionInfoEvent,
+    EventType.SESSION_DESCRIPTION_UPDATED.value: SessionDescriptionUpdatedEvent,
     EventType.SEND_MESSAGE.value: SendMessageRequest,
     EventType.PERMISSION_RESPONSE.value: PermissionResponseRequest,
     EventType.CLARIFICATION_RESPONSE.value: ClarificationResponseRequest,
