@@ -1,6 +1,6 @@
 """Template rendering plugin implementation.
 
-Provides tools for rendering Jinja2 templates with variable substitution
+Provides tools for rendering templates with variable substitution
 and writing the results to files.
 
 Key features:
@@ -9,7 +9,14 @@ Key features:
    them to .jaato/templates/ for later use via renderTemplate tool.
 2. Tool result enrichment: Detects embedded templates in tool outputs
    (e.g., from cat, readFile) and extracts them similarly.
-3. Template rendering: Renders Jinja2 templates with variable substitution.
+3. Template rendering: Renders templates with variable substitution.
+   Supports BOTH Jinja2 and Mustache/Handlebars syntax (auto-detected).
+
+Template Syntax Support:
+- Jinja2: {{ variable }}, {% if %}, {% for %}, {{ var | filter }}
+- Mustache: {{variable}}, {{#section}}...{{/section}}, {{^inverted}}, {{.}}
+
+The template engine is auto-detected based on syntax patterns.
 
 See docs/template-tool-design.md for the design specification.
 """
@@ -31,6 +38,18 @@ from ..model_provider.types import ToolSchema
 JINJA2_VARIABLE_PATTERN = re.compile(r'\{\{\s*\w+')
 JINJA2_CONTROL_PATTERN = re.compile(r'\{%\s*\w+')
 JINJA2_COMMENT_PATTERN = re.compile(r'\{#.*#\}')
+
+# Mustache/Handlebars specific patterns (distinguish from Jinja2)
+# These patterns identify Mustache syntax that wouldn't appear in Jinja2
+# Allow whitespace/newlines between {{ and control character (common in formatted templates)
+# Note: For DETECTION we don't require closing }} - just detect the start of constructs
+MUSTACHE_SECTION_PATTERN = re.compile(r'\{\{\s*#\s*\w+')  # {{#section or {{#if condition
+MUSTACHE_END_SECTION_PATTERN = re.compile(r'\{\{\s*/\s*\w+')  # {{/section or {{ /section
+MUSTACHE_INVERTED_PATTERN = re.compile(r'\{\{\s*\^\s*\w+')  # {{^inverted or {{ ^inverted
+MUSTACHE_CURRENT_ITEM_PATTERN = re.compile(r'\{\{\s*\.\s*\}\}')  # {{.}} or {{ . }}
+
+# Jinja2 specific patterns (distinguish from Mustache)
+JINJA2_FILTER_PATTERN = re.compile(r'\{\{.*\|.*\}\}')  # {{ var | filter }}
 
 # Regex to find fenced code blocks in markdown
 # Captures: language (group 1), content (group 2)
@@ -55,16 +74,28 @@ class TemplatePlugin:
 
     Tools provided:
     - renderTemplate: Render a template with variables and write to file
+    - renderTemplateToFile: Same as renderTemplate with overwrite option
+    - listExtractedTemplates: List templates extracted in this session
 
     Prompt enrichment:
-    - Detects code blocks containing Jinja2 template syntax
+    - Detects code blocks containing Jinja2 or Mustache template syntax
     - Extracts them to .jaato/templates/ directory
     - Annotates the prompt with the extracted template paths
 
-    This plugin uses Jinja2 syntax for templates:
+    Supported template syntaxes (auto-detected):
+
+    Jinja2:
     - Variables: {{ variable_name }}
     - Conditionals: {% if condition %}...{% endif %}
     - Loops: {% for item in items %}...{% endfor %}
+    - Filters: {{ name | upper }}
+
+    Mustache/Handlebars:
+    - Variables: {{variable_name}}
+    - Sections/loops: {{#items}}...{{/items}}
+    - Conditionals: {{#hasValue}}...{{/hasValue}}
+    - Inverted sections: {{^isEmpty}}...{{/isEmpty}}
+    - Current item: {{.}}
     """
 
     def __init__(self):
@@ -125,8 +156,9 @@ class TemplatePlugin:
                     "and write the result to a file. When a template exists for your task (check "
                     ".jaato/templates/ or use listExtractedTemplates), you MUST use this tool instead "
                     "of writing code manually. Templates ensure consistency and reduce errors. "
-                    "Templates support Jinja2 syntax: variables ({{name}}), conditionals "
-                    "({% if condition %}...{% endif %}), and loops ({% for item in items %}...{% endfor %}). "
+                    "Supports BOTH Jinja2 and Mustache/Handlebars syntax (auto-detected). "
+                    "Jinja2: {{name}}, {% if %}, {% for %}. "
+                    "Mustache: {{name}}, {{#items}}...{{/items}}, {{^empty}}...{{/empty}}, {{.}}. "
                     "Provide either 'template' for inline content or 'template_path' for extracted templates."
                 ),
                 parameters={
@@ -138,7 +170,7 @@ class TemplatePlugin:
                         },
                         "template_path": {
                             "type": "string",
-                            "description": "Path to template file. Mutually exclusive with template."
+                            "description": "Path to template file (supports relative paths with .. resolution). Mutually exclusive with template."
                         },
                         "variables": {
                             "type": "object",
@@ -159,7 +191,7 @@ class TemplatePlugin:
                     "**CHECK THIS BEFORE WRITING CODE**: List templates extracted from documentation "
                     "in this session. If a template exists for your task, you MUST use renderTemplate "
                     "instead of writing code manually. These templates were detected in code blocks "
-                    "with Jinja2 syntax and extracted to .jaato/templates/."
+                    "with Jinja2 or Mustache syntax and extracted to .jaato/templates/."
                 ),
                 parameters={
                     "type": "object",
@@ -170,8 +202,10 @@ class TemplatePlugin:
             ToolSchema(
                 name="renderTemplateToFile",
                 description=(
-                    "Render a template with full Jinja2 support and write directly to a file. "
-                    "Supports variables ({{name}}), conditionals ({% if %}), loops ({% for %}), and filters. "
+                    "Render a template and write directly to a file. "
+                    "Supports BOTH Jinja2 and Mustache/Handlebars syntax (auto-detected). "
+                    "Jinja2: {{name}}, {% if %}, {% for %}, {{ name | filter }}. "
+                    "Mustache: {{name}}, {{#items}}...{{/items}}, {{^empty}}...{{/empty}}, {{.}}. "
                     "Provide either 'template' for inline content or 'template_path' for a template file."
                 ),
                 parameters={
@@ -183,7 +217,7 @@ class TemplatePlugin:
                         },
                         "template_path": {
                             "type": "string",
-                            "description": "Path to template file. Mutually exclusive with 'template'."
+                            "description": "Path to template file (supports relative paths with .. resolution). Mutually exclusive with 'template'."
                         },
                         "template": {
                             "type": "string",
@@ -222,14 +256,14 @@ patterns. Manual coding when a template exists is NOT acceptable.
 
 ### TEMPLATE TOOLS:
 
-**renderTemplate(template_path, variables, output_path)** - Render with full Jinja2 syntax
-  - Supports Jinja2 features: variables, conditionals, loops, filters
-  - Returns: {"success": true, "output_path": "...", "size": 1234, "lines": 42}
+**renderTemplate(template_path, variables, output_path)** - Render template and write to file
+  - Supports both Jinja2 and Mustache/Handlebars syntax (auto-detected)
+  - Returns: {"success": true, "output_path": "...", "size": 1234, "template_syntax": "jinja2|mustache"}
 
-**renderTemplateToFile(output_path, template_path, variables)** - Render with full Jinja2 and write
-  - Supports full Jinja2 features: variables, conditionals, loops, filters
+**renderTemplateToFile(output_path, template_path, variables)** - Render template and write to file
+  - Supports both Jinja2 and Mustache/Handlebars syntax (auto-detected)
   - Checks if file exists (use overwrite=true to replace)
-  - Returns: {"success": true, "output_path": "...", "bytes_written": 1234}
+  - Returns: {"success": true, "output_path": "...", "bytes_written": 1234, "template_syntax": "jinja2|mustache"}
 
 **listExtractedTemplates()** - List templates extracted from documentation
   - Shows all templates extracted in this session
@@ -260,7 +294,7 @@ Templates are stored in `.jaato/templates/`. When you read documentation files
 (like MODULE.md) containing embedded templates, they are automatically extracted
 to this directory. Watch for "[Template extracted: ...]" annotations.
 
-### Example - Generate a Java service from template:
+### Example - Generate a Java service from template (Jinja2):
 ```
 renderTemplateToFile(
     output_path="/src/main/java/com/bank/CustomerService.java",
@@ -278,12 +312,25 @@ renderTemplateToFile(
 )
 ```
 
-### Template Syntax (Jinja2)
-Both renderTemplate and renderTemplateToFile support full Jinja2 syntax:
+### Template Syntax (both supported, auto-detected)
+
+**Jinja2 style:**
 - Variables: {{ variable_name }}
 - Conditionals: {% if condition %}...{% endif %}
 - Loops: {% for item in items %}...{% endfor %}
 - Filters: {{ name | upper }}, {{ value | default('fallback') }}
+
+**Mustache/Handlebars style:**
+- Variables: {{variable_name}}
+- Sections/loops: {{#items}}...{{/items}}
+- Conditionals: {{#hasValue}}...{{/hasValue}}
+- Inverted sections: {{^isEmpty}}...{{/isEmpty}}
+- Current item in loop: {{.}}
+
+The template engine is auto-detected based on syntax patterns. Mustache patterns
+({{#section}}, {{/section}}, {{^inverted}}, {{.}}) trigger Mustache rendering.
+Jinja2 patterns ({% %}, {{ | filter }}) trigger Jinja2 rendering.
+Simple {{variable}} works in both and defaults to Jinja2.
 
 Template rendering requires approval since it writes files."""
 
@@ -434,46 +481,46 @@ Template rendering requires approval since it writes files."""
             # Generate template ID and path
             content_hash = self._hash_content(content)
 
-            # Skip if already extracted this content
+            # Check if already processed this content in this session
             if content_hash in self._extracted_templates:
                 template_path = self._extracted_templates[content_hash]
-                self._trace(f"  skipping already-extracted: {template_path.name}")
-                continue
+                self._trace(f"  reusing already-extracted: {template_path.name}")
+            else:
+                # Determine template filename and extract
+                template_name = self._generate_template_name(instructions, content, lang, start)
+                template_path, is_new = self._extract_template(template_name, content, lang)
 
-            # Determine template filename
-            template_name = self._generate_template_name(instructions, content, lang, start)
-            template_path, is_new = self._extract_template(template_name, content, lang)
+                if template_path:
+                    self._extracted_templates[content_hash] = template_path
+                    if is_new:
+                        self._trace(f"  extracted new: {template_path.name}")
+                    else:
+                        self._trace(f"  found existing on disk: {template_path.name}")
 
+            # Always add annotation for available templates (new or existing)
             if template_path:
-                self._extracted_templates[content_hash] = template_path
+                variables = self._extract_variables(content)
+                extracted.append((content_hash, template_path, variables))
 
-                # Only add annotation for newly created templates
-                if is_new:
-                    variables = self._extract_variables(content)
-                    extracted.append((content_hash, template_path, variables))
+                # Build annotation
+                rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
+                var_list = ", ".join(variables[:5])
+                if len(variables) > 5:
+                    var_list += f", ... ({len(variables)} total)"
 
-                    # Build annotation
-                    rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
-                    var_list = ", ".join(variables[:5])
-                    if len(variables) > 5:
-                        var_list += f", ... ({len(variables)} total)"
-
-                    annotations.append(
-                        f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
-                        f"  Variables: {var_list or '(none detected)'}\n"
-                        f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                        f"  Code generated without this template will be REJECTED as non-compliant.\n"
-                        f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
-                    )
-                    self._trace(f"  extracted: {template_path.name} with {len(variables)} variables")
-                else:
-                    self._trace(f"  reusing existing: {template_path.name}")
+                annotations.append(
+                    f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
+                    f"  Variables: {var_list or '(none detected)'}\n"
+                    f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
+                    f"  Code generated without this template will be REJECTED as non-compliant.\n"
+                    f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
+                )
 
         if not annotations:
             return SystemInstructionEnrichmentResult(instructions=instructions)
 
         # Append annotations to instructions
-        annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES EXTRACTED - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
+        annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES AVAILABLE - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
         enriched_instructions = instructions + annotation_block
 
         return SystemInstructionEnrichmentResult(
@@ -521,9 +568,17 @@ Template rendering requires approval since it writes files."""
         # Find all code blocks in the result
         code_blocks = self._find_code_blocks(result)
 
+        # If no code blocks found, check if the raw content itself is a template
+        # This handles cases like readFile on a .tpl file
         if not code_blocks:
-            self._trace("  no code blocks found in tool result")
-            return ToolResultEnrichmentResult(result=result)
+            if self._is_template(result):
+                self._trace("  no code blocks, but raw content is a template")
+                # Treat the entire result as a single template block
+                # Use empty lang, full content, position 0
+                code_blocks = [("", result, 0, len(result))]
+            else:
+                self._trace("  no code blocks found in tool result")
+                return ToolResultEnrichmentResult(result=result)
 
         # Filter to blocks that contain template syntax
         template_blocks = [
@@ -533,6 +588,12 @@ Template rendering requires approval since it writes files."""
         ]
 
         if not template_blocks:
+            # Debug: show what's in each code block
+            for i, (lang, content, start, end) in enumerate(code_blocks):
+                preview = content[:100].replace('\n', '\\n') + ('...' if len(content) > 100 else '')
+                has_var = bool(JINJA2_VARIABLE_PATTERN.search(content))
+                has_section = bool(MUSTACHE_SECTION_PATTERN.search(content))
+                self._trace(f"  block {i+1}/{len(code_blocks)} lang={lang!r}: var={has_var} section={has_section} preview={preview}")
             self._trace(f"  found {len(code_blocks)} code blocks but none with template syntax")
             return ToolResultEnrichmentResult(result=result)
 
@@ -545,42 +606,44 @@ Template rendering requires approval since it writes files."""
         for lang, content, start, end in template_blocks:
             content_hash = self._hash_content(content)
 
+            # Check if already processed this content in this session
             if content_hash in self._extracted_templates:
                 template_path = self._extracted_templates[content_hash]
-                self._trace(f"  skipping already-extracted: {template_path.name}")
-                continue
+                self._trace(f"  reusing already-extracted: {template_path.name}")
+            else:
+                # Determine template filename and extract
+                template_name = self._generate_template_name(result, content, lang, start)
+                template_path, is_new = self._extract_template(template_name, content, lang)
 
-            template_name = self._generate_template_name(result, content, lang, start)
-            template_path, is_new = self._extract_template(template_name, content, lang)
+                if template_path:
+                    self._extracted_templates[content_hash] = template_path
+                    if is_new:
+                        self._trace(f"  extracted new: {template_path.name}")
+                    else:
+                        self._trace(f"  found existing on disk: {template_path.name}")
 
+            # Always add annotation for available templates (new or existing)
             if template_path:
-                self._extracted_templates[content_hash] = template_path
+                variables = self._extract_variables(content)
+                extracted.append((content_hash, template_path, variables))
 
-                # Only add annotation for newly created templates
-                if is_new:
-                    variables = self._extract_variables(content)
-                    extracted.append((content_hash, template_path, variables))
+                rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
+                var_list = ", ".join(variables[:5])
+                if len(variables) > 5:
+                    var_list += f", ... ({len(variables)} total)"
 
-                    rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
-                    var_list = ", ".join(variables[:5])
-                    if len(variables) > 5:
-                        var_list += f", ... ({len(variables)} total)"
-
-                    annotations.append(
-                        f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
-                        f"  Variables: {var_list or '(none detected)'}\n"
-                        f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                        f"  Code generated without this template will be REJECTED as non-compliant.\n"
-                        f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
-                    )
-                    self._trace(f"  extracted: {template_path.name} with {len(variables)} variables")
-                else:
-                    self._trace(f"  reusing existing: {template_path.name}")
+                annotations.append(
+                    f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
+                    f"  Variables: {var_list or '(none detected)'}\n"
+                    f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
+                    f"  Code generated without this template will be REJECTED as non-compliant.\n"
+                    f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
+                )
 
         if not annotations:
             return ToolResultEnrichmentResult(result=result)
 
-        annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES EXTRACTED - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
+        annotation_block = "\n\n---\n[!] **MANDATORY TEMPLATES AVAILABLE - USE THESE INSTEAD OF MANUAL CODING:**\n" + "\n\n".join(annotations) + "\n---"
         enriched_result = result + annotation_block
 
         return ToolResultEnrichmentResult(
@@ -608,11 +671,48 @@ Template rendering requires approval since it writes files."""
         return blocks
 
     def _is_template(self, content: str) -> bool:
-        """Check if content contains Jinja2 template syntax."""
+        """Check if content contains template syntax (Jinja2 or Mustache)."""
         return bool(
             JINJA2_VARIABLE_PATTERN.search(content) or
-            JINJA2_CONTROL_PATTERN.search(content)
+            JINJA2_CONTROL_PATTERN.search(content) or
+            MUSTACHE_SECTION_PATTERN.search(content) or
+            MUSTACHE_END_SECTION_PATTERN.search(content) or
+            MUSTACHE_INVERTED_PATTERN.search(content) or
+            MUSTACHE_CURRENT_ITEM_PATTERN.search(content)
         )
+
+    def _detect_template_syntax(self, template: str) -> str:
+        """Detect whether template uses Jinja2 or Mustache syntax.
+
+        Mustache indicators: {{#section}}, {{/section}}, {{^inverted}}, {{.}}
+        Jinja2 indicators: {% tag %}, {{ var | filter }}
+
+        Args:
+            template: Template content string.
+
+        Returns:
+            'mustache' or 'jinja2'
+        """
+        # Check for Mustache-specific patterns first
+        mustache_patterns = [
+            MUSTACHE_SECTION_PATTERN,     # {{#section}}
+            MUSTACHE_END_SECTION_PATTERN,  # {{/section}}
+            MUSTACHE_INVERTED_PATTERN,     # {{^inverted}}
+            MUSTACHE_CURRENT_ITEM_PATTERN,  # {{.}}
+        ]
+
+        for pattern in mustache_patterns:
+            if pattern.search(template):
+                return 'mustache'
+
+        # Check for Jinja2-specific patterns
+        if JINJA2_CONTROL_PATTERN.search(template):  # {% for/if/etc %}
+            return 'jinja2'
+        if JINJA2_FILTER_PATTERN.search(template):  # {{ var | filter }}
+            return 'jinja2'
+
+        # Default to jinja2 for simple {{variable}} (works in both)
+        return 'jinja2'
 
     def _hash_content(self, content: str) -> str:
         """Generate a short hash of content for deduplication."""
@@ -747,9 +847,68 @@ Template rendering requires approval since it writes files."""
 
         return sorted(variables)
 
-    # ==================== Jinja2 Rendering ====================
+    # ==================== Template Rendering ====================
 
-    def _render_with_jinja2(self, template: str, variables: Dict[str, Any]) -> Tuple[str, Optional[Dict]]:
+    def _render_template(self, template: str, variables: Dict[str, Any]) -> Tuple[str, Optional[Dict]]:
+        """Render template using detected syntax (Jinja2 or Mustache).
+
+        Automatically detects which template syntax is used and renders with
+        the appropriate engine.
+
+        Args:
+            template: Template content string.
+            variables: Key-value pairs for template variable substitution.
+
+        Returns:
+            Tuple of (rendered_content, error_dict).
+            If error_dict is not None, rendering failed.
+        """
+        syntax = self._detect_template_syntax(template)
+
+        if syntax == 'mustache':
+            return self._render_mustache(template, variables)
+        else:
+            return self._render_jinja2(template, variables)
+
+    def _render_mustache(self, template: str, variables: Dict[str, Any]) -> Tuple[str, Optional[Dict]]:
+        """Render template using Handlebars syntax.
+
+        Supports full Handlebars syntax:
+        - Variables: {{variable_name}}
+        - Sections/loops: {{#items}}...{{/items}}
+        - Conditionals: {{#if condition}}...{{/if}}
+        - Each loops: {{#each items}}...{{/each}}
+        - Inverted sections: {{^isEmpty}}...{{/isEmpty}}
+        - Current item: {{.}}, {{this}}
+
+        Args:
+            template: Template content string with Handlebars syntax.
+            variables: Key-value pairs for template variable substitution.
+
+        Returns:
+            Tuple of (rendered_content, error_dict).
+            If error_dict is not None, rendering failed.
+        """
+        try:
+            from pybars import Compiler
+        except ImportError:
+            return "", {
+                "error": "Handlebars template detected but pybars3 not installed. Install with: pip install pybars3",
+                "status": "dependency_missing"
+            }
+
+        try:
+            compiler = Compiler()
+            compiled_template = compiler.compile(template)
+            rendered = compiled_template(variables)
+            return rendered, None
+        except Exception as e:
+            return "", {
+                "error": f"Handlebars render error: {str(e)}",
+                "status": "render_error"
+            }
+
+    def _render_jinja2(self, template: str, variables: Dict[str, Any]) -> Tuple[str, Optional[Dict]]:
         """Render template using Jinja2.
 
         Args:
@@ -799,12 +958,84 @@ Template rendering requires approval since it writes files."""
                 "status": "render_error"
             }
 
+    # ==================== Path Resolution ====================
+
+    def _resolve_template_path(self, template_path: str) -> Tuple[Optional[Path], List[str]]:
+        """Resolve template path, supporting multiple base locations.
+
+        Tries paths in order:
+        1. Absolute path (if absolute)
+        2. Relative to current working directory
+        3. Relative to base_path (configured path)
+        4. Relative to .jaato/templates/
+        5. Resolved path (handles .. components)
+
+        Args:
+            template_path: Path to template (absolute or relative).
+
+        Returns:
+            Tuple of (resolved_path, paths_tried).
+            resolved_path is None if file not found.
+        """
+        path = Path(template_path)
+        paths_tried = []
+
+        # If absolute, use as-is
+        if path.is_absolute():
+            paths_tried.append(str(path))
+            if path.exists():
+                return path, paths_tried
+            return None, paths_tried
+
+        # Try relative to current working directory
+        cwd_path = Path.cwd() / path
+        paths_tried.append(str(cwd_path))
+        if cwd_path.exists():
+            return cwd_path, paths_tried
+
+        # Try relative to base_path (configured path)
+        base_path = self._base_path / path
+        paths_tried.append(str(base_path))
+        if base_path.exists():
+            return base_path, paths_tried
+
+        # Try relative to .jaato/templates/
+        templates_path = self._templates_dir / path
+        paths_tried.append(str(templates_path))
+        if templates_path.exists():
+            return templates_path, paths_tried
+
+        # Try resolving .. components explicitly
+        try:
+            resolved = (Path.cwd() / path).resolve()
+            if str(resolved) not in paths_tried:
+                paths_tried.append(str(resolved))
+            if resolved.exists():
+                return resolved, paths_tried
+        except (OSError, ValueError):
+            pass
+
+        # Try resolving from base_path
+        try:
+            resolved = (self._base_path / path).resolve()
+            if str(resolved) not in paths_tried:
+                paths_tried.append(str(resolved))
+            if resolved.exists():
+                return resolved, paths_tried
+        except (OSError, ValueError):
+            pass
+
+        return None, paths_tried
+
     # ==================== Tool Executors ====================
 
     def _execute_render_template(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute renderTemplate tool."""
+        """Execute renderTemplate tool.
+
+        Supports both Jinja2 and Mustache template syntax (auto-detected).
+        """
         template = args.get("template")
-        template_path = args.get("template_path")
+        template_path_arg = args.get("template_path")
         variables = args.get("variables", {})
         output_path = args.get("output_path", "")
 
@@ -812,33 +1043,33 @@ Template rendering requires approval since it writes files."""
         if not output_path:
             return {"error": "output_path is required"}
 
-        if not template and not template_path:
+        if not template and not template_path_arg:
             return {"error": "Either 'template' or 'template_path' must be provided"}
 
-        if template and template_path:
+        if template and template_path_arg:
             return {"error": "Provide either 'template' or 'template_path', not both"}
 
         # Get template content
-        if template_path:
-            path = Path(template_path)
-            if not path.is_absolute():
-                path = self._base_path / path
-            try:
-                template = path.read_text()
-            except FileNotFoundError:
+        template_source = "inline"
+        if template_path_arg:
+            resolved_path, paths_tried = self._resolve_template_path(template_path_arg)
+            if resolved_path is None:
                 return {
-                    "error": f"Template file not found: {template_path}",
-                    "resolved_path": str(path),
-                    "base_path": str(self._base_path)
+                    "error": f"Template file not found: {template_path_arg}",
+                    "paths_tried": paths_tried
                 }
+            try:
+                template = resolved_path.read_text()
+                template_source = str(resolved_path)
             except IOError as e:
                 return {
                     "error": f"Failed to read template: {e}",
-                    "resolved_path": str(path)
+                    "resolved_path": str(resolved_path)
                 }
 
-        # Render using Jinja2
-        rendered, error = self._render_with_jinja2(template, variables)
+        # Detect syntax and render using appropriate engine
+        syntax = self._detect_template_syntax(template)
+        rendered, error = self._render_template(template, variables)
         if error:
             return error
 
@@ -863,7 +1094,9 @@ Template rendering requires approval since it writes files."""
             "output_path": str(out_path),
             "size": len(rendered),
             "lines": rendered.count('\n') + 1,
-            "variables_used": list(variables.keys())
+            "variables_used": list(variables.keys()),
+            "template_syntax": syntax,
+            "template_source": template_source
         }
 
     def _execute_list_extracted(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -901,12 +1134,12 @@ Template rendering requires approval since it writes files."""
     def _execute_render_template_to_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute renderTemplateToFile tool.
 
-        Renders a template using full Jinja2 syntax and writes the result to a file.
-        Supports variables, conditionals, loops, and filters.
+        Renders a template and writes the result to a file.
+        Supports both Jinja2 and Mustache template syntax (auto-detected).
         """
         output_path = args.get("output_path", "")
         template = args.get("template")
-        template_path = args.get("template_path")
+        template_path_arg = args.get("template_path")
         variables = args.get("variables", {})
         overwrite = args.get("overwrite", False)
 
@@ -914,12 +1147,12 @@ Template rendering requires approval since it writes files."""
         if not output_path:
             return {"error": "output_path is required"}
 
-        if not template and not template_path:
+        if not template and not template_path_arg:
             return {
                 "error": "Exactly one of 'template' or 'template_path' must be provided"
             }
 
-        if template and template_path:
+        if template and template_path_arg:
             return {
                 "error": "Provide either 'template' or 'template_path', not both"
             }
@@ -928,24 +1161,21 @@ Template rendering requires approval since it writes files."""
         template_source = "inline" if template else "file"
 
         # Load template from file if template_path provided
-        if template_path:
+        if template_path_arg:
+            resolved_path, paths_tried = self._resolve_template_path(template_path_arg)
+            if resolved_path is None:
+                return {
+                    "error": f"Template file not found: {template_path_arg}",
+                    "paths_tried": paths_tried
+                }
             try:
-                path = Path(template_path)
-                if not path.is_absolute():
-                    path = self._base_path / path
-                if not path.exists():
-                    return {
-                        "error": f"Template file not found: {template_path}",
-                        "resolved_path": str(path),
-                        "base_path": str(self._base_path),
-                        "template_path": template_path
-                    }
-                template = path.read_text()
+                template = resolved_path.read_text()
+                template_source = str(resolved_path)
             except IOError as e:
                 return {
                     "error": f"Failed to read template: {e}",
-                    "resolved_path": str(path),
-                    "template_path": template_path
+                    "resolved_path": str(resolved_path),
+                    "template_path": template_path_arg
                 }
 
         # Check if output path already exists
@@ -959,12 +1189,13 @@ Template rendering requires approval since it writes files."""
                 "output_path": str(out_path)
             }
 
-        # Render using Jinja2
-        rendered, error = self._render_with_jinja2(template, variables)
+        # Detect syntax and render using appropriate engine
+        syntax = self._detect_template_syntax(template)
+        rendered, error = self._render_template(template, variables)
         if error:
             # Add template_path to error response if applicable
-            if template_path:
-                error["template_path"] = template_path
+            if template_path_arg:
+                error["template_path"] = template_path_arg
             return error
 
         # Create parent directories if needed
@@ -991,14 +1222,15 @@ Template rendering requires approval since it writes files."""
                 "output_path": str(out_path)
             }
 
-        self._trace(f"renderTemplateToFile: wrote {bytes_written} bytes to {out_path}")
+        self._trace(f"renderTemplateToFile: wrote {bytes_written} bytes to {out_path} (syntax: {syntax})")
 
         return {
             "success": True,
             "output_path": str(out_path),
             "bytes_written": bytes_written,
             "variables_used": sorted(variables.keys()),
-            "template_source": template_source
+            "template_source": template_source,
+            "template_syntax": syntax
         }
 
 
