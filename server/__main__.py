@@ -281,7 +281,7 @@ class JaatoDaemon:
             if self._ipc_server:
                 workspace_path = self._ipc_server.get_client_workspace(client_id)
 
-            if cmd == "session.create":
+            if cmd == "session.new":
                 name = event.args[0] if event.args else None
                 new_session_id = self._session_manager.create_session(
                     client_id, name, workspace_path=workspace_path
