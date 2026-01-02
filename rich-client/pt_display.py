@@ -498,9 +498,10 @@ class PTDisplay:
 
         # Calculate available height for output (account for dynamic input height)
         input_height = self._get_input_height()
-        # Subtract: status bar (1), tab bar (1 if present), input area
+        # Subtract: session bar (1), status bar (1), tab bar (1 if present), input area
         tab_bar_height = 1 if self._agent_tab_bar else 0
-        available_height = self._height - 1 - tab_bar_height - input_height
+        session_bar_height = 1  # Session bar is always visible
+        available_height = self._height - session_bar_height - 1 - tab_bar_height - input_height
 
         # Output is now 100% width (tab bar is horizontal, not side panel)
         panel_width = self._width
