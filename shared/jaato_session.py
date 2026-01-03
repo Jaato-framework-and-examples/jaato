@@ -71,7 +71,12 @@ class JaatoSession:
         history = session.get_history()
     """
 
-    def __init__(self, runtime: 'JaatoRuntime', model: str):
+    def __init__(
+        self,
+        runtime: 'JaatoRuntime',
+        model: str,
+        provider_name: Optional[str] = None
+    ):
         """Initialize a session.
 
         Note: Use runtime.create_session() instead of calling this directly.
@@ -79,9 +84,12 @@ class JaatoSession:
         Args:
             runtime: Parent JaatoRuntime providing shared resources.
             model: Model name to use for this session.
+            provider_name: Optional provider override for cross-provider sessions.
+                          If specified, uses a different AI provider than the runtime default.
         """
         self._runtime = runtime
         self._model_name = model
+        self._provider_name_override = provider_name
 
         # Provider for this session (created during configure())
         self._provider: Optional['ModelProviderPlugin'] = None
@@ -405,8 +413,11 @@ class JaatoSession:
                     except Exception as e:
                         print(f"Warning: Failed to configure plugin '{plugin_name}': {e}")
 
-        # Create provider for this session
-        self._provider = self._runtime.create_provider(self._model_name)
+        # Create provider for this session (with optional provider override)
+        self._provider = self._runtime.create_provider(
+            self._model_name,
+            provider_name=self._provider_name_override
+        )
 
         # Propagate agent context to provider for trace identification
         if hasattr(self._provider, 'set_agent_context'):
@@ -585,7 +596,9 @@ class JaatoSession:
             if self._provider and hasattr(self._provider, 'list_models'):
                 models = self._provider.list_models()
             else:
-                models = self._runtime.list_available_models()
+                models = self._runtime.list_available_models(
+                    provider_name=self._provider_name_override
+                )
             return {
                 "current_model": self._model_name,
                 "available_models": models
@@ -600,7 +613,9 @@ class JaatoSession:
                     "hint": "Use 'model list' to see available models"
                 }
 
-            available = self._runtime.list_available_models()
+            available = self._runtime.list_available_models(
+                provider_name=self._provider_name_override
+            )
             if model_name not in available:
                 return {
                     "error": f"Model '{model_name}' not found",
@@ -614,8 +629,11 @@ class JaatoSession:
             old_model = self._model_name
             self._model_name = model_name
 
-            # Create new provider for the new model
-            self._provider = self._runtime.create_provider(model_name)
+            # Create new provider for the new model (preserving provider override)
+            self._provider = self._runtime.create_provider(
+                model_name,
+                provider_name=self._provider_name_override
+            )
 
             # Propagate agent context to new provider for trace identification
             if hasattr(self._provider, 'set_agent_context'):
@@ -677,7 +695,9 @@ class JaatoSession:
         # Completing model name for 'select' subcommand
         if subcommand == "select" and len(args) >= 2:
             prefix = args[1] if len(args) > 1 else ""
-            models = self._runtime.list_available_models()
+            models = self._runtime.list_available_models(
+                provider_name=self._provider_name_override
+            )
             if prefix:
                 models = [m for m in models if m.startswith(prefix)]
             return [CommandCompletion(value=m, description="") for m in sorted(models)]

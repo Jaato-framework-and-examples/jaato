@@ -174,6 +174,8 @@ class SubagentProfile:
         plugin_configs: Per-plugin configuration overrides.
         system_instructions: Additional system instructions for the subagent.
         model: Optional model override (uses parent's model if not specified).
+        provider: Optional provider override (e.g., 'anthropic', 'google_genai').
+                  Allows subagents to use a different provider than the parent.
         max_turns: Maximum conversation turns before returning (default: 10).
         auto_approved: Whether this subagent can be spawned without permission.
         icon: Optional custom ASCII art icon (3 lines) for UI visualization.
@@ -186,6 +188,7 @@ class SubagentProfile:
     plugin_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     system_instructions: Optional[str] = None
     model: Optional[str] = None
+    provider: Optional[str] = None
     max_turns: int = 10
     auto_approved: bool = False
     icon: Optional[List[str]] = None
@@ -298,6 +301,7 @@ def discover_profiles(
             plugin_configs=data.get('plugin_configs', {}),
             system_instructions=data.get('system_instructions'),
             model=data.get('model'),
+            provider=data.get('provider'),
             max_turns=data.get('max_turns', 10),
             auto_approved=data.get('auto_approved', False),
             icon=data.get('icon'),
@@ -390,6 +394,7 @@ class SubagentConfig:
                 plugin_configs=profile_data.get('plugin_configs', {}),
                 system_instructions=profile_data.get('system_instructions'),
                 model=profile_data.get('model'),
+                provider=profile_data.get('provider'),
                 max_turns=profile_data.get('max_turns', 10),
                 auto_approved=profile_data.get('auto_approved', False),
                 icon=profile_data.get('icon'),
