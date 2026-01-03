@@ -566,6 +566,34 @@ class SessionManager:
             server._jaato.reset_session(state.history)
             logger.debug(f"Restored {len(state.history)} messages for session {session_id}")
 
+            # Restore turn accounting (reset_session clears it, so we restore after)
+            if state.turn_accounting:
+                jaato_session = server._jaato.get_session()
+                jaato_session._turn_accounting = list(state.turn_accounting)
+                logger.debug(f"Restored {len(state.turn_accounting)} turn accounting entries for session {session_id}")
+
+                # Update server's agent state and emit context update
+                if "main" in server._agents:
+                    server._agents["main"].turn_accounting = list(state.turn_accounting)
+                    usage = server._jaato.get_context_usage()
+                    server._agents["main"].context_usage = {
+                        'total_tokens': usage.get('total_tokens', 0),
+                        'prompt_tokens': usage.get('prompt_tokens', 0),
+                        'output_tokens': usage.get('output_tokens', 0),
+                        'percent_used': usage.get('percent_used', 0.0),
+                    }
+                    # Emit context update so clients show correct usage
+                    server.emit(ContextUpdatedEvent(
+                        agent_id="main",
+                        total_tokens=usage.get('total_tokens', 0),
+                        prompt_tokens=usage.get('prompt_tokens', 0),
+                        output_tokens=usage.get('output_tokens', 0),
+                        context_limit=usage.get('context_limit', 0),
+                        percent_used=usage.get('percent_used', 0.0),
+                        tokens_remaining=usage.get('tokens_remaining', 0),
+                    ))
+                    logger.debug(f"Emitted ContextUpdatedEvent: {usage.get('percent_used', 0.0):.1f}% used")
+
         session = Session(
             session_id=session_id,
             name=state.description or f"Session {session_id}",
