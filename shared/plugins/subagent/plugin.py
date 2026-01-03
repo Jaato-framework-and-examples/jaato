@@ -564,11 +564,6 @@ class SubagentPlugin:
         """
         self._runtime = runtime
 
-        # Also update config from runtime if needed
-        if self._config and runtime.project and runtime.location:
-            self._config.project = runtime.project
-            self._config.location = runtime.location
-
     def set_parent_session(self, session: Any) -> None:
         """Set the parent session reference for cancellation propagation.
 
@@ -1383,8 +1378,15 @@ class SubagentPlugin:
         Returns:
             SubagentResult with the subagent's response.
         """
-        # Use profile's model or default
+        # Determine model: profile > config default > parent session
         model = profile.model or self._config.default_model
+        if model is None and self._parent_session:
+            model = getattr(self._parent_session, '_model_name', None)
+
+        # Determine provider: profile > config default > parent session
+        provider = profile.provider or self._config.default_provider
+        if provider is None and self._parent_session:
+            provider = getattr(self._parent_session, '_provider_name_override', None)
 
         # Generate agent ID (for nested subagents, use dotted notation)
         self._subagent_counter += 1
@@ -1453,7 +1455,8 @@ class SubagentPlugin:
                 model=model,
                 tools=profile.plugins,  # Pass directly: [] = no tools, ["cli"] = only cli
                 system_instructions=profile.system_instructions,
-                plugin_configs=effective_plugin_configs if effective_plugin_configs else None
+                plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
+                provider_name=provider  # Cross-provider subagent support (None = inherit)
             )
 
             # Debug: write to trace log file (visible even with rich client)
