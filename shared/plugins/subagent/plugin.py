@@ -1378,9 +1378,15 @@ class SubagentPlugin:
         Returns:
             SubagentResult with the subagent's response.
         """
-        # Use profile's model/provider or defaults (None = inherit from parent/runtime)
+        # Determine model: profile > config default > parent session
         model = profile.model or self._config.default_model
+        if model is None and self._parent_session:
+            model = getattr(self._parent_session, '_model_name', None)
+
+        # Determine provider: profile > config default > parent session
         provider = profile.provider or self._config.default_provider
+        if provider is None and self._parent_session:
+            provider = getattr(self._parent_session, '_provider_name_override', None)
 
         # Generate agent ID (for nested subagents, use dotted notation)
         self._subagent_counter += 1
