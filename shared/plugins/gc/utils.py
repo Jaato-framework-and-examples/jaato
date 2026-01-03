@@ -16,7 +16,8 @@ class Turn:
     A turn typically consists of:
     - One user Message (role=USER)
     - One or more model Message objects (role=MODEL)
-    - Possibly function response Message objects (role=USER with function_response parts)
+    - Possibly function response Message objects (role=USER with function_response parts,
+      or role=TOOL for Anthropic provider)
     """
 
     index: int
@@ -60,7 +61,10 @@ def split_into_turns(history: List[Message]) -> List[Turn]:
         is_user_message = message.role == Role.USER
         is_function_response = False
 
-        if is_user_message and message.parts:
+        # Role.TOOL messages are always function responses (Anthropic provider uses this)
+        if message.role == Role.TOOL:
+            is_function_response = True
+        elif is_user_message and message.parts:
             # Check if it's a function response (has function_response parts)
             is_function_response = any(
                 part.function_response is not None
