@@ -97,6 +97,10 @@ class EventType(str, Enum):
     # Client configuration (Client -> Server)
     CLIENT_CONFIG = "client.config"
 
+    # Mid-turn prompts (Server -> Client)
+    MID_TURN_PROMPT_QUEUED = "mid_turn_prompt.queued"
+    MID_TURN_PROMPT_INJECTED = "mid_turn_prompt.injected"
+
 
 # =============================================================================
 # Base Event
@@ -580,6 +584,34 @@ class ClientConfigRequest(Event):
 
 
 # =============================================================================
+# Mid-Turn Prompt Events
+# =============================================================================
+
+@dataclass
+class MidTurnPromptQueuedEvent(Event):
+    """Sent when a user prompt is queued during model processing.
+
+    Instead of returning an error when the user sends a message while the model
+    is running, the message is queued and will be injected at the next natural
+    pause point (between tool executions, after subagent completion, etc.).
+    """
+    type: EventType = field(default=EventType.MID_TURN_PROMPT_QUEUED)
+    text: str = ""
+    position_in_queue: int = 0  # 0-based position (usually 0, can be >0 if multiple queued)
+
+
+@dataclass
+class MidTurnPromptInjectedEvent(Event):
+    """Sent when a queued prompt is injected into the conversation.
+
+    This notifies the client that the queued prompt is now being processed
+    by the model.
+    """
+    type: EventType = field(default=EventType.MID_TURN_PROMPT_INJECTED)
+    text: str = ""
+
+
+# =============================================================================
 # Serialization Helpers
 # =============================================================================
 
@@ -625,6 +657,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.HISTORY_REQUEST.value: HistoryRequest,
     EventType.HISTORY.value: HistoryEvent,
     EventType.CLIENT_CONFIG.value: ClientConfigRequest,
+    EventType.MID_TURN_PROMPT_QUEUED.value: MidTurnPromptQueuedEvent,
+    EventType.MID_TURN_PROMPT_INJECTED.value: MidTurnPromptInjectedEvent,
 }
 
 

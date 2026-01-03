@@ -87,6 +87,8 @@ from .events import (
     ClarificationResponseRequest,
     StopRequest,
     CommandRequest,
+    MidTurnPromptQueuedEvent,
+    MidTurnPromptInjectedEvent,
     serialize_event,
     deserialize_event,
 )
@@ -182,6 +184,9 @@ class JaatoServer:
         self._pending_permission_request_id: Optional[str] = None
         self._pending_clarification_request_id: Optional[str] = None
         self._pending_reference_selection_request_id: Optional[str] = None
+
+        # Queue for mid-turn prompts (messages sent while model is running)
+        self._mid_turn_prompt_queue: queue.Queue[str] = queue.Queue()
 
         # Background model thread
         self._model_thread: Optional[threading.Thread] = None
@@ -1049,9 +1054,12 @@ class JaatoServer:
             return
 
         if self._model_running:
-            self.emit(ErrorEvent(
-                error="Model is already processing",
-                error_type="StateError",
+            # Queue the message for mid-turn injection instead of returning an error
+            self._mid_turn_prompt_queue.put(text)
+            queue_size = self._mid_turn_prompt_queue.qsize()
+            self.emit(MidTurnPromptQueuedEvent(
+                text=text,
+                position_in_queue=queue_size - 1,
             ))
             return
 
@@ -1111,6 +1119,12 @@ class JaatoServer:
         def model_thread():
             server._model_running = True
             try:
+                # Set up mid-turn prompt callback to check the server's queue
+                session = server._jaato.get_session()
+                session.set_mid_turn_prompt_callback(
+                    lambda: server.get_pending_mid_turn_prompt()
+                )
+
                 # Run in workspace context so file operations use client's CWD
                 with server._in_workspace():
                     server._jaato.send_message(
@@ -1145,6 +1159,11 @@ class JaatoServer:
                     error_type=type(e).__name__,
                 ))
             finally:
+                # Clear mid-turn prompt callback
+                if server._jaato:
+                    session = server._jaato.get_session()
+                    session.set_mid_turn_prompt_callback(None)
+
                 server._model_running = False
                 server._model_thread = None
                 server.emit(AgentStatusChangedEvent(
@@ -1202,6 +1221,43 @@ class JaatoServer:
             return
 
         self._channel_input_queue.put(response)
+
+    def has_pending_mid_turn_prompt(self) -> bool:
+        """Check if there are pending mid-turn prompts.
+
+        Returns:
+            True if there are queued prompts.
+        """
+        return not self._mid_turn_prompt_queue.empty()
+
+    def get_pending_mid_turn_prompt(self) -> Optional[str]:
+        """Get the next pending mid-turn prompt if available.
+
+        Returns:
+            The prompt text, or None if no prompts are queued.
+        """
+        try:
+            prompt = self._mid_turn_prompt_queue.get_nowait()
+            # Emit event that the prompt is being injected
+            self.emit(MidTurnPromptInjectedEvent(text=prompt))
+            return prompt
+        except queue.Empty:
+            return None
+
+    def clear_mid_turn_prompts(self) -> int:
+        """Clear all pending mid-turn prompts.
+
+        Returns:
+            Number of prompts cleared.
+        """
+        count = 0
+        while not self._mid_turn_prompt_queue.empty():
+            try:
+                self._mid_turn_prompt_queue.get_nowait()
+                count += 1
+            except queue.Empty:
+                break
+        return count
 
     def _find_plugin_for_command(self, command: str) -> Any:
         """Find the plugin that provides a user command.
