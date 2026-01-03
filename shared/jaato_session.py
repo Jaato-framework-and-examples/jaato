@@ -40,6 +40,10 @@ if TYPE_CHECKING:
 # Pattern to match @references in prompts
 AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
 
+# Type alias for mid-turn prompt callback
+# Returns the prompt text if one is pending, None otherwise
+MidTurnPromptCallback = Callable[[], Optional[str]]
+
 
 class JaatoSession:
     """Per-agent conversation session.
@@ -133,6 +137,9 @@ class JaatoSession:
 
         # Terminal width for formatting (used by enrichment notifications)
         self._terminal_width: int = 80
+
+        # Mid-turn prompt injection
+        self._on_mid_turn_prompt: Optional[MidTurnPromptCallback] = None
 
     def set_terminal_width(self, width: int) -> None:
         """Set the terminal width for formatting.
@@ -256,6 +263,31 @@ class JaatoSession:
             )
         """
         self._on_retry = callback
+
+    def set_mid_turn_prompt_callback(
+        self,
+        callback: Optional[MidTurnPromptCallback]
+    ) -> None:
+        """Set callback for mid-turn prompt injection.
+
+        When set, this callback is called at natural pause points during
+        message processing (e.g., between tool executions). If the callback
+        returns a string, that string is injected into the conversation as
+        a user prompt, allowing the user to provide additional context or
+        ask questions while the model is working.
+
+        Args:
+            callback: Function that returns a prompt string if one is pending,
+                or None if no prompt is queued.
+                Signature: () -> Optional[str]
+
+        Example:
+            # Route mid-turn prompts from a queue
+            session.set_mid_turn_prompt_callback(
+                lambda: prompt_queue.get_nowait() if not prompt_queue.empty() else None
+            )
+        """
+        self._on_mid_turn_prompt = callback
 
     # ==================== Cancellation Support ====================
 
@@ -1010,6 +1042,21 @@ class JaatoSession:
                         else:
                             return f"[Model stopped unexpectedly: {response.finish_reason}]"
 
+                    # Check for mid-turn prompts at this natural pause point
+                    mid_turn_response = self._check_and_handle_mid_turn_prompt(
+                        use_streaming, on_output, wrapped_usage_callback, turn_data
+                    )
+                    if mid_turn_response:
+                        # The model responded to the injected prompt - use that response
+                        response = mid_turn_response
+                        if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
+                            partial = get_all_text()
+                            cancel_msg = "[Generation cancelled]"
+                            if on_output and not cancellation_notified:
+                                on_output("system", cancel_msg, "write")
+                            self._notify_model_of_cancellation(cancel_msg, partial)
+                            return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
+
                 # Check for more function calls in the new response
                 pending_calls = get_pending_function_calls()
 
@@ -1019,6 +1066,87 @@ class JaatoSession:
                     if not use_streaming and on_output:
                         on_output("model", part.text, "write")
                     accumulated_text.append(part.text)
+
+            # Final check for mid-turn prompts before completing the turn
+            # This handles prompts that arrived while the model was generating its final response
+            while True:
+                mid_turn_response = self._check_and_handle_mid_turn_prompt(
+                    use_streaming, on_output, wrapped_usage_callback, turn_data
+                )
+                if not mid_turn_response:
+                    break
+
+                # Process the response to the injected prompt
+                if self._is_cancelled() or mid_turn_response.finish_reason == FinishReason.CANCELLED:
+                    cancel_msg = "[Generation cancelled]"
+                    if on_output and not cancellation_notified:
+                        on_output("system", cancel_msg, "write")
+                    final_text = ''.join(accumulated_text) if accumulated_text else ''
+                    self._notify_model_of_cancellation(cancel_msg, final_text)
+                    return f"{final_text}\n\n{cancel_msg}" if final_text else cancel_msg
+
+                # Collect text from the mid-turn response
+                for part in mid_turn_response.parts:
+                    if part.text:
+                        # Note: In streaming mode, text was already emitted by the callback
+                        if not use_streaming and on_output:
+                            on_output("model", part.text, "write")
+                        accumulated_text.append(part.text)
+
+                # Check if the mid-turn response triggered more function calls
+                mid_turn_fc = [p.function_call for p in mid_turn_response.parts if p.function_call]
+                if mid_turn_fc:
+                    # Process these function calls and continue
+                    tool_results = self._execute_function_call_group(
+                        mid_turn_fc, turn_data, on_output, cancellation_notified
+                    )
+                    if self._is_cancelled():
+                        cancel_msg = "[Cancelled after tool execution]"
+                        if on_output and not cancellation_notified:
+                            on_output("system", cancel_msg, "write")
+                        self._notify_model_of_cancellation(cancel_msg)
+                        return cancel_msg
+
+                    response = self._send_tool_results_and_continue(
+                        tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
+                    )
+
+                    # Continue the main loop with this response if it has function calls
+                    pending_calls = [p.function_call for p in response.parts if p.function_call]
+                    while pending_calls:
+                        # Re-enter the main processing loop for tool calls
+                        current_fc_group = []
+                        for part in response.parts:
+                            if part.text:
+                                if not use_streaming and on_output:
+                                    on_output("model", part.text, "write")
+                                accumulated_text.append(part.text)
+                            elif part.function_call:
+                                current_fc_group.append(part.function_call)
+
+                        if current_fc_group:
+                            tool_results = self._execute_function_call_group(
+                                current_fc_group, turn_data, on_output, cancellation_notified
+                            )
+                            if self._is_cancelled():
+                                cancel_msg = "[Cancelled after tool execution]"
+                                if on_output and not cancellation_notified:
+                                    on_output("system", cancel_msg, "write")
+                                self._notify_model_of_cancellation(cancel_msg)
+                                return cancel_msg
+
+                            response = self._send_tool_results_and_continue(
+                                tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
+                            )
+
+                        pending_calls = [p.function_call for p in response.parts if p.function_call]
+
+                    # Collect final text from nested response
+                    for part in response.parts:
+                        if part.text:
+                            if not use_streaming and on_output:
+                                on_output("model", part.text, "write")
+                            accumulated_text.append(part.text)
 
             return ''.join(accumulated_text) if accumulated_text else ''
 
@@ -1202,6 +1330,92 @@ class JaatoSession:
                 on_retry=self._on_retry,
                 cancel_token=self._cancel_token
             )
+
+        self._record_token_usage(response)
+        self._accumulate_turn_tokens(response, turn_data)
+
+        return response
+
+    def _check_and_handle_mid_turn_prompt(
+        self,
+        use_streaming: bool,
+        on_output: Optional[OutputCallback],
+        wrapped_usage_callback: Optional[UsageUpdateCallback],
+        turn_data: Dict[str, Any]
+    ) -> Optional[ProviderResponse]:
+        """Check for and handle a pending mid-turn prompt.
+
+        This is called at natural pause points during message processing
+        (e.g., after tool execution, after receiving model response).
+
+        If a mid-turn prompt is pending, this method:
+        1. Emits the prompt as user output
+        2. Sends it to the model as a new user message
+        3. Returns the model's response
+
+        Args:
+            use_streaming: Whether to use streaming for the model call.
+            on_output: Callback for output events.
+            wrapped_usage_callback: Callback for usage updates.
+            turn_data: Current turn's data for token tracking.
+
+        Returns:
+            The model's response if a prompt was handled, None otherwise.
+        """
+        if not self._on_mid_turn_prompt:
+            return None
+
+        # Check for pending prompt
+        try:
+            prompt = self._on_mid_turn_prompt()
+        except Exception:
+            return None
+
+        if not prompt:
+            return None
+
+        self._trace(f"MID_TURN_PROMPT: Handling injected prompt: {prompt[:100]}...")
+
+        # Emit the prompt as user output so UI shows it
+        if on_output:
+            on_output("user", prompt, "write")
+
+        # Proactive rate limiting
+        self._pacer.pace()
+
+        # Send the prompt to the model
+        if use_streaming:
+            first_chunk_sent = [False]
+
+            def streaming_callback(chunk: str) -> None:
+                if on_output:
+                    mode = "append" if first_chunk_sent[0] else "write"
+                    self._trace(f"MID_TURN_RESPONSE mode={mode} len={len(chunk)}")
+                    on_output("model", chunk, mode)
+                    first_chunk_sent[0] = True
+
+            response, _retry_stats = with_retry(
+                lambda: self._provider.send_message_streaming(
+                    prompt,
+                    on_chunk=streaming_callback,
+                    cancel_token=self._cancel_token,
+                    on_usage_update=wrapped_usage_callback
+                ),
+                context="mid_turn_prompt_streaming",
+                on_retry=self._on_retry,
+                cancel_token=self._cancel_token
+            )
+        else:
+            response, _retry_stats = with_retry(
+                lambda: self._provider.send_message(prompt),
+                context="mid_turn_prompt",
+                on_retry=self._on_retry,
+                cancel_token=self._cancel_token
+            )
+
+            # Emit response text if not streaming
+            if on_output and response.get_text():
+                on_output("model", response.get_text(), "write")
 
         self._record_token_usage(response)
         self._accumulate_turn_tokens(response, turn_data)
