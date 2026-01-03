@@ -330,7 +330,8 @@ class SubagentConfig:
     Attributes:
         project: GCP project ID for Vertex AI.
         location: Vertex AI region (e.g., 'us-central1').
-        default_model: Default model for subagents.
+        default_model: Default model for subagents (inherited from parent if not set in profile).
+        default_provider: Default provider for subagents (inherited from parent if not set in profile).
         profiles: Dict of named subagent profiles.
         allow_inline: Whether to allow inline subagent creation.
         inline_allowed_plugins: Plugins allowed for inline subagent creation.
@@ -340,6 +341,7 @@ class SubagentConfig:
     project: str
     location: str
     default_model: str = "gemini-2.5-flash"
+    default_provider: Optional[str] = None  # None means inherit from parent/runtime
     profiles: Dict[str, SubagentProfile] = field(default_factory=dict)
     allow_inline: bool = True
     inline_allowed_plugins: List[str] = field(default_factory=list)
@@ -406,6 +408,7 @@ class SubagentConfig:
             project=data.get('project', ''),
             location=data.get('location', ''),
             default_model=data.get('default_model', 'gemini-2.5-flash'),
+            default_provider=data.get('default_provider'),  # None = inherit from parent
             profiles=profiles,
             allow_inline=data.get('allow_inline', True),
             inline_allowed_plugins=data.get('inline_allowed_plugins', []),
