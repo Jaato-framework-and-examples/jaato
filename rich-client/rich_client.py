@@ -2190,6 +2190,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         HistoryEvent,
         WorkspaceMismatchRequestedEvent,
         WorkspaceMismatchResponseRequest,
+        MidTurnPromptQueuedEvent,
+        MidTurnPromptInjectedEvent,
     )
 
     # Load keybindings
@@ -2650,6 +2652,27 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.add_system_message(
                     f"Error: {event.error_type}: {event.error}",
                     style="bold red"
+                )
+
+            elif isinstance(event, MidTurnPromptQueuedEvent):
+                # Show feedback that the prompt was queued for mid-turn injection
+                queue_pos = event.position_in_queue
+                if queue_pos == 0:
+                    display.add_system_message(
+                        "Prompt queued - will be processed at next pause",
+                        style="cyan"
+                    )
+                else:
+                    display.add_system_message(
+                        f"Prompt queued (position {queue_pos + 1}) - will be processed at next pause",
+                        style="cyan"
+                    )
+
+            elif isinstance(event, MidTurnPromptInjectedEvent):
+                # Show feedback that the queued prompt is being processed
+                display.add_system_message(
+                    "Processing queued prompt...",
+                    style="dim cyan"
                 )
 
             elif isinstance(event, SessionListEvent):
