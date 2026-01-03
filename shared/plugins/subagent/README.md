@@ -49,7 +49,9 @@ The subagent plugin uses the shared `JaatoRuntime` to create lightweight session
 ## Features
 
 - **Runtime Sharing**: Subagents use `JaatoRuntime.create_session()` for efficient spawning (no redundant connections)
+- **Cross-Provider Support**: Subagents can use different AI providers than the parent (e.g., Anthropic parent → Google GenAI subagent)
 - **Plugin Inheritance**: Subagents automatically inherit the parent's plugin configuration by default
+- **Model/Provider Inheritance**: If not specified in profile, subagents inherit the parent's model and provider
 - **Optional Overrides**: Use `inline_config` to override specific properties (plugins, max_turns, system_instructions)
 - **Predefined Profiles**: Configure named profiles for common subagent configurations
 - **Profile Auto-Discovery**: Automatically discover profiles from `.jaato/profiles/` directory (JSON/YAML files)
@@ -161,6 +163,21 @@ The subagent plugin automatically discovers profile definitions from `.jaato/pro
 }
 ```
 
+**Profile with explicit model and provider (cross-provider):**
+```json
+{
+  "name": "gemini_research_agent",
+  "description": "Research agent using Google Gemini for cost efficiency",
+  "plugins": ["web_search", "references"],
+  "model": "gemini-2.5-flash",
+  "provider": "google_genai",
+  "system_instructions": "You are a research specialist.",
+  "max_turns": 15
+}
+```
+
+> **Model/Provider Inheritance:** If `model` or `provider` is not specified in the profile, the subagent inherits from the parent session. This allows a Claude-based main agent to spawn subagents that also use Claude without redundant configuration.
+
 **Profile with plugin-specific configuration:**
 ```json
 {
@@ -235,28 +252,33 @@ from shared.plugins.subagent import SubagentPlugin
 
 plugin = SubagentPlugin()
 plugin.initialize({
-    'project': 'my-gcp-project',        # Optional: inherited from parent
-    'location': 'us-central1',           # Optional: inherited from parent
-    'default_model': 'gemini-2.5-flash', # Optional: inherited from parent
+    'project': 'my-gcp-project',         # Optional: inherited from parent
+    'location': 'us-central1',            # Optional: inherited from parent
+    'default_model': None,                # None = inherit from parent (recommended)
+    'default_provider': None,             # None = inherit from parent (recommended)
     'profiles': {
         'code_assistant': {
             'description': 'Subagent for code analysis',
             'plugins': ['cli'],
             'max_turns': 10,
+            # model/provider not set = inherits from parent
         },
-        'research_agent': {
-            'description': 'Subagent for research tasks',
-            'plugins': ['mcp', 'references'],
-            'system_instructions': 'Focus on accuracy',
+        'gemini_research': {
+            'description': 'Research using Gemini',
+            'plugins': ['web_search'],
+            'model': 'gemini-2.5-flash',     # Explicit model
+            'provider': 'google_genai',      # Explicit provider (must match model)
             'max_turns': 15,
         }
     },
-    'allow_inline': True,                # Allow inline_config (default: True)
-    'inline_allowed_plugins': [],        # Restrict inline plugins (empty = all allowed)
-    'auto_discover_profiles': True,      # Auto-discover from profiles_dir (default: True)
-    'profiles_dir': '.jaato/profiles',   # Directory to scan for profiles
+    'allow_inline': True,                 # Allow inline_config (default: True)
+    'inline_allowed_plugins': [],         # Restrict inline plugins (empty = all allowed)
+    'auto_discover_profiles': True,       # Auto-discover from profiles_dir (default: True)
+    'profiles_dir': '.jaato/profiles',    # Directory to scan for profiles
 })
 ```
+
+> **Important:** When setting `model` in a profile, you should also set `provider` to ensure they match. If only `model` is set without `provider`, the provider is inherited from parent, which may not support that model.
 
 ### Connection Inheritance
 
@@ -279,14 +301,25 @@ Profiles can be added programmatically:
 ```python
 from shared.plugins.subagent import SubagentProfile
 
+# Profile that inherits model/provider from parent
 plugin.add_profile(SubagentProfile(
-    name='custom_agent',
-    description='Custom subagent configuration',
+    name='simple_agent',
+    description='Inherits parent model and provider',
     plugins=['cli', 'todo'],
     system_instructions='You are a specialized assistant.',
-    model='gemini-2.0-flash',  # Override model
     max_turns=20,
-    auto_approved=False,       # Require permission to spawn
+    auto_approved=False,
+))
+
+# Profile with explicit cross-provider configuration
+plugin.add_profile(SubagentProfile(
+    name='gemini_agent',
+    description='Uses Google Gemini regardless of parent provider',
+    plugins=['cli', 'file_edit'],
+    model='gemini-2.5-flash',
+    provider='google_genai',
+    system_instructions='You are a code generation specialist.',
+    max_turns=15,
 ))
 ```
 
@@ -327,6 +360,58 @@ get_subagent_result(agent_id="subagent_abc123")
 ```
 
 Background agents run in daemon threads and store their results for later retrieval. Use `list_active_subagents` to monitor progress and `get_subagent_result` to collect responses.
+
+## Cross-Provider Support
+
+Subagents can use different AI providers than the parent agent. This enables scenarios like:
+- **Cost optimization**: Main agent uses Claude for complex reasoning, subagents use Gemini for simpler tasks
+- **Capability matching**: Use the best provider for each task type
+- **Fallback strategies**: Switch providers if one is rate-limited
+
+### Configuration
+
+Specify `model` and `provider` in the profile:
+
+```json
+{
+  "name": "gemini_coder",
+  "description": "Code generation using Gemini",
+  "model": "gemini-2.5-flash",
+  "provider": "google_genai",
+  "plugins": ["cli", "file_edit"]
+}
+```
+
+### Inheritance Rules
+
+The inheritance chain for `model` and `provider` is:
+
+1. **Profile level**: `profile.model` / `profile.provider` (if explicitly set)
+2. **Config level**: `default_model` / `default_provider` from SubagentConfig (if set)
+3. **Parent level**: Inherited from parent session (if both above are None)
+
+| Profile Setting | Config Default | Result |
+|-----------------|----------------|--------|
+| `model: "gemini-2.5-flash"`, `provider: "google_genai"` | (any) | Uses Gemini on Google GenAI |
+| `model: null`, `provider: null` | `null`, `null` | Inherits parent's model and provider |
+| `model: null`, `provider: null` | `"gemini-2.5-flash"`, `"google_genai"` | Uses config defaults |
+
+### Provider Registration
+
+The runtime automatically registers providers when they're first used. For providers requiring specific configuration, register them explicitly:
+
+```python
+from shared import JaatoRuntime, ProviderConfig
+
+runtime = JaatoRuntime(provider_name="anthropic")
+runtime.connect(project_id, location)
+
+# Register additional provider for subagents
+runtime.register_provider("google_genai", ProviderConfig(
+    project="my-gcp-project",
+    location="us-central1"
+))
+```
 
 ## Cancellation Propagation
 
@@ -430,4 +515,21 @@ response = client.send_message("Spawn a subagent to analyze the code")
 | `JAATO_TRACE_LOG` | Path to trace log file for debug output. Useful when running with rich terminal UIs that occupy the console. Set to empty string to disable. | `/tmp/rich_client_trace.log` |
 | `PROJECT_ID` | GCP project ID (fallback if not provided in config) | - |
 | `LOCATION` | Vertex AI region (fallback if not provided in config) | - |
-| `MODEL_NAME` | Default model name (fallback if not provided in config) | `gemini-2.5-flash` |
+| `MODEL_NAME` | Default model name (fallback if not provided in config) | Inherited from parent |
+
+## Profile Schema Reference
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | (required) | Unique identifier for the profile |
+| `description` | string | `""` | Human-readable description |
+| `plugins` | string[] | `[]` | List of plugin names to enable |
+| `plugin_configs` | object | `{}` | Per-plugin configuration overrides |
+| `system_instructions` | string | `null` | Additional system instructions |
+| `model` | string | `null` | Model name (e.g., `"gemini-2.5-flash"`, `"claude-sonnet-4-20250514"`). `null` = inherit from parent |
+| `provider` | string | `null` | Provider name (e.g., `"google_genai"`, `"anthropic"`). `null` = inherit from parent |
+| `max_turns` | int | `10` | Maximum conversation turns |
+| `auto_approved` | bool | `false` | Spawn without permission prompt |
+| `icon` | string[] | `null` | Custom 3-line ASCII art icon |
+| `icon_name` | string | `null` | Name of predefined icon |
+| `gc` | object | `null` | Garbage collection configuration |

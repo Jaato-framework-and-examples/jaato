@@ -506,7 +506,39 @@ The session checks for cancellation at these points:
 
 ## Subagent Coordination
 
-The SubagentPlugin supports advanced coordination patterns including parallel execution, cancellation propagation, and shared state.
+The SubagentPlugin supports advanced coordination patterns including parallel execution, cancellation propagation, shared state, and cross-provider support.
+
+### Cross-Provider Support
+
+Subagents can use different AI providers than the parent agent, enabling scenarios like cost optimization or capability matching:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      Parent Agent (Anthropic)                                │
+│                         claude-sonnet-4                                      │
+│                                                                             │
+│  ┌──────────────────────────────┐   ┌──────────────────────────────┐       │
+│  │   JaatoRuntime               │   │  SubagentPlugin              │       │
+│  │   _provider_configs:         │   │  profile.model = "gemini"    │       │
+│  │   • anthropic: (primary)     │   │  profile.provider = "google" │       │
+│  │   • google_genai: (auto)     │──▶│                              │       │
+│  └──────────────────────────────┘   └────────────┬─────────────────┘       │
+│                                                   │                         │
+│                                     create_session(model, provider_name)    │
+│                                                   │                         │
+│                                                   ▼                         │
+│                                     ┌──────────────────────────────┐       │
+│                                     │  JaatoSession (Subagent)     │       │
+│                                     │  provider: google_genai      │       │
+│                                     │  model: gemini-2.5-flash     │       │
+│                                     └──────────────────────────────┘       │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Inheritance rules for `model` and `provider`:
+1. **Profile level**: Explicit `model`/`provider` in profile (highest priority)
+2. **Config level**: `default_model`/`default_provider` in SubagentConfig
+3. **Parent level**: Inherited from parent session (if both above are `None`)
 
 ### Parallel Execution
 
