@@ -57,6 +57,10 @@ class JaatoRuntime:
         self._provider_name: str = provider_name
         self._provider_config: Optional[ProviderConfig] = None
 
+        # Multi-provider support: map provider_name -> ProviderConfig
+        # Allows subagents to use different providers than the parent
+        self._provider_configs: Dict[str, ProviderConfig] = {}
+
         # Connection info
         self._project: Optional[str] = None
         self._location: Optional[str] = None
@@ -152,7 +156,43 @@ class JaatoRuntime:
         self._project = project
         self._location = location
         self._provider_config = ProviderConfig(project=project, location=location)
+        # Register the primary provider config for multi-provider support
+        self._provider_configs[self._provider_name] = self._provider_config
         self._connected = True
+
+    def register_provider(
+        self,
+        provider_name: str,
+        config: Optional[ProviderConfig] = None
+    ) -> None:
+        """Register an additional provider for cross-provider subagent support.
+
+        Allows subagents to use different AI providers than the parent agent.
+        For example, the main agent can use Anthropic while a subagent uses
+        Google GenAI for specific tasks.
+
+        Args:
+            provider_name: Name of the provider (e.g., 'anthropic', 'google_genai').
+            config: Optional ProviderConfig. If None, creates a default config
+                   using the runtime's project/location (may not work for all providers).
+
+        Example:
+            # Register Anthropic for subagents (uses ANTHROPIC_API_KEY env var)
+            runtime.register_provider('anthropic')
+
+            # Register Google GenAI with specific config
+            runtime.register_provider('google_genai', ProviderConfig(
+                project='my-project',
+                location='us-central1'
+            ))
+        """
+        if config is None:
+            # Create default config - providers will use env vars for auth
+            config = ProviderConfig(
+                project=self._project or '',
+                location=self._location or ''
+            )
+        self._provider_configs[provider_name] = config
 
     def configure_plugins(
         self,
@@ -289,7 +329,8 @@ class JaatoRuntime:
         model: str,
         tools: Optional[List[str]] = None,
         system_instructions: Optional[str] = None,
-        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None
+        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+        provider_name: Optional[str] = None
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
 
@@ -305,6 +346,9 @@ class JaatoRuntime:
                                 prepend to the base instructions.
             plugin_configs: Optional per-plugin configuration overrides.
                            Plugins will be re-initialized with these configs.
+            provider_name: Optional provider override for cross-provider subagents.
+                          If specified, the session uses a different AI provider
+                          (e.g., 'anthropic', 'google_genai') than the runtime default.
 
         Returns:
             JaatoSession configured with the specified settings.
@@ -320,8 +364,8 @@ class JaatoRuntime:
         # Import here to avoid circular dependency
         from .jaato_session import JaatoSession
 
-        # Create session with runtime reference
-        session = JaatoSession(self, model)
+        # Create session with runtime reference and optional provider override
+        session = JaatoSession(self, model, provider_name=provider_name)
 
         # Configure session tools
         session.configure(
@@ -332,7 +376,11 @@ class JaatoRuntime:
 
         return session
 
-    def create_provider(self, model: str) -> 'ModelProviderPlugin':
+    def create_provider(
+        self,
+        model: str,
+        provider_name: Optional[str] = None
+    ) -> 'ModelProviderPlugin':
         """Create a new provider instance for a session.
 
         Each session gets its own provider instance to maintain
@@ -340,6 +388,10 @@ class JaatoRuntime:
 
         Args:
             model: Model name to connect to.
+            provider_name: Optional provider name override. If specified,
+                          uses a different provider than the runtime's default.
+                          The provider must be registered via register_provider()
+                          or will be auto-registered with default config.
 
         Returns:
             Initialized and connected ModelProviderPlugin.
@@ -350,7 +402,22 @@ class JaatoRuntime:
         if not self._connected or not self._provider_config:
             raise RuntimeError("Runtime not connected. Call connect() first.")
 
-        provider = load_provider(self._provider_name, self._provider_config)
+        # Use specified provider or fall back to default
+        effective_provider = provider_name or self._provider_name
+
+        # Get or create provider config
+        if effective_provider in self._provider_configs:
+            config = self._provider_configs[effective_provider]
+        else:
+            # Auto-register provider with default config
+            # This enables cross-provider subagents without explicit registration
+            config = ProviderConfig(
+                project=self._project or '',
+                location=self._location or ''
+            )
+            self._provider_configs[effective_provider] = config
+
+        provider = load_provider(effective_provider, config)
         provider.connect(model)
         return provider
 
@@ -490,11 +557,17 @@ class JaatoRuntime:
 
         return "\n\n".join(result_parts) if result_parts else None
 
-    def list_available_models(self, prefix: Optional[str] = None) -> List[str]:
-        """List available models from the provider.
+    def list_available_models(
+        self,
+        prefix: Optional[str] = None,
+        provider_name: Optional[str] = None
+    ) -> List[str]:
+        """List available models from a provider.
 
         Args:
             prefix: Optional name prefix to filter by.
+            provider_name: Optional provider to list models from. If not specified,
+                          uses the runtime's default provider.
 
         Returns:
             List of model names.
@@ -505,10 +578,23 @@ class JaatoRuntime:
         if not self._connected or not self._provider_config:
             raise RuntimeError("Runtime not connected. Call connect() first.")
 
+        # Use specified provider or fall back to default
+        effective_provider = provider_name or self._provider_name
+
+        # Get config for the provider
+        if effective_provider in self._provider_configs:
+            config = self._provider_configs[effective_provider]
+        else:
+            # Use default config for unregistered providers
+            config = ProviderConfig(
+                project=self._project or '',
+                location=self._location or ''
+            )
+
         # Create a temporary provider to list models
         # Note: initialize() sets up the client, connect() just selects a model
         # We don't need to connect to list available models
-        provider = load_provider(self._provider_name, self._provider_config)
+        provider = load_provider(effective_provider, config)
         return provider.list_models(prefix=prefix)
 
 
