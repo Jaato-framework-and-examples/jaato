@@ -393,12 +393,6 @@ class PTDisplay:
             # Message expired, clear it
             self._status_message = None
 
-        # Agent name (FIRST field, from selected agent if registry present)
-        if self._agent_registry:
-            agent_name = self._agent_registry.get_selected_agent_name()
-        else:
-            agent_name = "main"
-
         provider = self._model_provider or "—"
         model = self._model_name or "—"
 
@@ -422,23 +416,20 @@ class PTDisplay:
             context_str = "100% available"
 
         # Build formatted text with columns
-        # Agent | Plan symbols | Provider | Model | Context
-        result = [
-            ("class:status-bar.label", " Agent: "),
-            ("class:status-bar.value", agent_name),
-        ]
+        # Plan symbols | Provider | Model | Context
+        result = []
 
         # Add plan symbols if there's an active plan (use selected agent's plan if registry present)
         plan_symbols = self._get_current_plan_symbols()
         if plan_symbols:
-            result.append(("class:status-bar.separator", "  │  "))
+            result.append(("class:status-bar.label", " "))
             result.extend(plan_symbols)
             # Add hint to show popup (only when popup is not visible)
             if not self._plan_panel.is_popup_visible:
                 result.append(("class:status-bar.label", " [Ctrl+P to expand]"))
 
         result.extend([
-            ("class:status-bar.separator", "  │  "),
+            ("class:status-bar.separator", "  │  " if result else " "),
             ("class:status-bar.label", "Provider: "),
             ("class:status-bar.value", provider),
             ("class:status-bar.separator", "  │  "),
