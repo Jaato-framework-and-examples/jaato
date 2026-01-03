@@ -256,18 +256,57 @@ patterns. Manual coding when a template exists is NOT acceptable.
 
 ### TEMPLATE TOOLS:
 
-**renderTemplate(template_path, variables, output_path)** - Render template and write to file
-  - Supports both Jinja2 and Mustache/Handlebars syntax (auto-detected)
-  - Returns: {"success": true, "output_path": "...", "size": 1234, "template_syntax": "jinja2|mustache"}
-
-**renderTemplateToFile(output_path, template_path, variables)** - Render template and write to file
+**renderTemplateToFile(output_path, template_path, variables)** - PREFERRED tool for file generation
+  - Automatically creates parent directories - NO mkdir needed!
   - Supports both Jinja2 and Mustache/Handlebars syntax (auto-detected)
   - Checks if file exists (use overwrite=true to replace)
   - Returns: {"success": true, "output_path": "...", "bytes_written": 1234, "template_syntax": "jinja2|mustache"}
 
+**renderTemplate(template_path, variables, output_path)** - Alternative (same functionality)
+  - Also creates parent directories automatically
+  - Returns: {"success": true, "output_path": "...", "size": 1234, "template_syntax": "jinja2|mustache"}
+
 **listExtractedTemplates()** - List templates extracted from documentation
   - Shows all templates extracted in this session
   - Auto-approved (no permission required)
+
+### CRITICAL: Directory Creation Rules
+
+**DO NOT use `mkdir` to create directory structures!** The template tools automatically
+create all necessary parent directories when writing files.
+
+**WRONG approach (causes malformed directories):**
+```
+# NEVER DO THIS - mkdir with template notation creates literal garbage directories
+cli_based_tool: mkdir -p src/main/java/{{package}}/domain/{model,service}
+renderTemplate: ...
+```
+
+**CORRECT approach:**
+```
+# Just call renderTemplateToFile for each file - directories are created automatically
+renderTemplateToFile(
+    output_path="customer-service/src/main/java/com/bank/customer/domain/model/Customer.java",
+    template_path=".jaato/templates/Entity.java.tpl",
+    variables={"entity_name": "Customer", "package": "com.bank.customer.domain.model"}
+)
+```
+
+### File Path Rules
+
+1. **output_path must be a CONCRETE path** - all variables must be substituted BEFORE calling the tool
+2. **NEVER include `{` or `}` in output_path** - these are for template CONTENT only, not file paths
+3. **NEVER use shell brace expansion** like `{model,service,repository}` in paths
+4. **Generate ONE file at a time** - call renderTemplateToFile once per output file
+
+**Example - Generating multiple files:**
+```
+# For each entity, call renderTemplateToFile with concrete paths:
+renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/model/Customer.java", ...)
+renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/model/CustomerId.java", ...)
+renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/service/CustomerDomainService.java", ...)
+renderTemplateToFile(output_path="src/main/java/com/bank/customer/domain/repository/CustomerRepository.java", ...)
+```
 
 ### Template Priority Rule
 1. ALWAYS check if a template exists before writing code
@@ -293,24 +332,6 @@ This policy ensures consistent, maintainable code across all generated projects.
 Templates are stored in `.jaato/templates/`. When you read documentation files
 (like MODULE.md) containing embedded templates, they are automatically extracted
 to this directory. Watch for "[Template extracted: ...]" annotations.
-
-### Example - Generate a Java service from template (Jinja2):
-```
-renderTemplateToFile(
-    output_path="/src/main/java/com/bank/CustomerService.java",
-    template_path="/templates/service.java.tmpl",
-    variables={"class_name": "CustomerService", "package": "com.bank.customer"}
-)
-```
-
-### Example - Using inline template:
-```
-renderTemplateToFile(
-    output_path="/src/CustomerService.java",
-    template="package {{package}};\\n\\npublic class {{class_name}} {}",
-    variables={"class_name": "CustomerService", "package": "com.bank"}
-)
-```
 
 ### Template Syntax (both supported, auto-detected)
 
