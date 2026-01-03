@@ -38,6 +38,9 @@ from agent_panel import AgentPanel
 from agent_tab_bar import AgentTabBar
 from clipboard import ClipboardConfig, ClipboardProvider, create_provider
 from keybindings import KeybindingConfig, load_keybindings
+from shared.plugins.formatter_pipeline import create_pipeline
+from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter
+from shared.plugins.diff_formatter import create_plugin as create_diff_formatter
 
 
 class RichRenderer:
@@ -130,9 +133,18 @@ class PTDisplay:
         self._output_buffer.set_width(output_width)
         self._output_buffer.set_keybinding_config(self._keybinding_config)
 
+        # Formatter pipeline for output processing (syntax highlighting, diff coloring)
+        self._formatter_pipeline = create_pipeline()
+        self._formatter_pipeline.register(create_diff_formatter())        # priority 20
+        self._formatter_pipeline.register(create_code_block_formatter())  # priority 40
+        self._formatter_pipeline.set_console_width(output_width)
+        self._output_buffer.set_formatter_pipeline(self._formatter_pipeline)
+
         # Set keybinding config on agent registry buffers too
         if self._agent_registry:
             self._agent_registry.set_keybinding_config_all(self._keybinding_config)
+            # Also set formatter pipeline on agent buffers
+            self._agent_registry.set_formatter_pipeline_all(self._formatter_pipeline)
 
         # Rich renderer
         self._renderer = RichRenderer(self._width)
@@ -1438,6 +1450,9 @@ class PTDisplay:
                 self._pager_temp_buffer.set_width(original_buffer._console_width)
         else:
             self._pager_temp_buffer.set_width(self._output_buffer._console_width)
+        # Apply formatter pipeline for output processing
+        if self._formatter_pipeline:
+            self._pager_temp_buffer.set_formatter_pipeline(self._formatter_pipeline)
 
         self._show_pager_page()
 

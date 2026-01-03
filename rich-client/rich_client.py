@@ -814,11 +814,16 @@ class RichClient:
                 )
             self._trace(f"on_permission_requested: built {len(prompt_lines)} prompt lines, format_hint={format_hint}")
 
+            # Format prompt lines through the pipeline (for diff coloring, etc.)
+            formatted_lines = [
+                registry.format_text(line, format_hint=format_hint) for line in prompt_lines
+            ]
+
             # Update the tool in the main agent's buffer
             buffer = registry.get_buffer("main")
             self._trace(f"on_permission_requested: buffer={buffer}, active_tools={len(buffer._active_tools) if buffer else 0}")
             if buffer:
-                buffer.set_tool_permission_pending(tool_name, prompt_lines, format_hint=format_hint)
+                buffer.set_tool_permission_pending(tool_name, formatted_lines)
                 self._trace(f"on_permission_requested: set_tool_permission_pending called")
                 if display:
                     display.refresh()
@@ -2447,13 +2452,18 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         include_tool_name=False,  # Tool name already shown in tool tree
                     )
 
+                # Format prompt lines through the pipeline (for diff coloring, etc.)
+                formatted_lines = [
+                    agent_registry.format_text(line, format_hint=event.format_hint)
+                    for line in prompt_lines
+                ]
+
                 # Integrate into tool tree (same as direct mode)
                 buffer = agent_registry.get_selected_buffer()
                 if buffer:
                     buffer.set_tool_permission_pending(
                         event.tool_name,
-                        prompt_lines,
-                        format_hint=event.format_hint
+                        formatted_lines
                     )
                 display.refresh()
                 # Enable permission input mode

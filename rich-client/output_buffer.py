@@ -28,10 +28,21 @@ def _trace(msg: str) -> None:
         except (IOError, OSError):
             pass
 
+import re
+
 from rich.console import Console, RenderableType
 from rich.text import Text
 from rich.panel import Panel
 from rich.align import Align
+
+
+# Pattern to strip ANSI escape codes for visible length calculation
+_ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def _visible_len(text: str) -> int:
+    """Calculate visible length of text, ignoring ANSI escape codes."""
+    return len(_ANSI_ESCAPE_PATTERN.sub('', text))
 
 
 @dataclass
@@ -69,9 +80,8 @@ class ActiveToolCall:
     # Permission tracking
     permission_state: Optional[str] = None  # None, "pending", "granted", "denied"
     permission_method: Optional[str] = None  # "yes", "always", "once", "never", "whitelist", "blacklist"
-    permission_prompt_lines: Optional[List[str]] = None  # Expanded prompt while pending
+    permission_prompt_lines: Optional[List[str]] = None  # Expanded prompt (may contain ANSI codes)
     permission_truncated: bool = False  # True if prompt is truncated
-    permission_format_hint: Optional[str] = None  # "diff" for colored diff display
     # Clarification tracking (per-question progressive display)
     clarification_state: Optional[str] = None  # None, "pending", "resolved"
     clarification_prompt_lines: Optional[List[str]] = None  # Current question lines
@@ -130,6 +140,8 @@ class OutputBuffer:
         self._keybinding_config: Optional[Any] = None
         # Pending enrichment notifications (queued while tools are active)
         self._pending_enrichments: List[Tuple[str, str, str]] = []  # (source, text, mode)
+        # Formatter pipeline for output processing (optional)
+        self._formatter_pipeline: Optional[Any] = None
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -139,6 +151,9 @@ class OutputBuffer:
         """
         self._console_width = width
         self._measure_console = Console(width=width, force_terminal=True)
+        # Sync width with formatter pipeline if set
+        if self._formatter_pipeline and hasattr(self._formatter_pipeline, 'set_console_width'):
+            self._formatter_pipeline.set_console_width(width)
 
     def set_keybinding_config(self, config: Any) -> None:
         """Set the keybinding config for dynamic UI hints.
@@ -147,6 +162,22 @@ class OutputBuffer:
             config: KeybindingConfig instance from keybindings module.
         """
         self._keybinding_config = config
+
+    def set_formatter_pipeline(self, pipeline: Any) -> None:
+        """Set the formatter pipeline for output processing.
+
+        Args:
+            pipeline: FormatterPipeline instance or None to disable.
+        """
+        self._formatter_pipeline = pipeline
+        # Sync console width with pipeline if it has the method
+        if pipeline and hasattr(pipeline, 'set_console_width'):
+            pipeline.set_console_width(self._console_width)
+
+    # Legacy alias for backwards compatibility
+    def set_output_formatter(self, formatter: Any) -> None:
+        """Deprecated: Use set_formatter_pipeline instead."""
+        self.set_formatter_pipeline(formatter)
 
     def _format_key_hint(self, action: str) -> str:
         """Format a keybinding for display in UI hints.
@@ -355,6 +386,12 @@ class OutputBuffer:
             # Concatenate streaming chunks directly (no separator)
             # Then split by newlines for display
             full_text = ''.join(parts)
+
+            # Apply formatter pipeline for model output
+            if source == "model" and self._formatter_pipeline:
+                if hasattr(self._formatter_pipeline, 'format'):
+                    full_text = self._formatter_pipeline.format(full_text)
+
             lines = full_text.split('\n')
             for i, line in enumerate(lines):
                 # Only first line of a new turn gets the prefix
@@ -374,6 +411,13 @@ class OutputBuffer:
         source, parts, is_new_turn = self._current_block
         # Concatenate streaming chunks directly (no separator)
         full_text = ''.join(parts)
+
+        # Apply formatter pipeline for model output
+        # This handles complete code blocks during streaming
+        if source == "model" and self._formatter_pipeline:
+            if hasattr(self._formatter_pipeline, 'format'):
+                full_text = self._formatter_pipeline.format(full_text)
+
         lines_text = full_text.split('\n')
 
         result = []
@@ -1002,14 +1046,12 @@ class OutputBuffer:
         self,
         tool_name: str,
         prompt_lines: List[str],
-        format_hint: Optional[str] = None
     ) -> None:
         """Mark a tool as awaiting permission with the prompt to display.
 
         Args:
             tool_name: Name of the tool awaiting permission.
-            prompt_lines: Lines of the permission prompt to display.
-            format_hint: Optional hint for display format ("diff" for colored diff).
+            prompt_lines: Lines of the permission prompt to display (may contain ANSI codes).
         """
         _trace(f"set_tool_permission_pending: looking for tool={tool_name}")
         _trace(f"set_tool_permission_pending: active_tools={[(t.name, t.completed) for t in self._active_tools]}")
@@ -1017,7 +1059,6 @@ class OutputBuffer:
             if tool.name == tool_name and not tool.completed:
                 tool.permission_state = "pending"
                 tool.permission_prompt_lines = prompt_lines
-                tool.permission_format_hint = format_hint
                 # Scroll to bottom to show the prompt
                 self._scroll_offset = 0
                 _trace(f"set_tool_permission_pending: FOUND and set pending for {tool_name}")
@@ -1676,6 +1717,8 @@ class OutputBuffer:
                         output.append(wrapped_line)
             elif line.source == "model":
                 # Model output - use header line for turn start
+                # Text may contain ANSI codes from output formatter (syntax highlighting)
+                has_ansi = '\x1b[' in line.text
                 if line.is_turn_start:
                     # Add blank line before header for visual separation (if not first line)
                     if i > 0:
@@ -1687,18 +1730,26 @@ class OutputBuffer:
                     output.append("─" * remaining, style="dim cyan")
                     output.append("\n")
                     # Then render the text content (no prefix needed)
-                    wrapped = wrap_text(line.text, 0)
-                    for j, wrapped_line in enumerate(wrapped):
-                        if j > 0:
-                            output.append("\n")
-                        output.append(wrapped_line)
+                    if has_ansi:
+                        # Text contains ANSI codes from syntax highlighting
+                        output.append_text(Text.from_ansi(line.text))
+                    else:
+                        wrapped = wrap_text(line.text, 0)
+                        for j, wrapped_line in enumerate(wrapped):
+                            if j > 0:
+                                output.append("\n")
+                            output.append(wrapped_line)
                 else:
                     # Non-turn-start - just render text, no prefix
-                    wrapped = wrap_text(line.text, 0)
-                    for j, wrapped_line in enumerate(wrapped):
-                        if j > 0:
-                            output.append("\n")
-                        output.append(wrapped_line)
+                    if has_ansi:
+                        # Text contains ANSI codes from syntax highlighting
+                        output.append_text(Text.from_ansi(line.text))
+                    else:
+                        wrapped = wrap_text(line.text, 0)
+                        for j, wrapped_line in enumerate(wrapped):
+                            if j > 0:
+                                output.append("\n")
+                            output.append(wrapped_line)
             elif line.source == "tool":
                 # Tool output
                 prefix_width = len(f"[{line.source}] ") if line.is_turn_start else 0
@@ -2006,13 +2057,16 @@ class OutputBuffer:
                     # Draw box around permission prompt
                     # Box prefix is ~18 chars ("       │       │ "), leave room for border
                     max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
-                    box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
+                    box_width = min(max_box_width, max(_visible_len(line) for line in prompt_lines) + 4)
                     content_width = box_width - 4  # Space for "│ " and " │"
 
                     # Count lines after wrapping to properly truncate
+                    # Note: lines with ANSI codes are not wrapped (textwrap doesn't handle them)
                     wrapped_line_count = 0
                     for line in prompt_lines:
-                        if len(line) > content_width:
+                        visible_len = _visible_len(line)
+                        has_ansi = visible_len != len(line)
+                        if not has_ansi and visible_len > content_width:
                             wrapped = textwrap.wrap(line, width=content_width, break_long_words=True)
                             wrapped_line_count += len(wrapped) if wrapped else 1
                         else:
@@ -2037,8 +2091,10 @@ class OutputBuffer:
                     for prompt_line in prompt_lines[:-1] if truncated else prompt_lines:
                         if truncation_triggered:
                             break
-                        # Wrap long lines instead of truncating
-                        if len(prompt_line) > content_width:
+                        # Wrap long lines (but not lines with ANSI codes - textwrap doesn't handle them)
+                        visible_len = _visible_len(prompt_line)
+                        has_ansi = visible_len != len(prompt_line)
+                        if not has_ansi and visible_len > content_width:
                             wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
                             if not wrapped:
                                 wrapped = [prompt_line[:content_width]]
@@ -2050,20 +2106,16 @@ class OutputBuffer:
                                 truncation_triggered = True
                                 break
                             output.append("\n")
-                            padding = box_width - len(display_line) - 4
+                            padding = box_width - _visible_len(display_line) - 4
                             output.append(f"  {continuation}     │ ", style="dim")
-                            # Color diff lines appropriately
-                            if display_line.startswith('+') and not display_line.startswith('+++'):
-                                output.append(display_line, style="green")
-                            elif display_line.startswith('-') and not display_line.startswith('---'):
-                                output.append(display_line, style="red")
-                            elif display_line.startswith('@@'):
-                                output.append(display_line, style="cyan")
-                            # Color options line (contains [y]es, [n]o, etc.)
-                            elif display_line.strip().startswith('[') and ']' in display_line:
-                                output.append(display_line, style="cyan")
+                            # Render line (may contain ANSI codes from formatter pipeline)
+                            # Use Text.from_ansi() to handle any ANSI escape codes
+                            stripped = _ANSI_ESCAPE_PATTERN.sub('', display_line)
+                            if stripped.strip().startswith('[') and ']' in stripped:
+                                # Options line - style cyan
+                                output.append_text(Text.from_ansi(display_line, style="cyan"))
                             else:
-                                output.append(display_line)
+                                output.append_text(Text.from_ansi(display_line))
                             output.append(" " * max(0, padding) + " │", style="dim")
                             rendered_lines += 1
 
@@ -2077,15 +2129,17 @@ class OutputBuffer:
                         output.append(" " * max(0, padding) + " │", style="dim")
                         # Show last line (usually options) - wrap if needed
                         last_line = prompt_lines[-1]
-                        if len(last_line) > content_width:
+                        last_visible_len = _visible_len(last_line)
+                        last_has_ansi = last_visible_len != len(last_line)
+                        if not last_has_ansi and last_visible_len > content_width:
                             last_wrapped = textwrap.wrap(last_line, width=content_width, break_long_words=True)
                         else:
                             last_wrapped = [last_line]
                         for display_line in last_wrapped:
                             output.append("\n")
-                            padding = box_width - len(display_line) - 4
+                            padding = box_width - _visible_len(display_line) - 4
                             output.append(f"  {continuation}     │ ", style="dim")
-                            output.append(display_line, style="cyan")  # Options styled cyan
+                            output.append_text(Text.from_ansi(display_line, style="cyan"))
                             output.append(" " * max(0, padding) + " │", style="dim")
 
                     output.append("\n")
