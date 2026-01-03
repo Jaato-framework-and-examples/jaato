@@ -1453,7 +1453,8 @@ class SubagentPlugin:
                 model=model,
                 tools=profile.plugins,  # Pass directly: [] = no tools, ["cli"] = only cli
                 system_instructions=profile.system_instructions,
-                plugin_configs=effective_plugin_configs if effective_plugin_configs else None
+                plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
+                provider_name=profile.provider  # Cross-provider subagent support
             )
 
             # Debug: write to trace log file (visible even with rich client)
