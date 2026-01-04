@@ -710,6 +710,7 @@ class JaatoServer:
                     context_limit=context_limit,
                     percent_used=percent_used,
                     tokens_remaining=max(0, context_limit - total_tokens),
+                    turns=turns,
                 ))
 
             def on_agent_history_updated(self, agent_id, history):
@@ -1100,6 +1101,9 @@ class JaatoServer:
             if server._jaato:
                 context_limit = server._jaato.get_context_limit()
                 percent_used = (usage.total_tokens / context_limit * 100) if context_limit > 0 else 0
+                # Get current turn count from accounting
+                turn_accounting = server._jaato.get_turn_accounting()
+                turns = len(turn_accounting)
                 server.emit(ContextUpdatedEvent(
                     agent_id="main",
                     total_tokens=usage.total_tokens,
@@ -1108,6 +1112,7 @@ class JaatoServer:
                     context_limit=context_limit,
                     percent_used=percent_used,
                     tokens_remaining=max(0, context_limit - usage.total_tokens),
+                    turns=turns,
                 ))
 
         def gc_threshold_callback(percent_used: float, threshold: float) -> None:
@@ -1146,6 +1151,7 @@ class JaatoServer:
                             context_limit=context_limit,
                             percent_used=usage.get('percent_used', 0),
                             tokens_remaining=usage.get('tokens_remaining', 0),
+                            turns=usage.get('turns', 0),
                         ))
 
             except KeyboardInterrupt:

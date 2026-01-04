@@ -2618,7 +2618,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         total_tokens=event.total_tokens,
                         prompt_tokens=event.prompt_tokens,
                         output_tokens=event.output_tokens,
-                        turns=0,  # Not provided in event
+                        turns=event.turns,
                         percent_used=event.percent_used,
                     )
                 # Also update display (fallback if no registry)
