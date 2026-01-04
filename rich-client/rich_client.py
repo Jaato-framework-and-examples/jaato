@@ -2659,12 +2659,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 queue_pos = event.position_in_queue
                 if queue_pos == 0:
                     display.add_system_message(
-                        "Prompt queued - will be processed at next pause",
+                        "Prompt queued - will be processed when model pauses tool execution",
                         style="cyan"
                     )
                 else:
                     display.add_system_message(
-                        f"Prompt queued (position {queue_pos + 1}) - will be processed at next pause",
+                        f"Prompt queued (position {queue_pos + 1}) - will be processed when model pauses",
                         style="cyan"
                     )
 
