@@ -92,6 +92,9 @@ def _expand_string(s: str, context: Dict[str, str]) -> str:
 def _resolve_workspace_path(path: str) -> str:
     """Resolve a workspace path, handling relative paths.
 
+    Relative paths (like ".") are resolved relative to the current
+    working directory.
+
     Args:
         path: The workspace path (absolute or relative like ".").
 
@@ -100,7 +103,6 @@ def _resolve_workspace_path(path: str) -> str:
     """
     p = Path(path)
     if not p.is_absolute():
-        # Relative path - resolve relative to cwd
         p = Path.cwd() / p
     return str(p.resolve())
 
