@@ -22,11 +22,6 @@ import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-# Capture the startup CWD BEFORE any imports that might change it.
-# This is critical for resolving relative paths like workspaceRoot=. from .env files.
-_STARTUP_CWD = os.getcwd()
-os.environ['JAATO_STARTUP_CWD'] = _STARTUP_CWD
-
 # Add project root to path for imports
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:

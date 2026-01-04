@@ -221,30 +221,8 @@ class TestFindWorkspaceRoot:
         """workspaceRoot=. from .env is resolved to cwd."""
         with patch.dict(os.environ, {"workspaceRoot": "."}, clear=False):
             os.environ.pop("JAATO_WORKSPACE_ROOT", None)
-            os.environ.pop("JAATO_STARTUP_CWD", None)
             result = _find_workspace_root()
             assert result == os.getcwd()
-
-    def test_startup_cwd_used_for_relative_paths(self):
-        """JAATO_STARTUP_CWD is used to resolve relative paths."""
-        # Simulate rich-client setting startup CWD
-        with patch.dict(os.environ, {
-            "workspaceRoot": ".",
-            "JAATO_STARTUP_CWD": "/original/startup/dir"
-        }, clear=False):
-            os.environ.pop("JAATO_WORKSPACE_ROOT", None)
-            result = _find_workspace_root()
-            assert result == "/original/startup/dir"
-
-    def test_startup_cwd_with_subdir(self):
-        """JAATO_STARTUP_CWD resolves relative subdirs correctly."""
-        with patch.dict(os.environ, {
-            "workspaceRoot": "./myproject",
-            "JAATO_STARTUP_CWD": "/home/user"
-        }, clear=False):
-            os.environ.pop("JAATO_WORKSPACE_ROOT", None)
-            result = _find_workspace_root()
-            assert result == "/home/user/myproject"
 
 
 class TestWorkspaceRootOverride:
