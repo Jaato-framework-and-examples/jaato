@@ -429,6 +429,7 @@ class SubagentResult:
         error: Error message if success is False.
         token_usage: Token usage statistics if available.
         agent_id: ID of the subagent session (for multi-turn conversations).
+        output_streamed: Whether output was streamed via UI hooks (prevents double-display).
     """
     success: bool
     response: str
@@ -436,14 +437,24 @@ class SubagentResult:
     error: Optional[str] = None
     token_usage: Optional[Dict[str, int]] = None
     agent_id: Optional[str] = None
+    output_streamed: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for tool response."""
-        result = {
+        """Convert to dictionary for tool response.
+
+        When output_streamed is True, the response text is omitted from the
+        result since it was already displayed to the user via UI hooks.
+        This prevents the model from echoing the response in its output.
+        """
+        result: Dict[str, Any] = {
             'success': self.success,
-            'response': self.response,
             'turns_used': self.turns_used,
         }
+        # Only include response text if it wasn't already streamed to UI
+        if self.output_streamed:
+            result['response_note'] = 'Response was streamed to the user interface. Do not repeat it.'
+        else:
+            result['response'] = self.response
         if self.error:
             result['error'] = self.error
         if self.token_usage:
