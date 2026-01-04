@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 
 def expand_variables(
     value: Any,
-    context: Optional[Dict[str, str]] = None
+    context: Optional[Dict[str, str]] = None,
+    workspace_root_override: Optional[str] = None
 ) -> Any:
     """Expand ${variable} references in a value.
 
@@ -25,6 +26,9 @@ def expand_variables(
     Args:
         value: Value to expand (string, dict, list, or other)
         context: Optional dict of context variables to expand
+        workspace_root_override: Explicit workspace root to use instead of auto-detection.
+            This is useful when the calling code knows the correct workspace root
+            (e.g., from parent agent's config or environment).
 
     Returns:
         Value with variables expanded
@@ -40,9 +44,10 @@ def expand_variables(
         context = {}
 
     # Add default context variables
+    # Use workspace_root_override if provided, otherwise auto-detect
     default_context = {
         'cwd': os.getcwd(),
-        'workspaceRoot': _find_workspace_root(),
+        'workspaceRoot': _find_workspace_root(workspace_root_override),
         'HOME': os.environ.get('HOME', ''),
         'USER': os.environ.get('USER', ''),
     }
@@ -52,9 +57,9 @@ def expand_variables(
     if isinstance(value, str):
         return _expand_string(value, effective_context)
     elif isinstance(value, dict):
-        return {k: expand_variables(v, context) for k, v in value.items()}
+        return {k: expand_variables(v, context, workspace_root_override) for k, v in value.items()}
     elif isinstance(value, list):
-        return [expand_variables(item, context) for item in value]
+        return [expand_variables(item, context, workspace_root_override) for item in value]
     else:
         return value
 
@@ -84,12 +89,30 @@ def _expand_string(s: str, context: Dict[str, str]) -> str:
     return re.sub(pattern, replace_var, s)
 
 
-def _find_workspace_root() -> str:
+def _find_workspace_root(override: Optional[str] = None) -> str:
     """Find the workspace root by looking for .git directory.
+
+    Priority order:
+    1. Explicit override parameter
+    2. JAATO_WORKSPACE_ROOT environment variable
+    3. Search for .git or .jaato directory from cwd
+
+    Args:
+        override: Explicit workspace root path to use (takes precedence).
 
     Returns:
         Path to workspace root, or cwd if not found
     """
+    # Priority 1: Explicit override
+    if override:
+        return override
+
+    # Priority 2: Environment variable
+    env_root = os.environ.get('JAATO_WORKSPACE_ROOT')
+    if env_root:
+        return env_root
+
+    # Priority 3: Search for .git or .jaato directory
     current = Path.cwd()
     for parent in [current] + list(current.parents):
         if (parent / '.git').exists():
@@ -101,13 +124,16 @@ def _find_workspace_root() -> str:
 
 def expand_plugin_configs(
     plugin_configs: Dict[str, Dict[str, Any]],
-    context: Optional[Dict[str, str]] = None
+    context: Optional[Dict[str, str]] = None,
+    workspace_root_override: Optional[str] = None
 ) -> Dict[str, Dict[str, Any]]:
     """Expand variables in all plugin configurations.
 
     Args:
         plugin_configs: Dict of plugin name -> config dict
         context: Optional context variables (e.g., projectPath)
+        workspace_root_override: Explicit workspace root to use instead of auto-detection.
+            If provided, ${workspaceRoot} will expand to this value.
 
     Returns:
         Plugin configs with all variables expanded
@@ -120,7 +146,7 @@ def expand_plugin_configs(
         >>> expand_plugin_configs(configs, {"projectPath": "/app"})
         {'lsp': {'config_path': '/app/.lsp.json'}, 'mcp': {'config_path': '/app/.mcp.json'}}
     """
-    return expand_variables(plugin_configs, context)
+    return expand_variables(plugin_configs, context, workspace_root_override)
 
 
 @dataclass
