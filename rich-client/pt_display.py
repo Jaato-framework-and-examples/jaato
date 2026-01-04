@@ -924,9 +924,21 @@ class PTDisplay:
             style="class:status-bar",
         )
 
-        # Output panel (fills remaining space, now 100% width)
+        # Dynamic height for output panel - accounts for all other components
+        def get_output_height():
+            """Calculate output panel height by subtracting all other components."""
+            total = self._height
+            fixed = 2  # session_bar (1) + status_bar (1)
+            if self._agent_tab_bar is not None:
+                fixed += 1  # agent tab bar
+            pending = self._get_pending_prompts_height()
+            input_h = self._get_input_height()
+            return max(1, total - fixed - pending - input_h)
+
+        # Output panel (fills remaining space minus pending prompts)
         output_window = Window(
             FormattedTextControl(self._get_output_content),
+            height=get_output_height,
             wrap_lines=False,
         )
 
