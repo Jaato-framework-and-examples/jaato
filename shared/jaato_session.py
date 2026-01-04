@@ -1505,7 +1505,9 @@ class JaatoSession:
             self._on_prompt_injected(prompt)
 
         # Emit the prompt as user output so UI shows it
-        if on_output:
+        # Skip for subagent messages - parent doesn't need to echo child output
+        is_subagent_message = prompt.startswith("[SUBAGENT ")
+        if on_output and not is_subagent_message:
             on_output("user", prompt, "write")
 
         # Proactive rate limiting
