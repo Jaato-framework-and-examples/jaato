@@ -350,6 +350,27 @@ class JaatoSession:
         """
         self._parent_cancel_token = token
 
+        # Debug tracing: log parent token assignment
+        import os
+        import tempfile
+        from datetime import datetime
+        trace_path = os.environ.get("JAATO_TRACE_LOG")
+        if not trace_path:
+            trace_path = os.environ.get(
+                "JAATO_PROVIDER_TRACE",
+                os.path.join(tempfile.gettempdir(), "provider_trace.log")
+            )
+        if trace_path:
+            try:
+                token_id = getattr(token, '_id', 'N/A') if token else 'None'
+                own_token_id = getattr(self._cancel_token, '_id', 'N/A') if self._cancel_token else 'None'
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [session] SET_PARENT_CANCEL_TOKEN parent_id={token_id} own_id={own_token_id}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
+
     def _is_cancelled(self) -> bool:
         """Check if this session or its parent has been cancelled.
 
