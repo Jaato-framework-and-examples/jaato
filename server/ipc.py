@@ -625,7 +625,7 @@ class JaatoIPCServer:
 
         while not self._shutdown_event.is_set():
             try:
-                event = await asyncio.wait_for(queue.get(), timeout=0.5)
+                event = await asyncio.wait_for(queue.get(), timeout=0.01)
                 logger.debug(f"_broadcast_to_client: sending {type(event).__name__} to {client_id}")
                 await self._send_to_client(client_id, event)
                 logger.debug(f"_broadcast_to_client: sent successfully")
