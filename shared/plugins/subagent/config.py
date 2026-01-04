@@ -92,6 +92,14 @@ def _expand_string(s: str, context: Dict[str, str]) -> str:
 def _resolve_workspace_path(path: str) -> str:
     """Resolve a workspace path, handling relative paths.
 
+    Relative paths are resolved relative to:
+    1. JAATO_STARTUP_CWD (set by rich-client at startup), if available
+    2. Current working directory, as fallback
+
+    Using JAATO_STARTUP_CWD ensures that workspaceRoot=. from .env files
+    is resolved relative to where the user invoked the client, not where
+    the code happens to be running from later.
+
     Args:
         path: The workspace path (absolute or relative like ".").
 
@@ -100,8 +108,10 @@ def _resolve_workspace_path(path: str) -> str:
     """
     p = Path(path)
     if not p.is_absolute():
-        # Relative path - resolve relative to cwd
-        p = Path.cwd() / p
+        # Use startup CWD if available (set by rich-client at startup)
+        # This ensures relative paths are resolved from where the user invoked the client
+        base_dir = os.environ.get('JAATO_STARTUP_CWD', os.getcwd())
+        p = Path(base_dir) / p
     return str(p.resolve())
 
 
