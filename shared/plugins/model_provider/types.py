@@ -269,42 +269,12 @@ class CancelToken:
         All methods are thread-safe and can be called from any thread.
     """
 
-    # Class-level counter for unique IDs
-    _id_counter = 0
-    _id_lock = threading.Lock()
-
     def __init__(self):
         """Initialize a new cancel token."""
-        # Assign unique ID for debugging
-        with CancelToken._id_lock:
-            CancelToken._id_counter += 1
-            self._id = CancelToken._id_counter
-
         self._cancelled = False
         self._event = threading.Event()
         self._lock = threading.Lock()
         self._callbacks: List[Callable[[], None]] = []
-
-        # Debug tracing: log token creation
-        import os
-        import tempfile
-        import sys
-        from datetime import datetime
-        trace_path = os.environ.get("JAATO_TRACE_LOG")
-        if not trace_path:
-            trace_path = os.environ.get(
-                "JAATO_PROVIDER_TRACE",
-                os.path.join(tempfile.gettempdir(), "provider_trace.log")
-            )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [CancelToken] NEW token id={self._id}\n")
-                    f.flush()
-            except Exception as e:
-                # Log to stderr instead of silently swallowing
-                print(f"[CancelToken] Failed to write trace: {e}", file=sys.stderr)
 
     def cancel(self) -> None:
         """Request cancellation.
@@ -317,30 +287,6 @@ class CancelToken:
                 return
             self._cancelled = True
             callbacks = list(self._callbacks)
-
-        # Debug tracing: log cancellation with stack trace
-        import os
-        import traceback
-        import tempfile
-        import sys
-        from datetime import datetime
-        trace_path = os.environ.get("JAATO_TRACE_LOG")
-        if not trace_path:
-            trace_path = os.environ.get(
-                "JAATO_PROVIDER_TRACE",
-                os.path.join(tempfile.gettempdir(), "provider_trace.log")
-            )
-        if trace_path:
-            try:
-                with open(trace_path, "a") as f:
-                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    f.write(f"[{ts}] [CancelToken] CANCEL called on token id={self._id}! Stack trace:\n")
-                    for line in traceback.format_stack():
-                        f.write(line)
-                    f.write("\n")
-                    f.flush()
-            except Exception as e:
-                print(f"[CancelToken] Failed to write cancel trace: {e}", file=sys.stderr)
 
         # Set event to wake up any waiters
         self._event.set()
