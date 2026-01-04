@@ -376,12 +376,10 @@ class JaatoServer:
             """Get config value from session env, falling back to global env."""
             return session_env.get(key) or os.environ.get(key)
 
-        # Temporarily apply session env vars for provider initialization
-        # Save original values to restore later
-        original_env = {}
+        # Apply session env vars for the duration of the session
+        # These persist so that provider tracing and other runtime features work
         for key, value in session_env.items():
             if value is not None:
-                original_env[key] = os.environ.get(key)
                 os.environ[key] = value
 
         try:
@@ -423,13 +421,6 @@ class JaatoServer:
                 recoverable=False,
             ))
             return False
-        finally:
-            # Restore original environment variables
-            for key, orig_value in original_env.items():
-                if orig_value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = orig_value
 
         self._model_name = self._jaato.model_name or model_name
         self._model_provider = self._jaato.provider_name
