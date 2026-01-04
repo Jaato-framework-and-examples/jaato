@@ -288,6 +288,7 @@ class CancelToken:
         # Debug tracing: log token creation
         import os
         import tempfile
+        import sys
         from datetime import datetime
         trace_path = os.environ.get("JAATO_TRACE_LOG")
         if not trace_path:
@@ -301,8 +302,9 @@ class CancelToken:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
                     f.write(f"[{ts}] [CancelToken] NEW token id={self._id}\n")
                     f.flush()
-            except (IOError, OSError):
-                pass
+            except Exception as e:
+                # Log to stderr instead of silently swallowing
+                print(f"[CancelToken] Failed to write trace: {e}", file=sys.stderr)
 
     def cancel(self) -> None:
         """Request cancellation.
@@ -320,6 +322,7 @@ class CancelToken:
         import os
         import traceback
         import tempfile
+        import sys
         from datetime import datetime
         trace_path = os.environ.get("JAATO_TRACE_LOG")
         if not trace_path:
@@ -336,8 +339,8 @@ class CancelToken:
                         f.write(line)
                     f.write("\n")
                     f.flush()
-            except (IOError, OSError):
-                pass
+            except Exception as e:
+                print(f"[CancelToken] Failed to write cancel trace: {e}", file=sys.stderr)
 
         # Set event to wake up any waiters
         self._event.set()
