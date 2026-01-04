@@ -824,6 +824,7 @@ class SubagentPlugin:
                 turns_used=session_info['turn_count'],
                 token_usage=token_usage,
                 agent_id=agent_id,
+                output_streamed=bool(self._ui_hooks),
             ).to_dict()
 
         except Exception as e:
@@ -1619,6 +1620,7 @@ class SubagentPlugin:
                 turns_used=usage.get('turns', 1),
                 token_usage=token_usage,
                 agent_id=agent_id,
+                output_streamed=bool(self._ui_hooks),
             )
 
         except Exception as e:
