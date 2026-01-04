@@ -168,3 +168,66 @@ class TestFindWorkspaceRoot:
         """Returns string type."""
         result = _find_workspace_root()
         assert isinstance(result, str)
+
+    def test_override_takes_precedence(self):
+        """Explicit override parameter takes precedence over everything."""
+        result = _find_workspace_root(override="/custom/override")
+        assert result == "/custom/override"
+
+    def test_env_var_takes_precedence_over_detection(self):
+        """JAATO_WORKSPACE_ROOT env var takes precedence over auto-detection."""
+        with patch.dict(os.environ, {"JAATO_WORKSPACE_ROOT": "/env/workspace"}):
+            result = _find_workspace_root()
+            assert result == "/env/workspace"
+
+    def test_override_takes_precedence_over_env_var(self):
+        """Override parameter takes precedence over env var."""
+        with patch.dict(os.environ, {"JAATO_WORKSPACE_ROOT": "/env/workspace"}):
+            result = _find_workspace_root(override="/explicit/override")
+            assert result == "/explicit/override"
+
+
+class TestWorkspaceRootOverride:
+    """Tests for workspace_root_override in expand functions."""
+
+    def test_expand_variables_with_override(self):
+        """expand_variables uses workspace_root_override for ${workspaceRoot}."""
+        result = expand_variables(
+            "${workspaceRoot}/config.json",
+            workspace_root_override="/my/workspace"
+        )
+        assert result == "/my/workspace/config.json"
+
+    def test_expand_variables_nested_with_override(self):
+        """Nested dicts use workspace_root_override."""
+        input_data = {
+            "path": "${workspaceRoot}/templates",
+            "nested": {
+                "file": "${workspaceRoot}/.jaato/config.json"
+            }
+        }
+        result = expand_variables(input_data, workspace_root_override="/project")
+        assert result["path"] == "/project/templates"
+        assert result["nested"]["file"] == "/project/.jaato/config.json"
+
+    def test_expand_plugin_configs_with_override(self):
+        """expand_plugin_configs uses workspace_root_override."""
+        configs = {
+            "template": {"base_path": "${workspaceRoot}"},
+            "lsp": {"config_path": "${workspaceRoot}/.lsp.json"}
+        }
+        result = expand_plugin_configs(
+            configs,
+            workspace_root_override="/custom/workspace"
+        )
+        assert result["template"]["base_path"] == "/custom/workspace"
+        assert result["lsp"]["config_path"] == "/custom/workspace/.lsp.json"
+
+    def test_context_overrides_workspace_root(self):
+        """Context workspaceRoot takes precedence over auto-detection."""
+        # If context explicitly provides workspaceRoot, it should be used
+        result = expand_variables(
+            "${workspaceRoot}/file",
+            context={"workspaceRoot": "/from/context"}
+        )
+        assert result == "/from/context/file"
