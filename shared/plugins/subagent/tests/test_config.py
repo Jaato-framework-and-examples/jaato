@@ -186,6 +186,44 @@ class TestFindWorkspaceRoot:
             result = _find_workspace_root(override="/explicit/override")
             assert result == "/explicit/override"
 
+    def test_dotenv_workspaceRoot_is_used(self):
+        """workspaceRoot env var (from .env) is used when JAATO_WORKSPACE_ROOT not set."""
+        # Clear JAATO_WORKSPACE_ROOT, set workspaceRoot (simulating .env load)
+        with patch.dict(os.environ, {"workspaceRoot": "/from/dotenv"}, clear=False):
+            # Make sure JAATO_WORKSPACE_ROOT is not set
+            os.environ.pop("JAATO_WORKSPACE_ROOT", None)
+            result = _find_workspace_root()
+            assert result == "/from/dotenv"
+
+    def test_jaato_env_takes_precedence_over_dotenv(self):
+        """JAATO_WORKSPACE_ROOT takes precedence over workspaceRoot."""
+        with patch.dict(os.environ, {
+            "JAATO_WORKSPACE_ROOT": "/jaato/root",
+            "workspaceRoot": "/dotenv/root"
+        }):
+            result = _find_workspace_root()
+            assert result == "/jaato/root"
+
+    def test_relative_path_dot_is_resolved(self):
+        """Relative path '.' is resolved to absolute cwd."""
+        result = _find_workspace_root(override=".")
+        assert result == os.getcwd()
+        assert os.path.isabs(result)
+
+    def test_relative_path_subdir_is_resolved(self):
+        """Relative path like './subdir' is resolved."""
+        result = _find_workspace_root(override="./subdir")
+        expected = os.path.join(os.getcwd(), "subdir")
+        assert result == expected
+        assert os.path.isabs(result)
+
+    def test_dotenv_relative_path_is_resolved(self):
+        """workspaceRoot=. from .env is resolved to cwd."""
+        with patch.dict(os.environ, {"workspaceRoot": "."}, clear=False):
+            os.environ.pop("JAATO_WORKSPACE_ROOT", None)
+            result = _find_workspace_root()
+            assert result == os.getcwd()
+
 
 class TestWorkspaceRootOverride:
     """Tests for workspace_root_override in expand functions."""

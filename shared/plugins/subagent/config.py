@@ -89,13 +89,32 @@ def _expand_string(s: str, context: Dict[str, str]) -> str:
     return re.sub(pattern, replace_var, s)
 
 
+def _resolve_workspace_path(path: str) -> str:
+    """Resolve a workspace path, handling relative paths.
+
+    Args:
+        path: The workspace path (absolute or relative like ".").
+
+    Returns:
+        Absolute path to the workspace.
+    """
+    p = Path(path)
+    if not p.is_absolute():
+        # Relative path - resolve relative to cwd
+        p = Path.cwd() / p
+    return str(p.resolve())
+
+
 def _find_workspace_root(override: Optional[str] = None) -> str:
     """Find the workspace root by looking for .git directory.
 
     Priority order:
     1. Explicit override parameter
     2. JAATO_WORKSPACE_ROOT environment variable
-    3. Search for .git or .jaato directory from cwd
+    3. workspaceRoot environment variable (from .env file)
+    4. Search for .git or .jaato directory from cwd
+
+    Note: Relative paths (like ".") are resolved relative to cwd.
 
     Args:
         override: Explicit workspace root path to use (takes precedence).
@@ -105,14 +124,19 @@ def _find_workspace_root(override: Optional[str] = None) -> str:
     """
     # Priority 1: Explicit override
     if override:
-        return override
+        return _resolve_workspace_path(override)
 
-    # Priority 2: Environment variable
+    # Priority 2: JAATO_WORKSPACE_ROOT environment variable
     env_root = os.environ.get('JAATO_WORKSPACE_ROOT')
     if env_root:
-        return env_root
+        return _resolve_workspace_path(env_root)
 
-    # Priority 3: Search for .git or .jaato directory
+    # Priority 3: workspaceRoot environment variable (common in .env files)
+    env_workspace_root = os.environ.get('workspaceRoot')
+    if env_workspace_root:
+        return _resolve_workspace_path(env_workspace_root)
+
+    # Priority 4: Search for .git or .jaato directory
     current = Path.cwd()
     for parent in [current] + list(current.parents):
         if (parent / '.git').exists():
