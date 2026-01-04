@@ -197,6 +197,10 @@ class PTDisplay:
         self._stop_callback: Optional[Callable[[], bool]] = None
         self._is_running_callback: Optional[Callable[[], bool]] = None
 
+        # Debounced refresh for streaming performance
+        self._refresh_pending: bool = False
+        self._refresh_interval: float = 0.05  # 50ms debounce window
+
         # Build prompt_toolkit application
         self._app: Optional[Application] = None
         self._build_app()
@@ -1096,6 +1100,29 @@ class PTDisplay:
             # Invalidate schedules a redraw in the main event loop
             self._app.invalidate()
 
+    def _schedule_refresh(self) -> None:
+        """Schedule a debounced refresh for streaming performance.
+
+        Batches rapid refresh requests (e.g., during streaming) into a single
+        refresh every _refresh_interval seconds. This reduces rendering overhead
+        from 50+ refreshes/sec to ~20 refreshes/sec during streaming.
+        """
+        if self._refresh_pending:
+            # Already scheduled, will happen soon
+            return
+
+        if not self._app or not self._app.is_running:
+            return
+
+        self._refresh_pending = True
+
+        def _do_refresh() -> None:
+            self._refresh_pending = False
+            self.refresh()
+
+        # Schedule refresh after debounce interval
+        self._app.loop.call_later(self._refresh_interval, _do_refresh)
+
     def start(self) -> None:
         """Start the display (non-blocking).
 
@@ -1281,7 +1308,8 @@ class PTDisplay:
         buffer.append(source, text, mode)
         # Auto-scroll to bottom when new output arrives
         buffer.scroll_to_bottom()
-        self.refresh()
+        # Use debounced refresh during streaming for better performance
+        self._schedule_refresh()
 
     def add_system_message(self, message: str, style: str = "dim") -> None:
         """Add a system message to the output."""
