@@ -371,6 +371,7 @@ class ContextUpdatedEvent(Event):
     context_limit: int = 0
     percent_used: float = 0.0
     tokens_remaining: int = 0
+    turns: int = 0
 
 
 @dataclass
