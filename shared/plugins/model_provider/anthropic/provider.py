@@ -51,6 +51,7 @@ from .converters import (
     response_from_anthropic,
     serialize_history,
     tool_schemas_to_anthropic,
+    validate_tool_use_pairing,
 )
 from .env import (
     get_checked_credential_locations,
@@ -452,6 +453,9 @@ class AnthropicProvider:
         # Add user message to history
         self._history.append(Message.from_text(Role.USER, message))
 
+        # Validate and repair history (in case of prior cancellation/errors)
+        self._history = validate_tool_use_pairing(self._history)
+
         # Build messages for API
         messages = messages_to_anthropic(self._history)
 
@@ -506,6 +510,9 @@ class AnthropicProvider:
         # Add multipart message to history
         self._history.append(Message(role=Role.USER, parts=parts))
 
+        # Validate and repair history (in case of prior cancellation/errors)
+        self._history = validate_tool_use_pairing(self._history)
+
         # Build messages for API
         messages = messages_to_anthropic(self._history)
 
@@ -552,6 +559,9 @@ class AnthropicProvider:
         tool_result_parts = [Part(function_response=r) for r in results]
         self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
 
+        # Validate and repair history (in case of prior cancellation/errors)
+        self._history = validate_tool_use_pairing(self._history)
+
         # Build messages for API
         messages = messages_to_anthropic(self._history)
 
@@ -572,6 +582,9 @@ class AnthropicProvider:
 
             return provider_response
         except Exception as e:
+            # Rollback the tool results message we added
+            if self._history and self._history[-1].role == Role.TOOL:
+                self._history.pop()
             self._handle_api_error(e)
             raise
 
@@ -850,6 +863,9 @@ class AnthropicProvider:
         # Add user message to history
         self._history.append(Message.from_text(Role.USER, message))
 
+        # Validate and repair history (in case of prior cancellation/errors)
+        self._history = validate_tool_use_pairing(self._history)
+
         # Build messages for API
         messages = messages_to_anthropic(self._history)
 
@@ -916,6 +932,9 @@ class AnthropicProvider:
         tool_result_parts = [Part(function_response=r) for r in results]
         self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
 
+        # Validate and repair history (in case of prior cancellation/errors)
+        self._history = validate_tool_use_pairing(self._history)
+
         # Build messages for API
         messages = messages_to_anthropic(self._history)
 
@@ -939,6 +958,9 @@ class AnthropicProvider:
 
             return response
         except Exception as e:
+            # Rollback the tool results message we added
+            if self._history and self._history[-1].role == Role.TOOL:
+                self._history.pop()
             self._handle_api_error(e)
             raise
 
@@ -1092,21 +1114,28 @@ class AnthropicProvider:
         # Flush any remaining text
         flush_text_block()
 
-        # Handle any incomplete tool calls (shouldn't happen normally)
-        for idx, tc in current_tool_calls.items():
-            json_str = ''.join(tc["json_chunks"])
-            try:
-                args = json.loads(json_str) if json_str else {}
-            except json.JSONDecodeError:
-                args = {}
-            fc = FunctionCall(id=tc["id"], name=tc["name"], args=args)
-            # Notify caller about function call detection
-            if on_function_call:
-                on_function_call(fc)
-            parts.append(Part.from_function_call(fc))
+        # Handle incomplete tool calls only if NOT cancelled
+        # When cancelled, incomplete tool calls would create unpaired tool_use blocks
+        if not was_cancelled:
+            for idx, tc in current_tool_calls.items():
+                json_str = ''.join(tc["json_chunks"])
+                try:
+                    args = json.loads(json_str) if json_str else {}
+                except json.JSONDecodeError:
+                    args = {}
+                fc = FunctionCall(id=tc["id"], name=tc["name"], args=args)
+                # Notify caller about function call detection
+                if on_function_call:
+                    on_function_call(fc)
+                parts.append(Part.from_function_call(fc))
 
         # Build thinking string
         thinking = ''.join(accumulated_thinking) if accumulated_thinking else None
+
+        # When cancelled, filter out function_call parts to prevent unpaired tool_use blocks
+        # These would cause API errors on next call since there won't be tool_results
+        if was_cancelled:
+            parts = [p for p in parts if p.function_call is None]
 
         # Update finish reason if we have function calls
         if any(p.function_call for p in parts) and not was_cancelled:
