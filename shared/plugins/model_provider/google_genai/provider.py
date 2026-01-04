@@ -932,13 +932,15 @@ class GoogleGenAIProvider:
 
         try:
             # Use send_message_stream for streaming
-            self._trace(f"STREAM_START message_len={len(message)}")
+            # Log cancel token info for debugging
+            token_id = getattr(cancel_token, '_id', 'N/A') if cancel_token else 'None'
+            self._trace(f"STREAM_START message_len={len(message)} cancel_token_id={token_id}")
             self._trace(f"STREAM_INPUT>>>\n{message}\n<<<STREAM_INPUT")
             chunk_count = 0
             for chunk in self._chat.send_message_stream(message, config=config):
                 # Check for cancellation
                 if cancel_token and cancel_token.is_cancelled:
-                    self._trace(f"STREAM_CANCELLED after {chunk_count} chunks")
+                    self._trace(f"STREAM_CANCELLED after {chunk_count} chunks token_id={token_id}")
                     was_cancelled = True
                     finish_reason = FinishReason.CANCELLED
                     break
@@ -1113,7 +1115,9 @@ class GoogleGenAIProvider:
         try:
             # Use send_message_stream for streaming
             tool_names = [r.name for r in results]
-            self._trace(f"STREAM_TOOL_RESULTS_START tools={tool_names}")
+            # Log cancel token info for debugging
+            token_id = getattr(cancel_token, '_id', 'N/A') if cancel_token else 'None'
+            self._trace(f"STREAM_TOOL_RESULTS_START tools={tool_names} cancel_token_id={token_id}")
             # Log tool results as input
             tool_results_summary = []
             for r in results:
@@ -1124,7 +1128,9 @@ class GoogleGenAIProvider:
             for chunk in self._chat.send_message_stream(sdk_parts, config=config):
                 # Check for cancellation
                 if cancel_token and cancel_token.is_cancelled:
-                    self._trace(f"STREAM_TOOL_RESULTS_CANCELLED after {chunk_count} chunks")
+                    # Verify cancellation state (defensive check)
+                    is_really_cancelled = cancel_token._cancelled if hasattr(cancel_token, '_cancelled') else 'unknown'
+                    self._trace(f"STREAM_TOOL_RESULTS_CANCELLED after {chunk_count} chunks token_id={token_id} verified={is_really_cancelled}")
                     was_cancelled = True
                     finish_reason = FinishReason.CANCELLED
                     break
