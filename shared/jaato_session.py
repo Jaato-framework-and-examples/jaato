@@ -353,6 +353,7 @@ class JaatoSession:
         # Debug tracing: log parent token assignment
         import os
         import tempfile
+        import sys
         from datetime import datetime
         trace_path = os.environ.get("JAATO_TRACE_LOG")
         if not trace_path:
@@ -368,8 +369,8 @@ class JaatoSession:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
                     f.write(f"[{ts}] [session] SET_PARENT_CANCEL_TOKEN parent_id={token_id} own_id={own_token_id}\n")
                     f.flush()
-            except (IOError, OSError):
-                pass
+            except Exception as e:
+                print(f"[session] Failed to write parent token trace: {e}", file=sys.stderr)
 
     def _is_cancelled(self) -> bool:
         """Check if this session or its parent has been cancelled.
