@@ -53,6 +53,9 @@ class OutputLine:
     style: str
     display_lines: int = 1  # How many terminal lines this takes when rendered
     is_turn_start: bool = False  # True if this is the first line of a new turn
+    # Render cache for performance (avoids rebuilding Text objects on each render)
+    _rendered_cache: Optional[Text] = None
+    _cache_width: int = 0  # Width used when cache was created (invalidate on change)
 
 
 @dataclass
@@ -149,11 +152,21 @@ class OutputBuffer:
         Args:
             width: Console width in characters.
         """
+        if width != self._console_width:
+            # Width changed - invalidate all line render caches
+            self._invalidate_line_caches()
         self._console_width = width
         self._measure_console = Console(width=width, force_terminal=True)
         # Sync width with formatter pipeline if set
         if self._formatter_pipeline and hasattr(self._formatter_pipeline, 'set_console_width'):
             self._formatter_pipeline.set_console_width(width)
+
+    def _invalidate_line_caches(self) -> None:
+        """Invalidate render caches for all lines (called on width change)."""
+        for item in self._lines:
+            if isinstance(item, OutputLine):
+                item._rendered_cache = None
+                item._cache_width = 0
 
     def set_keybinding_config(self, config: Any) -> None:
         """Set the keybinding config for dynamic UI hints.
@@ -1557,6 +1570,34 @@ class OutputBuffer:
             output.append(f"  ▸ {tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
             output.append(" ".join(tool_summaries), style="dim")
 
+    def _get_cached_line_content(self, line: OutputLine, wrap_width: int) -> Optional[Text]:
+        """Get cached rendered content for a line, or None if cache invalid.
+
+        This avoids expensive Text.from_ansi() and text wrapping on each render
+        for lines that haven't changed.
+
+        Args:
+            line: The OutputLine to get cached content for.
+            wrap_width: Current wrap width (cache invalid if different).
+
+        Returns:
+            Cached Text object if valid, None otherwise.
+        """
+        if line._rendered_cache is not None and line._cache_width == wrap_width:
+            return line._rendered_cache
+        return None
+
+    def _cache_line_content(self, line: OutputLine, content: Text, wrap_width: int) -> None:
+        """Store rendered content in line cache.
+
+        Args:
+            line: The OutputLine to cache content for.
+            content: The rendered Text object.
+            wrap_width: Current wrap width.
+        """
+        line._rendered_cache = content
+        line._cache_width = wrap_width
+
     def render(self, height: Optional[int] = None, width: Optional[int] = None) -> RenderableType:
         """Render the output buffer as Rich Text.
 
@@ -1730,26 +1771,44 @@ class OutputBuffer:
                     output.append("─" * remaining, style="dim cyan")
                     output.append("\n")
                     # Then render the text content (no prefix needed)
-                    if has_ansi:
+                    # Use cache for expensive ANSI parsing
+                    cached = self._get_cached_line_content(line, wrap_width)
+                    if cached is not None:
+                        output.append_text(cached)
+                    elif has_ansi:
                         # Text contains ANSI codes from syntax highlighting
-                        output.append_text(Text.from_ansi(line.text))
+                        content = Text.from_ansi(line.text)
+                        self._cache_line_content(line, content, wrap_width)
+                        output.append_text(content)
                     else:
                         wrapped = wrap_text(line.text, 0)
+                        content = Text()
                         for j, wrapped_line in enumerate(wrapped):
                             if j > 0:
-                                output.append("\n")
-                            output.append(wrapped_line)
+                                content.append("\n")
+                            content.append(wrapped_line)
+                        self._cache_line_content(line, content, wrap_width)
+                        output.append_text(content)
                 else:
                     # Non-turn-start - just render text, no prefix
-                    if has_ansi:
+                    # Use cache for expensive ANSI parsing
+                    cached = self._get_cached_line_content(line, wrap_width)
+                    if cached is not None:
+                        output.append_text(cached)
+                    elif has_ansi:
                         # Text contains ANSI codes from syntax highlighting
-                        output.append_text(Text.from_ansi(line.text))
+                        content = Text.from_ansi(line.text)
+                        self._cache_line_content(line, content, wrap_width)
+                        output.append_text(content)
                     else:
                         wrapped = wrap_text(line.text, 0)
+                        content = Text()
                         for j, wrapped_line in enumerate(wrapped):
                             if j > 0:
-                                output.append("\n")
-                            output.append(wrapped_line)
+                                content.append("\n")
+                            content.append(wrapped_line)
+                        self._cache_line_content(line, content, wrap_width)
+                        output.append_text(content)
             elif line.source == "tool":
                 # Tool output
                 prefix_width = len(f"[{line.source}] ") if line.is_turn_start else 0
@@ -1826,16 +1885,29 @@ class OutputBuffer:
                     output.append(wrapped_line, style="dim")
             else:
                 # Other plugin output - wrap and preserve ANSI codes
-                prefix_width = len(f"[{line.source}] ") if line.is_turn_start else 0
-                wrapped = wrap_text(line.text, prefix_width)
-                for j, wrapped_line in enumerate(wrapped):
-                    if j > 0:
-                        output.append("\n")
-                    if j == 0 and line.is_turn_start:
-                        output.append(f"[{line.source}] ", style="dim magenta")
-                    elif j > 0 and line.is_turn_start:
-                        output.append(" " * (len(f"[{line.source}] ")))  # Indent continuation
-                    output.append_text(Text.from_ansi(wrapped_line))
+                # Use cache for expensive ANSI parsing (only for non-turn-start simple cases)
+                cached = self._get_cached_line_content(line, wrap_width) if not line.is_turn_start else None
+                if cached is not None:
+                    output.append_text(cached)
+                else:
+                    prefix_width = len(f"[{line.source}] ") if line.is_turn_start else 0
+                    wrapped = wrap_text(line.text, prefix_width)
+                    content = Text()
+                    for j, wrapped_line in enumerate(wrapped):
+                        if j > 0:
+                            content.append("\n")
+                            output.append("\n")
+                        if j == 0 and line.is_turn_start:
+                            output.append(f"[{line.source}] ", style="dim magenta")
+                        elif j > 0 and line.is_turn_start:
+                            output.append(" " * (len(f"[{line.source}] ")))  # Indent continuation
+                        parsed = Text.from_ansi(wrapped_line)
+                        output.append_text(parsed)
+                        if not line.is_turn_start:
+                            content.append_text(parsed)
+                    # Cache only non-turn-start lines (turn-start has prefix that varies)
+                    if not line.is_turn_start:
+                        self._cache_line_content(line, content, wrap_width)
 
         # Add tool call summary (after regular lines)
         if self._active_tools:
