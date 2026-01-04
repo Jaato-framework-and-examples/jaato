@@ -10,6 +10,7 @@ for subagents, avoiding redundant provider connections.
 import logging
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from datetime import datetime
 
@@ -97,14 +98,13 @@ class SubagentPlugin:
         self._ui_hooks: Optional['AgentUIHooks'] = None
         self._subagent_counter: int = 0  # Counter for generating unique subagent IDs
         self._parent_agent_id: str = "main"  # Parent agent ID for nested subagents
-        # Session registry for multi-turn conversations
+        # Session registry for multi-turn conversations and bidirectional communication
         self._active_sessions: Dict[str, Dict[str, Any]] = {}  # agent_id -> session info
-        # Parent session reference for cancellation propagation
+        self._sessions_lock = threading.Lock()  # Protect session registry access
+        # Parent session reference for output forwarding and cancellation propagation
         self._parent_session: Optional[Any] = None  # JaatoSession reference
-        # Background agent tracking for parallel execution
-        self._background_threads: Dict[str, threading.Thread] = {}  # agent_id -> thread
-        self._background_results: Dict[str, SubagentResult] = {}  # agent_id -> result
-        self._result_lock = threading.Lock()  # Protect result access
+        # Thread pool for async subagent execution
+        self._executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="subagent")
         # Shared state for inter-agent communication
         self._shared_state: Dict[str, Any] = {}  # key -> value (thread-safe via lock)
         self._state_lock = threading.Lock()  # Protect shared state access
@@ -280,12 +280,13 @@ class SubagentPlugin:
                 }
             ),
             ToolSchema(
-                name='continue_subagent',
+                name='send_to_subagent',
                 description=(
-                    'Send a follow-up message to an existing subagent session. Use this '
-                    'when you need to provide additional instructions or clarifications '
-                    'to a subagent that already completed an initial task. This allows '
-                    'multi-turn conversations with subagents instead of spawning new ones.'
+                    'Send a message to a running subagent. The message is injected into the '
+                    'subagent\'s queue and will be processed at its next yield point. This '
+                    'enables real-time guidance and course correction of running subagents. '
+                    'Use this to provide additional instructions, ask questions, or redirect '
+                    'the subagent while it is still executing.'
                 ),
                 parameters={
                     "type": "object",
@@ -300,7 +301,8 @@ class SubagentPlugin:
                         "message": {
                             "type": "string",
                             "description": (
-                                "Follow-up message or instruction to send to the subagent."
+                                "Message to inject into the subagent's queue. Will be processed "
+                                "at the next yield point (after tool execution or model response)."
                             )
                         }
                     },
@@ -342,31 +344,6 @@ class SubagentPlugin:
                         "subagent_id": {
                             "type": "string",
                             "description": "ID of the subagent to cancel (use list_active_subagents to see IDs)"
-                        }
-                    },
-                    "required": ["subagent_id"]
-                }
-            ),
-            ToolSchema(
-                name='get_subagent_result',
-                description=(
-                    'Get the result of a background subagent. Use this after spawning a '
-                    'subagent with background=true to retrieve its result once complete. '
-                    'Returns the result if complete, or status if still running.'
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "subagent_id": {
-                            "type": "string",
-                            "description": "ID of the subagent to get results from"
-                        },
-                        "wait": {
-                            "type": "boolean",
-                            "description": (
-                                "If true, block until the subagent completes. "
-                                "If false (default), return immediately with current status."
-                            )
                         }
                     },
                     "required": ["subagent_id"]
@@ -453,10 +430,9 @@ class SubagentPlugin:
         """Return mapping of tool names to executor functions."""
         return {
             'spawn_subagent': self._execute_spawn_subagent,
-            'continue_subagent': self._execute_continue_subagent,
+            'send_to_subagent': self._execute_send_to_subagent,
             'close_subagent': self._execute_close_subagent,
             'cancel_subagent': self._execute_cancel_subagent,
-            'get_subagent_result': self._execute_get_subagent_result,
             'list_active_subagents': self._execute_list_active_subagents,
             'list_subagent_profiles': self._execute_list_profiles,
             'set_shared_state': self._execute_set_shared_state,
@@ -469,23 +445,29 @@ class SubagentPlugin:
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions describing subagent capabilities."""
+        base_instructions = (
+            "You have access to a subagent system that allows you to delegate "
+            "tasks to specialized subagents.\n\n"
+            "ASYNC EXECUTION: spawn_subagent returns immediately with an agent_id. "
+            "The subagent runs in the background and you will receive its output as "
+            "[SUBAGENT agent_id=X event=Y] messages. Events include:\n"
+            "- MODEL_OUTPUT: Text the subagent's model is generating\n"
+            "- TOOL_CALL: Tool the subagent is calling\n"
+            "- TOOL_OUTPUT: Output from subagent's tool execution\n"
+            "- COMPLETED: Subagent finished its task\n"
+            "- ERROR: Subagent encountered an error\n\n"
+            "BIDIRECTIONAL COMMUNICATION:\n"
+            "- Use send_to_subagent to inject messages into a running subagent\n"
+            "- Monitor subagent output and redirect if needed\n"
+            "- Multiple subagents can run concurrently\n\n"
+            "Subagent Lifecycle Management:\n"
+            "- When you receive a COMPLETED event, use close_subagent to free resources\n"
+            "- Sessions auto-close after max_turns, but explicit closure is preferred\n"
+            "- Use list_active_subagents to see running subagents"
+        )
+
         if not self._config or not self._config.profiles:
-            return (
-                "You have access to a subagent system that allows you to delegate "
-                "tasks to specialized subagents. By default, subagents inherit your "
-                "current plugin configuration. Use inline_config only to override "
-                "specific properties like max_turns or system_instructions.\n\n"
-                "IMPORTANT: Subagents support multi-turn conversations. When spawn_subagent "
-                "returns an agent_id, you can send follow-up messages using continue_subagent "
-                "instead of spawning a new subagent. This preserves context and avoids "
-                "redundant initialization. Use list_active_subagents to see available sessions.\n\n"
-                "Subagent Lifecycle Management:\n"
-                "- When a subagent reports it has completed its task, IMMEDIATELY use close_subagent "
-                "to free resources and end the session.\n"
-                "- Sessions auto-close after max_turns, but explicit closure is preferred to avoid "
-                "wasting turns.\n"
-                "- Only keep sessions active if you expect to send more follow-up instructions."
-            )
+            return base_instructions
 
         profile_descriptions = []
         for name, profile in self._config.profiles.items():
@@ -497,27 +479,17 @@ class SubagentPlugin:
         profiles_text = "\n".join(profile_descriptions)
 
         return (
-            "You have access to a subagent system for delegating specialized tasks.\n\n"
+            f"{base_instructions}\n\n"
             "Available subagent profiles:\n"
             f"{profiles_text}\n\n"
             "Use spawn_subagent with a profile name and task to delegate work. "
-            "Without a profile, subagents inherit your current plugin configuration.\n\n"
-            "IMPORTANT: Subagents support multi-turn conversations. When spawn_subagent "
-            "returns an agent_id, you can send follow-up messages using continue_subagent "
-            "instead of spawning a new subagent. This preserves context and avoids "
-            "redundant initialization. Use list_active_subagents to see available sessions.\n\n"
-            "Subagent Lifecycle Management:\n"
-            "- When a subagent reports it has completed its task, IMMEDIATELY use close_subagent "
-            "to free resources and end the session.\n"
-            "- Sessions auto-close after max_turns, but explicit closure is preferred to avoid "
-            "wasting turns.\n"
-            "- Only keep sessions active if you expect to send more follow-up instructions."
+            "Without a profile, subagents inherit your current plugin configuration."
         )
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved."""
         # Read-only tools are safe and can be auto-approved
-        # spawn_subagent and continue_subagent should require permission unless auto_approved
+        # spawn_subagent and send_to_subagent should require permission unless auto_approved
         return ['list_subagent_profiles', 'list_active_subagents']
 
     def get_user_commands(self) -> List[UserCommand]:
@@ -689,153 +661,72 @@ class SubagentPlugin:
             'inline_allowed_plugins': self._config.inline_allowed_plugins,
         }
 
-    def _execute_continue_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Send follow-up message to an existing subagent session.
+    def _execute_send_to_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Inject a message into a running subagent's queue.
+
+        This is non-blocking - the message is queued and will be processed
+        at the subagent's next yield point.
 
         Args:
             args: Tool arguments containing:
                 - subagent_id: ID of the active subagent session
-                - message: Follow-up message to send
+                - message: Message to inject into the subagent's queue
 
         Returns:
-            SubagentResult as a dict.
+            Status dict indicating success or failure.
         """
         subagent_id = args.get('subagent_id', '')
         message = args.get('message', '')
 
         if not subagent_id:
-            return SubagentResult(
-                success=False,
-                response='',
-                error='No subagent_id provided'
-            ).to_dict()
+            return {
+                'success': False,
+                'error': 'No subagent_id provided'
+            }
 
         if not message:
-            return SubagentResult(
-                success=False,
-                response='',
-                error='No message provided'
-            ).to_dict()
+            return {
+                'success': False,
+                'error': 'No message provided'
+            }
 
         # Look up active session
-        session_info = self._active_sessions.get(subagent_id)
-        if not session_info:
-            return SubagentResult(
-                success=False,
-                response='',
-                error=f'No active session found with ID: {subagent_id}. Use list_active_subagents to see available sessions.'
-            ).to_dict()
+        with self._sessions_lock:
+            session_info = self._active_sessions.get(subagent_id)
 
-        # Check if max turns exceeded
-        if session_info['turn_count'] >= session_info['max_turns']:
-            # Close the session
-            self._close_session(subagent_id)
-            return SubagentResult(
-                success=False,
-                response='',
-                error=f'Session {subagent_id} exceeded max turns ({session_info["max_turns"]}). Session has been closed.'
-            ).to_dict()
+        if not session_info:
+            return {
+                'success': False,
+                'error': f'No active session found with ID: {subagent_id}. Use list_active_subagents to see available sessions.'
+            }
 
         try:
             session = session_info['session']
             agent_id = session_info['agent_id']
 
-            # Notify UI hooks that agent is active again
-            if self._ui_hooks:
-                self._ui_hooks.on_agent_status_changed(
-                    agent_id=agent_id,
-                    status="active"
-                )
+            # Inject message into subagent's queue (non-blocking)
+            session.inject_prompt(message)
 
-            # Wrap output callback to route through UI hooks
-            def subagent_output_callback(source: str, text: str, mode: str) -> None:
-                if self._ui_hooks:
-                    self._ui_hooks.on_agent_output(
-                        agent_id=agent_id,
-                        source=source,
-                        text=text,
-                        mode=mode
-                    )
-
-            # Emit the follow-up message to UI before execution
+            # Notify UI hooks that a message was sent
             if self._ui_hooks:
                 self._ui_hooks.on_agent_output(
                     agent_id=agent_id,
-                    source="user",
-                    text=message,
+                    source="parent",
+                    text=f"[Injected prompt] {message}",
                     mode="write"
                 )
 
-            # Send follow-up message
-            response = session.send_message(message, on_output=subagent_output_callback)
-
-            # Update session info
-            usage = session.get_context_usage()
-            session_info['last_activity'] = datetime.now()
-            session_info['turn_count'] = usage.get('turns', session_info['turn_count'] + 1)
-
-            token_usage = {
-                'prompt_tokens': usage.get('prompt_tokens', 0),
-                'output_tokens': usage.get('output_tokens', 0),
-                'total_tokens': usage.get('total_tokens', 0),
+            return {
+                'success': True,
+                'message': f'Message injected into {subagent_id}. Will be processed at next yield point.'
             }
 
-            # Notify UI hooks with accounting data
-            if self._ui_hooks:
-                # Per-turn accounting
-                turn_accounting = session.get_turn_accounting()
-                for turn_idx, turn in enumerate(turn_accounting):
-                    self._ui_hooks.on_agent_turn_completed(
-                        agent_id=agent_id,
-                        turn_number=turn_idx,
-                        prompt_tokens=turn.get('prompt', 0),
-                        output_tokens=turn.get('output', 0),
-                        total_tokens=turn.get('total', 0),
-                        duration_seconds=turn.get('duration_seconds', 0),
-                        function_calls=turn.get('function_calls', [])
-                    )
-
-                # Context usage
-                self._ui_hooks.on_agent_context_updated(
-                    agent_id=agent_id,
-                    total_tokens=usage.get('total_tokens', 0),
-                    prompt_tokens=usage.get('prompt_tokens', 0),
-                    output_tokens=usage.get('output_tokens', 0),
-                    turns=usage.get('turns', 0),
-                    percent_used=usage.get('percent_used', 0)
-                )
-
-                # History
-                history = session.get_history()
-                self._ui_hooks.on_agent_history_updated(
-                    agent_id=agent_id,
-                    history=history
-                )
-
-                # Change status to "waiting" - response complete, ready for more input
-                self._ui_hooks.on_agent_status_changed(
-                    agent_id=agent_id,
-                    status="waiting"
-                )
-
-            return SubagentResult(
-                success=True,
-                response=response,
-                turns_used=session_info['turn_count'],
-                token_usage=token_usage,
-                agent_id=agent_id,
-                output_streamed=bool(self._ui_hooks),
-            ).to_dict()
-
         except Exception as e:
-            logger.exception(f"Error continuing subagent {subagent_id}")
-            # Close the session on error
-            self._close_session(subagent_id)
-            return SubagentResult(
-                success=False,
-                response='',
-                error=f'Error in subagent session: {str(e)}'
-            ).to_dict()
+            logger.exception(f"Error sending to subagent {subagent_id}")
+            return {
+                'success': False,
+                'error': f'Error injecting message: {str(e)}'
+            }
 
     def _execute_close_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Close an active subagent session.
@@ -932,118 +823,34 @@ class SubagentPlugin:
                 'message': f'Failed to cancel session {subagent_id} - may have already completed'
             }
 
-    def _execute_get_subagent_result(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Get the result of a background subagent.
-
-        Args:
-            args: Tool arguments containing:
-                - subagent_id: ID of the subagent
-                - wait: If true, block until complete
-
-        Returns:
-            Dict with result or status.
-        """
-        subagent_id = args.get('subagent_id', '')
-        wait = args.get('wait', False)
-
-        if not subagent_id:
-            return {
-                'success': False,
-                'error': 'No subagent_id provided'
-            }
-
-        # Check if result already available
-        with self._result_lock:
-            if subagent_id in self._background_results:
-                result = self._background_results.pop(subagent_id)
-                return {
-                    'success': True,
-                    'complete': True,
-                    **result.to_dict()
-                }
-
-        # Check if thread is still running
-        thread = self._background_threads.get(subagent_id)
-        if thread and thread.is_alive():
-            if wait:
-                # Block until thread completes
-                thread.join()
-                # Now result should be available
-                with self._result_lock:
-                    if subagent_id in self._background_results:
-                        result = self._background_results.pop(subagent_id)
-                        return {
-                            'success': True,
-                            'complete': True,
-                            **result.to_dict()
-                        }
-                return {
-                    'success': False,
-                    'error': f'Subagent {subagent_id} completed but no result available'
-                }
-            else:
-                # Return status without waiting
-                return {
-                    'success': True,
-                    'complete': False,
-                    'status': 'running',
-                    'agent_id': subagent_id,
-                    'message': f'Subagent {subagent_id} is still running. Call again with wait=true to block until complete.'
-                }
-
-        # No thread and no result - unknown agent_id
-        return {
-            'success': False,
-            'error': f'No background subagent found with ID: {subagent_id}'
-        }
-
     def _execute_list_active_subagents(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """List active subagent sessions and background agents.
+        """List active subagent sessions.
 
         Args:
             args: Tool arguments (unused).
 
         Returns:
-            Dict containing list of active sessions and background agents.
+            Dict containing list of active sessions.
         """
         sessions = []
 
-        # List interactive sessions
-        for agent_id, info in self._active_sessions.items():
-            session = info.get('session')
-            is_running = session.is_running if session else False
-            supports_stop = session.supports_stop if session else False
-            sessions.append({
-                'agent_id': agent_id,
-                'profile': info['profile'].name,
-                'type': 'interactive',
-                'status': 'running' if is_running else 'waiting',
-                'can_cancel': is_running and supports_stop,
-                'created_at': info['created_at'].isoformat(),
-                'last_activity': info['last_activity'].isoformat(),
-                'turn_count': info['turn_count'],
-                'max_turns': info['max_turns'],
-            })
-
-        # List background agents
-        for agent_id, thread in self._background_threads.items():
-            sessions.append({
-                'agent_id': agent_id,
-                'type': 'background_agent',
-                'status': 'running' if thread.is_alive() else 'complete',
-                'can_cancel': thread.is_alive(),  # Can cancel via cancel_subagent
-            })
-
-        # Check for completed background agents with results not yet retrieved
-        with self._result_lock:
-            for agent_id in self._background_results.keys():
-                if agent_id not in self._background_threads:
-                    sessions.append({
-                        'agent_id': agent_id,
-                        'type': 'background_agent',
-                        'status': 'complete (result pending)',
-                        'can_cancel': False,
-                    })
+        # List active sessions
+        with self._sessions_lock:
+            for agent_id, info in self._active_sessions.items():
+                session = info.get('session')
+                is_running = session.is_running if session else False
+                supports_stop = session.supports_stop if session else False
+                sessions.append({
+                    'agent_id': agent_id,
+                    'profile': info['profile'].name,
+                    'status': 'running' if is_running else 'idle',
+                    'can_cancel': is_running and supports_stop,
+                    'can_send': True,  # Can always inject prompts
+                    'created_at': info['created_at'].isoformat(),
+                    'last_activity': info['last_activity'].isoformat(),
+                    'turn_count': info['turn_count'],
+                    'max_turns': info['max_turns'],
+                })
 
         if not sessions:
             return {
@@ -1280,87 +1087,224 @@ class SubagentPlugin:
         if profile.system_instructions:
             full_prompt = f"{profile.system_instructions}\n\n{full_prompt}"
 
-        # Check for background execution
-        background = args.get('background', False)
+        # Generate agent_id
+        self._subagent_counter += 1
+        if self._parent_agent_id == "main":
+            agent_id = f"subagent_{self._subagent_counter}"
+        else:
+            agent_id = f"{self._parent_agent_id}.{profile.name}"
 
-        if background:
-            # Generate agent_id for background task
-            self._subagent_counter += 1
-            if self._parent_agent_id == "main":
-                agent_id = f"subagent_{self._subagent_counter}"
-            else:
-                agent_id = f"{self._parent_agent_id}.{profile.name}"
+        # Submit to thread pool (always async)
+        self._executor.submit(
+            self._run_subagent_async,
+            agent_id,
+            profile,
+            full_prompt
+        )
 
-            # Spawn background thread
-            def background_task():
-                try:
-                    result = self._run_subagent(profile, full_prompt)
-                    with self._result_lock:
-                        self._background_results[agent_id] = result
-                except Exception as e:
-                    logger.exception("Error in background subagent")
-                    with self._result_lock:
-                        self._background_results[agent_id] = SubagentResult(
-                            success=False,
-                            response='',
-                            error=f"Subagent execution failed: {str(e)}",
-                            agent_id=agent_id
-                        )
-                finally:
-                    # Clean up thread reference
-                    self._background_threads.pop(agent_id, None)
+        # Return immediately with agent_id
+        return {
+            'success': True,
+            'agent_id': agent_id,
+            'status': 'spawned',
+            'message': f'Subagent {agent_id} spawned. Output will be forwarded as [SUBAGENT agent_id={agent_id} event=...] messages.'
+        }
 
-            thread = threading.Thread(target=background_task, daemon=True)
-            self._background_threads[agent_id] = thread
-            thread.start()
+    def _run_subagent_async(
+        self,
+        agent_id: str,
+        profile: SubagentProfile,
+        prompt: str
+    ) -> None:
+        """Run a subagent asynchronously with output forwarding to parent.
 
-            # Return immediately with agent_id
-            return {
-                'success': True,
-                'background': True,
-                'agent_id': agent_id,
-                'message': f'Subagent {agent_id} started in background. Use get_subagent_result to retrieve results.'
-            }
-
-        # Synchronous execution (default)
-        try:
-            result = self._run_subagent(profile, full_prompt)
-            return result.to_dict()
-        except Exception as e:
-            logger.exception("Error running subagent")
-            return SubagentResult(
-                success=False,
-                response='',
-                error=f"Subagent execution failed: {str(e)}"
-            ).to_dict()
-
-    def _run_subagent(self, profile: SubagentProfile, prompt: str) -> SubagentResult:
-        """Run a subagent with the given profile and prompt.
-
-        If a runtime is available (set via set_runtime()), creates a lightweight
-        session sharing the provider connection. Otherwise, falls back to creating
-        a new JaatoClient (legacy behavior).
+        This method runs in a thread pool and forwards all output to the
+        parent session's injection queue.
 
         Args:
+            agent_id: Pre-generated agent ID.
             profile: SubagentProfile defining the subagent's configuration.
             prompt: The prompt to send to the subagent.
-
-        Returns:
-            SubagentResult with the subagent's response.
         """
-        if not self._config:
-            return SubagentResult(
-                success=False,
-                response='',
-                error='Plugin not properly initialized'
+        if not self._runtime:
+            # No runtime - can't run async subagent
+            if self._parent_session:
+                self._parent_session.inject_prompt(
+                    f"[SUBAGENT agent_id={agent_id} event=ERROR]\n"
+                    f"Cannot spawn subagent: no runtime available"
+                )
+            return
+
+        try:
+            # Create session using the existing runtime-based method logic
+            # but with the pre-generated agent_id and parent forwarding
+
+            # Determine model: profile > config default > parent session
+            model = profile.model or self._config.default_model
+            if model is None and self._parent_session:
+                model = getattr(self._parent_session, '_model_name', None)
+
+            # Determine provider: profile > config default > parent session
+            provider = profile.provider or self._config.default_provider
+            if provider is None and self._parent_session:
+                provider = getattr(self._parent_session, '_provider_name_override', None)
+
+            # Notify UI hooks about agent creation
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_created(
+                    agent_id=agent_id,
+                    agent_name=profile.name,
+                    agent_type="subagent",
+                    profile_name=profile.name,
+                    parent_agent_id=self._parent_agent_id,
+                    icon_lines=profile.icon,
+                    created_at=datetime.now()
+                )
+                self._ui_hooks.on_agent_status_changed(
+                    agent_id=agent_id,
+                    status="active"
+                )
+
+            # Expand variables in plugin_configs
+            expansion_context = {}
+            raw_plugin_configs = profile.plugin_configs.copy() if profile.plugin_configs else {}
+            expanded_configs = expand_plugin_configs(raw_plugin_configs, expansion_context)
+
+            # Inject agent_name into each plugin's config
+            effective_plugin_configs = expanded_configs
+            for plugin_name in (profile.plugins or []):
+                if plugin_name not in effective_plugin_configs:
+                    effective_plugin_configs[plugin_name] = {}
+                effective_plugin_configs[plugin_name]["agent_name"] = profile.name
+                if plugin_name == "todo" and self._plan_reporter:
+                    effective_plugin_configs[plugin_name]["_injected_reporter"] = self._plan_reporter
+
+            # Create session
+            session = self._runtime.create_session(
+                model=model,
+                tools=profile.plugins,
+                system_instructions=profile.system_instructions,
+                plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
+                provider_name=provider
             )
 
-        # Use runtime-based session creation if available (preferred)
-        if self._runtime:
-            return self._run_subagent_with_runtime(profile, prompt)
+            # Set agent context
+            session.set_agent_context(
+                agent_type="subagent",
+                agent_name=profile.name
+            )
 
-        # Fall back to legacy JaatoClient creation
-        return self._run_subagent_legacy(profile, prompt)
+            # Set parent session for output forwarding - THIS IS THE KEY CHANGE
+            session.set_parent_session(self._parent_session)
+
+            # Set parent cancel token for cancellation propagation
+            if self._parent_session and hasattr(self._parent_session, '_cancel_token'):
+                parent_token = self._parent_session._cancel_token
+                if parent_token and hasattr(session, 'set_parent_cancel_token'):
+                    session.set_parent_cancel_token(parent_token)
+
+            # Pass UI hooks to session
+            if self._ui_hooks:
+                session.set_ui_hooks(self._ui_hooks, agent_id)
+
+            # Set retry callback
+            if self._retry_callback:
+                session.set_retry_callback(self._retry_callback)
+
+            # Store session in registry BEFORE running
+            with self._sessions_lock:
+                self._active_sessions[agent_id] = {
+                    'session': session,
+                    'profile': profile,
+                    'agent_id': agent_id,
+                    'created_at': datetime.now(),
+                    'last_activity': datetime.now(),
+                    'turn_count': 0,
+                    'max_turns': profile.max_turns,
+                }
+
+            # Wrap output callback for UI hooks (forwarding to parent is automatic now)
+            def subagent_output_callback(source: str, text: str, mode: str) -> None:
+                if self._ui_hooks:
+                    self._ui_hooks.on_agent_output(
+                        agent_id=agent_id,
+                        source=source,
+                        text=text,
+                        mode=mode
+                    )
+
+            # Emit the initial prompt to UI
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_output(
+                    agent_id=agent_id,
+                    source="user",
+                    text=prompt,
+                    mode="write"
+                )
+
+            # Run the conversation (output is automatically forwarded to parent)
+            response = session.send_message(prompt, on_output=subagent_output_callback)
+
+            # Update session info after completion
+            usage = session.get_context_usage()
+            with self._sessions_lock:
+                if agent_id in self._active_sessions:
+                    self._active_sessions[agent_id]['last_activity'] = datetime.now()
+                    self._active_sessions[agent_id]['turn_count'] = usage.get('turns', 1)
+
+            # Notify UI hooks with accounting data
+            if self._ui_hooks:
+                turn_accounting = session.get_turn_accounting()
+                for turn_idx, turn in enumerate(turn_accounting):
+                    self._ui_hooks.on_agent_turn_completed(
+                        agent_id=agent_id,
+                        turn_number=turn_idx,
+                        prompt_tokens=turn.get('prompt', 0),
+                        output_tokens=turn.get('output', 0),
+                        total_tokens=turn.get('total', 0),
+                        duration_seconds=turn.get('duration_seconds', 0),
+                        function_calls=turn.get('function_calls', [])
+                    )
+
+                self._ui_hooks.on_agent_context_updated(
+                    agent_id=agent_id,
+                    total_tokens=usage.get('total_tokens', 0),
+                    prompt_tokens=usage.get('prompt_tokens', 0),
+                    output_tokens=usage.get('output_tokens', 0),
+                    turns=usage.get('turns', 0),
+                    percent_used=usage.get('percent_used', 0)
+                )
+
+                history = session.get_history()
+                self._ui_hooks.on_agent_history_updated(
+                    agent_id=agent_id,
+                    history=history
+                )
+
+                # Change status to "idle" - ready for more prompts via send_to_subagent
+                self._ui_hooks.on_agent_status_changed(
+                    agent_id=agent_id,
+                    status="idle"
+                )
+
+        except Exception as e:
+            logger.exception(f"Error in async subagent {agent_id}")
+            # Forward error to parent
+            if self._parent_session:
+                self._parent_session.inject_prompt(
+                    f"[SUBAGENT agent_id={agent_id} event=ERROR]\n"
+                    f"Subagent execution failed: {str(e)}"
+                )
+            # Clean up session on error
+            with self._sessions_lock:
+                if agent_id in self._active_sessions:
+                    del self._active_sessions[agent_id]
+
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_status_changed(
+                    agent_id=agent_id,
+                    status="error"
+                )
 
     def _run_subagent_with_runtime(
         self,
