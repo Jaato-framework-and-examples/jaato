@@ -152,6 +152,10 @@ class JaatoSession:
         # When set, all output events are forwarded to parent's injection queue
         self._parent_session: Optional['JaatoSession'] = None
 
+        # Callback when a prompt is injected (processed from queue)
+        # Used by server to emit MidTurnPromptInjectedEvent
+        self._on_prompt_injected: Optional[Callable[[str], None]] = None
+
     def set_terminal_width(self, width: int) -> None:
         """Set the terminal width for formatting.
 
@@ -293,6 +297,18 @@ class JaatoSession:
             subagent_session.set_parent_session(self._parent_session)
         """
         self._parent_session = parent
+
+    def set_prompt_injected_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Set callback for when a prompt is processed from the injection queue.
+
+        This callback is invoked when a queued prompt is about to be processed
+        (injected into the conversation). The server uses this to emit
+        MidTurnPromptInjectedEvent to notify the client UI.
+
+        Args:
+            callback: Function called with the prompt text when injected.
+        """
+        self._on_prompt_injected = callback
 
     def inject_prompt(self, text: str) -> None:
         """Inject a prompt into this agent's queue.
@@ -1483,6 +1499,10 @@ class JaatoSession:
             return None
 
         self._trace(f"MID_TURN_PROMPT: Handling injected prompt: {prompt[:100]}...")
+
+        # Notify that prompt is being injected (for UI to remove from pending bar)
+        if self._on_prompt_injected:
+            self._on_prompt_injected(prompt)
 
         # Emit the prompt as user output so UI shows it
         if on_output:
