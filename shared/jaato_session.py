@@ -1001,19 +1001,23 @@ class JaatoSession:
                                 return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
 
                             # Check for mid-turn prompts after interleaved tool execution
-                            mid_turn_response = self._check_and_handle_mid_turn_prompt(
-                                use_streaming, on_output, wrapped_usage_callback, turn_data
-                            )
-                            if mid_turn_response:
-                                # Update response to the mid-turn prompt response
-                                response = mid_turn_response
-                                if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
-                                    partial = get_all_text()
-                                    cancel_msg = "[Generation cancelled]"
-                                    if on_output and not cancellation_notified:
-                                        on_output("system", cancel_msg, "write")
-                                    self._notify_model_of_cancellation(cancel_msg, partial)
-                                    return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
+                            # Only inject if response doesn't have more function calls
+                            # (otherwise we'd break the tool_use -> tool_result sequence)
+                            response_has_fc = any(p.function_call for p in response.parts)
+                            if not response_has_fc:
+                                mid_turn_response = self._check_and_handle_mid_turn_prompt(
+                                    use_streaming, on_output, wrapped_usage_callback, turn_data
+                                )
+                                if mid_turn_response:
+                                    # Update response to the mid-turn prompt response
+                                    response = mid_turn_response
+                                    if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
+                                        partial = get_all_text()
+                                        cancel_msg = "[Generation cancelled]"
+                                        if on_output and not cancellation_notified:
+                                            on_output("system", cancel_msg, "write")
+                                        self._notify_model_of_cancellation(cancel_msg, partial)
+                                        return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
 
                             current_fc_group = []
 
@@ -1059,19 +1063,23 @@ class JaatoSession:
                             return f"[Model stopped unexpectedly: {response.finish_reason}]"
 
                     # Check for mid-turn prompts at this natural pause point
-                    mid_turn_response = self._check_and_handle_mid_turn_prompt(
-                        use_streaming, on_output, wrapped_usage_callback, turn_data
-                    )
-                    if mid_turn_response:
-                        # The model responded to the injected prompt - use that response
-                        response = mid_turn_response
-                        if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
-                            partial = get_all_text()
-                            cancel_msg = "[Generation cancelled]"
-                            if on_output and not cancellation_notified:
-                                on_output("system", cancel_msg, "write")
-                            self._notify_model_of_cancellation(cancel_msg, partial)
-                            return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
+                    # Only inject if response doesn't have more function calls
+                    # (otherwise we'd break the tool_use -> tool_result sequence)
+                    response_has_fc = any(p.function_call for p in response.parts)
+                    if not response_has_fc:
+                        mid_turn_response = self._check_and_handle_mid_turn_prompt(
+                            use_streaming, on_output, wrapped_usage_callback, turn_data
+                        )
+                        if mid_turn_response:
+                            # The model responded to the injected prompt - use that response
+                            response = mid_turn_response
+                            if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
+                                partial = get_all_text()
+                                cancel_msg = "[Generation cancelled]"
+                                if on_output and not cancellation_notified:
+                                    on_output("system", cancel_msg, "write")
+                                self._notify_model_of_cancellation(cancel_msg, partial)
+                                return f"{partial}\n\n{cancel_msg}" if partial else cancel_msg
 
                 # Check for more function calls in the new response
                 pending_calls = get_pending_function_calls()
