@@ -21,6 +21,7 @@ build/
 **/traces/
 cli_vs_mcp/harness_summary.json
 test_traces/
+provider_trace.log
 
 # IDE/Editor
 .idea/
