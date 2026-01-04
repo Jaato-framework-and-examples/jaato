@@ -200,11 +200,12 @@ class SubagentPlugin:
             ToolSchema(
                 name='spawn_subagent',
                 description=(
-                    'Spawn a subagent to handle a specialized task. The subagent '
-                    'has its own tool configuration and runs independently. Use this '
-                    'to delegate tasks that require different capabilities or to '
-                    'isolate tool access. The subagent will complete the task and '
-                    'return the result.\n\n'
+                    'Spawn a subagent to handle a specialized task. Returns immediately with '
+                    'the agent_id while the subagent runs asynchronously in the background.\n\n'
+                    'ASYNC BEHAVIOR: The subagent executes independently. Its output appears in '
+                    'its own tab in the UI. Use list_active_subagents to check status (running/idle). '
+                    'If you need results from a subagent before proceeding, check its status and '
+                    'wait until it shows "idle" before spawning dependent tasks.\n\n'
                     'IMPORTANT: Always provide EITHER a profile name (for preconfigured agents) '
                     'OR a descriptive name (for inline agents). This helps identify agents in the UI.'
                 ),
@@ -266,14 +267,6 @@ class SubagentPlugin:
                                     "description": "Maximum conversation turns (default: 10)"
                                 }
                             }
-                        },
-                        "background": {
-                            "type": "boolean",
-                            "description": (
-                                "If true, run subagent in background and return immediately with "
-                                "agent_id. Use get_subagent_result to retrieve results later. "
-                                "Enables parallel execution of multiple subagents. Default: false."
-                            )
                         }
                     },
                     "required": ["task"]
@@ -449,19 +442,18 @@ class SubagentPlugin:
             "You have access to a subagent system that allows you to delegate "
             "tasks to specialized subagents.\n\n"
             "ASYNC EXECUTION: spawn_subagent returns immediately with an agent_id. "
-            "The subagent runs in the background and you will receive its output as "
-            "[SUBAGENT agent_id=X event=Y] messages. Events include:\n"
-            "- MODEL_OUTPUT: Text the subagent's model is generating\n"
-            "- TOOL_CALL: Tool the subagent is calling\n"
-            "- TOOL_OUTPUT: Output from subagent's tool execution\n"
-            "- COMPLETED: Subagent finished its task\n"
-            "- ERROR: Subagent encountered an error\n\n"
-            "BIDIRECTIONAL COMMUNICATION:\n"
+            "The subagent runs asynchronously and its output appears in its own tab "
+            "in the UI (not in your output).\n\n"
+            "CHECKING STATUS: Use list_active_subagents to see all subagents and their "
+            "status (running/idle). If you need a subagent's result before proceeding:\n"
+            "1. Call list_active_subagents\n"
+            "2. Check if the subagent's status is 'idle' (completed)\n"
+            "3. Only then spawn dependent tasks or proceed\n\n"
+            "COMMUNICATION:\n"
             "- Use send_to_subagent to inject messages into a running subagent\n"
-            "- Monitor subagent output and redirect if needed\n"
             "- Multiple subagents can run concurrently\n\n"
-            "Subagent Lifecycle Management:\n"
-            "- When you receive a COMPLETED event, use close_subagent to free resources\n"
+            "LIFECYCLE MANAGEMENT:\n"
+            "- Use close_subagent to free resources when done with a subagent\n"
             "- Sessions auto-close after max_turns, but explicit closure is preferred\n"
             "- Use list_active_subagents to see running subagents"
         )
@@ -1107,7 +1099,7 @@ class SubagentPlugin:
             'success': True,
             'agent_id': agent_id,
             'status': 'spawned',
-            'message': f'Subagent {agent_id} spawned. Output will be forwarded as [SUBAGENT agent_id={agent_id} event=...] messages.'
+            'message': f'Subagent {agent_id} spawned and running asynchronously. Use list_active_subagents to check status.'
         }
 
     def _run_subagent_async(
