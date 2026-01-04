@@ -200,6 +200,87 @@ def messages_to_anthropic(messages: List[Message]) -> List[Dict[str, Any]]:
     return result
 
 
+def validate_tool_use_pairing(messages: List[Message]) -> List[Message]:
+    """Validate and repair tool_use/tool_result pairing in history.
+
+    Anthropic requires every tool_use block to have a corresponding tool_result
+    immediately following it. This function:
+    1. Tracks all tool_use IDs from assistant messages
+    2. Removes them when matching tool_result is found
+    3. If unpaired tool_use blocks exist before a user message (text),
+       removes the assistant message containing them
+
+    This is a defensive measure to prevent API errors from corrupted history
+    due to cancellation or exceptions during streaming.
+
+    Args:
+        messages: List of internal Message objects
+
+    Returns:
+        Cleaned list of messages with unpaired tool_use blocks removed
+    """
+    if not messages:
+        return messages
+
+    result = []
+    pending_tool_use_ids: set = set()  # Track tool_use IDs awaiting results
+    pending_assistant_msg_idx: Optional[int] = None  # Index of assistant msg with pending tool calls
+
+    for msg in messages:
+        if msg.role == Role.MODEL:
+            # Check if this assistant message has function calls (tool_use)
+            has_tool_use = any(p.function_call is not None for p in msg.parts)
+            if has_tool_use:
+                # If we already have pending tool_use from a previous assistant message,
+                # that's an error - remove it
+                if pending_tool_use_ids and pending_assistant_msg_idx is not None:
+                    # Remove the previous assistant message that has unpaired tool_use
+                    result = result[:pending_assistant_msg_idx] + result[pending_assistant_msg_idx + 1:]
+                    # Adjust index for removal
+                    pending_assistant_msg_idx = None
+                    pending_tool_use_ids.clear()
+
+                # Track this message and its tool_use IDs
+                pending_assistant_msg_idx = len(result)
+                for p in msg.parts:
+                    if p.function_call is not None:
+                        pending_tool_use_ids.add(p.function_call.id)
+
+            result.append(msg)
+
+        elif msg.role == Role.TOOL:
+            # Tool results - match them with pending tool_use
+            for p in msg.parts:
+                if p.function_response is not None:
+                    pending_tool_use_ids.discard(p.function_response.call_id)
+
+            # If all tool_use IDs are resolved, clear tracking
+            if not pending_tool_use_ids:
+                pending_assistant_msg_idx = None
+
+            result.append(msg)
+
+        elif msg.role == Role.USER:
+            # User message - if we still have pending tool_use, we have a problem
+            # The assistant message with unpaired tool_use must be removed
+            if pending_tool_use_ids and pending_assistant_msg_idx is not None:
+                # Remove the assistant message that has unpaired tool_use
+                result = result[:pending_assistant_msg_idx] + result[pending_assistant_msg_idx + 1:]
+                pending_tool_use_ids.clear()
+                pending_assistant_msg_idx = None
+
+            result.append(msg)
+
+        else:
+            result.append(msg)
+
+    # Final check - if history ends with unpaired tool_use, remove that assistant message
+    if pending_tool_use_ids and pending_assistant_msg_idx is not None:
+        result = result[:pending_assistant_msg_idx] + result[pending_assistant_msg_idx + 1:]
+
+    return result
+
+
 def content_block_to_part(block: Dict[str, Any]) -> Optional[Part]:
     """Convert an Anthropic content block to a Part."""
     block_type = block.get("type")
