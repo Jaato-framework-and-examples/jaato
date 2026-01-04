@@ -1083,6 +1083,14 @@ class JaatoServer:
         """Start the model call in a background thread."""
         server = self
 
+        # Set up callback for when injected prompts are processed
+        # This allows UI to remove prompts from pending bar
+        if self._jaato:
+            session = self._jaato.get_session()
+            session.set_prompt_injected_callback(
+                lambda text: server.emit(MidTurnPromptInjectedEvent(text=text))
+            )
+
         def output_callback(source: str, text: str, mode: str) -> None:
             # Skip - output is routed through agent hooks
             pass
