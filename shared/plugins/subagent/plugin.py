@@ -15,7 +15,7 @@ from datetime import datetime
 
 from .config import (
     SubagentConfig, SubagentProfile, SubagentResult, GCProfileConfig,
-    discover_profiles, expand_plugin_configs
+    discover_profiles, expand_plugin_configs, _find_workspace_root
 )
 from ..base import UserCommand, CommandCompletion
 from ..model_provider.types import ToolSchema
@@ -1432,14 +1432,21 @@ class SubagentPlugin:
             # profile.plugins is always a list (possibly empty); pass it directly
             # Empty list = no tools, non-empty list = only those tools
 
+            # Determine workspace root for variable expansion and template plugin
+            # Priority: profile's workspaceRoot config > JAATO_WORKSPACE_ROOT env > auto-detect
+            workspace_root = _find_workspace_root()  # Auto-detect or use env var
+
             # Expand variables in plugin_configs (e.g., ${projectPath}, ${workspaceRoot})
-            # Uses default context: cwd, workspaceRoot, HOME, USER, plus env vars
+            # Pass workspace_root to ensure consistent expansion
             expansion_context = {}
             raw_plugin_configs = profile.plugin_configs.copy() if profile.plugin_configs else {}
-            expanded_configs = expand_plugin_configs(raw_plugin_configs, expansion_context)
+            expanded_configs = expand_plugin_configs(
+                raw_plugin_configs, expansion_context, workspace_root_override=workspace_root
+            )
 
             # Inject agent_name into each plugin's config for trace logging
             # Inject plan reporter into todo plugin for UI display
+            # Inject base_path into template plugin for correct path resolution
             # Note: Always override agent_name to ensure subagent uses its own name,
             # not an inherited one from profile's plugin_configs
             effective_plugin_configs = expanded_configs
@@ -1451,6 +1458,9 @@ class SubagentPlugin:
                 # Inject plan reporter so subagent plans show in UI instead of console
                 if plugin_name == "todo" and self._plan_reporter:
                     effective_plugin_configs[plugin_name]["_injected_reporter"] = self._plan_reporter
+                # Inject base_path into template plugin so it uses correct workspace root
+                if plugin_name == "template":
+                    effective_plugin_configs[plugin_name]["base_path"] = workspace_root
 
             session = self._runtime.create_session(
                 model=model,
@@ -1473,7 +1483,8 @@ class SubagentPlugin:
                         from datetime import datetime as dt
                         ts = dt.now().strftime("%H:%M:%S.%f")[:-3]
                         f.write(f"[{ts}] [SUBAGENT] '{profile.name}' tools={profile.plugins}\n")
-                        f.write(f"[{ts}] [SUBAGENT] plugin_configs={profile.plugin_configs}\n")
+                        f.write(f"[{ts}] [SUBAGENT] workspaceRoot={workspace_root}\n")
+                        f.write(f"[{ts}] [SUBAGENT] plugin_configs={effective_plugin_configs}\n")
                         f.flush()
                 except (IOError, OSError):
                     pass  # Silently skip if trace file cannot be written

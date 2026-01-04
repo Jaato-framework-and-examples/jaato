@@ -168,3 +168,104 @@ class TestFindWorkspaceRoot:
         """Returns string type."""
         result = _find_workspace_root()
         assert isinstance(result, str)
+
+    def test_override_takes_precedence(self):
+        """Explicit override parameter takes precedence over everything."""
+        result = _find_workspace_root(override="/custom/override")
+        assert result == "/custom/override"
+
+    def test_env_var_takes_precedence_over_detection(self):
+        """JAATO_WORKSPACE_ROOT env var takes precedence over auto-detection."""
+        with patch.dict(os.environ, {"JAATO_WORKSPACE_ROOT": "/env/workspace"}):
+            result = _find_workspace_root()
+            assert result == "/env/workspace"
+
+    def test_override_takes_precedence_over_env_var(self):
+        """Override parameter takes precedence over env var."""
+        with patch.dict(os.environ, {"JAATO_WORKSPACE_ROOT": "/env/workspace"}):
+            result = _find_workspace_root(override="/explicit/override")
+            assert result == "/explicit/override"
+
+    def test_dotenv_workspaceRoot_is_used(self):
+        """workspaceRoot env var (from .env) is used when JAATO_WORKSPACE_ROOT not set."""
+        # Clear JAATO_WORKSPACE_ROOT, set workspaceRoot (simulating .env load)
+        with patch.dict(os.environ, {"workspaceRoot": "/from/dotenv"}, clear=False):
+            # Make sure JAATO_WORKSPACE_ROOT is not set
+            os.environ.pop("JAATO_WORKSPACE_ROOT", None)
+            result = _find_workspace_root()
+            assert result == "/from/dotenv"
+
+    def test_jaato_env_takes_precedence_over_dotenv(self):
+        """JAATO_WORKSPACE_ROOT takes precedence over workspaceRoot."""
+        with patch.dict(os.environ, {
+            "JAATO_WORKSPACE_ROOT": "/jaato/root",
+            "workspaceRoot": "/dotenv/root"
+        }):
+            result = _find_workspace_root()
+            assert result == "/jaato/root"
+
+    def test_relative_path_dot_is_resolved(self):
+        """Relative path '.' is resolved to absolute cwd."""
+        result = _find_workspace_root(override=".")
+        assert result == os.getcwd()
+        assert os.path.isabs(result)
+
+    def test_relative_path_subdir_is_resolved(self):
+        """Relative path like './subdir' is resolved."""
+        result = _find_workspace_root(override="./subdir")
+        expected = os.path.join(os.getcwd(), "subdir")
+        assert result == expected
+        assert os.path.isabs(result)
+
+    def test_dotenv_relative_path_is_resolved(self):
+        """workspaceRoot=. from .env is resolved to cwd."""
+        with patch.dict(os.environ, {"workspaceRoot": "."}, clear=False):
+            os.environ.pop("JAATO_WORKSPACE_ROOT", None)
+            result = _find_workspace_root()
+            assert result == os.getcwd()
+
+
+class TestWorkspaceRootOverride:
+    """Tests for workspace_root_override in expand functions."""
+
+    def test_expand_variables_with_override(self):
+        """expand_variables uses workspace_root_override for ${workspaceRoot}."""
+        result = expand_variables(
+            "${workspaceRoot}/config.json",
+            workspace_root_override="/my/workspace"
+        )
+        assert result == "/my/workspace/config.json"
+
+    def test_expand_variables_nested_with_override(self):
+        """Nested dicts use workspace_root_override."""
+        input_data = {
+            "path": "${workspaceRoot}/templates",
+            "nested": {
+                "file": "${workspaceRoot}/.jaato/config.json"
+            }
+        }
+        result = expand_variables(input_data, workspace_root_override="/project")
+        assert result["path"] == "/project/templates"
+        assert result["nested"]["file"] == "/project/.jaato/config.json"
+
+    def test_expand_plugin_configs_with_override(self):
+        """expand_plugin_configs uses workspace_root_override."""
+        configs = {
+            "template": {"base_path": "${workspaceRoot}"},
+            "lsp": {"config_path": "${workspaceRoot}/.lsp.json"}
+        }
+        result = expand_plugin_configs(
+            configs,
+            workspace_root_override="/custom/workspace"
+        )
+        assert result["template"]["base_path"] == "/custom/workspace"
+        assert result["lsp"]["config_path"] == "/custom/workspace/.lsp.json"
+
+    def test_context_overrides_workspace_root(self):
+        """Context workspaceRoot takes precedence over auto-detection."""
+        # If context explicitly provides workspaceRoot, it should be used
+        result = expand_variables(
+            "${workspaceRoot}/file",
+            context={"workspaceRoot": "/from/context"}
+        )
+        assert result == "/from/context/file"
