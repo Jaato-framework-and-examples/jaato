@@ -55,6 +55,7 @@ from .channels import (
     ConsoleReporter,
     WebhookReporter,
     FileReporter,
+    MemoryReporter,
     MultiReporter,
     create_reporter,
 )
@@ -85,6 +86,7 @@ __all__ = [
     'ConsoleReporter',
     'WebhookReporter',
     'FileReporter',
+    'MemoryReporter',
     'MultiReporter',
     'create_reporter',
     # Config
