@@ -336,16 +336,19 @@ class JaatoSession:
     def _forward_to_parent(self, event_type: str, content: str) -> None:
         """Forward an event to the parent session.
 
-        NOTE: Currently disabled. Subagent output is visible in its own tab
-        via UI hooks. Forwarding to parent would cause parent's model to
-        receive and respond to child output, which is not desired.
+        Called internally at key points during execution to keep the parent
+        informed of this agent's activities. The parent model receives these
+        messages so it can react to child output. These messages are NOT echoed
+        in the parent's output panel (handled in _check_and_handle_mid_turn_prompt
+        which skips output for messages starting with "[SUBAGENT ").
 
         Args:
             event_type: Type of event (MODEL_OUTPUT, TOOL_CALL, TOOL_OUTPUT, etc.)
             content: Event content/payload.
         """
-        # Disabled - subagent output goes to its own tab via UI hooks
-        return
+        if self._parent_session:
+            message = f"[SUBAGENT agent_id={self._agent_id} event={event_type}]\n{content}"
+            self._parent_session.inject_prompt(message)
 
     # ==================== Cancellation Support ====================
 

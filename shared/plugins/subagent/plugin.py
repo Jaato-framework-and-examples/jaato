@@ -442,18 +442,23 @@ class SubagentPlugin:
             "You have access to a subagent system that allows you to delegate "
             "tasks to specialized subagents.\n\n"
             "ASYNC EXECUTION: spawn_subagent returns immediately with an agent_id. "
-            "The subagent runs asynchronously and its output appears in its own tab "
-            "in the UI (not in your output).\n\n"
-            "CHECKING STATUS: Use list_active_subagents to see all subagents and their "
-            "status (running/idle). If you need a subagent's result before proceeding:\n"
-            "1. Call list_active_subagents\n"
-            "2. Check if the subagent's status is 'idle' (completed)\n"
-            "3. Only then spawn dependent tasks or proceed\n\n"
-            "COMMUNICATION:\n"
+            "The subagent runs asynchronously in the background.\n\n"
+            "RECEIVING SUBAGENT OUTPUT: You will receive subagent output as "
+            "[SUBAGENT agent_id=X event=Y] messages injected into your conversation. "
+            "Events include:\n"
+            "- MODEL_OUTPUT: Text the subagent is generating\n"
+            "- TOOL_CALL: Tool the subagent is calling\n"
+            "- TOOL_OUTPUT: Output from subagent's tool execution\n"
+            "- COMPLETED: Subagent finished its task (includes final response)\n"
+            "- ERROR: Subagent encountered an error\n\n"
+            "REACTING TO OUTPUT: When you receive a COMPLETED event, you can use "
+            "the subagent's result to decide next steps. If you need to spawn "
+            "sequential dependent subagents, wait for COMPLETED before spawning the next.\n\n"
+            "BIDIRECTIONAL COMMUNICATION:\n"
             "- Use send_to_subagent to inject messages into a running subagent\n"
             "- Multiple subagents can run concurrently\n\n"
             "LIFECYCLE MANAGEMENT:\n"
-            "- Use close_subagent to free resources when done with a subagent\n"
+            "- Use close_subagent to free resources after receiving COMPLETED\n"
             "- Sessions auto-close after max_turns, but explicit closure is preferred\n"
             "- Use list_active_subagents to see running subagents"
         )
@@ -1099,7 +1104,7 @@ class SubagentPlugin:
             'success': True,
             'agent_id': agent_id,
             'status': 'spawned',
-            'message': f'Subagent {agent_id} spawned and running asynchronously. Use list_active_subagents to check status.'
+            'message': f'Subagent {agent_id} spawned. You will receive [SUBAGENT agent_id={agent_id} event=...] messages as it executes. Wait for COMPLETED event before using results.'
         }
 
     def _run_subagent_async(
