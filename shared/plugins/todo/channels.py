@@ -506,6 +506,81 @@ class FileReporter(TodoReporter):
         self._event_counter.clear()
 
 
+class MemoryReporter(TodoReporter):
+    """Reporter that stores progress events in memory.
+
+    Designed for server/daemon contexts where console output isn't desired,
+    but events need to be captured for later retrieval or callback-based
+    notification.
+
+    Events are stored in-memory and can be retrieved or cleared. Optionally,
+    a callback can be provided for real-time event notification.
+    """
+
+    def __init__(self):
+        self._events: List[ProgressEvent] = []
+        self._callback: Optional[Callable[[ProgressEvent], None]] = None
+        self._max_events: int = 1000  # Limit to prevent memory growth
+
+    @property
+    def name(self) -> str:
+        return "memory"
+
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
+        """Initialize memory reporter.
+
+        Config options:
+            callback: Optional callback for real-time event notification
+            max_events: Maximum events to store (default 1000)
+        """
+        if config:
+            self._callback = config.get("callback")
+            self._max_events = config.get("max_events", 1000)
+
+    def _store_event(self, event: ProgressEvent) -> None:
+        """Store event and optionally notify callback."""
+        self._events.append(event)
+
+        # Trim if exceeding max
+        if len(self._events) > self._max_events:
+            self._events = self._events[-self._max_events:]
+
+        if self._callback:
+            try:
+                self._callback(event)
+            except Exception:
+                pass  # Don't let callback errors affect operation
+
+    def get_events(self) -> List[ProgressEvent]:
+        """Return all stored events."""
+        return list(self._events)
+
+    def clear_events(self) -> None:
+        """Clear all stored events."""
+        self._events.clear()
+
+    def report_plan_created(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
+        """Store plan creation event."""
+        event = ProgressEvent.create("plan_created", plan)
+        self._store_event(event)
+
+    def report_step_update(self, plan: TodoPlan, step: TodoStep, agent_id: Optional[str] = None) -> None:
+        """Store step update event."""
+        event_type = f"step_{step.status.value}"
+        event = ProgressEvent.create(event_type, plan, step)
+        self._store_event(event)
+
+    def report_plan_completed(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
+        """Store plan completion event."""
+        event = ProgressEvent.create(f"plan_{plan.status.value}", plan)
+        self._store_event(event)
+
+    def shutdown(self) -> None:
+        """Clear stored events on shutdown."""
+        self._events.clear()
+        self._callback = None
+
+
 class MultiReporter(TodoReporter):
     """Reporter that broadcasts to multiple underlying reporters.
 
@@ -566,7 +641,7 @@ def create_reporter(
     """Factory function to create a reporter by type.
 
     Args:
-        reporter_type: One of "console", "webhook", "file"
+        reporter_type: One of "console", "webhook", "file", "memory"
         config: Optional configuration for the reporter
 
     Returns:
@@ -579,6 +654,7 @@ def create_reporter(
         "console": ConsoleReporter,
         "webhook": WebhookReporter,
         "file": FileReporter,
+        "memory": MemoryReporter,
     }
 
     if reporter_type not in reporters:
