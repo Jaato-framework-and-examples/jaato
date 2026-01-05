@@ -63,6 +63,8 @@ class AgentRegistry:
         self._selected_agent_id: str = "main"
         self._lock = threading.RLock()  # Reentrant lock for nested calls
         self._formatter_pipeline: Any = None  # Shared formatter pipeline for all agents
+        # Pending output for agents not yet created (handles race conditions)
+        self._pending_output: Dict[str, List[tuple]] = {}  # agent_id -> [(source, text, mode), ...]
 
     def create_agent(
         self,
@@ -121,6 +123,30 @@ class AgentRegistry:
             # If this is the first agent (main), select it
             if len(self._agents) == 1:
                 self._selected_agent_id = agent_id
+
+            # Flush any pending output for this agent (handles race condition where
+            # AgentOutputEvent arrived before AgentCreatedEvent)
+            if agent_id in self._pending_output:
+                pending = self._pending_output.pop(agent_id)
+                for source, text, mode in pending:
+                    agent_info.output_buffer.append(source, text, mode)
+
+    def queue_output(self, agent_id: str, source: str, text: str, mode: str) -> None:
+        """Queue output for an agent that hasn't been created yet.
+
+        Used when AgentOutputEvent arrives before AgentCreatedEvent (race condition).
+        The queued output will be flushed to the agent's buffer when it's created.
+
+        Args:
+            agent_id: Target agent identifier.
+            source: Source of the output ("model", plugin name, etc.)
+            text: The output text.
+            mode: "write" for new block, "append" to continue.
+        """
+        with self._lock:
+            if agent_id not in self._pending_output:
+                self._pending_output[agent_id] = []
+            self._pending_output[agent_id].append((source, text, mode))
 
     def get_agent(self, agent_id: str) -> Optional[AgentInfo]:
         """Get agent by ID.
