@@ -15,6 +15,7 @@ from .types import (
     Message,
     Part,
     ProviderResponse,
+    ThinkingConfig,
     ToolResult,
     ToolSchema,
     TokenUsage,
@@ -502,5 +503,37 @@ class ModelProviderPlugin(Protocol):
             agent_type: Type of agent ("main" or "subagent").
             agent_name: Optional name for the agent (e.g., profile name).
             agent_id: Unique identifier for the agent instance.
+        """
+        ...
+
+    # ==================== Thinking Mode ====================
+    # Optional extended thinking/reasoning support
+
+    def supports_thinking(self) -> bool:
+        """Check if this provider/model supports extended thinking.
+
+        Thinking mode enables extended reasoning capabilities:
+        - Anthropic: Extended thinking with visible reasoning traces
+        - Google Gemini: Thinking mode (Gemini 2.0+)
+
+        Returns:
+            True if thinking mode is supported, False otherwise.
+        """
+        ...
+
+    def set_thinking_config(self, config: ThinkingConfig) -> None:
+        """Set the thinking/reasoning mode configuration.
+
+        Dynamically enables or disables extended thinking for subsequent
+        API calls. Takes effect immediately for the next send_message().
+
+        Args:
+            config: ThinkingConfig with enabled flag and budget.
+                - enabled: Whether to use thinking mode
+                - budget: Token budget for thinking (provider-specific)
+
+        Note:
+            If the provider/model doesn't support thinking, this is a no-op.
+            Check supports_thinking() to verify capability first.
         """
         ...
