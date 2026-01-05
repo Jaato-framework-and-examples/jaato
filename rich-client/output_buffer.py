@@ -266,7 +266,7 @@ class OutputBuffer:
                 # 1 (potential blank line) + 1 (header) + content lines
                 return 2 + content_lines
             rendered.append(text)
-        elif source == "user":
+        elif source in ("user", "parent"):
             if is_turn_start:
                 # Header line (1) + wrapped content lines + potential blank line before header
                 rendered.append(text)
@@ -336,8 +336,8 @@ class OutputBuffer:
             self._pending_enrichments.append((source, text, mode))
             return
 
-        # If this is new user input, exit navigation mode and finalize any remaining tools
-        if source == "user" and mode == "write":
+        # If this is new user/parent input, exit navigation mode and finalize any remaining tools
+        if source in ("user", "parent") and mode == "write":
             self._exit_navigation_mode()
             # Finalize any remaining active tools
             if self._active_tools:
@@ -357,12 +357,14 @@ class OutputBuffer:
         if mode == "write":
             # Start a new block
             self._flush_current_block()
-            # Only show header when switching between user and model turns
+            # Only show header when switching between user/parent and model turns
             # (not for every model response within same agentic loop)
             is_new_turn = False
-            if source in ("user", "model"):
-                is_new_turn = (self._last_turn_source != source)
-                self._last_turn_source = source
+            if source in ("user", "parent", "model"):
+                # Treat "parent" like "user" for turn tracking
+                effective_source = "user" if source == "parent" else source
+                is_new_turn = (self._last_turn_source != effective_source)
+                self._last_turn_source = effective_source
             self._current_block = (source, [text], is_new_turn)
         elif mode == "append":
             # Append mode (streaming)
@@ -373,9 +375,11 @@ class OutputBuffer:
                 # First streaming chunk or source changed - create new block
                 self._flush_current_block()
                 is_new_turn = False
-                if source in ("user", "model"):
-                    is_new_turn = (self._last_turn_source != source)
-                    self._last_turn_source = source
+                if source in ("user", "parent", "model"):
+                    # Treat "parent" like "user" for turn tracking
+                    effective_source = "user" if source == "parent" else source
+                    is_new_turn = (self._last_turn_source != effective_source)
+                    self._last_turn_source = effective_source
                 self._current_block = (source, [text], is_new_turn)
         elif mode == "flush":
             # Flush mode: process pending output but don't add any content
@@ -1730,14 +1734,15 @@ class OutputBuffer:
                     if j > 0:
                         output.append("\n")
                     output.append(wrapped_line, style=line.style)
-            elif line.source == "user":
-                # User input - use header line for turn start
+            elif line.source in ("user", "parent"):
+                # User/parent input - use header line for turn start
                 if line.is_turn_start:
                     # Add blank line before header for visual separation (if not first line)
                     if i > 0:
                         output.append("\n")
-                    # Render header line: ── User/Parent ───────────────────
-                    user_label = "Parent" if self._agent_type == "subagent" else "User"
+                    # Render header line: ── User ── or ── Parent ──
+                    # "parent" source means message from parent agent to this subagent
+                    user_label = "Parent" if line.source == "parent" else "User"
                     header_prefix = f"── {user_label} "
                     remaining = max(0, wrap_width - len(header_prefix))
                     output.append(header_prefix, style="bold green")

@@ -550,15 +550,46 @@ class TodoPlugin:
         if self._reporter:
             self._reporter.report_step_update(plan, step, agent_id=self._agent_name)
 
-        return {
+        # Build response with continuation prompt
+        progress = plan.get_progress()
+        response = {
             "step_id": step.step_id,
             "sequence": step.sequence,
             "description": step.description,
             "status": step.status.value,
             "result": step.result,
             "error": step.error,
-            "progress": plan.get_progress(),
+            "progress": progress,
         }
+
+        # Add continuation prompt based on status to prevent model from stopping
+        if new_status == StepStatus.IN_PROGRESS:
+            response["instruction"] = (
+                f"Step is now in progress. Proceed immediately with: {step.description}"
+            )
+        elif new_status == StepStatus.COMPLETED:
+            if progress["pending"] > 0:
+                # Find next pending step
+                next_step = next(
+                    (s for s in sorted(plan.steps, key=lambda x: x.sequence)
+                     if s.status == StepStatus.PENDING),
+                    None
+                )
+                if next_step:
+                    response["instruction"] = (
+                        f"Step completed. Proceed immediately to next step: {next_step.description}"
+                    )
+                else:
+                    response["instruction"] = "Step completed. Continue with remaining work."
+            else:
+                response["instruction"] = "All steps completed. Call completePlan to finalize."
+        elif new_status == StepStatus.FAILED:
+            if progress["pending"] > 0:
+                response["instruction"] = (
+                    "Step failed. Decide whether to retry, skip, or proceed to remaining steps."
+                )
+
+        return response
 
     def _execute_get_plan_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the getPlanStatus tool."""

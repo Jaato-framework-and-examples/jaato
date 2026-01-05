@@ -197,6 +197,10 @@ class PTDisplay:
         self._stop_callback: Optional[Callable[[], bool]] = None
         self._is_running_callback: Optional[Callable[[], bool]] = None
 
+        # Pending prompts queue (displayed above input field)
+        # Each entry is (prompt_text, timestamp)
+        self._pending_prompts: List[Tuple[str, float]] = []
+
         # Debounced refresh for streaming performance
         self._refresh_pending: bool = False
         self._refresh_interval: float = 0.05  # 50ms debounce window
@@ -920,9 +924,21 @@ class PTDisplay:
             style="class:status-bar",
         )
 
-        # Output panel (fills remaining space, now 100% width)
+        # Dynamic height for output panel - accounts for all other components
+        def get_output_height():
+            """Calculate output panel height by subtracting all other components."""
+            total = self._height
+            fixed = 2  # session_bar (1) + status_bar (1)
+            if self._agent_tab_bar is not None:
+                fixed += 1  # agent tab bar
+            pending = self._get_pending_prompts_height()
+            input_h = self._get_input_height()
+            return max(1, total - fixed - pending - input_h)
+
+        # Output panel (fills remaining space minus pending prompts)
         output_window = Window(
             FormattedTextControl(self._get_output_content),
+            height=get_output_height,
             wrap_lines=False,
         )
 
@@ -958,6 +974,16 @@ class PTDisplay:
 
         # Input row (label + optional input area)
         input_row = VSplit([prompt_label, input_window])
+
+        # Pending prompts bar (shown above input when prompts are queued)
+        pending_prompts_bar = ConditionalContainer(
+            Window(
+                FormattedTextControl(self._get_pending_prompts_content),
+                height=self._get_pending_prompts_height,
+                style="class:pending-prompts-bar",
+            ),
+            filter=Condition(lambda: len(self._pending_prompts) > 0),
+        )
 
         # Plan popup (floating overlay, shown with Ctrl+P)
         def get_popup_height():
@@ -1004,15 +1030,16 @@ class PTDisplay:
             filter=Condition(lambda: self._agent_tab_bar is not None and self._agent_tab_bar.is_popup_visible),
         )
 
-        # Root layout with session bar at top, then tab bar, status bar, output, input
+        # Root layout with session bar at top, then tab bar, status bar, output, pending prompts, input
         from prompt_toolkit.layout.containers import FloatContainer, Float
         root = FloatContainer(
             content=HSplit([
-                session_bar,     # Session info bar (top)
-                agent_tab_bar,   # Agent tabs (conditional)
-                status_bar,      # Status bar
-                output_window,   # Output panel (100% width now)
-                input_row,       # Input area
+                session_bar,           # Session info bar (top)
+                agent_tab_bar,         # Agent tabs (conditional)
+                status_bar,            # Status bar
+                output_window,         # Output panel (fills remaining space)
+                pending_prompts_bar,   # Queued prompts (dynamic, above input)
+                input_row,             # Input area
             ]),
             floats=[
                 Float(
@@ -1069,6 +1096,10 @@ class PTDisplay:
             "session-bar.description": "#87d787",  # light green for description
             "session-bar.workspace": "#d7af87",  # tan/orange for workspace
             "session-bar.dim": "#606060",
+            # Pending prompts bar
+            "pending-prompts-bar": "bg:#1a1a1a",
+            "pending-prompt": "#5fd7ff",  # cyan
+            "pending-prompt.overflow": "#808080 italic",
         })
 
         input_style = self._input_handler._pt_style if self._input_handler else None
@@ -1325,6 +1356,91 @@ class PTDisplay:
         # Auto-scroll to bottom when new output arrives
         buffer.scroll_to_bottom()
         self.refresh()
+
+    # =========================================================================
+    # Pending Prompts Queue (displayed above input field)
+    # =========================================================================
+
+    def add_pending_prompt(self, prompt: str) -> None:
+        """Add a prompt to the pending queue.
+
+        Called when a prompt is queued for mid-turn injection (user types
+        while model is running, or subagent injects a message).
+
+        Args:
+            prompt: The prompt text to queue.
+        """
+        import time
+        self._pending_prompts.append((prompt, time.time()))
+        self.refresh()
+
+    def remove_pending_prompt(self, prompt: str) -> None:
+        """Remove a prompt from the pending queue.
+
+        Called when a queued prompt is processed/injected.
+
+        Args:
+            prompt: The prompt text that was processed.
+        """
+        # Remove first matching prompt
+        for i, (p, _) in enumerate(self._pending_prompts):
+            if p == prompt:
+                self._pending_prompts.pop(i)
+                break
+        self.refresh()
+
+    def clear_pending_prompts(self) -> None:
+        """Clear all pending prompts."""
+        self._pending_prompts.clear()
+        self.refresh()
+
+    def _get_pending_prompts_height(self) -> int:
+        """Calculate height for pending prompts bar.
+
+        Returns 0 if no pending prompts, otherwise 1 line per prompt
+        up to a maximum of 5 lines.
+        """
+        count = len(self._pending_prompts)
+        if count == 0:
+            return 0
+        return min(count, 5)  # Cap at 5 lines
+
+    def _get_pending_prompts_content(self) -> List[Tuple[str, str]]:
+        """Render pending prompts as formatted text for display above input.
+
+        Returns:
+            List of (style, text) tuples for prompt_toolkit.
+        """
+        if not self._pending_prompts:
+            return []
+
+        result = []
+        max_display = 5
+        count = len(self._pending_prompts)
+
+        # Show most recent prompts (up to max_display)
+        prompts_to_show = self._pending_prompts[-max_display:]
+
+        for i, (prompt, timestamp) in enumerate(prompts_to_show):
+            # Truncate long prompts
+            preview = prompt.replace("\n", " ")
+            if len(preview) > 60:
+                preview = preview[:57] + "..."
+
+            # Format: "⏳ [1] prompt text here..."
+            queue_num = count - len(prompts_to_show) + i + 1
+            line = f"⏳ [{queue_num}] {preview}"
+
+            result.append(("class:pending-prompt", line))
+            if i < len(prompts_to_show) - 1:
+                result.append(("", "\n"))
+
+        # If there are more prompts than we can show
+        if count > max_display:
+            hidden = count - max_display
+            result.insert(0, ("class:pending-prompt.overflow", f"  ... {hidden} more queued ...\n"))
+
+        return result
 
     def update_last_system_message(self, message: str, style: str = "dim") -> bool:
         """Update the last system message in the output.
