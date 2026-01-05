@@ -4,7 +4,9 @@ Provides isolated conversation state for an agent (main or subagent),
 while sharing resources from the parent JaatoRuntime.
 """
 
+import json
 import os
+import queue
 import re
 import tempfile
 from datetime import datetime
@@ -39,10 +41,6 @@ if TYPE_CHECKING:
 
 # Pattern to match @references in prompts
 AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
-
-# Type alias for mid-turn prompt callback
-# Returns the prompt text if one is pending, None otherwise
-MidTurnPromptCallback = Callable[[], Optional[str]]
 
 
 class JaatoSession:
@@ -146,8 +144,17 @@ class JaatoSession:
         # Terminal width for formatting (used by enrichment notifications)
         self._terminal_width: int = 80
 
-        # Mid-turn prompt injection
-        self._on_mid_turn_prompt: Optional[MidTurnPromptCallback] = None
+        # Injection queue for receiving prompts from parent/user mid-turn
+        # This is the core mechanism for async agent communication
+        self._injection_queue: queue.Queue[str] = queue.Queue()
+
+        # Parent session for output forwarding (subagent -> parent visibility)
+        # When set, all output events are forwarded to parent's injection queue
+        self._parent_session: Optional['JaatoSession'] = None
+
+        # Callback when a prompt is injected (processed from queue)
+        # Used by server to emit MidTurnPromptInjectedEvent
+        self._on_prompt_injected: Optional[Callable[[str], None]] = None
 
     def set_terminal_width(self, width: int) -> None:
         """Set the terminal width for formatting.
@@ -272,30 +279,81 @@ class JaatoSession:
         """
         self._on_retry = callback
 
-    def set_mid_turn_prompt_callback(
-        self,
-        callback: Optional[MidTurnPromptCallback]
-    ) -> None:
-        """Set callback for mid-turn prompt injection.
+    def set_parent_session(self, parent: Optional['JaatoSession']) -> None:
+        """Set parent session for output forwarding.
 
-        When set, this callback is called at natural pause points during
-        message processing (e.g., between tool executions). If the callback
-        returns a string, that string is injected into the conversation as
-        a user prompt, allowing the user to provide additional context or
-        ask questions while the model is working.
+        When set, all output events from this session are forwarded to the
+        parent session's injection queue. This enables parent agents to
+        monitor and react to their subagents' activities in real-time.
+
+        The forwarding is one level only - each parent sees only its
+        direct children, not grandchildren.
 
         Args:
-            callback: Function that returns a prompt string if one is pending,
-                or None if no prompt is queued.
-                Signature: () -> Optional[str]
+            parent: The parent session to forward output to, or None to disable.
 
         Example:
-            # Route mid-turn prompts from a queue
-            session.set_mid_turn_prompt_callback(
-                lambda: prompt_queue.get_nowait() if not prompt_queue.empty() else None
-            )
+            # In SubagentPlugin when creating a subagent session:
+            subagent_session.set_parent_session(self._parent_session)
         """
-        self._on_mid_turn_prompt = callback
+        self._parent_session = parent
+
+    def set_prompt_injected_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Set callback for when a prompt is processed from the injection queue.
+
+        This callback is invoked when a queued prompt is about to be processed
+        (injected into the conversation). The server uses this to emit
+        MidTurnPromptInjectedEvent to notify the client UI.
+
+        Args:
+            callback: Function called with the prompt text when injected.
+        """
+        self._on_prompt_injected = callback
+
+    def inject_prompt(self, text: str) -> None:
+        """Inject a prompt into this agent's queue.
+
+        The prompt will be processed at the next yield point in the chat loop
+        (e.g., after tool execution, after model response). This enables:
+        - User mid-turn input to main agent
+        - Parent agent sending messages to subagent
+        - Subagent returning results to parent
+
+        This method is thread-safe and can be called from any thread.
+
+        Args:
+            text: The prompt text to inject.
+
+        Example:
+            # Parent sending guidance to subagent
+            subagent_session.inject_prompt("Focus on the authentication module")
+
+            # Subagent returning result to parent
+            parent_session.inject_prompt("[SUBAGENT agent_id=researcher COMPLETED]\\nFound 3 issues")
+        """
+        self._injection_queue.put(text)
+
+    def _forward_to_parent(self, event_type: str, content: str) -> None:
+        """Forward a completion event to the parent session.
+
+        Only forwards COMPLETED, ERROR, and CANCELLED events to avoid noise.
+        Real-time output (MODEL_OUTPUT, TOOL_CALL, etc.) is visible in the
+        subagent's own tab via UI hooks.
+
+        These messages use XML format (<subagent_event>) and are NOT echoed
+        in the parent's output panel (handled in _check_and_handle_mid_turn_prompt).
+
+        Args:
+            event_type: Type of event (COMPLETED, ERROR, CANCELLED).
+            content: Event content/payload.
+        """
+        if self._parent_session:
+            # Only forward completion events to parent to avoid noise
+            # Real-time output is visible in subagent's own tab via UI hooks
+            if event_type not in ("COMPLETED", "ERROR", "CANCELLED"):
+                return
+            message = f"<subagent_event agent_id=\"{self._agent_id}\" type=\"{event_type}\">\n{content}\n</subagent_event>"
+            self._parent_session.inject_prompt(message)
 
     # ==================== Cancellation Support ====================
 
@@ -905,7 +963,7 @@ class JaatoSession:
                 # Track whether we've sent the first chunk (to use "write" vs "append")
                 first_chunk_sent = False
 
-                # Streaming callback that routes to on_output
+                # Streaming callback that routes to on_output and forwards to parent
                 def streaming_callback(chunk: str) -> None:
                     nonlocal first_chunk_sent
                     if on_output:
@@ -914,6 +972,8 @@ class JaatoSession:
                         self._trace(f"SESSION_OUTPUT mode={mode} len={len(chunk)} preview={repr(chunk[:50])}")
                         on_output("model", chunk, mode)
                         first_chunk_sent = True
+                    # Forward model output to parent for real-time visibility
+                    self._forward_to_parent("MODEL_OUTPUT", chunk)
 
                 self._trace(f"STREAMING on_usage_update={'set' if wrapped_usage_callback else 'None'}")
                 response, _retry_stats = with_retry(
@@ -1042,8 +1102,11 @@ class JaatoSession:
                             current_fc_group = []
 
                         # Emit text (only in non-streaming mode)
-                        if not use_streaming and on_output:
-                            on_output("model", part.text, "write")
+                        if not use_streaming:
+                            if on_output:
+                                on_output("model", part.text, "write")
+                            # Forward to parent for visibility
+                            self._forward_to_parent("MODEL_OUTPUT", part.text)
                         accumulated_text.append(part.text)
 
                     elif part.function_call:
@@ -1107,8 +1170,11 @@ class JaatoSession:
             # Collect any remaining text from the final response
             for part in response.parts:
                 if part.text:
-                    if not use_streaming and on_output:
-                        on_output("model", part.text, "write")
+                    if not use_streaming:
+                        if on_output:
+                            on_output("model", part.text, "write")
+                        # Forward to parent for visibility
+                        self._forward_to_parent("MODEL_OUTPUT", part.text)
                     accumulated_text.append(part.text)
 
             # Final check for mid-turn prompts before completing the turn
@@ -1133,8 +1199,11 @@ class JaatoSession:
                 for part in mid_turn_response.parts:
                     if part.text:
                         # Note: In streaming mode, text was already emitted by the callback
-                        if not use_streaming and on_output:
-                            on_output("model", part.text, "write")
+                        if not use_streaming:
+                            if on_output:
+                                on_output("model", part.text, "write")
+                            # Forward to parent for visibility
+                            self._forward_to_parent("MODEL_OUTPUT", part.text)
                         accumulated_text.append(part.text)
 
                 # Check if the mid-turn response triggered more function calls
@@ -1162,8 +1231,11 @@ class JaatoSession:
                         current_fc_group = []
                         for part in response.parts:
                             if part.text:
-                                if not use_streaming and on_output:
-                                    on_output("model", part.text, "write")
+                                if not use_streaming:
+                                    if on_output:
+                                        on_output("model", part.text, "write")
+                                    # Forward to parent for visibility
+                                    self._forward_to_parent("MODEL_OUTPUT", part.text)
                                 accumulated_text.append(part.text)
                             elif part.function_call:
                                 current_fc_group.append(part.function_call)
@@ -1188,15 +1260,23 @@ class JaatoSession:
                     # Collect final text from nested response
                     for part in response.parts:
                         if part.text:
-                            if not use_streaming and on_output:
-                                on_output("model", part.text, "write")
+                            if not use_streaming:
+                                if on_output:
+                                    on_output("model", part.text, "write")
+                                # Forward to parent for visibility
+                                self._forward_to_parent("MODEL_OUTPUT", part.text)
                             accumulated_text.append(part.text)
 
-            return ''.join(accumulated_text) if accumulated_text else ''
+            # Forward completion to parent
+            final_response = ''.join(accumulated_text) if accumulated_text else ''
+            self._forward_to_parent("COMPLETED", final_response)
+
+            return final_response
 
         except CancelledException:
             # Handle explicit cancellation exception
             # Note: Don't send on_output here - the explicit checks above already do
+            self._forward_to_parent("CANCELLED", "Generation cancelled")
             return "[Generation cancelled]"
 
         except Exception as exc:
@@ -1224,6 +1304,9 @@ class JaatoSession:
                 error_msg = f"[Error] {exc_name}: {str(exc)}"
                 on_output("error", error_msg, "write")
                 self._trace(f"PROVIDER_ERROR routed to callback: {exc_name}")
+
+            # Forward error to parent for visibility
+            self._forward_to_parent("ERROR", f"{exc_name}: {str(exc)}")
 
             # Re-raise so caller can also handle if needed
             raise
@@ -1259,6 +1342,9 @@ class JaatoSession:
             name = fc.name
             args = fc.args
 
+            # Forward tool call to parent for visibility
+            self._forward_to_parent("TOOL_CALL", f"{name}({json.dumps(args)})")
+
             # Emit hook: tool starting
             if self._ui_hooks:
                 # Signal UI to flush any pending output before displaying tool tree
@@ -1277,14 +1363,17 @@ class JaatoSession:
             fc_start = datetime.now()
             if self._executor:
                 # Set up tool output callback for streaming output during execution
-                if self._ui_hooks and fc.id:
-                    def tool_output_callback(chunk: str, _call_id=fc.id) -> None:
+                # Captures _name for use in the closure
+                def tool_output_callback(chunk: str, _call_id=fc.id, _name=name) -> None:
+                    if self._ui_hooks and _call_id:
                         self._ui_hooks.on_tool_output(
                             agent_id=self._agent_id,
                             call_id=_call_id,
                             chunk=chunk
                         )
-                    self._executor.set_tool_output_callback(tool_output_callback)
+                    # Forward tool output to parent for visibility
+                    self._forward_to_parent("TOOL_OUTPUT", f"[{_name}] {chunk}")
+                self._executor.set_tool_output_callback(tool_output_callback)
 
                 executor_result = self._executor.execute(name, args)
 
@@ -1392,6 +1481,11 @@ class JaatoSession:
         This is called at natural pause points during message processing
         (e.g., after tool execution, after receiving model response).
 
+        Prompts can come from:
+        - User input (via inject_prompt from server)
+        - Parent agent (via inject_prompt for guidance)
+        - Child agents (via inject_prompt for results/output)
+
         If a mid-turn prompt is pending, this method:
         1. Emits the prompt as user output
         2. Sends it to the model as a new user message
@@ -1406,23 +1500,26 @@ class JaatoSession:
         Returns:
             The model's response if a prompt was handled, None otherwise.
         """
-        if not self._on_mid_turn_prompt:
-            return None
-
-        # Check for pending prompt
+        # Check internal injection queue
         try:
-            prompt = self._on_mid_turn_prompt()
-        except Exception:
-            return None
-
-        if not prompt:
+            prompt = self._injection_queue.get_nowait()
+        except queue.Empty:
             return None
 
         self._trace(f"MID_TURN_PROMPT: Handling injected prompt: {prompt[:100]}...")
 
-        # Emit the prompt as user output so UI shows it
-        if on_output:
-            on_output("user", prompt, "write")
+        # Notify that prompt is being injected (for UI to remove from pending bar)
+        if self._on_prompt_injected:
+            self._on_prompt_injected(prompt)
+
+        # Emit the prompt as user/parent output so UI shows it
+        # Skip for subagent messages - parent doesn't need to echo child output
+        is_subagent_message = prompt.startswith("<subagent_event ") or prompt.startswith("[SUBAGENT ")
+        if on_output and not is_subagent_message:
+            # Use "parent" source if this is a subagent (has parent session),
+            # otherwise "user" for main agent receiving user input
+            source = "parent" if self._parent_session else "user"
+            on_output(source, prompt, "write")
 
         # Proactive rate limiting
         self._pacer.pace()

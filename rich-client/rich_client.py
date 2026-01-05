@@ -2655,30 +2655,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 )
 
             elif isinstance(event, MidTurnPromptQueuedEvent):
-                # Show feedback that the prompt was queued for mid-turn injection
-                # Truncate long prompts for display
-                prompt_preview = event.text[:50] + "..." if len(event.text) > 50 else event.text
-                prompt_preview = prompt_preview.replace("\n", " ")  # Single line
-                queue_pos = event.position_in_queue
-                if queue_pos == 0:
-                    display.add_system_message(
-                        f'Prompt queued: "{prompt_preview}" - will be processed when model pauses',
-                        style="cyan"
-                    )
-                else:
-                    display.add_system_message(
-                        f'Prompt queued (position {queue_pos + 1}): "{prompt_preview}"',
-                        style="cyan"
-                    )
+                # Add to pending prompts bar above input
+                display.add_pending_prompt(event.text)
 
             elif isinstance(event, MidTurnPromptInjectedEvent):
-                # Show feedback that the queued prompt is being processed
-                prompt_preview = event.text[:50] + "..." if len(event.text) > 50 else event.text
-                prompt_preview = prompt_preview.replace("\n", " ")  # Single line
-                display.add_system_message(
-                    f'Injecting queued prompt: "{prompt_preview}"',
-                    style="dim cyan"
-                )
+                # Remove from pending prompts bar when processed
+                display.remove_pending_prompt(event.text)
 
             elif isinstance(event, SessionListEvent):
                 # Store sessions for completion AND display
