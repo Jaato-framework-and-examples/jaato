@@ -274,6 +274,8 @@ class ClarificationResolvedEvent(Event):
     type: EventType = field(default=EventType.CLARIFICATION_RESOLVED)
     request_id: str = ""
     tool_name: str = ""
+    qa_pairs: List[List[str]] = field(default_factory=list)
+    # ^ List of [question_text, answer_text] pairs for overview display
 
 
 @dataclass

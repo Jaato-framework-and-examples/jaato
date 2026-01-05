@@ -881,11 +881,11 @@ class RichClient:
                 if display:
                     display.refresh()
 
-        def on_clarification_resolved(tool_name: str):
+        def on_clarification_resolved(tool_name: str, qa_pairs: list):
             """Called when all clarification questions are answered."""
             buffer = registry.get_buffer("main")
             if buffer:
-                buffer.set_tool_clarification_resolved(tool_name)
+                buffer.set_tool_clarification_resolved(tool_name, qa_pairs)
                 if display:
                     display.refresh()
 
@@ -2534,11 +2534,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.set_waiting_for_channel_input(True)
 
             elif isinstance(event, ClarificationResolvedEvent):
-                ipc_trace(f"  ClarificationResolvedEvent: tool={event.tool_name}")
+                ipc_trace(f"  ClarificationResolvedEvent: tool={event.tool_name}, qa_pairs={len(event.qa_pairs)}")
                 # Update tool tree with resolution (same as direct mode)
                 buffer = agent_registry.get_selected_buffer()
                 if buffer:
-                    buffer.set_tool_clarification_resolved(event.tool_name)
+                    # Convert [[q, a], ...] back to [(q, a), ...] for compatibility
+                    qa_pairs = [(q, a) for q, a in event.qa_pairs] if event.qa_pairs else None
+                    buffer.set_tool_clarification_resolved(event.tool_name, qa_pairs)
                     display.refresh()
                 pending_clarification_request = None
                 display.set_waiting_for_channel_input(False)
