@@ -167,6 +167,8 @@ class PTDisplay:
         self._model_provider: str = ""
         self._model_name: str = ""
         self._context_usage: Dict[str, Any] = {}
+        self._gc_threshold: Optional[float] = None  # GC threshold percentage (e.g., 80.0)
+        self._gc_strategy: Optional[str] = None  # GC strategy name (e.g., "truncate", "hybrid")
 
         # Session bar info
         self._session_id: str = ""
@@ -421,7 +423,18 @@ class PTDisplay:
             else:
                 context_str = f"{percent_available:.0f}% available ({total} used)"
         else:
+            percent_available = 100.0
             context_str = "100% available"
+
+        # Add GC threshold hint when approaching trigger point
+        gc_hint = None
+        if self._gc_threshold is not None:
+            # Calculate how close we are to the threshold
+            # Show hint when within 10% of threshold or already past it
+            gc_trigger_available = 100 - self._gc_threshold
+            if percent_available <= gc_trigger_available + 10:
+                strategy = self._gc_strategy or "gc"
+                gc_hint = f"{strategy} at {gc_trigger_available:.0f}%"
 
         # Build formatted text with columns
         # Plan symbols | Provider | Model | Context
@@ -446,8 +459,13 @@ class PTDisplay:
             ("class:status-bar.separator", "  │  "),
             ("class:status-bar.label", "Context: "),
             ("class:status-bar.value", context_str),
-            ("class:status-bar", " "),
         ])
+
+        # Add GC threshold warning hint if applicable
+        if gc_hint:
+            result.append(("class:status-bar.warning", f" ({gc_hint})"))
+
+        result.append(("class:status-bar", " "))
 
         return result
 
@@ -1100,6 +1118,8 @@ class PTDisplay:
             "pending-prompts-bar": "bg:#1a1a1a",
             "pending-prompt": "#5fd7ff",  # cyan
             "pending-prompt.overflow": "#808080 italic",
+            # Status bar warning (GC threshold)
+            "status-bar.warning": "#ffff5f",  # yellow for warning
         })
 
         input_style = self._input_handler._pt_style if self._input_handler else None
@@ -1284,6 +1304,21 @@ class PTDisplay:
             usage: Dict with 'total_tokens', 'prompt_tokens', 'output_tokens', etc.
         """
         self._context_usage = usage
+        self.refresh()
+
+    def set_gc_threshold(
+        self,
+        threshold: Optional[float],
+        strategy: Optional[str] = None
+    ) -> None:
+        """Set the GC threshold percentage and strategy for status bar display.
+
+        Args:
+            threshold: GC trigger threshold percentage (e.g., 80.0), or None to hide.
+            strategy: GC strategy name (e.g., "truncate", "hybrid", "summarize").
+        """
+        self._gc_threshold = threshold
+        self._gc_strategy = strategy
         self.refresh()
 
     # Plan panel methods
