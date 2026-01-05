@@ -3,7 +3,7 @@
 import os
 import tempfile
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..model_provider.types import ToolSchema
 
@@ -38,7 +38,7 @@ class ClarificationPlugin:
         self._agent_name: Optional[str] = None
         # Clarification lifecycle hooks for UI integration
         self._on_clarification_requested: Optional[Callable[[str, List[str]], None]] = None
-        self._on_clarification_resolved: Optional[Callable[[str], None]] = None
+        self._on_clarification_resolved: Optional[Callable[[str, List[Tuple[str, str]]], None]] = None
         # Per-question hooks for progressive display
         self._on_question_displayed: Optional[Callable[[str, int, int, List[str]], None]] = None
         self._on_question_answered: Optional[Callable[[str, int, str], None]] = None
@@ -90,7 +90,7 @@ class ClarificationPlugin:
     def set_clarification_hooks(
         self,
         on_requested: Optional[Callable[[str, List[str]], None]] = None,
-        on_resolved: Optional[Callable[[str], None]] = None,
+        on_resolved: Optional[Callable[[str, List[Tuple[str, str]]], None]] = None,
         on_question_displayed: Optional[Callable[[str, int, int, List[str]], None]] = None,
         on_question_answered: Optional[Callable[[str, int, str], None]] = None
     ) -> None:
@@ -102,8 +102,9 @@ class ClarificationPlugin:
         Args:
             on_requested: Called when clarification session starts.
                 Signature: (tool_name, prompt_lines) -> None
-            on_resolved: Called when clarification is resolved.
-                Signature: (tool_name) -> None
+            on_resolved: Called when clarification is resolved with Q&A summary.
+                Signature: (tool_name, qa_pairs) -> None
+                qa_pairs: List of (question_text, answer_text) tuples
             on_question_displayed: Called when each question is shown.
                 Signature: (tool_name, question_index, total_questions, question_lines) -> None
             on_question_answered: Called when user answers a question.
@@ -322,12 +323,11 @@ The tool returns responses keyed by question number (1-based):
                 on_question_answered=self._on_question_answered
             )
 
-            # Emit clarification resolved hook
-            if self._on_clarification_resolved:
-                self._on_clarification_resolved("request_clarification")
-
             # Format the response for the model
             if response.cancelled:
+                # Emit resolved hook with empty qa_pairs for cancelled
+                if self._on_clarification_resolved:
+                    self._on_clarification_resolved("request_clarification", [])
                 return {
                     "cancelled": True,
                     "message": "User cancelled the clarification request.",
@@ -335,18 +335,23 @@ The tool returns responses keyed by question number (1-based):
 
             # Build a structured response keyed by question number
             result = {"responses": {}}
+            # Also build Q&A pairs for the overview
+            qa_pairs: List[Tuple[str, str]] = []
 
             for answer in response.answers:
                 q_key = str(answer.question_index)
                 question = request.questions[answer.question_index - 1] if answer.question_index <= len(request.questions) else None
+                question_text = question.text if question else f"Question {answer.question_index}"
 
                 if answer.skipped:
                     result["responses"][q_key] = {"skipped": True}
+                    qa_pairs.append((question_text, "(skipped)"))
                 elif answer.free_text is not None:
                     result["responses"][q_key] = {
                         "value": answer.free_text,
                         "type": "free_text",
                     }
+                    qa_pairs.append((question_text, answer.free_text))
                 else:
                     # Get choice texts for selected indices
                     choice_texts = []
@@ -366,12 +371,18 @@ The tool returns responses keyed by question number (1-based):
                             "texts": choice_texts,
                             "type": "multiple_choice",
                         }
+                        qa_pairs.append((question_text, ", ".join(choice_texts) if choice_texts else "(none)"))
                     else:
                         result["responses"][q_key] = {
                             "selected": answer.selected_choices[0] if answer.selected_choices else None,
                             "text": choice_texts[0] if choice_texts else None,
                             "type": "single_choice",
                         }
+                        qa_pairs.append((question_text, choice_texts[0] if choice_texts else "(none)"))
+
+            # Emit clarification resolved hook with Q&A summary
+            if self._on_clarification_resolved:
+                self._on_clarification_resolved("request_clarification", qa_pairs)
 
             return result
 

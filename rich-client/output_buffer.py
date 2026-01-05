@@ -92,6 +92,7 @@ class ActiveToolCall:
     clarification_current_question: int = 0  # Current question index (1-based)
     clarification_total_questions: int = 0  # Total number of questions
     clarification_answered: Optional[List[Tuple[int, str]]] = None  # List of (question_index, answer_summary)
+    clarification_summary: Optional[List[Tuple[str, str]]] = None  # Q&A pairs [(question, answer), ...] for overview
     # Live output tracking (tail -f style preview)
     output_lines: Optional[List[str]] = None  # Rolling buffer of recent output lines
     output_max_lines: int = 30  # Max lines to keep in buffer
@@ -1177,11 +1178,16 @@ class OutputBuffer:
                 tool.clarification_prompt_lines = None
                 return
 
-    def set_tool_clarification_resolved(self, tool_name: str) -> None:
+    def set_tool_clarification_resolved(
+        self,
+        tool_name: str,
+        qa_pairs: Optional[List[Tuple[str, str]]] = None
+    ) -> None:
         """Mark a tool's clarification as fully resolved.
 
         Args:
             tool_name: Name of the tool.
+            qa_pairs: Optional list of (question, answer) tuples for overview display.
         """
         for tool in self._active_tools:
             if tool.name == tool_name:
@@ -1189,6 +1195,7 @@ class OutputBuffer:
                 tool.clarification_prompt_lines = None
                 tool.clarification_current_question = 0
                 tool.clarification_total_questions = 0
+                tool.clarification_summary = qa_pairs
                 return
 
     def get_pending_prompt_for_pager(self) -> Optional[Tuple[str, List[str]]]:
@@ -1421,6 +1428,11 @@ class OutputBuffer:
                         height += 1  # top border
                         height += rendered_lines
                         height += 1  # bottom border
+
+                # Clarification summary (if resolved with answers)
+                if tool.completed and tool.clarification_summary:
+                    height += 1  # header ("Answers (N)")
+                    height += len(tool.clarification_summary)  # One line per Q&A pair
 
         elif self._spinner_active:
             # Spinner alone (no tools) - just 1 line
@@ -2094,6 +2106,26 @@ class OutputBuffer:
                         output.append(f"    {continuation} ", style="dim")
                         # Show full error message without truncation
                         output.append(f"  ⚠ {tool.error_message}", style="red dim")
+
+                    # Show clarification summary if available (after resolved)
+                    if tool.completed and tool.clarification_summary:
+                        continuation = "   " if is_last else "│  "
+                        output.append("\n")
+                        output.append(f"    {continuation} ", style="dim")
+                        output.append("📋 ", style="cyan")
+                        output.append(f"Answers ({len(tool.clarification_summary)})", style="dim cyan")
+                        for question, answer in tool.clarification_summary:
+                            output.append("\n")
+                            output.append(f"    {continuation}   ", style="dim")
+                            # Truncate long questions for display
+                            max_q_len = 40
+                            q_display = question if len(question) <= max_q_len else question[:max_q_len-3] + "..."
+                            output.append(f"Q: {q_display}", style="dim")
+                            output.append(" → ", style="dim")
+                            # Truncate long answers for display
+                            max_a_len = 30
+                            a_display = answer if len(answer) <= max_a_len else answer[:max_a_len-3] + "..."
+                            output.append(a_display, style="dim green")
             else:
                 # Collapsed view - all tools on one line
                 tool_summaries = []
