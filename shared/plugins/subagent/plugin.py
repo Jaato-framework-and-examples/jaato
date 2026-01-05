@@ -1142,6 +1142,16 @@ class SubagentPlugin:
                 )
             return
 
+        # Resolve trace paths to absolute so they work even if CWD changes later
+        # (e.g., when parent's _in_workspace() context exits and restores CWD)
+        trace_log = os.environ.get("JAATO_TRACE_LOG")
+        if trace_log and not os.path.isabs(trace_log):
+            os.environ["JAATO_TRACE_LOG"] = os.path.abspath(trace_log)
+
+        provider_trace = os.environ.get("JAATO_PROVIDER_TRACE")
+        if provider_trace and not os.path.isabs(provider_trace):
+            os.environ["JAATO_PROVIDER_TRACE"] = os.path.abspath(provider_trace)
+
         if not self._runtime:
             # No runtime - can't run async subagent
             if self._parent_session:
@@ -1186,7 +1196,7 @@ class SubagentPlugin:
             raw_plugin_configs = profile.plugin_configs.copy() if profile.plugin_configs else {}
             expanded_configs = expand_plugin_configs(raw_plugin_configs, expansion_context)
 
-            # Inject agent_name into each plugin's config
+            # Inject agent_name and workspace-aware configs into each plugin
             effective_plugin_configs = expanded_configs
             for plugin_name in (profile.plugins or []):
                 if plugin_name not in effective_plugin_configs:
@@ -1194,6 +1204,9 @@ class SubagentPlugin:
                 effective_plugin_configs[plugin_name]["agent_name"] = profile.name
                 if plugin_name == "todo" and self._plan_reporter:
                     effective_plugin_configs[plugin_name]["_injected_reporter"] = self._plan_reporter
+                # Inject base_path for template plugin so it uses parent's workspace
+                if plugin_name == "template":
+                    effective_plugin_configs[plugin_name]["base_path"] = parent_cwd
 
             # Create session
             session = self._runtime.create_session(
