@@ -1284,25 +1284,33 @@ class SubagentPlugin:
 
             # Process any queued prompts from send_to_subagent
             # These arrive via inject_prompt() but may not be processed if
-            # send_message returned before they arrived
+            # send_message returned before they arrived.
+            # We wait up to 3 seconds for parent messages to arrive, resetting
+            # the counter each time we process a message.
             logger.info(f"QUEUE_CHECK: Starting queue processing loop for {agent_id}")
-            queue_check_count = 0
-            while True:
+            empty_checks = 0
+            max_empty_checks = 30  # 30 * 100ms = 3 seconds max wait
+            while empty_checks < max_empty_checks:
                 # Small delay to allow queued prompts to arrive
                 time.sleep(0.1)
-                queue_check_count += 1
 
                 # Check if there are pending prompts
                 queue_size = session._injection_queue.qsize()
-                logger.info(f"QUEUE_CHECK [{queue_check_count}]: queue_size={queue_size}")
+
+                if queue_size == 0:
+                    empty_checks += 1
+                    if empty_checks % 10 == 0:  # Log every second
+                        logger.info(f"QUEUE_CHECK [{agent_id}]: Waiting for prompts... ({empty_checks}/{max_empty_checks})")
+                    continue
+
+                # Reset counter when we get a message - parent is still active
+                empty_checks = 0
 
                 try:
                     queued_prompt = session._injection_queue.get_nowait()
                     logger.info(f"QUEUE_CHECK: Got prompt from queue: {queued_prompt[:50]}...")
                 except:
-                    # Queue is empty, done processing
-                    logger.info(f"QUEUE_CHECK: Queue empty after {queue_check_count} checks, exiting loop")
-                    break
+                    continue
 
                 # Emit the parent's prompt to UI with "parent" source
                 logger.info(f"QUEUE_CHECK: Emitting to UI with source=parent")
@@ -1320,6 +1328,8 @@ class SubagentPlugin:
                 logger.info(f"QUEUE_CHECK: Sending to model...")
                 response = session.send_message(queued_prompt, on_output=subagent_output_callback)
                 logger.info(f"QUEUE_CHECK: Model responded")
+
+            logger.info(f"QUEUE_CHECK: Exiting loop for {agent_id} after {empty_checks} consecutive empty checks")
 
             # Update session info after completion
             usage = session.get_context_usage()
