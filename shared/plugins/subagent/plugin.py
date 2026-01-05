@@ -10,7 +10,6 @@ for subagents, avoiding redundant provider connections.
 import logging
 import os
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from datetime import datetime
@@ -661,18 +660,18 @@ class SubagentPlugin:
         }
 
     def _execute_send_to_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Inject a message into a running subagent's queue.
+        """Send a message to a subagent for processing.
 
-        This is non-blocking - the message is queued and will be processed
-        at the subagent's next yield point.
+        If the subagent is idle, the message is processed immediately.
+        If the subagent is busy, the message is queued for mid-turn processing.
 
         Args:
             args: Tool arguments containing:
                 - subagent_id: ID of the active subagent session
-                - message: Message to inject into the subagent's queue
+                - message: Message to send to the subagent
 
         Returns:
-            Status dict indicating success or failure.
+            Status dict with the subagent's response or error.
         """
         subagent_id = args.get('subagent_id', '')
         message = args.get('message', '')
@@ -703,23 +702,59 @@ class SubagentPlugin:
             session = session_info['session']
             agent_id = session_info['agent_id']
 
-            # Inject message into subagent's queue (non-blocking)
-            # The session will handle UI notification when it processes the prompt
-            # (using "parent" source since this subagent has a parent session)
-            logger.info(f"SEND_TO_SUBAGENT: subagent_id={subagent_id}, session={id(session)}, message={message[:50]}...")
-            session.inject_prompt(message)
-            logger.info(f"SEND_TO_SUBAGENT: inject_prompt called, queue_size={session._injection_queue.qsize()}")
+            # Check if subagent is currently processing
+            if session.is_running:
+                # Subagent is busy - queue for mid-turn processing
+                logger.info(f"SEND_TO_SUBAGENT: {subagent_id} is busy, queuing message")
+                session.inject_prompt(message)
+                return {
+                    'success': True,
+                    'status': 'queued',
+                    'message': f'Subagent is busy. Message queued for processing.'
+                }
+
+            # Subagent is idle - process directly
+            logger.info(f"SEND_TO_SUBAGENT: {subagent_id} is idle, processing directly")
+
+            # Emit the parent's message to UI
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_output(
+                    agent_id=agent_id,
+                    source="parent",
+                    text=message,
+                    mode="write"
+                )
+
+            # Create output callback for model response
+            def output_callback(source: str, text: str, mode: str) -> None:
+                if self._ui_hooks:
+                    self._ui_hooks.on_agent_output(
+                        agent_id=agent_id,
+                        source=source,
+                        text=text,
+                        mode=mode
+                    )
+
+            # Process the message
+            response = session.send_message(message, on_output=output_callback)
+
+            # Forward response to parent
+            if self._parent_session:
+                self._parent_session.inject_prompt(
+                    f"[SUBAGENT agent_id={agent_id} event=MODEL_OUTPUT]\n{response}"
+                )
 
             return {
                 'success': True,
-                'message': f'Message injected into {subagent_id}. Will be processed at next yield point.'
+                'status': 'processed',
+                'response': response
             }
 
         except Exception as e:
             logger.exception(f"Error sending to subagent {subagent_id}")
             return {
                 'success': False,
-                'error': f'Error injecting message: {str(e)}'
+                'error': f'Error processing message: {str(e)}'
             }
 
     def _execute_close_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1281,61 +1316,13 @@ class SubagentPlugin:
                     mode="write"
                 )
 
-            # Run the conversation (output is automatically forwarded to parent)
+            # Run the initial conversation (output is automatically forwarded to parent)
             response = session.send_message(prompt, on_output=subagent_output_callback)
 
-            # Process any queued prompts from send_to_subagent
-            # These arrive via inject_prompt() but may not be processed if
-            # send_message returned before they arrived.
-            # We wait for parent messages to arrive. The parent needs time to:
-            # 1. Receive our completion event
-            # 2. Process it and decide to send more messages
-            # 3. Execute send_to_subagent tool calls
-            # This can take 10+ seconds, so we wait up to 60 seconds.
-            # The counter resets each time we process a message.
-            logger.info(f"QUEUE_CHECK: Starting queue processing loop for {agent_id}, session={id(session)}")
-            empty_checks = 0
-            max_empty_checks = 600  # 600 * 100ms = 60 seconds max wait
-            while empty_checks < max_empty_checks:
-                # Small delay to allow queued prompts to arrive
-                time.sleep(0.1)
-
-                # Check if there are pending prompts
-                queue_size = session._injection_queue.qsize()
-
-                if queue_size == 0:
-                    empty_checks += 1
-                    if empty_checks % 50 == 0:  # Log every 5 seconds
-                        logger.info(f"QUEUE_CHECK [{agent_id}]: Waiting for prompts... ({empty_checks}/{max_empty_checks})")
-                    continue
-
-                # Reset counter when we get a message - parent is still active
-                empty_checks = 0
-
-                try:
-                    queued_prompt = session._injection_queue.get_nowait()
-                    logger.info(f"QUEUE_CHECK: Got prompt from queue: {queued_prompt[:50]}...")
-                except:
-                    continue
-
-                # Emit the parent's prompt to UI with "parent" source
-                logger.info(f"QUEUE_CHECK: Emitting to UI with source=parent")
-                if self._ui_hooks:
-                    self._ui_hooks.on_agent_output(
-                        agent_id=agent_id,
-                        source="parent",
-                        text=queued_prompt,
-                        mode="write"
-                    )
-                else:
-                    logger.warning(f"QUEUE_CHECK: No UI hooks available!")
-
-                # Send to model and get response
-                logger.info(f"QUEUE_CHECK: Sending to model...")
-                response = session.send_message(queued_prompt, on_output=subagent_output_callback)
-                logger.info(f"QUEUE_CHECK: Model responded")
-
-            logger.info(f"QUEUE_CHECK: Exiting loop for {agent_id} after {empty_checks} consecutive empty checks")
+            # Note: Additional messages from parent via send_to_subagent are now
+            # processed directly by _execute_send_to_subagent when the session is idle,
+            # or queued for mid-turn processing if the session is busy.
+            # No polling loop needed.
 
             # Update session info after completion
             usage = session.get_context_usage()
