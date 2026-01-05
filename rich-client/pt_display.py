@@ -168,6 +168,7 @@ class PTDisplay:
         self._model_name: str = ""
         self._context_usage: Dict[str, Any] = {}
         self._gc_threshold: Optional[float] = None  # GC threshold percentage (e.g., 80.0)
+        self._gc_strategy: Optional[str] = None  # GC strategy name (e.g., "truncate", "hybrid")
 
         # Session bar info
         self._session_id: str = ""
@@ -432,7 +433,8 @@ class PTDisplay:
             # Show hint when within 10% of threshold or already past it
             gc_trigger_available = 100 - self._gc_threshold
             if percent_available <= gc_trigger_available + 10:
-                gc_hint = f"GC triggering at {gc_trigger_available:.0f}%"
+                strategy = self._gc_strategy or "gc"
+                gc_hint = f"{strategy} at {gc_trigger_available:.0f}%"
 
         # Build formatted text with columns
         # Plan symbols | Provider | Model | Context
@@ -1304,13 +1306,19 @@ class PTDisplay:
         self._context_usage = usage
         self.refresh()
 
-    def set_gc_threshold(self, threshold: Optional[float]) -> None:
-        """Set the GC threshold percentage for status bar display.
+    def set_gc_threshold(
+        self,
+        threshold: Optional[float],
+        strategy: Optional[str] = None
+    ) -> None:
+        """Set the GC threshold percentage and strategy for status bar display.
 
         Args:
             threshold: GC trigger threshold percentage (e.g., 80.0), or None to hide.
+            strategy: GC strategy name (e.g., "truncate", "hybrid", "summarize").
         """
         self._gc_threshold = threshold
+        self._gc_strategy = strategy
         self.refresh()
 
     # Plan panel methods
