@@ -250,7 +250,9 @@ class TruncateGCPlugin:
         self._trace(f"collect: removed={removed_count} turns, tokens {tokens_before}->{tokens_after}")
 
         # Add notification if configured
-        if self._config.get('notify_on_gc', False):
+        notify_on_gc = self._config.get('notify_on_gc', False)
+        self._trace(f"collect: notify_on_gc={notify_on_gc}")
+        if notify_on_gc:
             template = self._config.get(
                 'notification_template',
                 "Context cleaned: removed {removed} old turns, kept {kept} recent turns."
@@ -261,6 +263,7 @@ class TruncateGCPlugin:
                 tokens_freed=tokens_before - tokens_after
             )
             result.notification = notification
+            self._trace(f"collect: notification created: {notification}")
 
             # Prepend notification to history
             notification_content = create_gc_notification_message(notification)
