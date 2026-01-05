@@ -1500,23 +1500,38 @@ class JaatoSession:
         Returns:
             The model's response if a prompt was handled, None otherwise.
         """
-        # Check internal injection queue
-        try:
-            prompt = self._injection_queue.get_nowait()
-        except queue.Empty:
-            return None
+        # Process queue items, skipping subagent messages until we find a real prompt
+        # or the queue is empty. Subagent messages are for logging/visibility only.
+        while True:
+            # Check internal injection queue
+            try:
+                prompt = self._injection_queue.get_nowait()
+            except queue.Empty:
+                return None
 
-        self._trace(f"MID_TURN_PROMPT: Handling injected prompt: {prompt[:100]}...")
+            self._trace(f"MID_TURN_PROMPT: Handling injected prompt: {prompt[:100]}...")
 
-        # Notify that prompt is being injected (for UI to remove from pending bar)
-        if self._on_prompt_injected:
-            self._on_prompt_injected(prompt)
+            # Notify that prompt is being injected (for UI to remove from pending bar)
+            if self._on_prompt_injected:
+                self._on_prompt_injected(prompt)
+
+            # Check if this is a subagent message (for logging/visibility, not model prompts)
+            # Subagent messages are forwarded for tracing but the model shouldn't respond to them
+            # The parent model gets subagent results via spawn_subagent tool response
+            is_subagent_message = prompt.startswith("<subagent_event ") or prompt.startswith("[SUBAGENT ")
+            self._trace(f"MID_TURN_PROMPT: is_subagent_message={is_subagent_message}, on_output={on_output is not None}, _parent_session={self._parent_session is not None}")
+
+            if is_subagent_message:
+                # Subagent messages are for logging/visibility only - don't send to model
+                # This prevents duplicate model responses to each forwarded MODEL_OUTPUT chunk
+                self._trace(f"MID_TURN_PROMPT: Skipping model call for subagent message (logged only)")
+                continue  # Check for more messages in the queue
+
+            # Found a real prompt to process - break out of skip loop
+            break
 
         # Emit the prompt as user/parent output so UI shows it
-        # Skip for subagent messages - parent doesn't need to echo child output
-        is_subagent_message = prompt.startswith("<subagent_event ") or prompt.startswith("[SUBAGENT ")
-        self._trace(f"MID_TURN_PROMPT: is_subagent_message={is_subagent_message}, on_output={on_output is not None}, _parent_session={self._parent_session is not None}")
-        if on_output and not is_subagent_message:
+        if on_output:
             # Use "parent" source if this is a subagent (has parent session),
             # otherwise "user" for main agent receiving user input
             source = "parent" if self._parent_session else "user"
