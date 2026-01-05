@@ -1091,12 +1091,17 @@ class SubagentPlugin:
         else:
             agent_id = f"{self._parent_agent_id}.{profile.name}"
 
+        # Capture parent's working directory so subagent runs in same context
+        # This ensures relative paths (trace logs, workspaceRoot) resolve correctly
+        parent_cwd = os.getcwd()
+
         # Submit to thread pool (always async)
         self._executor.submit(
             self._run_subagent_async,
             agent_id,
             profile,
-            full_prompt
+            full_prompt,
+            parent_cwd
         )
 
         # Return immediately with agent_id
@@ -1111,7 +1116,8 @@ class SubagentPlugin:
         self,
         agent_id: str,
         profile: SubagentProfile,
-        prompt: str
+        prompt: str,
+        parent_cwd: str
     ) -> None:
         """Run a subagent asynchronously with output forwarding to parent.
 
@@ -1122,7 +1128,20 @@ class SubagentPlugin:
             agent_id: Pre-generated agent ID.
             profile: SubagentProfile defining the subagent's configuration.
             prompt: The prompt to send to the subagent.
+            parent_cwd: Parent's working directory for resolving relative paths.
         """
+        # Change to parent's working directory so relative paths resolve correctly
+        # This ensures trace logs, workspaceRoot, etc. work the same as parent
+        try:
+            os.chdir(parent_cwd)
+        except OSError as e:
+            if self._parent_session:
+                self._parent_session.inject_prompt(
+                    f"[SUBAGENT agent_id={agent_id} event=ERROR]\n"
+                    f"Cannot change to workspace directory {parent_cwd}: {e}"
+                )
+            return
+
         if not self._runtime:
             # No runtime - can't run async subagent
             if self._parent_session:
