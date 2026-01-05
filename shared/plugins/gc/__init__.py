@@ -110,7 +110,8 @@ def load_gc_plugin(name: str, config: Optional[Dict] = None) -> GCPlugin:
 
 
 def load_gc_from_file(
-    file_path: str = ".jaato/gc.json"
+    file_path: str = ".jaato/gc.json",
+    agent_name: Optional[str] = None
 ) -> Optional[tuple["GCPlugin", "GCConfig"]]:
     """Load GC configuration from a JSON file.
 
@@ -130,13 +131,14 @@ def load_gc_from_file(
 
     Args:
         file_path: Path to the JSON config file (default: .jaato/gc.json).
+        agent_name: Optional agent name for trace logging identification.
 
     Returns:
         Tuple of (GCPlugin, GCConfig) if file exists and is valid,
         None if file doesn't exist or is invalid.
 
     Example:
-        result = load_gc_from_file()
+        result = load_gc_from_file(agent_name="main")
         if result:
             gc_plugin, gc_config = result
             client.set_gc_plugin(gc_plugin, gc_config)
@@ -164,6 +166,8 @@ def load_gc_from_file(
             'preserve_recent_turns': data.get('preserve_recent_turns', 5),
             'notify_on_gc': data.get('notify_on_gc', True),
         }
+        if agent_name:
+            gc_init_config['agent_name'] = agent_name
         if data.get('summarize_middle_turns') is not None:
             gc_init_config['summarize_middle_turns'] = data['summarize_middle_turns']
         # Merge plugin-specific config

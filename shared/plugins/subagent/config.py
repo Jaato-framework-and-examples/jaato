@@ -471,7 +471,8 @@ class SubagentConfig:
 
 
 def gc_profile_to_plugin_config(
-    gc_profile: GCProfileConfig
+    gc_profile: GCProfileConfig,
+    agent_name: Optional[str] = None
 ) -> tuple:
     """Convert a GCProfileConfig to a (GCPlugin, GCConfig) tuple.
 
@@ -480,6 +481,7 @@ def gc_profile_to_plugin_config(
 
     Args:
         gc_profile: GCProfileConfig from a subagent profile.
+        agent_name: Optional agent name for trace logging identification.
 
     Returns:
         Tuple of (GCPlugin, GCConfig) ready to pass to session.set_gc_plugin().
@@ -489,7 +491,7 @@ def gc_profile_to_plugin_config(
 
     Example:
         if profile.gc:
-            gc_plugin, gc_config = gc_profile_to_plugin_config(profile.gc)
+            gc_plugin, gc_config = gc_profile_to_plugin_config(profile.gc, agent_id)
             session.set_gc_plugin(gc_plugin, gc_config)
     """
     from ..gc import load_gc_plugin, GCConfig
@@ -502,6 +504,8 @@ def gc_profile_to_plugin_config(
         'preserve_recent_turns': gc_profile.preserve_recent_turns,
         'notify_on_gc': gc_profile.notify_on_gc,
     }
+    if agent_name:
+        gc_init_config['agent_name'] = agent_name
     if gc_profile.summarize_middle_turns is not None:
         gc_init_config['summarize_middle_turns'] = gc_profile.summarize_middle_turns
     # Merge plugin-specific config

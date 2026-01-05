@@ -454,7 +454,7 @@ class RichClient:
         self._backend.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
         # Load GC configuration from .jaato/gc.json if present
-        gc_result = load_gc_from_file()
+        gc_result = load_gc_from_file(agent_name="main")
         if gc_result:
             gc_plugin, gc_config = gc_result
             self._backend.set_gc_plugin(gc_plugin, gc_config)

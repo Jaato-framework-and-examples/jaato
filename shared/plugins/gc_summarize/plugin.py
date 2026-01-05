@@ -314,7 +314,9 @@ class SummarizeGCPlugin:
         self._trace(f"collect: summarized={len(turns_to_summarize)} turns, tokens {tokens_before}->{tokens_after}")
 
         # Add notification if configured
-        if self._config.get('notify_on_gc', False):
+        notify_on_gc = self._config.get('notify_on_gc', False)
+        self._trace(f"collect: notify_on_gc={notify_on_gc}")
+        if notify_on_gc:
             template = self._config.get(
                 'notification_template',
                 "Context cleaned: summarized {removed} old turns into context summary."
@@ -325,6 +327,11 @@ class SummarizeGCPlugin:
                 tokens_freed=tokens_before - tokens_after
             )
             result.notification = notification
+            self._trace(f"collect: notification created: {notification}")
+
+            # Prepend notification to history
+            notification_content = create_gc_notification_message(notification)
+            new_history = [notification_content] + new_history
 
         return new_history, result
 
