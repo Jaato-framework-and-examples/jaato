@@ -10,6 +10,7 @@ for subagents, avoiding redundant provider connections.
 import logging
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from datetime import datetime
@@ -1280,6 +1281,32 @@ class SubagentPlugin:
 
             # Run the conversation (output is automatically forwarded to parent)
             response = session.send_message(prompt, on_output=subagent_output_callback)
+
+            # Process any queued prompts from send_to_subagent
+            # These arrive via inject_prompt() but may not be processed if
+            # send_message returned before they arrived
+            while True:
+                # Small delay to allow queued prompts to arrive
+                time.sleep(0.1)
+
+                # Check if there are pending prompts
+                try:
+                    queued_prompt = session._injection_queue.get_nowait()
+                except:
+                    # Queue is empty, done processing
+                    break
+
+                # Emit the parent's prompt to UI with "parent" source
+                if self._ui_hooks:
+                    self._ui_hooks.on_agent_output(
+                        agent_id=agent_id,
+                        source="parent",
+                        text=queued_prompt,
+                        mode="write"
+                    )
+
+                # Send to model and get response
+                response = session.send_message(queued_prompt, on_output=subagent_output_callback)
 
             # Update session info after completion
             usage = session.get_context_usage()
