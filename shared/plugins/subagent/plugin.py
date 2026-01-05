@@ -705,11 +705,11 @@ class SubagentPlugin:
             session.inject_prompt(message)
 
             # Notify UI hooks that a message was sent
-            # Use "user" source so it renders like user input in the subagent's output
+            # Use "parent" source - output buffer renders this like "user" but with "Parent" label
             if self._ui_hooks:
                 self._ui_hooks.on_agent_output(
                     agent_id=agent_id,
-                    source="user",
+                    source="parent",
                     text=message,
                     mode="write"
                 )
