@@ -395,6 +395,10 @@ class AgentRegistry:
     ) -> None:
         """Update agent's context usage metrics.
 
+        Uses max-tracking to prevent values from going backwards (which can
+        happen during turn transitions when turn_accounting is reset).
+        The only way values should decrease is after GC runs.
+
         Args:
             agent_id: Which agent's context to update.
             total_tokens: Total tokens used.
@@ -408,13 +412,29 @@ class AgentRegistry:
             if not agent:
                 return
 
-            agent.context_usage = {
-                'total_tokens': total_tokens,
-                'prompt_tokens': prompt_tokens,
-                'output_tokens': output_tokens,
-                'turns': turns,
-                'percent_used': percent_used
-            }
+            # Get previous values (default to 0 if not set)
+            prev = agent.context_usage or {}
+            prev_total = prev.get('total_tokens', 0)
+
+            # Only update if new values are >= previous (prevents backwards jumping)
+            # This mirrors the max_tokens_seen logic in rich_client's usage callback
+            # Allow decreases of up to 20% (to handle GC and minor fluctuations)
+            # Block large drops (>20%) which are likely glitches from turn transitions
+            if prev_total > 0:
+                drop_percent = (prev_total - total_tokens) / prev_total * 100
+                is_large_drop = drop_percent > 20
+            else:
+                is_large_drop = False
+
+            if total_tokens >= prev_total or not is_large_drop:
+                agent.context_usage = {
+                    'total_tokens': total_tokens,
+                    'prompt_tokens': prompt_tokens,
+                    'output_tokens': output_tokens,
+                    'turns': turns,
+                    'percent_used': percent_used
+                }
+            # else: skip update - large backwards jump (likely turn transition glitch)
 
     def update_history(self, agent_id: str, history: List[Any]) -> None:
         """Update agent's conversation history.
