@@ -1512,10 +1512,12 @@ class JaatoSession:
         # Emit the prompt as user/parent output so UI shows it
         # Skip for subagent messages - parent doesn't need to echo child output
         is_subagent_message = prompt.startswith("<subagent_event ") or prompt.startswith("[SUBAGENT ")
+        self._trace(f"MID_TURN_PROMPT: is_subagent_message={is_subagent_message}, on_output={on_output is not None}, _parent_session={self._parent_session is not None}")
         if on_output and not is_subagent_message:
             # Use "parent" source if this is a subagent (has parent session),
             # otherwise "user" for main agent receiving user input
             source = "parent" if self._parent_session else "user"
+            self._trace(f"MID_TURN_PROMPT: Emitting with source={source}")
             on_output(source, prompt, "write")
 
         # Proactive rate limiting
