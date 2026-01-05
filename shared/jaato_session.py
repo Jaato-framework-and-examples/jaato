@@ -17,6 +17,7 @@ from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig
 from .token_accounting import TokenLedger
 from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
+from .plugins.gc.utils import estimate_history_tokens
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .plugins.model_provider.base import UsageUpdateCallback, GCThresholdCallback
 from .plugins.model_provider.types import (
@@ -1729,6 +1730,9 @@ class JaatoSession:
 
         Note: Each turn's prompt_tokens includes ALL previous history,
         so we use the LAST turn's values (not sum) for context usage.
+
+        When turn_accounting is empty (e.g., after GC reset), we estimate
+        tokens from the actual history to avoid incorrectly reporting 0%.
         """
         turn_accounting = self.get_turn_accounting()
 
@@ -1741,9 +1745,18 @@ class JaatoSession:
             total_output = last_turn.get('output', 0)
             total_tokens = last_turn.get('total', 0)
         else:
-            total_prompt = 0
-            total_output = 0
-            total_tokens = 0
+            # No turn accounting available - estimate from history
+            # This happens after GC resets the session with compressed history
+            history = self.get_history()
+            if history:
+                estimated_tokens = estimate_history_tokens(history)
+                total_prompt = estimated_tokens
+                total_output = 0
+                total_tokens = estimated_tokens
+            else:
+                total_prompt = 0
+                total_output = 0
+                total_tokens = 0
 
         context_limit = self.get_context_limit()
         percent_used = (total_tokens / context_limit * 100) if context_limit > 0 else 0
