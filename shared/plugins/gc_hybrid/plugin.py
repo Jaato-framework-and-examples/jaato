@@ -304,7 +304,9 @@ class HybridGCPlugin:
         self._trace(f"collect: truncated={turns_truncated}, summarized={turns_summarized}, tokens {tokens_before}->{tokens_after}")
 
         # Add notification if configured
-        if self._config.get('notify_on_gc', False):
+        notify_on_gc = self._config.get('notify_on_gc', False)
+        self._trace(f"collect: notify_on_gc={notify_on_gc}")
+        if notify_on_gc:
             template = self._config.get(
                 'notification_template',
                 "Context cleaned: {truncated} turns removed, "
@@ -317,6 +319,11 @@ class HybridGCPlugin:
                 tokens_freed=tokens_before - tokens_after
             )
             result.notification = notification
+            self._trace(f"collect: notification created: {notification}")
+
+            # Prepend notification to history
+            notification_content = create_gc_notification_message(notification)
+            new_history_parts = [notification_content] + new_history_parts
 
         return new_history_parts, result
 
