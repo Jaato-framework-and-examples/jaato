@@ -115,6 +115,18 @@ spawn_subagent(
     task="Run shell commands only",
     inline_config={"plugins": ["cli"]}
 )
+
+# Override GC configuration (useful for testing)
+spawn_subagent(
+    task="Stress test with low GC threshold",
+    inline_config={
+        "gc": {
+            "type": "truncate",
+            "threshold_percent": 5.0,  # Trigger GC at 5% (testing)
+            "preserve_recent_turns": 3
+        }
+    }
+)
 ```
 
 ### With Predefined Profiles

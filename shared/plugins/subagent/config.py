@@ -470,6 +470,56 @@ class SubagentConfig:
         )
 
 
+def gc_profile_to_plugin_config(
+    gc_profile: GCProfileConfig
+) -> tuple:
+    """Convert a GCProfileConfig to a (GCPlugin, GCConfig) tuple.
+
+    This helper function takes a profile's GC configuration and creates
+    the actual GC plugin and config objects needed by JaatoSession.
+
+    Args:
+        gc_profile: GCProfileConfig from a subagent profile.
+
+    Returns:
+        Tuple of (GCPlugin, GCConfig) ready to pass to session.set_gc_plugin().
+
+    Raises:
+        ValueError: If the GC plugin type is not found.
+
+    Example:
+        if profile.gc:
+            gc_plugin, gc_config = gc_profile_to_plugin_config(profile.gc)
+            session.set_gc_plugin(gc_plugin, gc_config)
+    """
+    from ..gc import load_gc_plugin, GCConfig
+
+    gc_type = gc_profile.type
+    gc_plugin_name = gc_type if gc_type.startswith('gc_') else f'gc_{gc_type}'
+
+    # Build plugin init config
+    gc_init_config = {
+        'preserve_recent_turns': gc_profile.preserve_recent_turns,
+        'notify_on_gc': gc_profile.notify_on_gc,
+    }
+    if gc_profile.summarize_middle_turns is not None:
+        gc_init_config['summarize_middle_turns'] = gc_profile.summarize_middle_turns
+    # Merge plugin-specific config
+    gc_init_config.update(gc_profile.plugin_config)
+
+    gc_plugin = load_gc_plugin(gc_plugin_name, gc_init_config)
+
+    # Create GCConfig for the session
+    gc_config = GCConfig(
+        threshold_percent=gc_profile.threshold_percent,
+        max_turns=gc_profile.max_turns,
+        preserve_recent_turns=gc_profile.preserve_recent_turns,
+        plugin_config=gc_profile.plugin_config,
+    )
+
+    return gc_plugin, gc_config
+
+
 @dataclass
 class SubagentResult:
     """Result from a subagent execution.
