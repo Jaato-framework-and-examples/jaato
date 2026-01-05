@@ -63,6 +63,13 @@ class AgentRegistry:
         self._selected_agent_id: str = "main"
         self._lock = threading.RLock()  # Reentrant lock for nested calls
         self._formatter_pipeline: Any = None  # Shared formatter pipeline for all agents
+        # Pending events for agents not yet created (handles race conditions)
+        # Each entry is a tuple: (event_type, *event_data)
+        # - ("output", source, text, mode)
+        # - ("tool_start", tool_name, tool_args, call_id)
+        # - ("tool_end", tool_name, success, duration_seconds, error_message, call_id)
+        # - ("tool_output", call_id, chunk)
+        self._pending_events: Dict[str, List[tuple]] = {}  # agent_id -> [events...]
 
     def create_agent(
         self,
@@ -121,6 +128,73 @@ class AgentRegistry:
             # If this is the first agent (main), select it
             if len(self._agents) == 1:
                 self._selected_agent_id = agent_id
+
+            # Flush any pending events for this agent (handles race condition where
+            # events arrived before AgentCreatedEvent)
+            if agent_id in self._pending_events:
+                pending = self._pending_events.pop(agent_id)
+                for event in pending:
+                    event_type = event[0]
+                    if event_type == "output":
+                        _, source, text, mode = event
+                        agent_info.output_buffer.append(source, text, mode)
+                    elif event_type == "tool_start":
+                        _, tool_name, tool_args, call_id = event
+                        agent_info.output_buffer.add_active_tool(tool_name, tool_args, call_id=call_id)
+                    elif event_type == "tool_end":
+                        _, tool_name, success, duration_seconds, error_message, call_id = event
+                        agent_info.output_buffer.mark_tool_completed(
+                            tool_name, success, duration_seconds, error_message, call_id=call_id
+                        )
+                    elif event_type == "tool_output":
+                        _, call_id, chunk = event
+                        agent_info.output_buffer.append_tool_output(call_id, chunk)
+
+    def queue_output(self, agent_id: str, source: str, text: str, mode: str) -> None:
+        """Queue output for an agent that hasn't been created yet.
+
+        Used when AgentOutputEvent arrives before AgentCreatedEvent (race condition).
+        The queued output will be flushed to the agent's buffer when it's created.
+
+        Args:
+            agent_id: Target agent identifier.
+            source: Source of the output ("model", plugin name, etc.)
+            text: The output text.
+            mode: "write" for new block, "append" to continue.
+        """
+        with self._lock:
+            if agent_id not in self._pending_events:
+                self._pending_events[agent_id] = []
+            self._pending_events[agent_id].append(("output", source, text, mode))
+
+    def queue_tool_start(self, agent_id: str, tool_name: str, tool_args: Dict, call_id: Optional[str] = None) -> None:
+        """Queue tool start event for an agent that hasn't been created yet."""
+        with self._lock:
+            if agent_id not in self._pending_events:
+                self._pending_events[agent_id] = []
+            self._pending_events[agent_id].append(("tool_start", tool_name, tool_args, call_id))
+
+    def queue_tool_end(
+        self,
+        agent_id: str,
+        tool_name: str,
+        success: bool,
+        duration_seconds: float,
+        error_message: Optional[str],
+        call_id: Optional[str] = None
+    ) -> None:
+        """Queue tool end event for an agent that hasn't been created yet."""
+        with self._lock:
+            if agent_id not in self._pending_events:
+                self._pending_events[agent_id] = []
+            self._pending_events[agent_id].append(("tool_end", tool_name, success, duration_seconds, error_message, call_id))
+
+    def queue_tool_output(self, agent_id: str, call_id: str, chunk: str) -> None:
+        """Queue tool output event for an agent that hasn't been created yet."""
+        with self._lock:
+            if agent_id not in self._pending_events:
+                self._pending_events[agent_id] = []
+            self._pending_events[agent_id].append(("tool_output", call_id, chunk))
 
     def get_agent(self, agent_id: str) -> Optional[AgentInfo]:
         """Get agent by ID.

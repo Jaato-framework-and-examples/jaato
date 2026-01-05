@@ -9,6 +9,7 @@ for subagents, avoiding redundant provider connections.
 
 import logging
 import os
+import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
@@ -451,8 +452,9 @@ class SubagentPlugin:
             "- TOOL_OUTPUT: Output from subagent's tool execution\n"
             "- COMPLETED: Subagent finished its task (includes final response)\n"
             "- ERROR: Subagent encountered an error\n\n"
-            "REACTING TO OUTPUT: When you receive a COMPLETED event, you can use "
-            "the subagent's result to decide next steps. If you need to spawn "
+            "REACTING TO OUTPUT: You can monitor subagent progress in real-time and use "
+            "send_to_subagent to provide guidance or corrections. When you receive a "
+            "COMPLETED event, use the result to decide next steps. If you need to spawn "
             "sequential dependent subagents, wait for COMPLETED before spawning the next.\n\n"
             "BIDIRECTIONAL COMMUNICATION:\n"
             "- Use send_to_subagent to inject messages into a running subagent\n"
@@ -659,18 +661,18 @@ class SubagentPlugin:
         }
 
     def _execute_send_to_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Inject a message into a running subagent's queue.
+        """Send a message to a subagent for processing.
 
-        This is non-blocking - the message is queued and will be processed
-        at the subagent's next yield point.
+        Messages are queued and processed asynchronously by the subagent.
+        The parent receives responses via [SUBAGENT event=MODEL_OUTPUT] notifications.
 
         Args:
             args: Tool arguments containing:
                 - subagent_id: ID of the active subagent session
-                - message: Message to inject into the subagent's queue
+                - message: Message to send to the subagent
 
         Returns:
-            Status dict indicating success or failure.
+            Status dict indicating the message was queued.
         """
         subagent_id = args.get('subagent_id', '')
         message = args.get('message', '')
@@ -701,21 +703,21 @@ class SubagentPlugin:
             session = session_info['session']
             agent_id = session_info['agent_id']
 
-            # Inject message into subagent's queue (non-blocking)
-            # The session will handle UI notification when it processes the prompt
-            # (using "parent" source since this subagent has a parent session)
+            # Queue message for async processing by subagent thread
+            logger.info(f"SEND_TO_SUBAGENT: Queuing message for {subagent_id}")
             session.inject_prompt(message)
 
             return {
                 'success': True,
-                'message': f'Message injected into {subagent_id}. Will be processed at next yield point.'
+                'status': 'queued',
+                'message': f'Message queued for {subagent_id}. Response will arrive via [SUBAGENT event=MODEL_OUTPUT].'
             }
 
         except Exception as e:
             logger.exception(f"Error sending to subagent {subagent_id}")
             return {
                 'success': False,
-                'error': f'Error injecting message: {str(e)}'
+                'error': f'Error queuing message: {str(e)}'
             }
 
     def _execute_close_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1201,6 +1203,12 @@ class SubagentPlugin:
                 if plugin_name == "template":
                     effective_plugin_configs[plugin_name]["base_path"] = parent_cwd
 
+            # Save parent session reference BEFORE create_session, because
+            # create_session calls session.configure() which overwrites
+            # self._parent_session to the new session (see line 514 in jaato_session.py)
+            parent_session = self._parent_session
+            logger.debug(f"SUBAGENT_DEBUG: Saved parent_session={parent_session} (is None={parent_session is None})")
+
             # Create session
             session = self._runtime.create_session(
                 model=model,
@@ -1209,6 +1217,11 @@ class SubagentPlugin:
                 plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
                 provider_name=provider
             )
+            logger.debug(f"SUBAGENT_DEBUG: After create_session, self._parent_session={self._parent_session}")
+
+            # Restore parent session reference (was overwritten by configure())
+            self._parent_session = parent_session
+            logger.debug(f"SUBAGENT_DEBUG: Restored self._parent_session={self._parent_session}")
 
             # Set agent context
             session.set_agent_context(
@@ -1216,8 +1229,10 @@ class SubagentPlugin:
                 agent_name=profile.name
             )
 
-            # Set parent session for output forwarding - THIS IS THE KEY CHANGE
-            session.set_parent_session(self._parent_session)
+            # Set parent session for output forwarding
+            logger.debug(f"SUBAGENT_DEBUG: Setting session._parent_session to {parent_session}")
+            session.set_parent_session(parent_session)
+            logger.debug(f"SUBAGENT_DEBUG: session._parent_session is now {session._parent_session}")
 
             # Set parent cancel token for cancellation propagation
             if self._parent_session and hasattr(self._parent_session, '_cancel_token'):
@@ -1264,8 +1279,37 @@ class SubagentPlugin:
                     mode="write"
                 )
 
-            # Run the conversation (output is automatically forwarded to parent)
+            # Run the initial conversation (output is automatically forwarded to parent)
             response = session.send_message(prompt, on_output=subagent_output_callback)
+
+            # Process additional messages from parent via blocking queue
+            # This is efficient - no polling, just blocks until message arrives or timeout
+            idle_timeout = 30  # seconds to wait before considering subagent done
+            logger.info(f"SUBAGENT_LOOP: Entering message loop for {agent_id}, timeout={idle_timeout}s")
+
+            while True:
+                try:
+                    # Block efficiently until message arrives or timeout
+                    message = session._injection_queue.get(timeout=idle_timeout)
+                    logger.info(f"SUBAGENT_LOOP: Got message for {agent_id}: {message[:50]}...")
+
+                    # Emit parent's message to UI
+                    if self._ui_hooks:
+                        self._ui_hooks.on_agent_output(
+                            agent_id=agent_id,
+                            source="parent",
+                            text=message,
+                            mode="write"
+                        )
+
+                    # Process the message
+                    response = session.send_message(message, on_output=subagent_output_callback)
+                    logger.info(f"SUBAGENT_LOOP: Processed message for {agent_id}")
+
+                except queue.Empty:
+                    # No messages for idle_timeout seconds, exit loop
+                    logger.info(f"SUBAGENT_LOOP: Timeout reached for {agent_id}, exiting loop")
+                    break
 
             # Update session info after completion
             usage = session.get_context_usage()
