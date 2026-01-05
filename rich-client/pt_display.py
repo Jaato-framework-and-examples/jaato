@@ -416,6 +416,15 @@ class PTDisplay:
         if usage:
             percent_used = usage.get('percent_used', 0)
             percent_available = 100 - percent_used
+        else:
+            percent_available = 100.0
+
+        # Build context string with GC threshold hint if configured
+        if self._gc_threshold is not None:
+            gc_trigger_available = 100 - self._gc_threshold
+            strategy = self._gc_strategy or "gc"
+            context_str = f"{percent_available:.0f}% available ({strategy} at {gc_trigger_available:.0f}%)"
+        elif usage:
             total = usage.get('total_tokens', 0)
             # Format: "88% available (15K used)"
             if total >= 1000:
@@ -423,18 +432,7 @@ class PTDisplay:
             else:
                 context_str = f"{percent_available:.0f}% available ({total} used)"
         else:
-            percent_available = 100.0
             context_str = "100% available"
-
-        # Add GC threshold hint when approaching trigger point
-        gc_hint = None
-        if self._gc_threshold is not None:
-            # Calculate how close we are to the threshold
-            # Show hint when within 10% of threshold or already past it
-            gc_trigger_available = 100 - self._gc_threshold
-            if percent_available <= gc_trigger_available + 10:
-                strategy = self._gc_strategy or "gc"
-                gc_hint = f"{strategy} at {gc_trigger_available:.0f}%"
 
         # Build formatted text with columns
         # Plan symbols | Provider | Model | Context
@@ -459,13 +457,8 @@ class PTDisplay:
             ("class:status-bar.separator", "  │  "),
             ("class:status-bar.label", "Context: "),
             ("class:status-bar.value", context_str),
+            ("class:status-bar", " "),
         ])
-
-        # Add GC threshold warning hint if applicable
-        if gc_hint:
-            result.append(("class:status-bar.warning", f" ({gc_hint})"))
-
-        result.append(("class:status-bar", " "))
 
         return result
 
