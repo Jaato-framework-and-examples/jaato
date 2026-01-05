@@ -1285,18 +1285,27 @@ class SubagentPlugin:
             # Process any queued prompts from send_to_subagent
             # These arrive via inject_prompt() but may not be processed if
             # send_message returned before they arrived
+            logger.info(f"QUEUE_CHECK: Starting queue processing loop for {agent_id}")
+            queue_check_count = 0
             while True:
                 # Small delay to allow queued prompts to arrive
                 time.sleep(0.1)
+                queue_check_count += 1
 
                 # Check if there are pending prompts
+                queue_size = session._injection_queue.qsize()
+                logger.info(f"QUEUE_CHECK [{queue_check_count}]: queue_size={queue_size}")
+
                 try:
                     queued_prompt = session._injection_queue.get_nowait()
+                    logger.info(f"QUEUE_CHECK: Got prompt from queue: {queued_prompt[:50]}...")
                 except:
                     # Queue is empty, done processing
+                    logger.info(f"QUEUE_CHECK: Queue empty after {queue_check_count} checks, exiting loop")
                     break
 
                 # Emit the parent's prompt to UI with "parent" source
+                logger.info(f"QUEUE_CHECK: Emitting to UI with source=parent")
                 if self._ui_hooks:
                     self._ui_hooks.on_agent_output(
                         agent_id=agent_id,
@@ -1304,9 +1313,13 @@ class SubagentPlugin:
                         text=queued_prompt,
                         mode="write"
                     )
+                else:
+                    logger.warning(f"QUEUE_CHECK: No UI hooks available!")
 
                 # Send to model and get response
+                logger.info(f"QUEUE_CHECK: Sending to model...")
                 response = session.send_message(queued_prompt, on_output=subagent_output_callback)
+                logger.info(f"QUEUE_CHECK: Model responded")
 
             # Update session info after completion
             usage = session.get_context_usage()
