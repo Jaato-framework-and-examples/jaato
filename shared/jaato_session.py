@@ -331,28 +331,27 @@ class JaatoSession:
             # Subagent returning result to parent
             parent_session.inject_prompt("[SUBAGENT agent_id=researcher COMPLETED]\\nFound 3 issues")
         """
+        self._trace(f"INJECT_PROMPT: agent_id={self._agent_id}, queue_size_before={self._injection_queue.qsize()}, text={text[:50]}...")
         self._injection_queue.put(text)
+        self._trace(f"INJECT_PROMPT: queue_size_after={self._injection_queue.qsize()}")
 
     def _forward_to_parent(self, event_type: str, content: str) -> None:
-        """Forward a completion event to the parent session.
+        """Forward an event to the parent session.
 
-        Only forwards COMPLETED, ERROR, and CANCELLED events to avoid noise.
-        Real-time output (MODEL_OUTPUT, TOOL_CALL, etc.) is visible in the
-        subagent's own tab via UI hooks.
+        Forwards all event types so the parent model can monitor subagent progress
+        and react in real-time (e.g., provide guidance via send_to_subagent).
 
-        These messages use XML format (<subagent_event>) and are NOT echoed
-        in the parent's output panel (handled in _check_and_handle_mid_turn_prompt).
+        These messages are NOT echoed in the parent's output panel - the check in
+        _check_and_handle_mid_turn_prompt skips output for [SUBAGENT ...] messages.
+        The subagent's output is visible in its own UI panel via UI hooks.
 
         Args:
-            event_type: Type of event (COMPLETED, ERROR, CANCELLED).
+            event_type: Type of event (MODEL_OUTPUT, TOOL_CALL, TOOL_OUTPUT,
+                       COMPLETED, ERROR, CANCELLED).
             content: Event content/payload.
         """
         if self._parent_session:
-            # Only forward completion events to parent to avoid noise
-            # Real-time output is visible in subagent's own tab via UI hooks
-            if event_type not in ("COMPLETED", "ERROR", "CANCELLED"):
-                return
-            message = f"<subagent_event agent_id=\"{self._agent_id}\" type=\"{event_type}\">\n{content}\n</subagent_event>"
+            message = f"[SUBAGENT agent_id={self._agent_id} event={event_type}]\n{content}"
             self._parent_session.inject_prompt(message)
 
     # ==================== Cancellation Support ====================
@@ -1515,10 +1514,12 @@ class JaatoSession:
         # Emit the prompt as user/parent output so UI shows it
         # Skip for subagent messages - parent doesn't need to echo child output
         is_subagent_message = prompt.startswith("<subagent_event ") or prompt.startswith("[SUBAGENT ")
+        self._trace(f"MID_TURN_PROMPT: is_subagent_message={is_subagent_message}, on_output={on_output is not None}, _parent_session={self._parent_session is not None}")
         if on_output and not is_subagent_message:
             # Use "parent" source if this is a subagent (has parent session),
             # otherwise "user" for main agent receiving user input
             source = "parent" if self._parent_session else "user"
+            self._trace(f"MID_TURN_PROMPT: Emitting with source={source}")
             on_output(source, prompt, "write")
 
         # Proactive rate limiting
