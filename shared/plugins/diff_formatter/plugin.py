@@ -1,18 +1,18 @@
 # shared/plugins/diff_formatter/plugin.py
-"""Diff formatter plugin for colorizing unified diff output.
+"""Diff formatter plugin with adaptive rendering based on terminal width.
 
-This plugin detects unified diff format and applies ANSI colors:
-- Green for additions (+)
-- Red for deletions (-)
-- Cyan for hunk headers (@@)
-- Dim for file headers (+++, ---)
+Supports three rendering modes:
+- Side-by-side (≥120 cols): Two-column view with box drawing
+- Compact (80-119 cols): Single-column with arrow notation
+- Unified (<80 cols): Traditional +/- format
 
-Can be used standalone or registered with a FormatterPipeline.
+The mode is automatically selected based on terminal width.
 
 Usage (standalone):
     from shared.plugins.diff_formatter import create_plugin
 
     formatter = create_plugin()
+    formatter.set_console_width(140)  # Side-by-side mode
     colored = formatter.format_output(diff_text)
 
 Usage (pipeline):
@@ -27,38 +27,58 @@ Usage (pipeline):
 import re
 from typing import Any, Dict, List, Optional
 
-# ANSI color codes
-ANSI_RESET = "\033[0m"
-ANSI_DIM = "\033[2m"
-ANSI_RED = "\033[31m"
-ANSI_GREEN = "\033[32m"
-ANSI_CYAN = "\033[36m"
+from .parser import parse_unified_diff, ParsedDiff
+from .renderers.base import ColorScheme, DEFAULT_COLOR_SCHEME, NO_COLOR_SCHEME
+from .renderers.unified import UnifiedRenderer, render_raw_unified
+from .renderers.side_by_side import SideBySideRenderer
+from .renderers.compact import CompactRenderer
 
 # Pattern to detect unified diff content
-# Matches lines starting with diff markers
 DIFF_LINE_PATTERN = re.compile(r'^(\+\+\+|---|\+|-|@@)', re.MULTILINE)
-
-# More strict pattern for unified diff headers
 UNIFIED_DIFF_HEADER = re.compile(r'^(---|\+\+\+) ', re.MULTILINE)
 HUNK_HEADER = re.compile(r'^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@', re.MULTILINE)
 
 # Priority for pipeline ordering (20-39 = structural formatting)
 DEFAULT_PRIORITY = 20
 
+# Width thresholds for mode selection
+SIDE_BY_SIDE_MIN_WIDTH = 120
+COMPACT_MIN_WIDTH = 80
+
 
 class DiffFormatterPlugin:
-    """Plugin that colorizes unified diff output.
+    """Plugin that formats unified diff output with adaptive rendering.
 
     Implements the FormatterPlugin protocol for use in a formatter pipeline.
-    Detects unified diff format and applies ANSI colors to diff lines.
+    Automatically selects the best rendering mode based on terminal width:
+
+    - Side-by-side (≥120 cols): Two-column box-drawn table with:
+        - OLD and NEW columns
+        - Line numbers for both versions
+        - Word-level highlighting for modifications
+
+    - Compact (80-119 cols): Single-column box-drawn format with:
+        - Arrow notation (→) for modifications
+        - +/- prefix for pure adds/deletes
+        - Condensed display without context lines
+
+    - Unified (<80 cols): Traditional format with:
+        - Standard +/- line prefixes
+        - Colored output (green/red)
+        - Full context preserved
     """
 
     def __init__(self):
         self._priority = DEFAULT_PRIORITY
-        self._color_additions = ANSI_GREEN
-        self._color_deletions = ANSI_RED
-        self._color_hunks = ANSI_CYAN
-        self._color_headers = ANSI_DIM
+        self._console_width = 120
+        self._colors = DEFAULT_COLOR_SCHEME
+
+        # Renderers in priority order (highest min_width first)
+        self._renderers = [
+            SideBySideRenderer(),
+            CompactRenderer(),
+            UnifiedRenderer(),
+        ]
 
     # ==================== FormatterPlugin Protocol ====================
 
@@ -89,7 +109,6 @@ class DiffFormatterPlugin:
             return True
 
         # Detection: look for unified diff markers
-        # Must have at least a hunk header or file headers to be a diff
         if HUNK_HEADER.search(text):
             return True
         if UNIFIED_DIFF_HEADER.search(text) and DIFF_LINE_PATTERN.search(text):
@@ -98,17 +117,33 @@ class DiffFormatterPlugin:
         return False
 
     def format_output(self, text: str) -> str:
-        """Colorize unified diff output.
+        """Format unified diff output with adaptive rendering.
+
+        Parses the diff and selects the appropriate renderer
+        based on current terminal width.
 
         Args:
             text: Text containing unified diff.
 
         Returns:
-            Text with ANSI color codes for diff highlighting.
+            Formatted diff with appropriate rendering style.
         """
-        lines = text.split('\n')
-        colored_lines = [self._colorize_line(line) for line in lines]
-        return '\n'.join(colored_lines)
+        # Parse the unified diff
+        try:
+            parsed = parse_unified_diff(text)
+        except Exception:
+            # If parsing fails, fall back to simple colorization
+            return render_raw_unified(text, self._colors)
+
+        # If no hunks were parsed, fall back to raw colorization
+        if not parsed.hunks:
+            return render_raw_unified(text, self._colors)
+
+        # Select renderer based on width
+        renderer = self._select_renderer()
+
+        # Render the diff
+        return renderer.render(parsed, self._console_width, self._colors)
 
     # ==================== ConfigurableFormatter Protocol ====================
 
@@ -118,52 +153,61 @@ class DiffFormatterPlugin:
         Args:
             config: Dict with optional settings:
                 - priority: Pipeline priority (default: 20)
-                - color_additions: ANSI code for additions (default: green)
-                - color_deletions: ANSI code for deletions (default: red)
-                - color_hunks: ANSI code for hunk headers (default: cyan)
-                - color_headers: ANSI code for file headers (default: dim)
+                - console_width: Terminal width (default: 120)
+                - colors: Custom ColorScheme or False for no colors
         """
         config = config or {}
         self._priority = config.get("priority", DEFAULT_PRIORITY)
-        self._color_additions = config.get("color_additions", ANSI_GREEN)
-        self._color_deletions = config.get("color_deletions", ANSI_RED)
-        self._color_hunks = config.get("color_hunks", ANSI_CYAN)
-        self._color_headers = config.get("color_headers", ANSI_DIM)
+        self._console_width = config.get("console_width", 120)
+
+        colors_config = config.get("colors")
+        if colors_config is False:
+            self._colors = NO_COLOR_SCHEME
+        elif isinstance(colors_config, ColorScheme):
+            self._colors = colors_config
+        else:
+            self._colors = DEFAULT_COLOR_SCHEME
 
     def set_console_width(self, width: int) -> None:
-        """Update console width (not used by diff formatter)."""
-        pass
+        """Update console width for adaptive rendering.
+
+        Args:
+            width: Terminal width in columns.
+        """
+        self._console_width = width
 
     def shutdown(self) -> None:
         """Cleanup when plugin is disabled."""
         pass
 
-    # ==================== Internal Methods ====================
+    # ==================== Mode Selection ====================
 
-    def _colorize_line(self, line: str) -> str:
-        """Apply color to a single diff line based on its prefix.
-
-        Args:
-            line: A single line from the diff.
+    def _select_renderer(self):
+        """Select the appropriate renderer based on terminal width.
 
         Returns:
-            Line with ANSI color codes applied.
+            Renderer instance appropriate for current width.
         """
-        if line.startswith('+++') or line.startswith('---'):
-            # File headers - dim
-            return f"{self._color_headers}{line}{ANSI_RESET}"
-        elif line.startswith('@@'):
-            # Hunk headers - cyan
-            return f"{self._color_hunks}{line}{ANSI_RESET}"
-        elif line.startswith('+'):
-            # Additions - green
-            return f"{self._color_additions}{line}{ANSI_RESET}"
-        elif line.startswith('-'):
-            # Deletions - red
-            return f"{self._color_deletions}{line}{ANSI_RESET}"
+        for renderer in self._renderers:
+            if self._console_width >= renderer.min_width():
+                return renderer
+
+        # Fallback to last (unified) renderer
+        return self._renderers[-1]
+
+    def get_current_mode(self) -> str:
+        """Get the current rendering mode name.
+
+        Returns:
+            One of: "side_by_side", "compact", "unified"
+        """
+        renderer = self._select_renderer()
+        if isinstance(renderer, SideBySideRenderer):
+            return "side_by_side"
+        elif isinstance(renderer, CompactRenderer):
+            return "compact"
         else:
-            # Context lines - no color
-            return line
+            return "unified"
 
     # ==================== Convenience Methods ====================
 
@@ -174,7 +218,7 @@ class DiffFormatterPlugin:
             diff_text: Unified diff text.
 
         Returns:
-            Colorized diff with ANSI codes.
+            Formatted diff.
         """
         return self.format_output(diff_text)
 
@@ -188,6 +232,43 @@ class DiffFormatterPlugin:
             True if text looks like a diff.
         """
         return self.should_format(text)
+
+    def set_colors(self, colors: ColorScheme) -> None:
+        """Set custom color scheme.
+
+        Args:
+            colors: ColorScheme instance.
+        """
+        self._colors = colors
+
+    def disable_colors(self) -> None:
+        """Disable color output."""
+        self._colors = NO_COLOR_SCHEME
+
+    def enable_colors(self) -> None:
+        """Enable default color output."""
+        self._colors = DEFAULT_COLOR_SCHEME
+
+    # ==================== Legacy Compatibility ====================
+
+    # These properties maintain compatibility with code that accessed
+    # the old color configuration directly
+
+    @property
+    def _color_additions(self) -> str:
+        return self._colors.added
+
+    @property
+    def _color_deletions(self) -> str:
+        return self._colors.deleted
+
+    @property
+    def _color_hunks(self) -> str:
+        return self._colors.hunk_header
+
+    @property
+    def _color_headers(self) -> str:
+        return self._colors.dim
 
 
 def create_plugin() -> DiffFormatterPlugin:
