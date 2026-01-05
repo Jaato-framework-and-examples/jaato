@@ -14,7 +14,6 @@ import sys
 import pathlib
 import queue
 import threading
-import tempfile
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -195,9 +194,6 @@ class JaatoServer:
         # Model info
         self._model_provider: str = ""
         self._model_name: str = ""
-
-        # Trace log path
-        self._trace_path = os.path.join(tempfile.gettempdir(), "jaato_server_trace.log")
 
         # Terminal width for formatting (default 80)
         self._terminal_width: int = 80
@@ -1467,10 +1463,5 @@ class JaatoServer:
             self.permission_plugin.shutdown()
 
     def _trace(self, msg: str) -> None:
-        """Write trace message for debugging."""
-        try:
-            with open(self._trace_path, "a") as f:
-                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] {msg}\n")
-        except Exception:
-            pass
+        """Write trace message for debugging (goes to daemon log)."""
+        logger.debug(msg)
