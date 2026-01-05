@@ -2587,15 +2587,19 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
             elif isinstance(event, ToolCallStartEvent):
                 # Use tool tree visualization (same as direct mode)
-                buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
+                buffer = agent_registry.get_buffer(event.agent_id)
                 if buffer:
                     buffer.add_active_tool(event.tool_name, event.tool_args, call_id=event.call_id)
                     buffer.scroll_to_bottom()  # Auto-scroll when tool tree grows
                     display.refresh()
+                else:
+                    # Agent not yet created - queue event for later
+                    ipc_trace(f"  Queuing tool start for unknown agent: {event.agent_id}")
+                    agent_registry.queue_tool_start(event.agent_id, event.tool_name, event.tool_args, event.call_id)
 
             elif isinstance(event, ToolCallEndEvent):
                 # Use tool tree visualization (same as direct mode)
-                buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
+                buffer = agent_registry.get_buffer(event.agent_id)
                 if buffer:
                     buffer.mark_tool_completed(
                         event.tool_name,
@@ -2606,13 +2610,24 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     )
                     buffer.scroll_to_bottom()  # Auto-scroll when tool tree updates
                     display.refresh()
+                else:
+                    # Agent not yet created - queue event for later
+                    ipc_trace(f"  Queuing tool end for unknown agent: {event.agent_id}")
+                    agent_registry.queue_tool_end(
+                        event.agent_id, event.tool_name, event.success,
+                        event.duration_seconds, event.error_message, event.call_id
+                    )
 
             elif isinstance(event, ToolOutputEvent):
                 # Live output chunk from running tool (tail -f style preview)
-                buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
+                buffer = agent_registry.get_buffer(event.agent_id)
                 if buffer and event.call_id:
                     buffer.append_tool_output(event.call_id, event.chunk)
                     display.refresh()
+                elif event.call_id:
+                    # Agent not yet created - queue event for later
+                    ipc_trace(f"  Queuing tool output for unknown agent: {event.agent_id}")
+                    agent_registry.queue_tool_output(event.agent_id, event.call_id, event.chunk)
 
             elif isinstance(event, ContextUpdatedEvent):
                 # Update context usage in agent registry (status bar reads from here)
