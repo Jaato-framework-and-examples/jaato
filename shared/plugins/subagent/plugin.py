@@ -1355,7 +1355,7 @@ class SubagentPlugin:
             # Configure GC for subagent if profile specifies it
             if profile.gc:
                 try:
-                    gc_plugin, gc_config = gc_profile_to_plugin_config(profile.gc)
+                    gc_plugin, gc_config = gc_profile_to_plugin_config(profile.gc, agent_id)
                     session.set_gc_plugin(gc_plugin, gc_config)
                     logger.info(
                         "Configured GC for subagent %s: type=%s, threshold=%.1f%%",
