@@ -162,11 +162,20 @@ class OutputBuffer:
             self._formatter_pipeline.set_console_width(width)
 
     def _invalidate_line_caches(self) -> None:
-        """Invalidate render caches for all lines (called on width change)."""
+        """Invalidate render caches and recalculate display_lines for all lines (called on width change).
+
+        This is critical for correct scroll position calculation - display_lines
+        must reflect the actual rendered height at the current width, otherwise
+        gaps or overflow will occur when scrolling.
+        """
         for item in self._lines:
             if isinstance(item, OutputLine):
                 item._rendered_cache = None
                 item._cache_width = 0
+                # Recalculate display_lines for the new width
+                item.display_lines = self._measure_display_lines(
+                    item.source, item.text, item.is_turn_start
+                )
 
     def set_keybinding_config(self, config: Any) -> None:
         """Set the keybinding config for dynamic UI hints.
@@ -255,27 +264,27 @@ class OutputBuffer:
         rendered = Text()
         if source == "model":
             if is_turn_start:
-                # Header line (1) + wrapped content lines + potential blank line before header
-                # The blank line is added for non-first items in the visible set (see render loop)
-                # We conservatively include it to avoid underestimating height
+                # Header line (1) + wrapped content lines
+                # Note: blank line before header is handled at render-loop level as inter-item separator
                 rendered.append(text)
                 with self._measure_console.capture() as capture:
                     self._measure_console.print(rendered, end='')
                 output = capture.get()
                 content_lines = output.count('\n') + 1 if output else 1
-                # 1 (potential blank line) + 1 (header) + content lines
-                return 2 + content_lines
+                # 1 (header) + content lines
+                return 1 + content_lines
             rendered.append(text)
         elif source in ("user", "parent"):
             if is_turn_start:
-                # Header line (1) + wrapped content lines + potential blank line before header
+                # Header line (1) + wrapped content lines
+                # Note: blank line before header is handled at render-loop level as inter-item separator
                 rendered.append(text)
                 with self._measure_console.capture() as capture:
                     self._measure_console.print(rendered, end='')
                 output = capture.get()
                 content_lines = output.count('\n') + 1 if output else 1
-                # 1 (potential blank line) + 1 (header) + content lines
-                return 2 + content_lines
+                # 1 (header) + content lines
+                return 1 + content_lines
             rendered.append(text)
         elif source == "system":
             rendered.append(text)
@@ -1737,10 +1746,8 @@ class OutputBuffer:
             elif line.source in ("user", "parent"):
                 # User/parent input - use header line for turn start
                 if line.is_turn_start:
-                    # Add blank line before header for visual separation (if not first line)
-                    if i > 0:
-                        output.append("\n")
                     # Render header line: ── User ── or ── Parent ──
+                    # Note: inter-item separator in render loop provides visual separation
                     # "parent" source means message from parent agent to this subagent
                     user_label = "Parent" if line.source == "parent" else "User"
                     header_prefix = f"── {user_label} "
@@ -1766,10 +1773,8 @@ class OutputBuffer:
                 # Text may contain ANSI codes from output formatter (syntax highlighting)
                 has_ansi = '\x1b[' in line.text
                 if line.is_turn_start:
-                    # Add blank line before header for visual separation (if not first line)
-                    if i > 0:
-                        output.append("\n")
                     # Render header line: ── Model ─────────────────
+                    # Note: inter-item separator in render loop provides visual separation
                     header_prefix = "── Model "
                     remaining = max(0, wrap_width - len(header_prefix))
                     output.append(header_prefix, style="bold cyan")
