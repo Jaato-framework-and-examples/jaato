@@ -1179,6 +1179,7 @@ class JaatoSession:
 
             # Final check for mid-turn prompts before completing the turn
             # This handles prompts that arrived while the model was generating its final response
+            self._trace(f"FINAL_MID_TURN_CHECK: Starting drain loop, queue_size={self._injection_queue.qsize()}")
             while True:
                 mid_turn_response = self._check_and_handle_mid_turn_prompt(
                     use_streaming, on_output, wrapped_usage_callback, turn_data
@@ -1266,6 +1267,38 @@ class JaatoSession:
                                 # Forward to parent for visibility
                                 self._forward_to_parent("MODEL_OUTPUT", part.text)
                             accumulated_text.append(part.text)
+
+                # Explicitly continue to check for more queued prompts
+                # This ensures we drain the queue even after processing function calls
+                continue
+
+            # Safety check: process any prompts that might have been added during the final iteration
+            # This handles the race condition where prompts arrive just as the drain loop exits
+            final_queue_size = self._injection_queue.qsize()
+            if final_queue_size > 0:
+                self._trace(f"FINAL_MID_TURN_CHECK: Queue not empty after drain loop! size={final_queue_size}, processing remaining")
+                # Process remaining prompts (with a limit to prevent infinite loops)
+                safety_iterations = 0
+                max_safety_iterations = 10  # Prevent livelock
+                while safety_iterations < max_safety_iterations:
+                    safety_iterations += 1
+                    remaining_response = self._check_and_handle_mid_turn_prompt(
+                        use_streaming, on_output, wrapped_usage_callback, turn_data
+                    )
+                    if not remaining_response:
+                        break
+                    # Collect text from the response
+                    for part in remaining_response.parts:
+                        if part.text:
+                            if not use_streaming:
+                                if on_output:
+                                    on_output("model", part.text, "write")
+                                self._forward_to_parent("MODEL_OUTPUT", part.text)
+                            accumulated_text.append(part.text)
+                    # Note: We don't process function calls here to avoid complexity
+                    # Any function calls in these responses will be logged but not executed
+                    if any(p.function_call for p in remaining_response.parts):
+                        self._trace("FINAL_MID_TURN_CHECK: Safety loop response had function calls (not processed)")
 
             # Forward completion to parent
             final_response = ''.join(accumulated_text) if accumulated_text else ''
@@ -1507,6 +1540,7 @@ class JaatoSession:
             try:
                 prompt = self._injection_queue.get_nowait()
             except queue.Empty:
+                self._trace("MID_TURN_PROMPT: Queue empty, returning None")
                 return None
 
             self._trace(f"MID_TURN_PROMPT: Handling injected prompt: {prompt[:100]}...")
