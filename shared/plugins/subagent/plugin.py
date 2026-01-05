@@ -9,7 +9,6 @@ for subagents, avoiding redundant provider connections.
 
 import logging
 import os
-import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
@@ -663,8 +662,8 @@ class SubagentPlugin:
     def _execute_send_to_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Send a message to a subagent for processing.
 
-        Messages are queued and processed asynchronously by the subagent.
-        The parent receives responses via [SUBAGENT event=MODEL_OUTPUT] notifications.
+        If the subagent is idle, the message is processed immediately.
+        If the subagent is busy, the message is queued for mid-turn processing.
 
         Args:
             args: Tool arguments containing:
@@ -672,7 +671,7 @@ class SubagentPlugin:
                 - message: Message to send to the subagent
 
         Returns:
-            Status dict indicating the message was queued.
+            Status dict with the subagent's response or error.
         """
         subagent_id = args.get('subagent_id', '')
         message = args.get('message', '')
@@ -703,21 +702,71 @@ class SubagentPlugin:
             session = session_info['session']
             agent_id = session_info['agent_id']
 
-            # Queue message for async processing by subagent thread
-            logger.info(f"SEND_TO_SUBAGENT: Queuing message for {subagent_id}")
-            session.inject_prompt(message)
+            # Check if subagent is currently processing
+            if session.is_running:
+                # Subagent is busy - queue for mid-turn processing
+                logger.info(f"SEND_TO_SUBAGENT: {subagent_id} is busy, queuing message")
+                session.inject_prompt(message)
+                return {
+                    'success': True,
+                    'status': 'queued',
+                    'message': f'Subagent is busy. Message queued for processing.'
+                }
+
+            # Subagent is idle - process directly
+            logger.info(f"SEND_TO_SUBAGENT: {subagent_id} is idle, processing directly")
+
+            # Emit the parent's message to UI
+            if self._ui_hooks:
+                self._ui_hooks.on_agent_output(
+                    agent_id=agent_id,
+                    source="parent",
+                    text=message,
+                    mode="write"
+                )
+
+            # Create output callback for model response
+            def output_callback(source: str, text: str, mode: str) -> None:
+                if self._ui_hooks:
+                    self._ui_hooks.on_agent_output(
+                        agent_id=agent_id,
+                        source=source,
+                        text=text,
+                        mode=mode
+                    )
+
+            # Process the message
+            response = session.send_message(message, on_output=output_callback)
+
+            # Update context after processing (match main agent behavior)
+            if self._ui_hooks:
+                usage = session.get_context_usage()
+                self._ui_hooks.on_agent_context_updated(
+                    agent_id=agent_id,
+                    total_tokens=usage.get('total_tokens', 0),
+                    prompt_tokens=usage.get('prompt_tokens', 0),
+                    output_tokens=usage.get('output_tokens', 0),
+                    turns=usage.get('turns', 0),
+                    percent_used=usage.get('percent_used', 0)
+                )
+
+            # Forward response to parent
+            if self._parent_session:
+                self._parent_session.inject_prompt(
+                    f"[SUBAGENT agent_id={agent_id} event=MODEL_OUTPUT]\n{response}"
+                )
 
             return {
                 'success': True,
-                'status': 'queued',
-                'message': f'Message queued for {subagent_id}. Response will arrive via [SUBAGENT event=MODEL_OUTPUT].'
+                'status': 'processed',
+                'response': response
             }
 
         except Exception as e:
             logger.exception(f"Error sending to subagent {subagent_id}")
             return {
                 'success': False,
-                'error': f'Error queuing message: {str(e)}'
+                'error': f'Error processing message: {str(e)}'
             }
 
     def _execute_close_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1282,34 +1331,10 @@ class SubagentPlugin:
             # Run the initial conversation (output is automatically forwarded to parent)
             response = session.send_message(prompt, on_output=subagent_output_callback)
 
-            # Process additional messages from parent via blocking queue
-            # This is efficient - no polling, just blocks until message arrives or timeout
-            idle_timeout = 30  # seconds to wait before considering subagent done
-            logger.info(f"SUBAGENT_LOOP: Entering message loop for {agent_id}, timeout={idle_timeout}s")
-
-            while True:
-                try:
-                    # Block efficiently until message arrives or timeout
-                    message = session._injection_queue.get(timeout=idle_timeout)
-                    logger.info(f"SUBAGENT_LOOP: Got message for {agent_id}: {message[:50]}...")
-
-                    # Emit parent's message to UI
-                    if self._ui_hooks:
-                        self._ui_hooks.on_agent_output(
-                            agent_id=agent_id,
-                            source="parent",
-                            text=message,
-                            mode="write"
-                        )
-
-                    # Process the message
-                    response = session.send_message(message, on_output=subagent_output_callback)
-                    logger.info(f"SUBAGENT_LOOP: Processed message for {agent_id}")
-
-                except queue.Empty:
-                    # No messages for idle_timeout seconds, exit loop
-                    logger.info(f"SUBAGENT_LOOP: Timeout reached for {agent_id}, exiting loop")
-                    break
+            # Note: Additional messages from parent via send_to_subagent are now
+            # processed directly by _execute_send_to_subagent when the session is idle,
+            # or queued for mid-turn processing if the session is busy.
+            # No polling loop needed.
 
             # Update session info after completion
             usage = session.get_context_usage()
