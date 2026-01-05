@@ -1287,11 +1287,15 @@ class SubagentPlugin:
             # Process any queued prompts from send_to_subagent
             # These arrive via inject_prompt() but may not be processed if
             # send_message returned before they arrived.
-            # We wait up to 3 seconds for parent messages to arrive, resetting
-            # the counter each time we process a message.
+            # We wait for parent messages to arrive. The parent needs time to:
+            # 1. Receive our completion event
+            # 2. Process it and decide to send more messages
+            # 3. Execute send_to_subagent tool calls
+            # This can take 10+ seconds, so we wait up to 60 seconds.
+            # The counter resets each time we process a message.
             logger.info(f"QUEUE_CHECK: Starting queue processing loop for {agent_id}, session={id(session)}")
             empty_checks = 0
-            max_empty_checks = 30  # 30 * 100ms = 3 seconds max wait
+            max_empty_checks = 600  # 600 * 100ms = 60 seconds max wait
             while empty_checks < max_empty_checks:
                 # Small delay to allow queued prompts to arrive
                 time.sleep(0.1)
@@ -1301,7 +1305,7 @@ class SubagentPlugin:
 
                 if queue_size == 0:
                     empty_checks += 1
-                    if empty_checks % 10 == 0:  # Log every second
+                    if empty_checks % 50 == 0:  # Log every 5 seconds
                         logger.info(f"QUEUE_CHECK [{agent_id}]: Waiting for prompts... ({empty_checks}/{max_empty_checks})")
                     continue
 
