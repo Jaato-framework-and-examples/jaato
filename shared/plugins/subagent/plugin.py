@@ -702,17 +702,9 @@ class SubagentPlugin:
             agent_id = session_info['agent_id']
 
             # Inject message into subagent's queue (non-blocking)
+            # The session will handle UI notification when it processes the prompt
+            # (using "parent" source since this subagent has a parent session)
             session.inject_prompt(message)
-
-            # Notify UI hooks that a message was sent
-            # Use "parent" source - output buffer renders this like "user" but with "Parent" label
-            if self._ui_hooks:
-                self._ui_hooks.on_agent_output(
-                    agent_id=agent_id,
-                    source="parent",
-                    text=message,
-                    mode="write"
-                )
 
             return {
                 'success': True,

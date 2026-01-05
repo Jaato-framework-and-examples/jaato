@@ -334,16 +334,17 @@ class JaatoSession:
         self._injection_queue.put(text)
 
     def _forward_to_parent(self, event_type: str, content: str) -> None:
-        """Forward an event to the parent session.
+        """Forward a completion event to the parent session.
 
-        Called internally at key points during execution to keep the parent
-        informed of this agent's activities. The parent model receives these
-        messages so it can react to child output. These messages are NOT echoed
-        in the parent's output panel (handled in _check_and_handle_mid_turn_prompt
-        which skips output for messages starting with "[SUBAGENT ").
+        Only forwards COMPLETED, ERROR, and CANCELLED events to avoid noise.
+        Real-time output (MODEL_OUTPUT, TOOL_CALL, etc.) is visible in the
+        subagent's own tab via UI hooks.
+
+        These messages use XML format (<subagent_event>) and are NOT echoed
+        in the parent's output panel (handled in _check_and_handle_mid_turn_prompt).
 
         Args:
-            event_type: Type of event (MODEL_OUTPUT, TOOL_CALL, TOOL_OUTPUT, etc.)
+            event_type: Type of event (COMPLETED, ERROR, CANCELLED).
             content: Event content/payload.
         """
         if self._parent_session:
@@ -1511,11 +1512,14 @@ class JaatoSession:
         if self._on_prompt_injected:
             self._on_prompt_injected(prompt)
 
-        # Emit the prompt as user output so UI shows it
+        # Emit the prompt as user/parent output so UI shows it
         # Skip for subagent messages - parent doesn't need to echo child output
         is_subagent_message = prompt.startswith("<subagent_event ") or prompt.startswith("[SUBAGENT ")
         if on_output and not is_subagent_message:
-            on_output("user", prompt, "write")
+            # Use "parent" source if this is a subagent (has parent session),
+            # otherwise "user" for main agent receiving user input
+            source = "parent" if self._parent_session else "user"
+            on_output(source, prompt, "write")
 
         # Proactive rate limiting
         self._pacer.pace()
