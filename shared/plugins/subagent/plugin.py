@@ -706,7 +706,9 @@ class SubagentPlugin:
             # Inject message into subagent's queue (non-blocking)
             # The session will handle UI notification when it processes the prompt
             # (using "parent" source since this subagent has a parent session)
+            logger.info(f"SEND_TO_SUBAGENT: subagent_id={subagent_id}, session={id(session)}, message={message[:50]}...")
             session.inject_prompt(message)
+            logger.info(f"SEND_TO_SUBAGENT: inject_prompt called, queue_size={session._injection_queue.qsize()}")
 
             return {
                 'success': True,
@@ -1287,7 +1289,7 @@ class SubagentPlugin:
             # send_message returned before they arrived.
             # We wait up to 3 seconds for parent messages to arrive, resetting
             # the counter each time we process a message.
-            logger.info(f"QUEUE_CHECK: Starting queue processing loop for {agent_id}")
+            logger.info(f"QUEUE_CHECK: Starting queue processing loop for {agent_id}, session={id(session)}")
             empty_checks = 0
             max_empty_checks = 30  # 30 * 100ms = 3 seconds max wait
             while empty_checks < max_empty_checks:

@@ -331,7 +331,9 @@ class JaatoSession:
             # Subagent returning result to parent
             parent_session.inject_prompt("[SUBAGENT agent_id=researcher COMPLETED]\\nFound 3 issues")
         """
+        self._trace(f"INJECT_PROMPT: agent_id={self._agent_id}, queue_size_before={self._injection_queue.qsize()}, text={text[:50]}...")
         self._injection_queue.put(text)
+        self._trace(f"INJECT_PROMPT: queue_size_after={self._injection_queue.qsize()}")
 
     def _forward_to_parent(self, event_type: str, content: str) -> None:
         """Forward an event to the parent session.
