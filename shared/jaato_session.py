@@ -866,7 +866,18 @@ class JaatoSession:
         )
 
         if result.success:
-            self._trace(f"PROACTIVE_GC: Collected {result.items_collected} items, freed {result.tokens_freed} tokens")
+            if result.items_collected == 0:
+                # GC ran but collected nothing - this is often surprising to users
+                self._trace(
+                    f"PROACTIVE_GC: WARNING - GC triggered but collected 0 items. "
+                    f"Check preserve_recent_turns setting vs actual turn count. "
+                    f"Details: {result.details}"
+                )
+            else:
+                self._trace(
+                    f"PROACTIVE_GC: Collected {result.items_collected} items, "
+                    f"freed {result.tokens_freed} tokens"
+                )
             self.reset_session(new_history)
             self._gc_history.append(result)
 
@@ -2182,12 +2193,26 @@ class JaatoSession:
 
         history = self.get_history()
         context_usage = self.get_context_usage()
+        self._trace(
+            f"MANUAL_GC: triggering manual GC (usage={context_usage.get('percent_used', 0):.1f}%)"
+        )
 
         new_history, result = self._gc_plugin.collect(
             history, context_usage, self._gc_config, GCTriggerReason.MANUAL
         )
 
         if result.success:
+            if result.items_collected == 0:
+                self._trace(
+                    f"MANUAL_GC: WARNING - GC ran but collected 0 items. "
+                    f"Check preserve_recent_turns setting vs actual turn count. "
+                    f"Details: {result.details}"
+                )
+            else:
+                self._trace(
+                    f"MANUAL_GC: collected {result.items_collected} items, "
+                    f"freed {result.tokens_freed} tokens"
+                )
             self.reset_session(new_history)
             self._gc_history.append(result)
 
@@ -2206,12 +2231,28 @@ class JaatoSession:
         should_gc, reason = self._gc_plugin.should_collect(context_usage, self._gc_config)
 
         if should_gc and reason:
+            self._trace(
+                f"GC_BEFORE_SEND: triggering GC (reason={reason.value}, "
+                f"usage={context_usage.get('percent_used', 0):.1f}%)"
+            )
             history = self.get_history()
             new_history, result = self._gc_plugin.collect(
                 history, context_usage, self._gc_config, reason
             )
 
             if result.success:
+                if result.items_collected == 0:
+                    # GC ran but collected nothing - this is often surprising to users
+                    self._trace(
+                        f"GC_BEFORE_SEND: WARNING - GC triggered but collected 0 items. "
+                        f"Check preserve_recent_turns setting vs actual turn count. "
+                        f"Details: {result.details}"
+                    )
+                else:
+                    self._trace(
+                        f"GC_BEFORE_SEND: collected {result.items_collected} items, "
+                        f"freed {result.tokens_freed} tokens"
+                    )
                 self.reset_session(new_history)
                 self._gc_history.append(result)
 

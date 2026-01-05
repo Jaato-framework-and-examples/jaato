@@ -1091,11 +1091,20 @@ class RichClient:
         output_callback = self._create_output_callback()
 
         # Track maximum token usage seen during this turn (to avoid jumping backwards)
-        # Start at 0 - streaming prompt_tokens already includes full history,
-        # so each turn's streaming values naturally represent the current context.
-        # Don't initialize from get_context_usage() as turn_accounting values may differ
-        # from streaming values, causing updates to be incorrectly skipped.
-        max_tokens_seen = {'prompt': 0, 'output': 0, 'total': 0}
+        # Initialize from REGISTRY values (not turn_accounting) to maintain continuity
+        # across turns. This prevents the status bar from jumping down at the start
+        # of a new turn when the first streaming chunk arrives with values that may
+        # be lower than the previous turn's final values.
+        if self._agent_registry:
+            agent_id = self._agent_registry.get_selected_agent_id()
+            prev_usage = self._agent_registry.get_selected_context_usage() if agent_id else {}
+            max_tokens_seen = {
+                'prompt': prev_usage.get('prompt_tokens', 0),
+                'output': prev_usage.get('output_tokens', 0),
+                'total': prev_usage.get('total_tokens', 0)
+            }
+        else:
+            max_tokens_seen = {'prompt': 0, 'output': 0, 'total': 0}
 
         # Create usage update callback for real-time token accounting
         def usage_update_callback(usage) -> None:
@@ -1208,10 +1217,24 @@ class RichClient:
                     )
                 self._trace(f"[model_thread] send_message returned")
 
-                # Update context usage in status bar
+                # Update context usage in status bar and registry
+                # Important: Update REGISTRY too so it reflects post-GC values
+                # when garbage collection runs during the turn
                 if self._display and self._backend:
                     usage = self._run_async(self._backend.get_context_usage())
                     self._display.update_context_usage(usage)
+                    # Also update registry so next turn's max_tokens_seen initializes correctly
+                    if self._agent_registry:
+                        agent_id = self._agent_registry.get_selected_agent_id()
+                        if agent_id:
+                            self._agent_registry.update_context_usage(
+                                agent_id=agent_id,
+                                total_tokens=usage.get('total_tokens', 0),
+                                prompt_tokens=usage.get('prompt_tokens', 0),
+                                output_tokens=usage.get('output_tokens', 0),
+                                turns=usage.get('turns', 0),
+                                percent_used=usage.get('percent_used', 0)
+                            )
 
                 # Add separator after model finishes
                 # (response content is already shown via the callback)

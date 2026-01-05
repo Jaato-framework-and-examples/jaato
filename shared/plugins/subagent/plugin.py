@@ -771,6 +771,17 @@ class SubagentPlugin:
             # Update context after processing (match main agent behavior)
             if self._ui_hooks:
                 usage = session.get_context_usage()
+                # Debug: Log full usage info to trace token accounting issues
+                logger.debug(
+                    f"SUBAGENT_USAGE [{agent_id}]: "
+                    f"total={usage.get('total_tokens', 0)}, "
+                    f"prompt={usage.get('prompt_tokens', 0)}, "
+                    f"output={usage.get('output_tokens', 0)}, "
+                    f"context_limit={usage.get('context_limit', 'N/A')}, "
+                    f"percent_used={usage.get('percent_used', 0):.2f}%, "
+                    f"turns={usage.get('turns', 0)}, "
+                    f"model={usage.get('model', 'unknown')}"
+                )
                 self._ui_hooks.on_agent_context_updated(
                     agent_id=agent_id,
                     total_tokens=usage.get('total_tokens', 0),
@@ -1397,6 +1408,17 @@ class SubagentPlugin:
 
             # Update session info after completion
             usage = session.get_context_usage()
+            # Debug: Log full usage info to trace token accounting issues
+            logger.debug(
+                f"SUBAGENT_ASYNC_USAGE [{agent_id}]: "
+                f"total={usage.get('total_tokens', 0)}, "
+                f"prompt={usage.get('prompt_tokens', 0)}, "
+                f"output={usage.get('output_tokens', 0)}, "
+                f"context_limit={usage.get('context_limit', 'N/A')}, "
+                f"percent_used={usage.get('percent_used', 0):.2f}%, "
+                f"turns={usage.get('turns', 0)}, "
+                f"model={usage.get('model', 'unknown')}"
+            )
             with self._sessions_lock:
                 if agent_id in self._active_sessions:
                     self._active_sessions[agent_id]['last_activity'] = datetime.now()
