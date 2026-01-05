@@ -1206,6 +1206,7 @@ class SubagentPlugin:
             # create_session calls session.configure() which overwrites
             # self._parent_session to the new session (see line 514 in jaato_session.py)
             parent_session = self._parent_session
+            logger.debug(f"SUBAGENT_DEBUG: Saved parent_session={parent_session} (is None={parent_session is None})")
 
             # Create session
             session = self._runtime.create_session(
@@ -1215,9 +1216,11 @@ class SubagentPlugin:
                 plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
                 provider_name=provider
             )
+            logger.debug(f"SUBAGENT_DEBUG: After create_session, self._parent_session={self._parent_session}")
 
             # Restore parent session reference (was overwritten by configure())
             self._parent_session = parent_session
+            logger.debug(f"SUBAGENT_DEBUG: Restored self._parent_session={self._parent_session}")
 
             # Set agent context
             session.set_agent_context(
@@ -1226,7 +1229,9 @@ class SubagentPlugin:
             )
 
             # Set parent session for output forwarding
+            logger.debug(f"SUBAGENT_DEBUG: Setting session._parent_session to {parent_session}")
             session.set_parent_session(parent_session)
+            logger.debug(f"SUBAGENT_DEBUG: session._parent_session is now {session._parent_session}")
 
             # Set parent cancel token for cancellation propagation
             if self._parent_session and hasattr(self._parent_session, '_cancel_token'):
