@@ -371,3 +371,34 @@ class CancelToken:
             self._cancelled = False
             self._event.clear()
             self._callbacks.clear()
+
+
+@dataclass
+class ThinkingConfig:
+    """Configuration for extended thinking/reasoning modes.
+
+    This is a provider-agnostic configuration for thinking capabilities:
+    - Anthropic: Extended thinking with budget_tokens
+    - Google Gemini: Thinking mode (Gemini 2.0+)
+
+    Attributes:
+        enabled: Whether thinking mode is enabled.
+        budget: Token budget for extended thinking.
+            Interpretation is provider-specific:
+            - Anthropic: Max tokens for thinking (default 10000)
+            - Gemini: May be used for thinking budget
+    """
+    enabled: bool = False
+    budget: int = 10000
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {"enabled": self.enabled, "budget": self.budget}
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'ThinkingConfig':
+        """Create from dictionary."""
+        return cls(
+            enabled=data.get("enabled", False),
+            budget=data.get("budget", 10000)
+        )

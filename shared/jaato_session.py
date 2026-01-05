@@ -35,6 +35,7 @@ from .plugins.model_provider.types import (
     Part,
     ProviderResponse,
     Role,
+    ThinkingConfig,
     TokenUsage,
     ToolResult,
     ToolSchema,
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from .plugins.model_provider.base import ModelProviderPlugin
     from .plugins.subagent.ui_hooks import AgentUIHooks
     from .plugins.telemetry import TelemetryPlugin
+    from .plugins.thinking import ThinkingPlugin
 
 # Import framework instruction for tool result injection
 from .jaato_runtime import _TASK_COMPLETION_INSTRUCTION
@@ -142,6 +144,9 @@ class JaatoSession:
         self._gc_plugin: Optional[GCPlugin] = None
         self._gc_config: Optional[GCConfig] = None
         self._gc_history: List[GCResult] = []
+
+        # Thinking mode
+        self._thinking_plugin: Optional['ThinkingPlugin'] = None
 
         # Session persistence
         self._session_plugin: Optional[SessionPlugin] = None
@@ -3277,6 +3282,73 @@ class JaatoSession:
             return result
 
         return None
+
+    # ==================== Thinking Mode ====================
+
+    def set_thinking_plugin(self, plugin: 'ThinkingPlugin') -> None:
+        """Set the thinking plugin for controlling reasoning modes.
+
+        The thinking plugin provides user commands for controlling extended
+        thinking capabilities (e.g., Anthropic extended thinking, Gemini
+        thinking mode).
+
+        Args:
+            plugin: The ThinkingPlugin instance.
+        """
+        self._thinking_plugin = plugin
+
+        # Give plugin access to this session
+        if hasattr(plugin, 'set_session'):
+            plugin.set_session(self)
+
+        # Register user commands
+        if hasattr(plugin, 'get_user_commands'):
+            for cmd in plugin.get_user_commands():
+                self._user_commands[cmd.name] = cmd
+
+        # Register executors
+        if hasattr(plugin, 'get_executors') and self._executor:
+            for name, fn in plugin.get_executors().items():
+                self._executor.register(name, fn)
+
+    def remove_thinking_plugin(self) -> None:
+        """Remove the thinking plugin."""
+        if self._thinking_plugin:
+            if hasattr(self._thinking_plugin, 'shutdown'):
+                self._thinking_plugin.shutdown()
+        self._thinking_plugin = None
+
+    def set_thinking_config(self, config: ThinkingConfig) -> None:
+        """Set thinking mode configuration directly on the provider.
+
+        This is a convenience method that bypasses the plugin and sets
+        the thinking configuration directly on the provider.
+
+        Args:
+            config: ThinkingConfig with enabled flag and budget.
+        """
+        if self._provider and hasattr(self._provider, 'set_thinking_config'):
+            self._provider.set_thinking_config(config)
+
+    def get_thinking_config(self) -> Optional[ThinkingConfig]:
+        """Get current thinking configuration from the plugin.
+
+        Returns:
+            Current ThinkingConfig if plugin is set, None otherwise.
+        """
+        if self._thinking_plugin and hasattr(self._thinking_plugin, 'get_current_config'):
+            return self._thinking_plugin.get_current_config()
+        return None
+
+    def supports_thinking(self) -> bool:
+        """Check if the current provider supports thinking mode.
+
+        Returns:
+            True if thinking is supported, False otherwise.
+        """
+        if self._provider and hasattr(self._provider, 'supports_thinking'):
+            return self._provider.supports_thinking()
+        return False
 
     # ==================== Session Persistence ====================
 
