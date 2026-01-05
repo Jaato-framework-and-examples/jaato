@@ -261,45 +261,45 @@ class OutputBuffer:
             self._measure_console = Console(width=self._console_width, force_terminal=True)
 
         # Build the text as it will be rendered
-        rendered = Text()
+        # IMPORTANT: If text contains ANSI codes, use Text.from_ansi() to properly
+        # measure visible width. Otherwise ANSI escape sequences are counted as
+        # visible characters, causing massive overcounting for syntax-highlighted text.
+        has_ansi = '\x1b[' in text
+        if has_ansi:
+            rendered = Text.from_ansi(text)
+        else:
+            rendered = Text()
+            rendered.append(text)
+
         if source == "model":
             if is_turn_start:
                 # Blank line (1) + header line (1) + wrapped content lines
                 # Note: blank line is rendered at inter-item level for non-first visible items,
                 # but we always count it in measurement. This slightly overcounts for first
                 # visible item but ensures we don't try to show more items than fit.
-                rendered.append(text)
                 with self._measure_console.capture() as capture:
                     self._measure_console.print(rendered, end='')
                 output = capture.get()
                 content_lines = output.count('\n') + 1 if output else 1
                 # 1 (blank) + 1 (header) + content lines
                 return 2 + content_lines
-            rendered.append(text)
         elif source in ("user", "parent"):
             if is_turn_start:
                 # Blank line (1) + header line (1) + wrapped content lines
                 # Note: blank line is rendered at inter-item level for non-first visible items,
                 # but we always count it in measurement. This slightly overcounts for first
                 # visible item but ensures we don't try to show more items than fit.
-                rendered.append(text)
                 with self._measure_console.capture() as capture:
                     self._measure_console.print(rendered, end='')
                 output = capture.get()
                 content_lines = output.count('\n') + 1 if output else 1
                 # 1 (blank) + 1 (header) + content lines
                 return 2 + content_lines
-            rendered.append(text)
-        elif source == "system":
-            rendered.append(text)
-        elif source == "enrichment":
-            # Enrichment notifications are pre-formatted single lines
-            # after _flush_current_block splits by newline
-            rendered.append(text)
-        else:
+        elif source not in ("system", "enrichment"):
             if is_turn_start:
-                rendered.append(f"[{source}] ", style="dim magenta")
-            rendered.append(text)
+                # Prepend source prefix for non-model sources
+                prefix = Text(f"[{source}] ", style="dim magenta")
+                rendered = prefix + rendered
 
         # Measure by capturing output
         with self._measure_console.capture() as capture:
