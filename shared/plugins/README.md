@@ -804,6 +804,47 @@ User sees:
 registry.expose_all({'artifact_tracker': {'storage_path': '.jaato/artifacts.json'}})
 ```
 
+### Thinking Plugin (`thinking`)
+
+Controls extended thinking/reasoning modes in AI providers. This plugin provides a user-only command that is NOT shared with the model - thinking mode is 100% under user control.
+
+**Configuration:**
+- `config_path`: Path to thinking.json config file (optional)
+
+**User Commands:**
+- `/thinking`: Show current status
+- `/thinking off`: Disable thinking
+- `/thinking on`: Enable thinking (10K budget)
+- `/thinking deep`: Enable deep thinking (25K budget)
+- `/thinking ultra`: Enable ultra thinking (100K budget)
+- `/thinking <number>`: Custom token budget
+
+**Auto-approved:** Yes (user command)
+
+**Configuration file (`.jaato/thinking.json`):**
+```json
+{
+  "default": "off",
+  "presets": {
+    "off": { "enabled": false, "budget": 0 },
+    "on": { "enabled": true, "budget": 10000 },
+    "deep": { "enabled": true, "budget": 25000 },
+    "ultra": { "enabled": true, "budget": 100000 }
+  }
+}
+```
+
+**Note:** This plugin is special - it provides a user command but no model tools. The command explicitly uses `share_with_model=False` to prevent the model from seeing or modifying its own thinking configuration.
+
+**Example:**
+```python
+from shared.plugins.thinking import create_plugin
+
+thinking_plugin = create_plugin()
+thinking_plugin.initialize()
+jaato.set_thinking_plugin(thinking_plugin)
+```
+
 ---
 
 ## File Structure
@@ -860,6 +901,11 @@ shared/plugins/
 │   ├── __init__.py
 │   ├── plugin.py
 │   ├── lsp_client.py
+│   └── README.md
+├── thinking/        # Thinking mode control plugin
+│   ├── __init__.py
+│   ├── config.py
+│   ├── plugin.py
 │   └── README.md
 └── references/      # Documentation injection plugin
     ├── __init__.py
