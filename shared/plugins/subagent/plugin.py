@@ -484,7 +484,14 @@ class SubagentPlugin:
             "LIFECYCLE MANAGEMENT:\n"
             "- Use close_subagent to free resources after receiving COMPLETED\n"
             "- Sessions auto-close after max_turns, but explicit closure is preferred\n"
-            "- Use list_active_subagents to see running subagents"
+            "- Use list_active_subagents to see running subagents\n\n"
+            "GC CONFIGURATION:\n"
+            "Subagents can have their own garbage collection (GC) settings independent of the parent. "
+            "This is useful for testing GC behavior or when subagents need different context management. "
+            "Use inline_config.gc to specify:\n"
+            "- type: 'truncate', 'summarize', or 'hybrid'\n"
+            "- threshold_percent: Trigger GC at this context usage (e.g., 5.0 for early testing)\n"
+            "- preserve_recent_turns: Number of recent turns to keep after GC"
         )
 
         if not self._config or not self._config.profiles:
