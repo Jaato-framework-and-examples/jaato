@@ -156,7 +156,41 @@ Add a `gc` field to subagent profile JSON files in `.jaato/profiles/`:
 
 The subagent plugin automatically initializes GC when spawning agents with this configuration.
 
-### 3. Programmatic Configuration
+### 3. Inline Configuration (Ad-Hoc Subagents)
+
+For quick testing or one-off subagents, use `inline_config.gc` when spawning:
+
+```python
+spawn_subagent(
+    task="Stress test GC behavior",
+    inline_config={
+        "gc": {
+            "type": "truncate",
+            "threshold_percent": 5.0,  # Trigger early for testing
+            "preserve_recent_turns": 3
+        }
+    }
+)
+```
+
+This is useful for:
+- **Testing GC strategies**: Use a low threshold (e.g., 5%) to trigger GC quickly
+- **Per-task tuning**: Different tasks may need different context management
+- **Debugging**: Observe GC behavior without modifying profile files
+
+Available `inline_config.gc` options:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `type` | string | `"truncate"` | GC strategy: `"truncate"`, `"summarize"`, or `"hybrid"` |
+| `threshold_percent` | float | 80.0 | Trigger GC at this context usage % |
+| `preserve_recent_turns` | int | 5 | Turns to always preserve |
+| `notify_on_gc` | bool | true | Inject notification after GC |
+| `summarize_middle_turns` | int | null | For hybrid: turns to summarize |
+| `max_turns` | int | null | Trigger GC at turn count |
+| `plugin_config` | object | {} | Plugin-specific options |
+
+### 4. Programmatic Configuration
 
 For direct control in custom clients:
 
