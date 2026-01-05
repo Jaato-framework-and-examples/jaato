@@ -21,6 +21,7 @@ from ..gc import (
     GCResult,
     GCTriggerReason,
     Turn,
+    create_gc_notification_message,
     create_summary_message,
     estimate_history_tokens,
     flatten_turns,
@@ -227,7 +228,8 @@ class SummarizeGCPlugin:
                 f"To actually remove context, either reduce preserve_recent_turns "
                 f"or add more turns to the conversation."
             )
-            return history, GCResult(
+
+            result = GCResult(
                 success=True,
                 items_collected=0,
                 tokens_before=tokens_before,
@@ -240,6 +242,24 @@ class SummarizeGCPlugin:
                     "preserve_count": preserve_count,
                 }
             )
+
+            # Add no-op notification if configured
+            new_history = history
+            if self._config.get('notify_on_gc', False):
+                noop_template = self._config.get(
+                    'noop_notification_template',
+                    "GC triggered but all {total} turns preserved "
+                    "(preserve_recent_turns={preserve}). No context removed."
+                )
+                notification = noop_template.format(
+                    total=total_turns,
+                    preserve=preserve_count
+                )
+                result.notification = notification
+                notification_content = create_gc_notification_message(notification)
+                new_history = [notification_content] + list(history)
+
+            return new_history, result
 
         # Separate turns into to-summarize and to-preserve
         turns_to_summarize: List[Turn] = []
