@@ -830,12 +830,16 @@ class JaatoServer:
                 context_lines=prompt_lines,
             ))
 
-        def on_clarification_resolved(tool_name: str):
+        def on_clarification_resolved(tool_name: str, qa_pairs: list):
+            request_id = server._pending_clarification_request_id or ""
             server._pending_clarification_request_id = None
             server._waiting_for_channel_input = False
+            # Convert qa_pairs from list of tuples to list of lists for JSON serialization
+            qa_pairs_serializable = [[q, a] for q, a in qa_pairs] if qa_pairs else []
             server.emit(ClarificationResolvedEvent(
-                request_id=server._pending_clarification_request_id or "",
+                request_id=request_id,
                 tool_name=tool_name,
+                qa_pairs=qa_pairs_serializable,
             ))
 
         def on_question_displayed(tool_name: str, question_index: int,
