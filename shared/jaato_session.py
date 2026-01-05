@@ -347,7 +347,11 @@ class JaatoSession:
             content: Event content/payload.
         """
         if self._parent_session:
-            message = f"[SUBAGENT agent_id={self._agent_id} event={event_type}]\n{content}"
+            # Only forward completion events to parent to avoid noise
+            # Real-time output is visible in subagent's own tab via UI hooks
+            if event_type not in ("COMPLETED", "ERROR", "CANCELLED"):
+                return
+            message = f"<subagent_event agent_id=\"{self._agent_id}\" type=\"{event_type}\">\n{content}\n</subagent_event>"
             self._parent_session.inject_prompt(message)
 
     # ==================== Cancellation Support ====================
@@ -1509,7 +1513,7 @@ class JaatoSession:
 
         # Emit the prompt as user output so UI shows it
         # Skip for subagent messages - parent doesn't need to echo child output
-        is_subagent_message = prompt.startswith("[SUBAGENT ")
+        is_subagent_message = prompt.startswith("<subagent_event ") or prompt.startswith("[SUBAGENT ")
         if on_output and not is_subagent_message:
             on_output("user", prompt, "write")
 
