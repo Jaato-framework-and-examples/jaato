@@ -264,27 +264,31 @@ class OutputBuffer:
         rendered = Text()
         if source == "model":
             if is_turn_start:
-                # Header line (1) + wrapped content lines
-                # Note: blank line before header is handled at render-loop level as inter-item separator
+                # Blank line (1) + header line (1) + wrapped content lines
+                # Note: blank line is rendered at inter-item level for non-first visible items,
+                # but we always count it in measurement. This slightly overcounts for first
+                # visible item but ensures we don't try to show more items than fit.
                 rendered.append(text)
                 with self._measure_console.capture() as capture:
                     self._measure_console.print(rendered, end='')
                 output = capture.get()
                 content_lines = output.count('\n') + 1 if output else 1
-                # 1 (header) + content lines
-                return 1 + content_lines
+                # 1 (blank) + 1 (header) + content lines
+                return 2 + content_lines
             rendered.append(text)
         elif source in ("user", "parent"):
             if is_turn_start:
-                # Header line (1) + wrapped content lines
-                # Note: blank line before header is handled at render-loop level as inter-item separator
+                # Blank line (1) + header line (1) + wrapped content lines
+                # Note: blank line is rendered at inter-item level for non-first visible items,
+                # but we always count it in measurement. This slightly overcounts for first
+                # visible item but ensures we don't try to show more items than fit.
                 rendered.append(text)
                 with self._measure_console.capture() as capture:
                     self._measure_console.print(rendered, end='')
                 output = capture.get()
                 content_lines = output.count('\n') + 1 if output else 1
-                # 1 (header) + content lines
-                return 1 + content_lines
+                # 1 (blank) + 1 (header) + content lines
+                return 2 + content_lines
             rendered.append(text)
         elif source == "system":
             rendered.append(text)
@@ -1728,6 +1732,9 @@ class OutputBuffer:
         for i, item in enumerate(items_to_show):
             if i > 0:
                 output.append("\n")
+                # Add extra blank line before turn_start items for visual separation
+                if isinstance(item, OutputLine) and item.is_turn_start:
+                    output.append("\n")
 
             # Handle ToolBlocks specially
             if isinstance(item, ToolBlock):
@@ -1747,7 +1754,7 @@ class OutputBuffer:
                 # User/parent input - use header line for turn start
                 if line.is_turn_start:
                     # Render header line: ── User ── or ── Parent ──
-                    # Note: inter-item separator in render loop provides visual separation
+                    # Note: blank line for visual separation is added at inter-item level above
                     # "parent" source means message from parent agent to this subagent
                     user_label = "Parent" if line.source == "parent" else "User"
                     header_prefix = f"── {user_label} "
@@ -1774,7 +1781,7 @@ class OutputBuffer:
                 has_ansi = '\x1b[' in line.text
                 if line.is_turn_start:
                     # Render header line: ── Model ─────────────────
-                    # Note: inter-item separator in render loop provides visual separation
+                    # Note: blank line for visual separation is added at inter-item level above
                     header_prefix = "── Model "
                     remaining = max(0, wrap_width - len(header_prefix))
                     output.append(header_prefix, style="bold cyan")
