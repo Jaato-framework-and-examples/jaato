@@ -2378,10 +2378,15 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
             elif isinstance(event, AgentOutputEvent):
                 # Route output to the correct agent's buffer
                 ipc_trace(f"  AgentOutputEvent: agent={event.agent_id}, source={event.source}, mode={event.mode}, len={len(event.text)}")
-                buffer = agent_registry.get_buffer(event.agent_id) or agent_registry.get_selected_buffer()
+                buffer = agent_registry.get_buffer(event.agent_id)
                 if buffer:
                     buffer.append(event.source, event.text, event.mode)
                     display.refresh()
+                else:
+                    # Agent not yet created - queue output for later
+                    # This handles race condition where AgentOutputEvent arrives before AgentCreatedEvent
+                    ipc_trace(f"  Queuing output for unknown agent: {event.agent_id}")
+                    agent_registry.queue_output(event.agent_id, event.source, event.text, event.mode)
 
             elif isinstance(event, AgentCreatedEvent):
                 # Register new agent
