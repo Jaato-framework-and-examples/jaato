@@ -146,6 +146,12 @@ class HybridGCPlugin:
                 self._trace(f"should_collect: triggered by turn_limit ({turns} >= {config.max_turns})")
                 return True, GCTriggerReason.TURN_LIMIT
 
+        # Log why we're NOT triggering (helpful for debugging)
+        self._trace(
+            f"should_collect: not triggered - "
+            f"usage={percent_used:.1f}% < threshold={config.threshold_percent}%, "
+            f"turns={context_usage.get('turns', 0)}"
+        )
         return False, None
 
     def collect(
@@ -187,6 +193,12 @@ class HybridGCPlugin:
 
         # Nothing to collect if we have fewer turns than preservation count
         if total_turns <= preserve_recent:
+            self._trace(
+                f"collect: NO-OP - only {total_turns} turns, all preserved "
+                f"(preserve_recent_turns={preserve_recent}). "
+                f"To actually remove context, either reduce preserve_recent_turns "
+                f"or add more turns to the conversation."
+            )
             return history, GCResult(
                 success=True,
                 items_collected=0,
@@ -194,7 +206,11 @@ class HybridGCPlugin:
                 tokens_after=tokens_before,
                 plugin_name=self.name,
                 trigger_reason=reason,
-                details={"message": "Not enough turns to collect"}
+                details={
+                    "message": "Not enough turns to collect",
+                    "total_turns": total_turns,
+                    "preserve_recent_turns": preserve_recent,
+                }
             )
 
         # Divide turns into generations
