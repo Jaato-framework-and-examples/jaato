@@ -21,6 +21,7 @@ from ..gc import (
     GCResult,
     GCTriggerReason,
     Turn,
+    create_gc_notification_message,
     create_summary_message,
     estimate_history_tokens,
     flatten_turns,
@@ -146,6 +147,12 @@ class HybridGCPlugin:
                 self._trace(f"should_collect: triggered by turn_limit ({turns} >= {config.max_turns})")
                 return True, GCTriggerReason.TURN_LIMIT
 
+        # Log why we're NOT triggering (helpful for debugging)
+        self._trace(
+            f"should_collect: not triggered - "
+            f"usage={percent_used:.1f}% < threshold={config.threshold_percent}%, "
+            f"turns={context_usage.get('turns', 0)}"
+        )
         return False, None
 
     def collect(
@@ -187,15 +194,44 @@ class HybridGCPlugin:
 
         # Nothing to collect if we have fewer turns than preservation count
         if total_turns <= preserve_recent:
-            return history, GCResult(
+            self._trace(
+                f"collect: NO-OP - only {total_turns} turns, all preserved "
+                f"(preserve_recent_turns={preserve_recent}). "
+                f"To actually remove context, either reduce preserve_recent_turns "
+                f"or add more turns to the conversation."
+            )
+
+            result = GCResult(
                 success=True,
                 items_collected=0,
                 tokens_before=tokens_before,
                 tokens_after=tokens_before,
                 plugin_name=self.name,
                 trigger_reason=reason,
-                details={"message": "Not enough turns to collect"}
+                details={
+                    "message": "Not enough turns to collect",
+                    "total_turns": total_turns,
+                    "preserve_recent_turns": preserve_recent,
+                }
             )
+
+            # Add no-op notification if configured
+            new_history = history
+            if self._config.get('notify_on_gc', False):
+                noop_template = self._config.get(
+                    'noop_notification_template',
+                    "GC triggered but all {total} turns preserved "
+                    "(preserve_recent_turns={preserve}). No context removed."
+                )
+                notification = noop_template.format(
+                    total=total_turns,
+                    preserve=preserve_recent
+                )
+                result.notification = notification
+                notification_content = create_gc_notification_message(notification)
+                new_history = [notification_content] + list(history)
+
+            return new_history, result
 
         # Divide turns into generations
         # Recent: last preserve_recent turns
