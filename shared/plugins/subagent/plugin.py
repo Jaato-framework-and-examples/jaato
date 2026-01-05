@@ -1202,6 +1202,11 @@ class SubagentPlugin:
                 if plugin_name == "template":
                     effective_plugin_configs[plugin_name]["base_path"] = parent_cwd
 
+            # Save parent session reference BEFORE create_session, because
+            # create_session calls session.configure() which overwrites
+            # self._parent_session to the new session (see line 514 in jaato_session.py)
+            parent_session = self._parent_session
+
             # Create session
             session = self._runtime.create_session(
                 model=model,
@@ -1211,14 +1216,17 @@ class SubagentPlugin:
                 provider_name=provider
             )
 
+            # Restore parent session reference (was overwritten by configure())
+            self._parent_session = parent_session
+
             # Set agent context
             session.set_agent_context(
                 agent_type="subagent",
                 agent_name=profile.name
             )
 
-            # Set parent session for output forwarding - THIS IS THE KEY CHANGE
-            session.set_parent_session(self._parent_session)
+            # Set parent session for output forwarding
+            session.set_parent_session(parent_session)
 
             # Set parent cancel token for cancellation propagation
             if self._parent_session and hasattr(self._parent_session, '_cancel_token'):
