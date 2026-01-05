@@ -16,7 +16,8 @@ from datetime import datetime
 
 from .config import (
     SubagentConfig, SubagentProfile, SubagentResult, GCProfileConfig,
-    discover_profiles, expand_plugin_configs, _find_workspace_root
+    discover_profiles, expand_plugin_configs, _find_workspace_root,
+    gc_profile_to_plugin_config
 )
 from ..base import UserCommand, CommandCompletion
 from ..model_provider.types import ToolSchema
@@ -265,6 +266,28 @@ class SubagentPlugin:
                                 "max_turns": {
                                     "type": "integer",
                                     "description": "Maximum conversation turns (default: 10)"
+                                },
+                                "gc": {
+                                    "type": "object",
+                                    "description": (
+                                        "Garbage collection configuration for the subagent. "
+                                        "Allows setting a different GC threshold than the parent."
+                                    ),
+                                    "properties": {
+                                        "type": {
+                                            "type": "string",
+                                            "enum": ["truncate", "summarize", "hybrid"],
+                                            "description": "GC strategy type (default: truncate)"
+                                        },
+                                        "threshold_percent": {
+                                            "type": "number",
+                                            "description": "Trigger GC when context usage exceeds this percentage"
+                                        },
+                                        "preserve_recent_turns": {
+                                            "type": "integer",
+                                            "description": "Number of recent turns to always preserve"
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1085,6 +1108,7 @@ class SubagentPlugin:
             plugins = self._parent_plugins
             system_instructions = None
             max_turns = 10
+            gc_config = None
 
             if inline_config:
                 # Override plugins only if explicitly specified
@@ -1103,6 +1127,18 @@ class SubagentPlugin:
                     system_instructions = inline_config['system_instructions']
                 if 'max_turns' in inline_config:
                     max_turns = inline_config['max_turns']
+                # Parse gc config from inline_config
+                if 'gc' in inline_config and inline_config['gc']:
+                    gc_data = inline_config['gc']
+                    gc_config = GCProfileConfig(
+                        type=gc_data.get('type', 'truncate'),
+                        threshold_percent=gc_data.get('threshold_percent', 80.0),
+                        preserve_recent_turns=gc_data.get('preserve_recent_turns', 5),
+                        notify_on_gc=gc_data.get('notify_on_gc', True),
+                        summarize_middle_turns=gc_data.get('summarize_middle_turns'),
+                        max_turns=gc_data.get('max_turns'),
+                        plugin_config=gc_data.get('plugin_config', {}),
+                    )
 
             # Use provided name, or fall back to legacy behavior
             if custom_name:
@@ -1117,6 +1153,7 @@ class SubagentPlugin:
                 plugins=plugins,
                 system_instructions=system_instructions,
                 max_turns=max_turns,
+                gc=gc_config,
             )
 
         # Build the full prompt
@@ -1296,6 +1333,21 @@ class SubagentPlugin:
             # Set retry callback
             if self._retry_callback:
                 session.set_retry_callback(self._retry_callback)
+
+            # Configure GC for subagent if profile specifies it
+            if profile.gc:
+                try:
+                    gc_plugin, gc_config = gc_profile_to_plugin_config(profile.gc)
+                    session.set_gc_plugin(gc_plugin, gc_config)
+                    logger.info(
+                        "Configured GC for subagent %s: type=%s, threshold=%.1f%%",
+                        agent_id, profile.gc.type, profile.gc.threshold_percent
+                    )
+                except ValueError as e:
+                    logger.warning(
+                        "Failed to configure GC for subagent %s: %s",
+                        agent_id, e
+                    )
 
             # Store session in registry BEFORE running
             with self._sessions_lock:
