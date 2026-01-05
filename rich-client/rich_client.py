@@ -125,6 +125,9 @@ class RichClient:
         self._model_provider: str = ""
         self._model_name: str = ""
 
+        # GC threshold for status bar (set during initialization if GC is configured)
+        self._gc_threshold: Optional[float] = None
+
         # UI hooks reference for signaling agent status changes
         self._ui_hooks: Optional[Any] = None
 
@@ -454,6 +457,8 @@ class RichClient:
         if gc_result:
             gc_plugin, gc_config = gc_result
             self._backend.set_gc_plugin(gc_plugin, gc_config)
+            # Store threshold for status bar display
+            self._gc_threshold = gc_config.threshold_percent
 
         # Setup session plugin
         self._setup_session_plugin()
@@ -1389,6 +1394,10 @@ class RichClient:
 
         # Set model info in status bar
         self._display.set_model_info(self._model_provider, self._model_name)
+
+        # Set GC threshold in status bar (if configured)
+        if self._gc_threshold is not None:
+            self._display.set_gc_threshold(self._gc_threshold)
 
         # Set up stop callbacks for Ctrl-C handling
         self._display.set_stop_callbacks(
