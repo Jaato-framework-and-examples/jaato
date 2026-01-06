@@ -227,6 +227,7 @@ class PermissionRequestedEvent(Event):
     Includes pre-formatted prompt lines (with diff for file edits) when available.
     """
     type: EventType = field(default=EventType.PERMISSION_REQUESTED)
+    agent_id: str = ""  # Which agent is requesting permission
     request_id: str = ""
     tool_name: str = ""
     tool_args: Dict[str, Any] = field(default_factory=dict)
@@ -240,6 +241,7 @@ class PermissionRequestedEvent(Event):
 class PermissionResolvedEvent(Event):
     """Permission has been resolved (granted or denied)."""
     type: EventType = field(default=EventType.PERMISSION_RESOLVED)
+    agent_id: str = ""  # Which agent's permission was resolved
     request_id: str = ""
     tool_name: str = ""
     granted: bool = False
@@ -250,6 +252,7 @@ class PermissionResolvedEvent(Event):
 class ClarificationRequestedEvent(Event):
     """Clarification session has started."""
     type: EventType = field(default=EventType.CLARIFICATION_REQUESTED)
+    agent_id: str = ""  # Which agent is requesting clarification
     request_id: str = ""
     tool_name: str = ""
     context_lines: List[str] = field(default_factory=list)
@@ -260,6 +263,7 @@ class ClarificationRequestedEvent(Event):
 class ClarificationQuestionEvent(Event):
     """A single clarification question to answer."""
     type: EventType = field(default=EventType.CLARIFICATION_QUESTION)
+    agent_id: str = ""  # Which agent is asking the question
     request_id: str = ""
     question_index: int = 0
     total_questions: int = 0
@@ -272,6 +276,7 @@ class ClarificationQuestionEvent(Event):
 class ClarificationResolvedEvent(Event):
     """All clarification questions have been answered."""
     type: EventType = field(default=EventType.CLARIFICATION_RESOLVED)
+    agent_id: str = ""  # Which agent's clarification was resolved
     request_id: str = ""
     tool_name: str = ""
     qa_pairs: List[List[str]] = field(default_factory=list)
@@ -286,6 +291,7 @@ class ReferenceSelectionRequestedEvent(Event):
     which references to include.
     """
     type: EventType = field(default=EventType.REFERENCE_SELECTION_REQUESTED)
+    agent_id: str = ""  # Which agent is requesting reference selection
     request_id: str = ""
     tool_name: str = ""
     prompt_lines: List[str] = field(default_factory=list)
@@ -295,6 +301,7 @@ class ReferenceSelectionRequestedEvent(Event):
 class ReferenceSelectionResolvedEvent(Event):
     """Reference selection has been completed."""
     type: EventType = field(default=EventType.REFERENCE_SELECTION_RESOLVED)
+    agent_id: str = ""  # Which agent's reference selection was resolved
     request_id: str = ""
     tool_name: str = ""
     selected_ids: List[str] = field(default_factory=list)

@@ -190,6 +190,9 @@ class JaatoServer:
         self._pending_clarification_request_id: Optional[str] = None
         self._pending_reference_selection_request_id: Optional[str] = None
 
+        # Track which agent is currently executing a tool (for permission/clarification routing)
+        self._current_tool_agent_id: str = "main"
+
         # Queue for mid-turn prompts (messages sent while model is running)
         self._mid_turn_prompt_queue: queue.Queue[str] = queue.Queue()
 
@@ -790,6 +793,8 @@ class JaatoServer:
                     server._agents[agent_id].history = history
 
             def on_tool_call_start(self, agent_id, tool_name, tool_args, call_id=None):
+                # Track current agent for permission/clarification routing
+                server._current_tool_agent_id = agent_id
                 server.emit(ToolCallStartEvent(
                     agent_id=agent_id,
                     tool_name=tool_name,
@@ -870,6 +875,7 @@ class JaatoServer:
                     pass  # Fall back to client-side formatting
 
             server.emit(PermissionRequestedEvent(
+                agent_id=server._current_tool_agent_id,
                 request_id=request_id,
                 tool_name=tool_name,
                 tool_args=tool_args or {},
@@ -883,6 +889,7 @@ class JaatoServer:
             server._pending_permission_request_id = None
             server._waiting_for_channel_input = False
             server.emit(PermissionResolvedEvent(
+                agent_id=server._current_tool_agent_id,
                 request_id=request_id,
                 tool_name=tool_name,
                 granted=granted,
@@ -910,6 +917,7 @@ class JaatoServer:
             server._pending_clarification_request_id = request_id
             server._waiting_for_channel_input = True
             server.emit(ClarificationRequestedEvent(
+                agent_id=server._current_tool_agent_id,
                 request_id=request_id,
                 tool_name=tool_name,
                 context_lines=prompt_lines,
@@ -922,6 +930,7 @@ class JaatoServer:
             # Convert qa_pairs from list of tuples to list of lists for JSON serialization
             qa_pairs_serializable = [[q, a] for q, a in qa_pairs] if qa_pairs else []
             server.emit(ClarificationResolvedEvent(
+                agent_id=server._current_tool_agent_id,
                 request_id=request_id,
                 tool_name=tool_name,
                 qa_pairs=qa_pairs_serializable,
@@ -930,6 +939,7 @@ class JaatoServer:
         def on_question_displayed(tool_name: str, question_index: int,
                                   total_questions: int, question_lines: list):
             server.emit(ClarificationQuestionEvent(
+                agent_id=server._current_tool_agent_id,
                 request_id=server._pending_clarification_request_id or "",
                 question_index=question_index,
                 total_questions=total_questions,
@@ -964,6 +974,7 @@ class JaatoServer:
             server._pending_reference_selection_request_id = request_id
             server._waiting_for_channel_input = True
             server.emit(ReferenceSelectionRequestedEvent(
+                agent_id=server._current_tool_agent_id,
                 request_id=request_id,
                 tool_name=tool_name,
                 prompt_lines=prompt_lines,
@@ -974,6 +985,7 @@ class JaatoServer:
             server._pending_reference_selection_request_id = None
             server._waiting_for_channel_input = False
             server.emit(ReferenceSelectionResolvedEvent(
+                agent_id=server._current_tool_agent_id,
                 request_id=request_id,
                 tool_name=tool_name,
                 selected_ids=selected_ids,

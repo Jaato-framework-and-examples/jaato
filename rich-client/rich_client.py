@@ -2569,7 +2569,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 ]
 
                 # Integrate into tool tree (same as direct mode)
-                buffer = agent_registry.get_selected_buffer()
+                # Route to the agent that requested permission, not the selected agent
+                buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
                 if buffer:
                     buffer.set_tool_permission_pending(
                         event.tool_name,
@@ -2583,7 +2584,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 pending_permission_request = None
                 display.set_waiting_for_channel_input(False)
                 # Update tool tree with permission result
-                buffer = agent_registry.get_selected_buffer()
+                # Route to the agent whose permission was resolved, not the selected agent
+                buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
                 if buffer:
                     buffer.set_tool_permission_resolved(event.tool_name, event.granted, event.method)
                     display.refresh()
@@ -2594,8 +2596,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 pending_clarification_request = {
                     "request_id": event.request_id,
                     "tool_name": event.tool_name,
+                    "agent_id": event.agent_id,  # Track which agent requested clarification
                 }
-                buffer = agent_registry.get_selected_buffer()
+                # Route to the agent that requested clarification, not the selected agent
+                buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
                 if buffer:
                     buffer.set_tool_clarification_pending(event.tool_name, event.context_lines)
                 display.refresh()
@@ -2604,13 +2608,15 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 ipc_trace(f"  ClarificationQuestionEvent: q{event.question_index}/{event.total_questions}")
                 # Show clarification question in tool tree (same as direct mode)
                 if not pending_clarification_request:
-                    pending_clarification_request = {"request_id": event.request_id}
+                    pending_clarification_request = {"request_id": event.request_id, "agent_id": event.agent_id}
                 pending_clarification_request["current_question"] = event.question_index
                 pending_clarification_request["total_questions"] = event.total_questions
 
                 # Update tool tree with current question
                 tool_name = pending_clarification_request.get("tool_name", "clarification")
-                buffer = agent_registry.get_selected_buffer()
+                # Route to the agent that requested clarification, not the selected agent
+                agent_id = event.agent_id or pending_clarification_request.get("agent_id")
+                buffer = agent_registry.get_buffer(agent_id) if agent_id else agent_registry.get_selected_buffer()
                 if buffer:
                     question_lines = event.question_text.split("\n") if event.question_text else []
                     buffer.set_tool_clarification_question(
@@ -2626,7 +2632,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
             elif isinstance(event, ClarificationResolvedEvent):
                 ipc_trace(f"  ClarificationResolvedEvent: tool={event.tool_name}, qa_pairs={len(event.qa_pairs)}")
                 # Update tool tree with resolution (same as direct mode)
-                buffer = agent_registry.get_selected_buffer()
+                # Route to the agent whose clarification was resolved, not the selected agent
+                buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
                 if buffer:
                     # Convert [[q, a], ...] back to [(q, a), ...] for compatibility
                     qa_pairs = [(q, a) for q, a in event.qa_pairs] if event.qa_pairs else None
@@ -2641,9 +2648,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 pending_reference_selection_request = {
                     "request_id": event.request_id,
                     "tool_name": event.tool_name,
+                    "agent_id": event.agent_id,  # Track which agent requested selection
                 }
                 # Display the prompt lines in the output
-                buffer = agent_registry.get_selected_buffer()
+                # Route to the agent that requested selection, not the selected agent
+                buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
                 if buffer:
                     for line in event.prompt_lines:
                         buffer.append("references", line + "\n", "append")
