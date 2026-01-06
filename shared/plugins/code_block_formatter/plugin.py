@@ -1,40 +1,31 @@
 # shared/plugins/code_block_formatter/plugin.py
-"""Code block formatter plugin for syntax highlighting code blocks.
+"""Streaming code block formatter plugin for syntax highlighting.
 
 This plugin transforms model output text containing markdown code blocks
-into ANSI-escaped text with syntax highlighting. It can be used standalone
-or registered with a FormatterPipeline.
+into ANSI-escaped text with syntax highlighting. It buffers content inside
+code blocks until they're complete, while passing through regular text
+immediately.
 
-Usage (standalone):
+Usage:
     from shared.plugins.code_block_formatter import create_plugin
 
     formatter = create_plugin()
-    formatter.initialize({"theme": "monokai"})
-    formatted = formatter.format_output(text)
+    formatter.initialize({"theme": "monokai", "line_numbers": True})
 
-Usage (pipeline):
-    from shared.plugins.formatter_pipeline import create_pipeline
-    from shared.plugins.code_block_formatter import create_plugin
-
-    pipeline = create_pipeline()
-    pipeline.register(create_plugin())
-    formatted = pipeline.format(text)
+    # Streaming mode
+    for chunk in model_output:
+        for output in formatter.process_chunk(chunk):
+            print(output, end='')
+    for output in formatter.flush():
+        print(output, end='')
 """
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional
 
 from rich.console import Console
 from rich.syntax import Syntax
-from rich.text import Text
 
-
-# Regex pattern for detecting code blocks with optional language specifier
-# Matches: ```lang\ncode\n``` or ```\ncode\n```
-CODE_BLOCK_PATTERN = re.compile(
-    r'```(\w*)\n(.*?)```',
-    re.DOTALL
-)
 
 # Common language aliases mapping
 LANGUAGE_ALIASES = {
@@ -58,19 +49,24 @@ DEFAULT_PRIORITY = 40
 
 
 class CodeBlockFormatterPlugin:
-    """Plugin that formats model output with syntax highlighting for code blocks.
+    """Streaming plugin that formats code blocks with syntax highlighting.
 
-    Implements the FormatterPlugin protocol for use in a formatter pipeline.
-    Detects markdown code blocks (```lang...```) and applies syntax highlighting.
+    Implements the FormatterPlugin protocol. Buffers content inside code
+    blocks (```...```) until complete, passes through other text immediately.
     """
 
     def __init__(self):
         self._theme = "monokai"
         self._line_numbers = False
         self._word_wrap = True
-        self._background_color: Optional[str] = None  # None = no background
+        self._background_color: Optional[str] = None
         self._console_width = 80
         self._priority = DEFAULT_PRIORITY
+
+        # Streaming state
+        self._buffer = ""
+        self._in_code_block = False
+        self._code_block_lang = ""
 
     # ==================== FormatterPlugin Protocol ====================
 
@@ -84,66 +80,87 @@ class CodeBlockFormatterPlugin:
         """Execution priority (40 = syntax highlighting range)."""
         return self._priority
 
-    def should_format(self, text: str, format_hint: Optional[str] = None) -> bool:
-        """Check if this formatter should process the text.
+    def process_chunk(self, chunk: str) -> Iterator[str]:
+        """Process a chunk, buffering code blocks, passing through text.
 
         Args:
-            text: Text to check.
-            format_hint: Optional hint (not used - we detect code blocks directly).
+            chunk: Incoming text chunk.
 
-        Returns:
-            True if text contains markdown code blocks.
+        Yields:
+            Output chunks - immediate for regular text, formatted for complete code blocks.
         """
-        return CODE_BLOCK_PATTERN.search(text) is not None
+        self._buffer += chunk
 
-    def format_output(self, text: str) -> str:
-        """Transform text with code blocks into ANSI-highlighted text.
+        while self._buffer:
+            if not self._in_code_block:
+                # Look for code block start: ```lang or ```
+                match = re.search(r'```(\w*)\n', self._buffer)
+                if match:
+                    # Yield text before the code block
+                    before = self._buffer[:match.start()]
+                    if before:
+                        yield before
 
-        Parses the text for markdown code blocks (```lang...```) and renders
-        them with syntax highlighting. Plain text segments are preserved.
+                    # Enter code block mode
+                    self._code_block_lang = match.group(1) or "text"
+                    self._buffer = self._buffer[match.end():]
+                    self._in_code_block = True
+                else:
+                    # Check if we might have a partial code block start at the end
+                    # This includes: `, ``, ```, ```lang (without trailing \n)
+                    partial_match = re.search(r'`{1,3}\w*$', self._buffer)
+                    if partial_match:
+                        # Hold back the potential code block start
+                        to_yield = self._buffer[:partial_match.start()]
+                        self._buffer = self._buffer[partial_match.start():]
+                        if to_yield:
+                            yield to_yield
+                        return
+                    # No code block start, yield everything
+                    yield self._buffer
+                    self._buffer = ""
+            else:
+                # In code block, look for closing ```
+                end_match = re.search(r'\n```', self._buffer)
+                if end_match:
+                    # Extract code block content
+                    code = self._buffer[:end_match.start()]
 
-        Args:
-            text: Text potentially containing markdown code blocks.
+                    # Format and yield the complete code block
+                    formatted = self._render_code_block(code, self._code_block_lang)
+                    yield formatted
 
-        Returns:
-            Text with ANSI escape codes for syntax highlighting.
-            If no code blocks are found, returns the original text unchanged.
+                    # Exit code block mode, continue with remaining text
+                    self._buffer = self._buffer[end_match.end():]
+                    self._in_code_block = False
+                    self._code_block_lang = ""
+                else:
+                    # Code block not complete yet, keep buffering
+                    return
+
+    def flush(self) -> Iterator[str]:
+        """Flush any remaining buffered content.
+
+        Yields:
+            Any remaining content, formatted if it was a code block.
         """
-        if not self.should_format(text):
-            return text
+        if self._buffer:
+            if self._in_code_block:
+                # Incomplete code block - format what we have
+                formatted = self._render_code_block(self._buffer, self._code_block_lang)
+                yield formatted
+            else:
+                # Regular text
+                yield self._buffer
+            self._buffer = ""
+            self._in_code_block = False
+            self._code_block_lang = ""
 
-        # Handle literal \n in text (escaped newlines) - convert to actual newlines
-        text = text.replace('\\n', '\n')
-
-        result_parts: List[str] = []
-        last_end = 0
-
-        for match in CODE_BLOCK_PATTERN.finditer(text):
-            # Add any plain text before this code block
-            plain_text = text[last_end:match.start()]
-            if plain_text:
-                result_parts.append(plain_text)
-
-            # Extract language and code from the match
-            language = match.group(1) or "text"
-            code = match.group(2)
-
-            # Remove trailing newline from code if present
-            if code.endswith('\n'):
-                code = code[:-1]
-
-            # Render the code block with syntax highlighting
-            highlighted = self._render_code_block(code, language)
-            result_parts.append(highlighted)
-
-            last_end = match.end()
-
-        # Add any remaining plain text after the last code block
-        remaining = text[last_end:]
-        if remaining:
-            result_parts.append(remaining)
-
-        return ''.join(result_parts)
+    def reset(self) -> None:
+        """Reset state for a new turn."""
+        self._buffer = ""
+        self._in_code_block = False
+        self._code_block_lang = ""
 
     # ==================== ConfigurableFormatter Protocol ====================
 
@@ -168,31 +185,30 @@ class CodeBlockFormatterPlugin:
         self._priority = config.get("priority", DEFAULT_PRIORITY)
 
     def set_console_width(self, width: int) -> None:
-        """Update the console width for rendering.
-
-        Args:
-            width: New console width in characters.
-        """
+        """Update the console width for rendering."""
         self._console_width = max(20, width)
 
     def shutdown(self) -> None:
         """Cleanup when plugin is disabled."""
-        pass
+        self.reset()
 
     # ==================== Internal Methods ====================
 
     def _render_code_block(self, code: str, language: str) -> str:
-        """Render a single code block with syntax highlighting.
+        """Render a code block with syntax highlighting and block indent.
 
         Args:
             code: The code content (without ``` markers).
             language: The language identifier.
 
         Returns:
-            ANSI-escaped string with syntax highlighting.
+            ANSI-escaped string with syntax highlighting, indented as a block.
         """
         # Map language aliases
         lang = LANGUAGE_ALIASES.get(language.lower(), language.lower())
+
+        # Block indent for visual distinction
+        indent = "    "  # 4 spaces
 
         try:
             syntax = Syntax(
@@ -206,7 +222,7 @@ class CodeBlockFormatterPlugin:
 
             # Render to ANSI string using a temporary console
             console = Console(
-                width=self._console_width,
+                width=max(40, self._console_width - len(indent)),
                 force_terminal=True,
                 no_color=False,
                 highlight=False,
@@ -214,50 +230,15 @@ class CodeBlockFormatterPlugin:
             with console.capture() as capture:
                 console.print(syntax, end="")
 
-            return capture.get()
+            # Add block indent to each line
+            rendered = capture.get()
+            indented_lines = [indent + line for line in rendered.split('\n')]
+            return '\n' + '\n'.join(indented_lines) + '\n'
 
         except Exception:
-            # Fallback: return code as-is if highlighting fails
-            return code
-
-    # ==================== Convenience Methods ====================
-
-    def format_code(self, code: str, language: str = "text") -> str:
-        """Format a single code snippet with syntax highlighting.
-
-        Convenience method for formatting code without markdown wrappers.
-
-        Args:
-            code: Code to highlight.
-            language: Programming language (default: "text").
-
-        Returns:
-            ANSI-escaped string with syntax highlighting.
-        """
-        return self._render_code_block(code, language)
-
-    def extract_code_blocks(self, text: str) -> List[Tuple[str, str, int, int]]:
-        """Extract all code blocks from text with their positions.
-
-        Args:
-            text: Text containing markdown code blocks.
-
-        Returns:
-            List of tuples: (language, code, start_pos, end_pos)
-        """
-        blocks = []
-        for match in CODE_BLOCK_PATTERN.finditer(text):
-            language = match.group(1) or "text"
-            code = match.group(2)
-            if code.endswith('\n'):
-                code = code[:-1]
-            blocks.append((language, code, match.start(), match.end()))
-        return blocks
-
-    # Legacy alias
-    def has_code_blocks(self, text: str) -> bool:
-        """Check if text contains any code blocks (alias for should_format)."""
-        return self.should_format(text)
+            # Fallback: return code as-is with indent if highlighting fails
+            indented_lines = [indent + line for line in code.split('\n')]
+            return '\n' + '\n'.join(indented_lines) + '\n'
 
 
 def create_plugin() -> CodeBlockFormatterPlugin:

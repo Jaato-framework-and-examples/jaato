@@ -45,6 +45,7 @@ from shared import (
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
 from shared.plugins.base import parse_command_args
 from shared.plugins.gc import load_gc_from_file
+from shared.plugins.code_validation_formatter import create_plugin as create_code_validation_formatter
 
 # Reuse input handling from simple-client
 from input_handler import InputHandler
@@ -648,6 +649,67 @@ class RichClient:
             if subagent_plugin and hasattr(subagent_plugin, 'set_retry_callback'):
                 subagent_plugin.set_retry_callback(on_retry)
                 self._trace("Retry callback configured for subagent plugin")
+
+    def _setup_code_validation_formatter(self) -> None:
+        """Set up code validation formatter for LSP diagnostics on output code blocks.
+
+        Creates the code validation formatter, wires it with the LSP plugin,
+        and registers it with the display's formatter pipeline.
+
+        Note: Registers the formatter even if no LSP servers are connected yet,
+        since servers may connect asynchronously. The formatter checks dynamically.
+        """
+        self._trace("_setup_code_validation_formatter: starting")
+        if not self._display or not self.registry:
+            self._trace("_setup_code_validation_formatter: no display or registry")
+            return
+
+        # Get LSP plugin from registry
+        lsp_plugin = self.registry.get_plugin("lsp")
+        self._trace(f"_setup_code_validation_formatter: lsp_plugin={lsp_plugin is not None}")
+        if not lsp_plugin:
+            self._trace("Code validation formatter: LSP plugin not available")
+            return
+
+        # Create code validation formatter (register regardless of current LSP state)
+        code_validator = create_code_validation_formatter()
+        code_validator.set_lsp_plugin(lsp_plugin)
+        code_validator.initialize({
+            "enabled": True,
+            "max_errors_per_block": 5,
+            "max_warnings_per_block": 3,
+        })
+        self._trace(f"_setup_code_validation_formatter: code_validator created, name={code_validator.name}, priority={code_validator.priority}")
+
+        # Set up feedback callback for model self-correction
+        # When validation issues are found, inject them into the conversation
+        def on_validation_feedback(feedback: str) -> None:
+            """Inject validation feedback into the conversation."""
+            if self._display and feedback:
+                # Show feedback in output panel as a system message
+                self._display.add_system_message(
+                    f"[Code Validation] Issues detected in output code blocks",
+                    style="yellow"
+                )
+                self._trace(f"Code validation feedback: {len(feedback)} chars")
+
+        code_validator.set_feedback_callback(on_validation_feedback)
+
+        # Register with display's formatter pipeline
+        self._display.register_formatter(code_validator)
+
+        # Log current state (servers may connect later)
+        connected_servers = getattr(lsp_plugin, '_connected_servers', set())
+        self._trace(f"Code validation formatter registered (current LSP servers: {connected_servers or 'none yet'})")
+
+        # Store reference for debugging
+        self._code_validator = code_validator
+
+        # Show visible feedback about code validation status
+        if connected_servers:
+            self.log(f"[plugin] Code validation enabled for: {', '.join(connected_servers)}")
+        else:
+            self.log(f"[plugin] Code validation formatter registered (LSP servers will be checked dynamically)")
 
     def _setup_agent_hooks(self) -> None:
         """Set up agent lifecycle hooks for UI integration."""
@@ -1438,6 +1500,9 @@ class RichClient:
 
         # Set up retry callback to route rate limit messages to output panel
         self._setup_retry_callback()
+
+        # Set up code validation formatter for LSP diagnostics on output code blocks
+        self._setup_code_validation_formatter()
 
         # Register UI hooks with jaato client and subagent plugin
         # This will create the main agent in the registry via set_ui_hooks()
@@ -2243,10 +2308,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     # Session provider will be set after state variables are defined (below)
 
     # Create display with full features
+    # server_formatted=True because server handles syntax highlighting and code validation
     display = PTDisplay(
         keybinding_config=keybindings,
         agent_registry=agent_registry,
         input_handler=input_handler,
+        server_formatted=True,
     )
 
     # Create IPC client

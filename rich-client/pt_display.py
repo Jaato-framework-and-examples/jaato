@@ -95,6 +95,7 @@ class PTDisplay:
         agent_registry: Optional["AgentRegistry"] = None,
         clipboard_config: Optional[ClipboardConfig] = None,
         keybinding_config: Optional[KeybindingConfig] = None,
+        server_formatted: bool = False,
     ):
         """Initialize the display.
 
@@ -107,6 +108,8 @@ class PTDisplay:
                              If not provided, uses config from environment.
             keybinding_config: Optional KeybindingConfig for custom keybindings.
                               If not provided, loads from config files or uses defaults.
+            server_formatted: If True, skip client-side formatting (server already formatted).
+                             Used in IPC mode where server handles syntax highlighting.
         """
         self._width, self._height = shutil.get_terminal_size()
 
@@ -134,17 +137,24 @@ class PTDisplay:
         self._output_buffer.set_keybinding_config(self._keybinding_config)
 
         # Formatter pipeline for output processing (syntax highlighting, diff coloring)
-        self._formatter_pipeline = create_pipeline()
-        self._formatter_pipeline.register(create_diff_formatter())        # priority 20
-        self._formatter_pipeline.register(create_code_block_formatter())  # priority 40
-        self._formatter_pipeline.set_console_width(output_width)
-        self._output_buffer.set_formatter_pipeline(self._formatter_pipeline)
+        # Skip in server_formatted mode - server already handles formatting
+        self._formatter_pipeline = None
+        if not server_formatted:
+            self._formatter_pipeline = create_pipeline()
+            self._formatter_pipeline.register(create_diff_formatter())        # priority 20
+            # Code block formatter with line numbers enabled
+            code_block_formatter = create_code_block_formatter()
+            code_block_formatter.initialize({"line_numbers": True})
+            self._formatter_pipeline.register(code_block_formatter)           # priority 40
+            self._formatter_pipeline.set_console_width(output_width)
+            self._output_buffer.set_formatter_pipeline(self._formatter_pipeline)
 
         # Set keybinding config on agent registry buffers too
         if self._agent_registry:
             self._agent_registry.set_keybinding_config_all(self._keybinding_config)
-            # Also set formatter pipeline on agent buffers
-            self._agent_registry.set_formatter_pipeline_all(self._formatter_pipeline)
+            # Also set formatter pipeline on agent buffers (only if not server_formatted)
+            if self._formatter_pipeline:
+                self._agent_registry.set_formatter_pipeline_all(self._formatter_pipeline)
 
         # Rich renderer
         self._renderer = RichRenderer(self._width)
@@ -1313,6 +1323,26 @@ class PTDisplay:
         self._gc_threshold = threshold
         self._gc_strategy = strategy
         self.refresh()
+
+    def register_formatter(self, formatter: Any) -> None:
+        """Register an additional formatter plugin with the pipeline.
+
+        Args:
+            formatter: A formatter implementing the FormatterPlugin protocol.
+        """
+        if self._formatter_pipeline:
+            self._formatter_pipeline.register(formatter)
+            # Also register with agent registry if present
+            if self._agent_registry:
+                self._agent_registry.set_formatter_pipeline_all(self._formatter_pipeline)
+
+    def get_formatter_pipeline(self) -> Any:
+        """Get the formatter pipeline for external access.
+
+        Returns:
+            The FormatterPipeline instance.
+        """
+        return self._formatter_pipeline
 
     # Plan panel methods
 
