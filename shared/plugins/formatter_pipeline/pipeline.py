@@ -19,8 +19,25 @@ Usage:
 """
 
 from typing import Any, Dict, List, Optional
+import os
+import tempfile
+from datetime import datetime
 
 from .protocol import FormatterPlugin, ConfigurableFormatter
+
+
+def _trace(msg: str) -> None:
+    """Write debug trace to file."""
+    try:
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        with open(trace_path, 'a') as f:
+            ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+            f.write(f"[{ts}] FormatterPipeline: {msg}\n")
+    except Exception:
+        pass
 
 
 class FormatterPipeline:
@@ -45,7 +62,9 @@ class FormatterPipeline:
         Raises:
             TypeError: If formatter doesn't implement required protocol.
         """
+        _trace(f"register: attempting to register {type(formatter).__name__}")
         if not isinstance(formatter, FormatterPlugin):
+            _trace(f"register: FAILED protocol check for {type(formatter).__name__}")
             raise TypeError(
                 f"Formatter must implement FormatterPlugin protocol, "
                 f"got {type(formatter).__name__}"
@@ -65,6 +84,8 @@ class FormatterPipeline:
         # Sync console width if formatter supports it
         if isinstance(formatter, ConfigurableFormatter):
             formatter.set_console_width(self._console_width)
+
+        _trace(f"register: SUCCESS - {formatter.name} at priority {formatter.priority}, total formatters: {len(self._formatters)}")
 
     def unregister(self, name: str) -> bool:
         """Remove a formatter by name.
@@ -132,9 +153,15 @@ class FormatterPipeline:
             Formatted text with ANSI codes for styling.
         """
         result = text
+        has_code_block = '```' in text
+        if has_code_block:
+            _trace(f"format: processing text with code blocks ({len(text)} chars), {len(self._formatters)} formatters registered")
 
         for formatter in self._formatters:
-            if formatter.should_format(result, format_hint):
+            should = formatter.should_format(result, format_hint)
+            if has_code_block:
+                _trace(f"format: {formatter.name} (priority {formatter.priority}) should_format={should}")
+            if should:
                 result = formatter.format_output(result)
 
         return result
