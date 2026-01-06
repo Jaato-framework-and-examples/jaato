@@ -722,6 +722,7 @@ class RichClient:
         # Create hooks implementation
         registry = self._agent_registry
         display = self._display
+        trace_fn = self._trace  # Capture trace function for use in hooks
 
         class RichClientHooks:
             """UI hooks implementation for rich client."""
@@ -790,6 +791,7 @@ class RichClient:
                 )
 
             def on_agent_gc_config(self, agent_id, threshold, strategy):
+                trace_fn(f"[on_agent_gc_config] agent_id={agent_id}, threshold={threshold}, strategy={strategy}")
                 registry.update_gc_config(agent_id, threshold, strategy)
                 if display:
                     display.refresh()
