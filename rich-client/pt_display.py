@@ -1314,6 +1314,26 @@ class PTDisplay:
         self._gc_strategy = strategy
         self.refresh()
 
+    def register_formatter(self, formatter: Any) -> None:
+        """Register an additional formatter plugin with the pipeline.
+
+        Args:
+            formatter: A formatter implementing the FormatterPlugin protocol.
+        """
+        if self._formatter_pipeline:
+            self._formatter_pipeline.register(formatter)
+            # Also register with agent registry if present
+            if self._agent_registry:
+                self._agent_registry.set_formatter_pipeline_all(self._formatter_pipeline)
+
+    def get_formatter_pipeline(self) -> Any:
+        """Get the formatter pipeline for external access.
+
+        Returns:
+            The FormatterPipeline instance.
+        """
+        return self._formatter_pipeline
+
     # Plan panel methods
 
     def update_plan(self, plan_data: Dict[str, Any], agent_id: Optional[str] = None) -> None:
