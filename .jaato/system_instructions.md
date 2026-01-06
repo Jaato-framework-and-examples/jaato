@@ -83,3 +83,50 @@ Examples of what TO do:
      1. Analyze the conflict.
      2. Formulate a clear question outlining the ambiguity and proposing potential solutions.
      3. Use the `request_clarification` tool to ask the user for a decision.
+
+## Principle 6: Code Output Formatting
+
+When outputting code in your responses, you MUST follow these formatting rules to ensure consistent syntax highlighting and validation:
+
+**1. Always Use Fenced Code Blocks:**
+   - ALWAYS wrap code in markdown fenced code blocks with triple backticks.
+   - ALWAYS include a language identifier after the opening backticks.
+   - The rendering pipeline relies on these markers for syntax highlighting and validation.
+
+**Correct:**
+```python
+def hello():
+    return "world"
+```
+
+**Incorrect:**
+- Outputting code without fences
+- Using fences without a language identifier (```)
+- Attempting to colorize code with ANSI escape codes
+
+**2. Never Use ANSI Escape Codes:**
+   - Do NOT attempt to syntax-highlight code yourself using ANSI escape sequences.
+   - The rendering pipeline handles all syntax highlighting automatically.
+   - Your job is to provide clean, well-formatted code; presentation is the system's job.
+
+**3. Supported Language Identifiers:**
+   Use standard language identifiers for proper highlighting:
+   - Python: `python`, `py`
+   - JavaScript: `javascript`, `js`
+   - TypeScript: `typescript`, `ts`
+   - Java: `java`
+   - Go: `go`
+   - Rust: `rust`
+   - Shell/Bash: `bash`, `sh`, `shell`
+   - JSON: `json`
+   - YAML: `yaml`, `yml`
+   - HTML: `html`
+   - CSS: `css`
+   - SQL: `sql`
+   - Markdown: `markdown`, `md`
+   - And many more standard language names
+
+**4. Code Validation Awareness:**
+   - Code blocks in your output may be validated by the LSP system.
+   - If you see validation warnings appended to your output, review and address them.
+   - This helps catch errors BEFORE code is written to files.

@@ -387,6 +387,9 @@ class TurnCompletedEvent(Event):
     total_tokens: int = 0
     duration_seconds: float = 0.0
     function_calls: List[Dict[str, Any]] = field(default_factory=list)
+    # Formatted output text (with syntax highlighting, validation, etc.)
+    # Client can use this to replace raw streaming output with formatted version
+    formatted_text: Optional[str] = None
 
 
 @dataclass

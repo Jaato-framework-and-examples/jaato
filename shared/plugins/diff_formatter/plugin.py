@@ -25,7 +25,7 @@ Usage (pipeline):
 """
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from .parser import parse_unified_diff, ParsedDiff
 from .renderers.base import ColorScheme, DEFAULT_COLOR_SCHEME, NO_COLOR_SCHEME
@@ -92,31 +92,41 @@ class DiffFormatterPlugin:
         """Execution priority (20 = structural formatting range)."""
         return self._priority
 
-    def should_format(self, text: str, format_hint: Optional[str] = None) -> bool:
-        """Check if this formatter should process the text.
+    def process_chunk(self, chunk: str) -> Iterator[str]:
+        """Process a chunk, formatting diffs inline.
 
-        Uses format_hint="diff" as fast path, otherwise detects diff patterns.
+        Diffs are typically complete blocks, so we format them immediately
+        when detected. Non-diff text passes through unchanged.
 
         Args:
-            text: Text to check.
-            format_hint: Optional hint - "diff" triggers formatting.
+            chunk: Incoming text chunk.
 
-        Returns:
-            True if text appears to be a unified diff.
+        Yields:
+            Formatted chunk if it's a diff, otherwise unchanged.
         """
-        # Fast path: explicit hint
-        if format_hint == "diff":
-            return True
+        if self._is_diff(chunk):
+            yield self._format_diff(chunk)
+        else:
+            yield chunk
 
-        # Detection: look for unified diff markers
+    def flush(self) -> Iterator[str]:
+        """Flush any remaining content (no-op for diff formatter)."""
+        return
+        yield  # Make this a generator
+
+    def reset(self) -> None:
+        """Reset state for a new turn (no-op for diff formatter)."""
+        pass
+
+    def _is_diff(self, text: str) -> bool:
+        """Check if text appears to be a unified diff."""
         if HUNK_HEADER.search(text):
             return True
         if UNIFIED_DIFF_HEADER.search(text) and DIFF_LINE_PATTERN.search(text):
             return True
-
         return False
 
-    def format_output(self, text: str) -> str:
+    def _format_diff(self, text: str) -> str:
         """Format unified diff output with adaptive rendering.
 
         Parses the diff and selects the appropriate renderer
@@ -144,6 +154,17 @@ class DiffFormatterPlugin:
 
         # Render the diff
         return renderer.render(parsed, self._console_width, self._colors)
+
+    # Legacy method for backwards compatibility
+    def format_output(self, text: str) -> str:
+        """Format unified diff (legacy method, use process_chunk for streaming)."""
+        return self._format_diff(text)
+
+    def should_format(self, text: str, format_hint: Optional[str] = None) -> bool:
+        """Check if text is a diff (legacy method)."""
+        if format_hint == "diff":
+            return True
+        return self._is_diff(text)
 
     # ==================== ConfigurableFormatter Protocol ====================
 
