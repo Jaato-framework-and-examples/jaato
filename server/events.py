@@ -381,6 +381,9 @@ class ContextUpdatedEvent(Event):
     percent_used: float = 0.0
     tokens_remaining: int = 0
     turns: int = 0
+    # GC configuration (included for status bar display)
+    gc_threshold: Optional[float] = None  # GC trigger threshold percentage
+    gc_strategy: Optional[str] = None  # GC strategy name (e.g., "truncate", "hybrid")
 
 
 @dataclass
