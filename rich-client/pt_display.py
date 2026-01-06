@@ -417,11 +417,14 @@ class PTDisplay:
         model = self._model_name or "—"
 
         # Build context usage display (show percentage available)
-        # Use selected agent's context if registry present
+        # Use selected agent's context and GC config if registry present
         if self._agent_registry:
             usage = self._agent_registry.get_selected_context_usage()
+            gc_threshold, gc_strategy = self._agent_registry.get_selected_gc_config()
         else:
             usage = self._context_usage
+            gc_threshold = self._gc_threshold
+            gc_strategy = self._gc_strategy
 
         if usage:
             percent_used = usage.get('percent_used', 0)
@@ -430,9 +433,9 @@ class PTDisplay:
             percent_available = 100.0
 
         # Build context string with GC threshold hint if configured
-        if self._gc_threshold is not None:
-            gc_trigger_available = 100 - self._gc_threshold
-            strategy = self._gc_strategy or "gc"
+        if gc_threshold is not None:
+            gc_trigger_available = 100 - gc_threshold
+            strategy = gc_strategy or "gc"
             context_str = f"{percent_available:.0f}% available ({strategy} at {gc_trigger_available:.0f}%)"
         elif usage:
             total = usage.get('total_tokens', 0)

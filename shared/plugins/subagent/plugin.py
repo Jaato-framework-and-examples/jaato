@@ -1643,6 +1643,12 @@ class SubagentPlugin:
                         "Configured GC for subagent %s: type=%s, threshold=%.1f%%",
                         agent_id, profile.gc.type, profile.gc.threshold_percent
                     )
+                    # Notify UI about GC config for status bar display
+                    if self._ui_hooks and hasattr(self._ui_hooks, 'on_agent_gc_config'):
+                        strategy = profile.gc.type
+                        self._ui_hooks.on_agent_gc_config(
+                            agent_id, profile.gc.threshold_percent, strategy
+                        )
                 except ValueError as e:
                     logger.warning(
                         "Failed to configure GC for subagent %s: %s",

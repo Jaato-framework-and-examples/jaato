@@ -789,6 +789,11 @@ class RichClient:
                     output_tokens, turns, percent_used
                 )
 
+            def on_agent_gc_config(self, agent_id, threshold, strategy):
+                registry.update_gc_config(agent_id, threshold, strategy)
+                if display:
+                    display.refresh()
+
             def on_agent_history_updated(self, agent_id, history):
                 registry.update_history(agent_id, history)
 
@@ -1507,6 +1512,10 @@ class RichClient:
         # Register UI hooks with jaato client and subagent plugin
         # This will create the main agent in the registry via set_ui_hooks()
         self._setup_agent_hooks()
+
+        # Set GC config on main agent in registry (for per-agent status bar display)
+        if self._gc_threshold is not None and self._agent_registry:
+            self._agent_registry.update_gc_config("main", self._gc_threshold, self._gc_strategy)
 
         # Set up permission hooks for inline permission display in tool tree
         self._setup_permission_hooks()

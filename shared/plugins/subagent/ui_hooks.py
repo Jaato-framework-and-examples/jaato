@@ -159,6 +159,23 @@ class AgentUIHooks(Protocol):
         """
         ...
 
+    def on_agent_gc_config(
+        self,
+        agent_id: str,
+        threshold: float,
+        strategy: str
+    ) -> None:
+        """Called when agent's GC configuration is set.
+
+        Enables per-agent GC threshold display in the status bar.
+
+        Args:
+            agent_id: Which agent's GC config is being set.
+            threshold: GC trigger threshold percentage (e.g., 80.0).
+            strategy: GC strategy name (e.g., "truncate", "hybrid", "summarize").
+        """
+        ...
+
     def on_agent_history_updated(
         self,
         agent_id: str,
