@@ -722,6 +722,7 @@ class RichClient:
         # Create hooks implementation
         registry = self._agent_registry
         display = self._display
+        trace_fn = self._trace  # Capture trace function for use in hooks
 
         class RichClientHooks:
             """UI hooks implementation for rich client."""
@@ -788,6 +789,12 @@ class RichClient:
                     agent_id, total_tokens, prompt_tokens,
                     output_tokens, turns, percent_used
                 )
+
+            def on_agent_gc_config(self, agent_id, threshold, strategy):
+                trace_fn(f"[on_agent_gc_config] agent_id={agent_id}, threshold={threshold}, strategy={strategy}")
+                registry.update_gc_config(agent_id, threshold, strategy)
+                if display:
+                    display.refresh()
 
             def on_agent_history_updated(self, agent_id, history):
                 registry.update_history(agent_id, history)
@@ -1507,6 +1514,10 @@ class RichClient:
         # Register UI hooks with jaato client and subagent plugin
         # This will create the main agent in the registry via set_ui_hooks()
         self._setup_agent_hooks()
+
+        # Set GC config on main agent in registry (for per-agent status bar display)
+        if self._gc_threshold is not None and self._agent_registry:
+            self._agent_registry.update_gc_config("main", self._gc_threshold, self._gc_strategy)
 
         # Set up permission hooks for inline permission display in tool tree
         self._setup_permission_hooks()
@@ -2755,6 +2766,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         turns=event.turns,
                         percent_used=event.percent_used,
                     )
+                    # Update GC config if present in event
+                    if event.gc_threshold is not None:
+                        agent_registry.update_gc_config(agent_id, event.gc_threshold, event.gc_strategy)
                 # Also update display (fallback if no registry)
                 usage = {
                     "prompt_tokens": event.prompt_tokens,
