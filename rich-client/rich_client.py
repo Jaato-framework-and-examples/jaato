@@ -698,6 +698,15 @@ class RichClient:
         connected_servers = getattr(lsp_plugin, '_connected_servers', set())
         self._trace(f"Code validation formatter registered (current LSP servers: {connected_servers or 'none yet'})")
 
+        # Store reference for debugging
+        self._code_validator = code_validator
+
+        # Show visible feedback about code validation status
+        if connected_servers:
+            self.log(f"[plugin] Code validation enabled for: {', '.join(connected_servers)}")
+        else:
+            self.log(f"[plugin] Code validation formatter registered (LSP servers will be checked dynamically)")
+
     def _setup_agent_hooks(self) -> None:
         """Set up agent lifecycle hooks for UI integration."""
         if not self._backend or not self._agent_registry:

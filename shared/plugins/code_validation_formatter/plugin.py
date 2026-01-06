@@ -30,10 +30,8 @@ Usage (pipeline):
 
 import os
 import re
-import tempfile
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 # Try to import Rich for colored output (optional)
 try:
@@ -119,7 +117,6 @@ class CodeValidationFormatterPlugin:
     def __init__(self):
         self._enabled = True
         self._lsp_plugin: Optional[Any] = None  # LSPToolPlugin instance
-        self._temp_dir: Optional[Path] = None
         self._console_width = 80
         self._priority = DEFAULT_PRIORITY
         self._max_errors_per_block = 5  # Limit errors shown per code block
@@ -242,7 +239,7 @@ class CodeValidationFormatterPlugin:
                 - max_errors_per_block: Max errors to show (default: 5)
                 - max_warnings_per_block: Max warnings to show (default: 3)
                 - console_width: Width for rendering (default: 80)
-                - priority: Pipeline priority (default: 45)
+                - priority: Pipeline priority (default: 35)
         """
         config = config or {}
         self._enabled = config.get("enabled", True)
@@ -250,10 +247,7 @@ class CodeValidationFormatterPlugin:
         self._max_warnings_per_block = config.get("max_warnings_per_block", 3)
         self._console_width = config.get("console_width", 80)
         self._priority = config.get("priority", DEFAULT_PRIORITY)
-
-        # Create temp directory for validation files
-        self._temp_dir = Path(tempfile.mkdtemp(prefix="jaato_code_validation_"))
-        _trace(f"initialize: temp_dir={self._temp_dir}, enabled={self._enabled}")
+        _trace(f"initialize: enabled={self._enabled}")
 
     def set_console_width(self, width: int) -> None:
         """Update the console width for rendering.
@@ -265,15 +259,8 @@ class CodeValidationFormatterPlugin:
 
     def shutdown(self) -> None:
         """Cleanup when plugin is disabled."""
-        # Clean up temp directory
-        if self._temp_dir and self._temp_dir.exists():
-            try:
-                import shutil
-                shutil.rmtree(self._temp_dir)
-            except OSError:
-                pass
-        self._temp_dir = None
-        _trace("shutdown: cleaned up temp directory")
+        self._enabled = False
+        _trace("shutdown: disabled")
 
     # ==================== LSP Integration ====================
 
@@ -322,12 +309,14 @@ class CodeValidationFormatterPlugin:
         Returns:
             List of diagnostic dicts with severity, message, line, etc.
         """
-        if not self._lsp_plugin or not self._temp_dir:
+        if not self._lsp_plugin:
+            _trace(f"_validate_code: no LSP plugin")
             return []
 
         # Get file extension for this language
         extension = LANGUAGE_EXTENSIONS.get(language)
         if not extension:
+            _trace(f"_validate_code: no extension for {language}")
             return []
 
         # Check if LSP has a server for this language
@@ -335,18 +324,14 @@ class CodeValidationFormatterPlugin:
             _trace(f"_validate_code: no LSP server for {language}")
             return []
 
-        # Create temp file with the code
-        temp_file = self._temp_dir / f"validate_{language}{extension}"
         try:
-            temp_file.write_text(code)
-        except OSError as e:
-            _trace(f"_validate_code: failed to write temp file: {e}")
-            return []
-
-        try:
-            # Call LSP diagnostics
-            result = self._lsp_plugin._exec_get_diagnostics({
-                'file_path': str(temp_file)
+            # Use the dedicated validate_snippet method which properly opens/closes
+            # the file with the LSP server and waits for diagnostics
+            _trace(f"_validate_code: calling validate_snippet for {language}")
+            result = self._lsp_plugin._exec_validate_snippet({
+                'code': code,
+                'language': language,
+                'extension': extension
             })
 
             if isinstance(result, dict) and result.get('error'):
@@ -357,18 +342,12 @@ class CodeValidationFormatterPlugin:
                 _trace(f"_validate_code: found {len(result)} diagnostics for {language}")
                 return result
 
+            _trace(f"_validate_code: unexpected result type: {type(result)}")
             return []
 
         except Exception as e:
             _trace(f"_validate_code: exception: {e}")
             return []
-
-        finally:
-            # Clean up temp file
-            try:
-                temp_file.unlink()
-            except OSError:
-                pass
 
     def _has_server_for_language(self, language: str) -> bool:
         """Check if LSP has a server for the given language.
@@ -423,7 +402,7 @@ class CodeValidationFormatterPlugin:
         diagnostics: List[Dict[str, Any]],
         language: str
     ) -> str:
-        """Format diagnostics as a warning block.
+        """Format diagnostics as a visually distinct warning block.
 
         Args:
             diagnostics: List of diagnostic dicts.
@@ -435,33 +414,38 @@ class CodeValidationFormatterPlugin:
         # Separate by severity
         errors = [d for d in diagnostics if d.get('severity') == 'Error']
         warnings = [d for d in diagnostics if d.get('severity') == 'Warning']
-        others = [d for d in diagnostics if d.get('severity') not in ('Error', 'Warning')]
-
-        lines = ["\n"]  # Start with newline after code block
-
-        # Format errors
-        if errors:
-            lines.append(f"⚠️ **Code Validation ({language}):** {len(errors)} error(s) found")
-            for i, err in enumerate(errors[:self._max_errors_per_block]):
-                line_num = err.get('line', '?')
-                msg = err.get('message', 'Unknown error')
-                lines.append(f"  {SEVERITY_ICONS['Error']} Line {line_num}: {msg}")
-            if len(errors) > self._max_errors_per_block:
-                lines.append(f"  ... and {len(errors) - self._max_errors_per_block} more errors")
-
-        # Format warnings (only if no errors, to reduce noise)
-        if warnings and not errors:
-            lines.append(f"⚠️ **Code Validation ({language}):** {len(warnings)} warning(s)")
-            for i, warn in enumerate(warnings[:self._max_warnings_per_block]):
-                line_num = warn.get('line', '?')
-                msg = warn.get('message', 'Unknown warning')
-                lines.append(f"  {SEVERITY_ICONS['Warning']} Line {line_num}: {msg}")
-            if len(warnings) > self._max_warnings_per_block:
-                lines.append(f"  ... and {len(warnings) - self._max_warnings_per_block} more warnings")
 
         if not errors and not warnings:
             # Only info/hints - skip unless verbose
             return ""
+
+        # Block indent prefix for visual distinction
+        indent = "    │ "
+
+        lines = ["\n"]  # Start with newline after code block
+        lines.append(f"    ┌─ Code Validation ({language}) ─")
+
+        # Format errors
+        if errors:
+            lines.append(f"{indent}{SEVERITY_ICONS['Error']} {len(errors)} error(s) found:")
+            for err in errors[:self._max_errors_per_block]:
+                line_num = err.get('line', '?')
+                msg = err.get('message', 'Unknown error')
+                lines.append(f"{indent}  Line {line_num}: {msg}")
+            if len(errors) > self._max_errors_per_block:
+                lines.append(f"{indent}  ... and {len(errors) - self._max_errors_per_block} more")
+
+        # Format warnings (also show if there are errors, for completeness)
+        if warnings:
+            lines.append(f"{indent}{SEVERITY_ICONS['Warning']} {len(warnings)} warning(s):")
+            for warn in warnings[:self._max_warnings_per_block]:
+                line_num = warn.get('line', '?')
+                msg = warn.get('message', 'Unknown warning')
+                lines.append(f"{indent}  Line {line_num}: {msg}")
+            if len(warnings) > self._max_warnings_per_block:
+                lines.append(f"{indent}  ... and {len(warnings) - self._max_warnings_per_block} more")
+
+        lines.append("    └─")
 
         lines.append("")  # Blank line after warnings
         return "\n".join(lines)
