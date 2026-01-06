@@ -30,6 +30,7 @@ Usage (pipeline):
 
 import os
 import re
+import tempfile
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -148,27 +149,38 @@ class CodeValidationFormatterPlugin:
         Returns:
             True if enabled and text contains code blocks we can validate.
         """
+        _trace(f"should_format: called, enabled={self._enabled}, has_lsp={self._lsp_plugin is not None}")
         if not self._enabled:
+            _trace("should_format: disabled")
             return False
 
         if not self._lsp_plugin:
+            _trace("should_format: no LSP plugin")
             return False
 
         # Check if LSP has any connected servers (check dynamically, not just at init)
         connected_servers = getattr(self._lsp_plugin, '_connected_servers', set())
+        _trace(f"should_format: connected_servers={connected_servers}")
         if not connected_servers:
+            _trace("should_format: no connected servers")
             return False
 
         # Only process if there are code blocks with supported languages
         # that we have LSP servers for
-        for match in CODE_BLOCK_PATTERN.finditer(text):
+        matches = list(CODE_BLOCK_PATTERN.finditer(text))
+        _trace(f"should_format: found {len(matches)} code blocks in text ({len(text)} chars)")
+        for match in matches:
             language = match.group(1).lower()
+            _trace(f"should_format: checking language '{language}', in LANGUAGE_EXTENSIONS={language in LANGUAGE_EXTENSIONS}")
             if language in LANGUAGE_EXTENSIONS:
                 # Check if we have an LSP server for this language
-                if self._has_server_for_language(language):
+                has_server = self._has_server_for_language(language)
+                _trace(f"should_format: _has_server_for_language({language})={has_server}")
+                if has_server:
                     _trace(f"should_format: found {language} block with LSP server available")
                     return True
 
+        _trace("should_format: no matching code blocks found")
         return False
 
     def format_output(self, text: str) -> str:
