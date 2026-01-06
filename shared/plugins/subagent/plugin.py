@@ -106,9 +106,6 @@ class SubagentPlugin:
         self._parent_session: Optional[Any] = None  # JaatoSession reference
         # Thread pool for async subagent execution
         self._executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="subagent")
-        # Shared state for inter-agent communication
-        self._shared_state: Dict[str, Any] = {}  # key -> value (thread-safe via lock)
-        self._state_lock = threading.Lock()  # Protect shared state access
         # Retry callback for subagent sessions (propagated from parent)
         self._retry_callback: Optional['RetryCallback'] = None
         # Plan reporter for subagent TodoPlugins (propagated from parent)
@@ -417,114 +414,6 @@ class SubagentPlugin:
                     "required": []
                 }
             ),
-            ToolSchema(
-                name='set_shared_state',
-                description=(
-                    'Store a value in shared state that can be accessed by all agents '
-                    '(main and subagents). Use this for inter-agent communication '
-                    'and sharing analysis results between parallel subagents.'
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "key": {
-                            "type": "string",
-                            "description": "Unique key for the state entry"
-                        },
-                        "value": {
-                            "description": "Value to store (any JSON-serializable type)"
-                        }
-                    },
-                    "required": ["key", "value"]
-                }
-            ),
-            ToolSchema(
-                name='get_shared_state',
-                description=(
-                    'Retrieve a value from shared state. Use this to access '
-                    'data stored by other agents or previous operations.'
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "key": {
-                            "type": "string",
-                            "description": "Key of the state entry to retrieve"
-                        }
-                    },
-                    "required": ["key"]
-                }
-            ),
-            ToolSchema(
-                name='list_shared_state',
-                description=(
-                    'List all keys in shared state. Use this to see what '
-                    'data is available for inter-agent communication.'
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            ),
-            ToolSchema(
-                name='share_context',
-                description=(
-                    'Share context from your memory with another agent (parent or subagent). '
-                    'Use this to transfer knowledge without the receiving agent needing to '
-                    're-read files or re-execute tools.\n\n'
-                    'IMPORTANT: Do NOT re-read files before sharing. Use your memory of files '
-                    'you have already read. Share your understanding, summaries, or relevant '
-                    'excerpts directly from what you remember.\n\n'
-                    'Use this to:\n'
-                    '- Share files you have already read (from memory, not disk)\n'
-                    '- Share your analysis or findings\n'
-                    '- Share relevant facts you have discovered\n'
-                    '- Provide context to help another agent without them re-doing your work\n\n'
-                    'Examples:\n'
-                    '- You read auth.py earlier → share your memory of its contents\n'
-                    '- You discovered a bug → share your understanding of the issue\n'
-                    '- You analyzed a pattern → share your conclusions'
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "to": {
-                            "type": "string",
-                            "description": (
-                                "Target agent: 'parent' to share with your parent agent, "
-                                "or a subagent_id to share with a specific subagent. "
-                                "Use list_active_subagents to see available subagent IDs."
-                            )
-                        },
-                        "files": {
-                            "type": "object",
-                            "description": (
-                                "Files to share from your memory. Keys are file paths, "
-                                "values are the content/summary you remember. Do NOT re-read "
-                                "files - use what is already in your context."
-                            ),
-                            "additionalProperties": {"type": "string"}
-                        },
-                        "findings": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": (
-                                "Key findings, facts, or conclusions to share. "
-                                "These should be insights from your analysis."
-                            )
-                        },
-                        "notes": {
-                            "type": "string",
-                            "description": (
-                                "Free-form context, analysis, guidance, or explanation "
-                                "to help the receiving agent understand the shared context."
-                            )
-                        }
-                    },
-                    "required": ["to"]
-                }
-            )
         ]
         return declarations
 
@@ -537,10 +426,6 @@ class SubagentPlugin:
             'cancel_subagent': self._execute_cancel_subagent,
             'list_active_subagents': self._execute_list_active_subagents,
             'list_subagent_profiles': self._execute_list_profiles,
-            'set_shared_state': self._execute_set_shared_state,
-            'get_shared_state': self._execute_get_shared_state,
-            'list_shared_state': self._execute_list_shared_state,
-            'share_context': self._execute_share_context,
             # User command aliases
             'profiles': self._execute_list_profiles,
             'active': self._execute_list_active_subagents,
@@ -583,8 +468,8 @@ class SubagentPlugin:
             "COMPLETED event, use the result to decide next steps. If you need to spawn "
             "sequential dependent subagents, wait for COMPLETED before spawning the next.\n\n"
             "BIDIRECTIONAL COMMUNICATION:\n"
-            "- send_to_subagent: For guidance, instructions, questions, redirecting focus\n"
-            "- share_context: For sharing FILES and FINDINGS from your memory (preferred for knowledge transfer)\n"
+            "- send_to_subagent: For guidance, instructions, questions, or sharing context with subagents\n"
+            "- Subagents can share back to you using their native share_context tool\n"
             "- Multiple subagents can run concurrently\n\n"
             "LIFECYCLE MANAGEMENT:\n"
             "- Use close_subagent to free resources after receiving COMPLETED\n"
@@ -598,15 +483,12 @@ class SubagentPlugin:
             "- threshold_percent: Trigger GC at this context usage (e.g., 5.0 for early testing)\n"
             "- preserve_recent_turns: Number of recent turns to keep after GC\n\n"
             "CONTEXT SHARING (TELEPATHY):\n"
-            "ALWAYS use share_context (not send_to_subagent) when sharing files or findings from memory:\n"
-            "- At spawn: Use context parameter with {files: {path: content}, findings: [...], notes: '...'}\n"
-            "- Mid-execution: Use share_context tool (NOT send_to_subagent) for knowledge transfer\n"
+            "When spawning subagents, share context from YOUR MEMORY (not disk):\n"
+            "- Use context parameter: {files: {path: content}, findings: [...], notes: '...'}\n"
             "- CRITICAL: Share from MEMORY, not disk. Do NOT re-read files before sharing.\n"
-            "- share_context provides structured format; send_to_subagent is for plain messages only.\n\n"
-            "Example - CORRECT:\n"
-            "  share_context(to='subagent_1', files={'auth.py': '<content from memory>'}, findings=['Uses JWT'])\n"
-            "Example - WRONG:\n"
-            "  send_to_subagent(subagent_id='subagent_1', message='Here is auth.py: <content>')"
+            "- Subagents will automatically have a share_context tool to send findings back to you.\n\n"
+            "Example spawn with context:\n"
+            "  spawn_subagent(task='analyze auth', context={files: {'auth.py': '<content from memory>'}, findings: ['Uses JWT']})"
         )
 
         if not self._config or not self._config.profiles:
@@ -1082,80 +964,6 @@ class SubagentPlugin:
                         )
         return cancelled_count
 
-    def _execute_set_shared_state(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Store a value in shared state.
-
-        Args:
-            args: Tool arguments containing:
-                - key: State key
-                - value: Value to store
-
-        Returns:
-            Dict with success status.
-        """
-        key = args.get('key', '')
-        if not key:
-            return {'success': False, 'error': 'No key provided'}
-
-        value = args.get('value')
-        with self._state_lock:
-            self._shared_state[key] = value
-
-        return {
-            'success': True,
-            'message': f'State "{key}" set successfully'
-        }
-
-    def _execute_get_shared_state(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Retrieve a value from shared state.
-
-        Args:
-            args: Tool arguments containing:
-                - key: State key to retrieve
-
-        Returns:
-            Dict with value or error.
-        """
-        key = args.get('key', '')
-        if not key:
-            return {'success': False, 'error': 'No key provided'}
-
-        with self._state_lock:
-            if key in self._shared_state:
-                return {
-                    'success': True,
-                    'key': key,
-                    'value': self._shared_state[key]
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': f'Key "{key}" not found in shared state'
-                }
-
-    def _execute_list_shared_state(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """List all keys in shared state.
-
-        Args:
-            args: Tool arguments (unused).
-
-        Returns:
-            Dict with list of keys.
-        """
-        with self._state_lock:
-            keys = list(self._shared_state.keys())
-
-        if not keys:
-            return {
-                'keys': [],
-                'message': 'Shared state is empty'
-            }
-
-        return {
-            'keys': keys,
-            'count': len(keys)
-        }
-
     def _format_shared_context(
         self,
         files: Optional[Dict[str, str]] = None,
@@ -1193,106 +1001,6 @@ class SubagentPlugin:
 
         parts.append('</shared_context>')
         return '\n'.join(parts)
-
-    def _execute_share_context(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Share context with another agent (parent or subagent).
-
-        Uses the same send pattern as send_to_subagent: direct send_message
-        if target is idle, inject_prompt if target is busy.
-
-        Args:
-            args: Tool arguments containing:
-                - to: Target agent ('parent' or subagent_id)
-                - files: Optional dict of path -> content from memory
-                - findings: Optional list of key findings
-                - notes: Optional free-form notes
-
-        Returns:
-            Status dict indicating success or error.
-        """
-        target = args.get('to', '')
-        files = args.get('files', {})
-        findings = args.get('findings', [])
-        notes = args.get('notes', '')
-
-        if not target:
-            return {
-                'success': False,
-                'error': 'No target specified. Use "parent" or a subagent_id.'
-            }
-
-        # Check if there's anything to share
-        if not files and not findings and not notes:
-            return {
-                'success': False,
-                'error': 'No context to share. Provide at least one of: files, findings, notes.'
-            }
-
-        # Format the context
-        formatted_context = self._format_shared_context(files, findings, notes)
-
-        # Determine target session
-        if target == 'parent':
-            if not self._parent_session:
-                return {
-                    'success': False,
-                    'error': 'No parent session available. This agent may be the main agent.'
-                }
-            target_session = self._parent_session
-            target_name = 'parent'
-        else:
-            # Target is a subagent_id
-            with self._sessions_lock:
-                session_info = self._active_sessions.get(target)
-
-            if not session_info:
-                return {
-                    'success': False,
-                    'error': f'No active subagent found with ID: {target}. Use list_active_subagents to see available sessions.'
-                }
-            target_session = session_info['session']
-            target_name = target
-
-        try:
-            # Use same pattern as send_to_subagent: direct send if idle, inject if busy
-            if target_session.is_running:
-                # Target is busy - queue for mid-turn processing
-                logger.info(f"SHARE_CONTEXT: {target_name} is busy, queuing context")
-                target_session.inject_prompt(formatted_context)
-                return {
-                    'success': True,
-                    'status': 'queued',
-                    'target': target_name,
-                    'message': f'Context queued for {target_name}. Will be processed at next yield point.',
-                    'shared': {
-                        'files': list(files.keys()) if files else [],
-                        'findings_count': len(findings) if findings else 0,
-                        'has_notes': bool(notes)
-                    }
-                }
-
-            # Target is idle - send directly
-            logger.info(f"SHARE_CONTEXT: {target_name} is idle, sending directly")
-            response = target_session.send_message(formatted_context)
-
-            return {
-                'success': True,
-                'status': 'delivered',
-                'target': target_name,
-                'response': response,
-                'shared': {
-                    'files': list(files.keys()) if files else [],
-                    'findings_count': len(findings) if findings else 0,
-                    'has_notes': bool(notes)
-                }
-            }
-
-        except Exception as e:
-            logger.exception(f"Error sharing context with {target_name}")
-            return {
-                'success': False,
-                'error': f'Failed to share context: {str(e)}'
-            }
 
     def _close_session(self, agent_id: str) -> None:
         """Close and cleanup a subagent session.
@@ -1643,6 +1351,12 @@ class SubagentPlugin:
                         "Configured GC for subagent %s: type=%s, threshold=%.1f%%",
                         agent_id, profile.gc.type, profile.gc.threshold_percent
                     )
+                    # Notify UI about GC config for status bar display
+                    if self._ui_hooks and hasattr(self._ui_hooks, 'on_agent_gc_config'):
+                        strategy = profile.gc.type
+                        self._ui_hooks.on_agent_gc_config(
+                            agent_id, profile.gc.threshold_percent, strategy
+                        )
                 except ValueError as e:
                     logger.warning(
                         "Failed to configure GC for subagent %s: %s",

@@ -417,11 +417,14 @@ class PTDisplay:
         model = self._model_name or "—"
 
         # Build context usage display (show percentage available)
-        # Use selected agent's context if registry present
+        # Use selected agent's context and GC config if registry present
         if self._agent_registry:
             usage = self._agent_registry.get_selected_context_usage()
+            gc_threshold, gc_strategy = self._agent_registry.get_selected_gc_config()
         else:
             usage = self._context_usage
+            gc_threshold = self._gc_threshold
+            gc_strategy = self._gc_strategy
 
         if usage:
             percent_used = usage.get('percent_used', 0)
@@ -429,18 +432,27 @@ class PTDisplay:
         else:
             percent_available = 100.0
 
-        # Build context string with GC threshold hint if configured
-        if self._gc_threshold is not None:
-            gc_trigger_available = 100 - self._gc_threshold
-            strategy = self._gc_strategy or "gc"
-            context_str = f"{percent_available:.0f}% available ({strategy} at {gc_trigger_available:.0f}%)"
-        elif usage:
+        # Build context string with token count and optional GC threshold hint
+        if usage:
             total = usage.get('total_tokens', 0)
-            # Format: "88% available (15K used)"
+            # Format token count
             if total >= 1000:
-                context_str = f"{percent_available:.0f}% available ({total // 1000}K used)"
+                tokens_str = f"{total // 1000}K used"
             else:
-                context_str = f"{percent_available:.0f}% available ({total} used)"
+                tokens_str = f"{total} used"
+
+            # Add GC threshold hint if configured
+            if gc_threshold is not None:
+                gc_trigger_available = 100 - gc_threshold
+                strategy = gc_strategy or "gc"
+                context_str = f"{percent_available:.0f}% available ({tokens_str}, {strategy} at {gc_trigger_available:.0f}%)"
+            else:
+                context_str = f"{percent_available:.0f}% available ({tokens_str})"
+        elif gc_threshold is not None:
+            # No usage yet but GC is configured
+            gc_trigger_available = 100 - gc_threshold
+            strategy = gc_strategy or "gc"
+            context_str = f"{percent_available:.0f}% available ({strategy} at {gc_trigger_available:.0f}%)"
         else:
             context_str = "100% available"
 

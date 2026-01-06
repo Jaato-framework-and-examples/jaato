@@ -538,6 +538,9 @@ class JaatoSession:
         # Register built-in model command
         self._register_model_command()
 
+        # Register built-in telepathy tool (share_context)
+        self._register_telepathy_tool()
+
         # Create provider session
         self._create_provider_session()
 
@@ -724,6 +727,183 @@ class JaatoSession:
             "error": f"Unknown subcommand: {subcommand}",
             "valid_subcommands": ["list", "select"]
         }
+
+    def _register_telepathy_tool(self) -> None:
+        """Register the built-in share_context tool for agent communication.
+
+        This tool allows any agent (main or subagent) to share structured
+        context with its parent agent. It's a native session capability,
+        not tied to any specific plugin.
+        """
+        # Only register if we have a parent session (subagents can share with parent)
+        # Main agent can also use this to share with subagents via the subagent plugin
+        share_context_schema = ToolSchema(
+            name='share_context',
+            description=(
+                'Share context from your memory with your parent agent. '
+                'Use this to transfer knowledge without the parent needing to '
+                're-read files or re-execute tools.\n\n'
+                'IMPORTANT: Do NOT re-read files before sharing. Use your memory of files '
+                'you have already read. Share your understanding, summaries, or relevant '
+                'excerpts directly from what you remember.\n\n'
+                'Use this to:\n'
+                '- Share files you have already read (from memory, not disk)\n'
+                '- Share your analysis or findings\n'
+                '- Share relevant facts you have discovered\n'
+                '- Provide context to help your parent without them re-doing your work'
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "object",
+                        "description": (
+                            "Files to share from your memory. Keys are file paths, "
+                            "values are the content/summary you remember. Do NOT re-read "
+                            "files - use what is already in your context."
+                        ),
+                        "additionalProperties": {"type": "string"}
+                    },
+                    "findings": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Key findings, facts, or conclusions to share. "
+                            "These should be insights from your analysis."
+                        )
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": (
+                            "Free-form context, analysis, guidance, or explanation "
+                            "to help the parent agent understand the shared context."
+                        )
+                    }
+                },
+                "required": []
+            }
+        )
+
+        # Add tool schema to session tools
+        if self._tools is None:
+            self._tools = []
+        self._tools = list(self._tools)
+        self._tools.append(share_context_schema)
+
+        # Register executor
+        if self._executor:
+            self._executor.register("share_context", self._execute_share_context)
+
+    def _execute_share_context(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the share_context tool.
+
+        Shares structured context with the parent agent.
+
+        Args:
+            args: Tool arguments containing:
+                - files: Optional dict of path -> content from memory
+                - findings: Optional list of key findings
+                - notes: Optional free-form notes
+
+        Returns:
+            Status dict indicating success or error.
+        """
+        files = args.get('files', {})
+        findings = args.get('findings', [])
+        notes = args.get('notes', '')
+
+        # Check if there's anything to share
+        if not files and not findings and not notes:
+            return {
+                'success': False,
+                'error': 'No context to share. Provide at least one of: files, findings, notes.'
+            }
+
+        # Check if we have a parent to share with
+        if not self._parent_session:
+            return {
+                'success': False,
+                'error': 'No parent session available. This agent may be the main agent.'
+            }
+
+        # Format the context
+        formatted_context = self._format_shared_context(files, findings, notes)
+
+        try:
+            # Use same pattern as subagent communication: inject if busy, send if idle
+            if self._parent_session.is_running:
+                # Parent is busy - queue for mid-turn processing
+                self._parent_session.inject_prompt(formatted_context)
+                return {
+                    'success': True,
+                    'status': 'queued',
+                    'message': 'Context queued for parent. Will be processed at next yield point.',
+                    'shared': {
+                        'files': list(files.keys()) if files else [],
+                        'findings_count': len(findings) if findings else 0,
+                        'has_notes': bool(notes)
+                    }
+                }
+
+            # Parent is idle - this shouldn't normally happen (subagent runs while parent waits)
+            # But handle it gracefully by injecting anyway
+            self._parent_session.inject_prompt(formatted_context)
+            return {
+                'success': True,
+                'status': 'sent',
+                'message': 'Context sent to parent.',
+                'shared': {
+                    'files': list(files.keys()) if files else [],
+                    'findings_count': len(findings) if findings else 0,
+                    'has_notes': bool(notes)
+                }
+            }
+
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'Failed to share context: {str(e)}'
+            }
+
+    def _format_shared_context(
+        self,
+        files: Dict[str, str],
+        findings: List[str],
+        notes: str
+    ) -> str:
+        """Format shared context for injection into parent's conversation.
+
+        Args:
+            files: Dict of file path -> content from memory
+            findings: List of key findings
+            notes: Free-form notes
+
+        Returns:
+            Formatted string for injection.
+        """
+        parts = ['<shared_context from_agent="subagent">']
+
+        if files:
+            parts.append('<files>')
+            for path, content in files.items():
+                parts.append(f'<file path="{path}">')
+                parts.append(content)
+                parts.append('</file>')
+            parts.append('</files>')
+
+        if findings:
+            parts.append('<findings>')
+            for finding in findings:
+                parts.append(f'  - {finding}')
+            parts.append('</findings>')
+
+        if notes:
+            parts.append('<notes>')
+            parts.append(notes)
+            parts.append('</notes>')
+
+        parts.append('</shared_context>')
+        return '\n'.join(parts)
 
     def get_model_completions(self, args: List[str]) -> List['CommandCompletion']:
         """Get completions for the model command.
