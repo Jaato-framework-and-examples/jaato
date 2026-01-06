@@ -666,6 +666,7 @@ class RichClient:
 
         # Get LSP plugin from registry
         lsp_plugin = self.registry.get_plugin("lsp")
+        self._trace(f"_setup_code_validation_formatter: lsp_plugin={lsp_plugin is not None}")
         if not lsp_plugin:
             self._trace("Code validation formatter: LSP plugin not available")
             return
@@ -678,6 +679,7 @@ class RichClient:
             "max_errors_per_block": 5,
             "max_warnings_per_block": 3,
         })
+        self._trace(f"_setup_code_validation_formatter: code_validator created, name={code_validator.name}, priority={code_validator.priority}")
 
         # Set up feedback callback for model self-correction
         # When validation issues are found, inject them into the conversation

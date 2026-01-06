@@ -93,19 +93,17 @@ SEVERITY_ICONS = {
 
 
 def _trace(msg: str) -> None:
-    """Write trace message to log file for debugging."""
-    trace_path = os.environ.get(
-        'JAATO_TRACE_LOG',
-        os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-    )
-    if trace_path:
-        try:
-            with open(trace_path, "a") as f:
-                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] [CodeValidator] {msg}\n")
-                f.flush()
-        except (IOError, OSError):
-            pass
+    """Write trace message to log file (only if JAATO_TRACE_LOG is set)."""
+    trace_path = os.environ.get('JAATO_TRACE_LOG')
+    if not trace_path:
+        return  # No tracing if env var not set
+    try:
+        with open(trace_path, "a") as f:
+            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            f.write(f"[{ts}] [CodeValidator] {msg}\n")
+            f.flush()
+    except (IOError, OSError):
+        pass
 
 
 class CodeValidationFormatterPlugin:
