@@ -324,11 +324,13 @@ class SubagentPlugin:
             ToolSchema(
                 name='send_to_subagent',
                 description=(
-                    'Send a message to a running subagent. The message is injected into the '
-                    'subagent\'s queue and will be processed at its next yield point. This '
-                    'enables real-time guidance and course correction of running subagents. '
-                    'Use this to provide additional instructions, ask questions, or redirect '
-                    'the subagent while it is still executing.'
+                    'Send a message to a running subagent for guidance or course correction. '
+                    'Use this for:\n'
+                    '- Giving instructions or redirecting focus\n'
+                    '- Asking questions about progress\n'
+                    '- Providing feedback on subagent output\n\n'
+                    'NOTE: To share FILES or FINDINGS from your memory, use share_context instead. '
+                    'send_to_subagent is for conversational messages, not structured knowledge transfer.'
                 ),
                 parameters={
                     "type": "object",
@@ -564,7 +566,8 @@ class SubagentPlugin:
             "COMPLETED event, use the result to decide next steps. If you need to spawn "
             "sequential dependent subagents, wait for COMPLETED before spawning the next.\n\n"
             "BIDIRECTIONAL COMMUNICATION:\n"
-            "- Use send_to_subagent to inject messages into a running subagent\n"
+            "- send_to_subagent: For guidance, instructions, questions, redirecting focus\n"
+            "- share_context: For sharing FILES and FINDINGS from your memory (preferred for knowledge transfer)\n"
             "- Multiple subagents can run concurrently\n\n"
             "LIFECYCLE MANAGEMENT:\n"
             "- Use close_subagent to free resources after receiving COMPLETED\n"
@@ -578,13 +581,15 @@ class SubagentPlugin:
             "- threshold_percent: Trigger GC at this context usage (e.g., 5.0 for early testing)\n"
             "- preserve_recent_turns: Number of recent turns to keep after GC\n\n"
             "CONTEXT SHARING (TELEPATHY):\n"
-            "Share knowledge between agents WITHOUT re-reading files or re-executing tools:\n"
+            "ALWAYS use share_context (not send_to_subagent) when sharing files or findings from memory:\n"
             "- At spawn: Use context parameter with {files: {path: content}, findings: [...], notes: '...'}\n"
-            "- Mid-execution: Use share_context tool to send context to parent or subagents\n"
-            "- IMPORTANT: Share from MEMORY, not disk. If you read a file earlier, share your memory of it.\n"
-            "- This avoids duplicate work and keeps agents synchronized.\n"
-            "Example: You read auth.py, spawn a subagent - pass your memory of auth.py in context, "
-            "don't make the subagent re-read it."
+            "- Mid-execution: Use share_context tool (NOT send_to_subagent) for knowledge transfer\n"
+            "- CRITICAL: Share from MEMORY, not disk. Do NOT re-read files before sharing.\n"
+            "- share_context provides structured format; send_to_subagent is for plain messages only.\n\n"
+            "Example - CORRECT:\n"
+            "  share_context(to='subagent_1', files={'auth.py': '<content from memory>'}, findings=['Uses JWT'])\n"
+            "Example - WRONG:\n"
+            "  send_to_subagent(subagent_id='subagent_1', message='Here is auth.py: <content>')"
         )
 
         if not self._config or not self._config.profiles:
