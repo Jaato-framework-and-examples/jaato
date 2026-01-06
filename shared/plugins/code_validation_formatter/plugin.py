@@ -5,8 +5,9 @@ This plugin intercepts code blocks in model output, validates them via LSP,
 and appends diagnostic warnings/errors. This enables the model to see issues
 before code is written to files.
 
-The plugin runs AFTER the code_block_formatter (priority 40) so that syntax
-highlighting is applied first, then validation warnings are appended.
+The plugin runs BEFORE the code_block_formatter (priority 35 vs 40) because
+the syntax highlighter strips the ``` markers. Validation warnings are inserted
+after each code block, then syntax highlighting is applied to everything.
 
 Usage (standalone):
     from shared.plugins.code_validation_formatter import create_plugin
@@ -79,8 +80,9 @@ LANGUAGE_EXTENSIONS = {
     'zig': '.zig',
 }
 
-# Priority for pipeline ordering (45 = after code_block_formatter at 40)
-DEFAULT_PRIORITY = 45
+# Priority for pipeline ordering (35 = BEFORE code_block_formatter at 40)
+# Must run before syntax highlighting because that strips the ``` markers
+DEFAULT_PRIORITY = 35
 
 # Severity icons for diagnostic output
 SEVERITY_ICONS = {
@@ -136,7 +138,7 @@ class CodeValidationFormatterPlugin:
 
     @property
     def priority(self) -> int:
-        """Execution priority (45 = after syntax highlighting)."""
+        """Execution priority (35 = before syntax highlighting at 40)."""
         return self._priority
 
     def should_format(self, text: str, format_hint: Optional[str] = None) -> bool:
