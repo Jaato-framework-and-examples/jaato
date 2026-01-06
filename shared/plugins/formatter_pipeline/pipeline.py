@@ -27,15 +27,15 @@ from .protocol import FormatterPlugin, ConfigurableFormatter
 
 
 def _trace(msg: str) -> None:
-    """Write debug trace to file."""
+    """Write debug trace to file (only if JAATO_TRACE_LOG is set)."""
+    trace_path = os.environ.get('JAATO_TRACE_LOG')
+    if not trace_path:
+        return  # No tracing if env var not set
     try:
-        trace_path = os.environ.get(
-            'JAATO_TRACE_LOG',
-            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-        )
         with open(trace_path, 'a') as f:
             ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-            f.write(f"[{ts}] FormatterPipeline: {msg}\n")
+            f.write(f"[{ts}] [FormatterPipeline] {msg}\n")
+            f.flush()
     except Exception:
         pass
 
