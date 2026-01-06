@@ -659,7 +659,9 @@ class RichClient:
         Note: Registers the formatter even if no LSP servers are connected yet,
         since servers may connect asynchronously. The formatter checks dynamically.
         """
+        self._trace("_setup_code_validation_formatter: starting")
         if not self._display or not self.registry:
+            self._trace("_setup_code_validation_formatter: no display or registry")
             return
 
         # Get LSP plugin from registry
