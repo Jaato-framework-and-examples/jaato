@@ -321,12 +321,19 @@ The tool returns responses keyed by question number (1-based):
         if not self._initialized or not channel:
             return {"error": "Plugin not initialized"}
 
+        # Check if using ParentBridgedChannel (subagent mode)
+        # In subagent mode, we don't invoke the parent's hooks as that would
+        # incorrectly set the parent's UI to "waiting for clarification input"
+        from .channels import ParentBridgedChannel
+        is_subagent_mode = isinstance(channel, ParentBridgedChannel)
+
         try:
             # Parse the request
             request = self._parse_request(args)
 
             # Emit clarification requested hook (for initial context, not all questions)
-            if self._on_clarification_requested:
+            # SKIP in subagent mode - the parent's hooks would confuse the UI
+            if self._on_clarification_requested and not is_subagent_mode:
                 # Just send context, not all questions - questions come one by one
                 context_lines = []
                 if request.context:
@@ -334,16 +341,18 @@ The tool returns responses keyed by question number (1-based):
                 self._on_clarification_requested("request_clarification", context_lines)
 
             # Get user responses via the channel, passing per-question hooks
+            # In subagent mode, skip the hooks as they would affect the parent's UI
             response = channel.request_clarification(
                 request,
-                on_question_displayed=self._on_question_displayed,
-                on_question_answered=self._on_question_answered
+                on_question_displayed=None if is_subagent_mode else self._on_question_displayed,
+                on_question_answered=None if is_subagent_mode else self._on_question_answered
             )
 
             # Format the response for the model
             if response.cancelled:
                 # Emit resolved hook with empty qa_pairs for cancelled
-                if self._on_clarification_resolved:
+                # SKIP in subagent mode
+                if self._on_clarification_resolved and not is_subagent_mode:
                     self._on_clarification_resolved("request_clarification", [])
                 return {
                     "cancelled": True,
@@ -398,7 +407,8 @@ The tool returns responses keyed by question number (1-based):
                         qa_pairs.append((question_text, choice_texts[0] if choice_texts else "(none)"))
 
             # Emit clarification resolved hook with Q&A summary
-            if self._on_clarification_resolved:
+            # SKIP in subagent mode
+            if self._on_clarification_resolved and not is_subagent_mode:
                 self._on_clarification_resolved("request_clarification", qa_pairs)
 
             return result
