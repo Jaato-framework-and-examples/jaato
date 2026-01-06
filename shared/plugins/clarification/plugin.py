@@ -460,9 +460,23 @@ The tool returns responses keyed by question number (1-based):
         """Return list of channel types supported by clarification plugin.
 
         Returns:
-            List of supported channel types: console, queue, auto.
+            List of supported channel types: console, queue, auto, parent_bridged.
         """
-        return ["console", "queue", "auto"]
+        return ["console", "queue", "auto", "parent_bridged"]
+
+    def configure_for_subagent(self, session: Any) -> None:
+        """Configure this plugin for subagent mode.
+
+        Sets up the parent-bridged channel and connects it to the session
+        so that clarification requests are forwarded to the parent agent.
+
+        Args:
+            session: JaatoSession instance with parent reference.
+        """
+        from .channels import ParentBridgedChannel
+        channel = ParentBridgedChannel()
+        channel.set_session(session)
+        self._channel = channel
 
     def set_channel(
         self,

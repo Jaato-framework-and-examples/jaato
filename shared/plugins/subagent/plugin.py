@@ -560,7 +560,15 @@ class SubagentPlugin:
             "- TOOL_CALL: Tool the subagent is calling\n"
             "- TOOL_OUTPUT: Output from subagent's tool execution\n"
             "- COMPLETED: Subagent finished its task (includes final response)\n"
-            "- ERROR: Subagent encountered an error\n\n"
+            "- ERROR: Subagent encountered an error\n"
+            "- CLARIFICATION_REQUESTED: Subagent needs clarification (you must respond)\n"
+            "- PERMISSION_REQUESTED: Subagent needs permission approval (you must respond)\n\n"
+            "RESPONDING TO SUBAGENT REQUESTS:\n"
+            "When you receive CLARIFICATION_REQUESTED or PERMISSION_REQUESTED, the subagent is "
+            "BLOCKED waiting for your response. You MUST respond using send_to_subagent:\n"
+            "- For clarification: send_to_subagent(subagent_id, '<clarification_response request_id=\"...\"><answer index=\"1\">your answer</answer></clarification_response>')\n"
+            "- For permission: send_to_subagent(subagent_id, '<permission_response request_id=\"...\"><decision>yes</decision></permission_response>')\n"
+            "- Simple responses also work: send_to_subagent(subagent_id, 'yes') or send_to_subagent(subagent_id, 'the first file')\n\n"
             "REACTING TO OUTPUT: You can monitor subagent progress in real-time and use "
             "send_to_subagent to provide guidance or corrections. When you receive a "
             "COMPLETED event, use the result to decide next steps. If you need to spawn "
@@ -1585,6 +1593,22 @@ class SubagentPlugin:
             logger.debug(f"SUBAGENT_DEBUG: Setting session._parent_session to {parent_session}")
             session.set_parent_session(parent_session)
             logger.debug(f"SUBAGENT_DEBUG: session._parent_session is now {session._parent_session}")
+
+            # Configure clarification and permission plugins for subagent mode
+            # This routes their requests through the parent instead of blocking locally
+            if self._runtime and self._runtime.registry:
+                registry = self._runtime.registry
+
+                # Configure clarification plugin
+                clarification_plugin = registry.get_plugin('clarification')
+                if clarification_plugin and hasattr(clarification_plugin, 'configure_for_subagent'):
+                    clarification_plugin.configure_for_subagent(session)
+                    logger.debug(f"SUBAGENT_DEBUG: Configured clarification plugin for subagent mode")
+
+                # Configure permission plugin
+                if self._runtime.permission_plugin and hasattr(self._runtime.permission_plugin, 'configure_for_subagent'):
+                    self._runtime.permission_plugin.configure_for_subagent(session)
+                    logger.debug(f"SUBAGENT_DEBUG: Configured permission plugin for subagent mode")
 
             # Set parent cancel token for cancellation propagation
             if self._parent_session and hasattr(self._parent_session, '_cancel_token'):

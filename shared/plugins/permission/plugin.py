@@ -995,9 +995,23 @@ If permission is denied, do not attempt to proceed with that action."""
         """Return list of channel types supported by permission plugin.
 
         Returns:
-            List of supported channel types: console, queue, webhook, file.
+            List of supported channel types: console, queue, webhook, file, parent_bridged.
         """
-        return ["console", "queue", "webhook", "file"]
+        return ["console", "queue", "webhook", "file", "parent_bridged"]
+
+    def configure_for_subagent(self, session: Any) -> None:
+        """Configure this plugin for subagent mode.
+
+        Sets up the parent-bridged channel and connects it to the session
+        so that permission requests are forwarded to the parent agent.
+
+        Args:
+            session: JaatoSession instance with parent reference.
+        """
+        from .channels import ParentBridgedChannel
+        channel = ParentBridgedChannel()
+        channel.set_session(session)
+        self._channel = channel
 
     def set_channel(
         self,
