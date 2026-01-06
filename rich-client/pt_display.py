@@ -432,18 +432,27 @@ class PTDisplay:
         else:
             percent_available = 100.0
 
-        # Build context string with GC threshold hint if configured
-        if gc_threshold is not None:
+        # Build context string with token count and optional GC threshold hint
+        if usage:
+            total = usage.get('total_tokens', 0)
+            # Format token count
+            if total >= 1000:
+                tokens_str = f"{total // 1000}K used"
+            else:
+                tokens_str = f"{total} used"
+
+            # Add GC threshold hint if configured
+            if gc_threshold is not None:
+                gc_trigger_available = 100 - gc_threshold
+                strategy = gc_strategy or "gc"
+                context_str = f"{percent_available:.0f}% available ({tokens_str}, {strategy} at {gc_trigger_available:.0f}%)"
+            else:
+                context_str = f"{percent_available:.0f}% available ({tokens_str})"
+        elif gc_threshold is not None:
+            # No usage yet but GC is configured
             gc_trigger_available = 100 - gc_threshold
             strategy = gc_strategy or "gc"
             context_str = f"{percent_available:.0f}% available ({strategy} at {gc_trigger_available:.0f}%)"
-        elif usage:
-            total = usage.get('total_tokens', 0)
-            # Format: "88% available (15K used)"
-            if total >= 1000:
-                context_str = f"{percent_available:.0f}% available ({total // 1000}K used)"
-            else:
-                context_str = f"{percent_available:.0f}% available ({total} used)"
         else:
             context_str = "100% available"
 

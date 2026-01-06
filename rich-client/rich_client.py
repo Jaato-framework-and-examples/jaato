@@ -2766,6 +2766,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         turns=event.turns,
                         percent_used=event.percent_used,
                     )
+                    # Update GC config if present in event
+                    if event.gc_threshold is not None:
+                        agent_registry.update_gc_config(agent_id, event.gc_threshold, event.gc_strategy)
                 # Also update display (fallback if no registry)
                 usage = {
                     "prompt_tokens": event.prompt_tokens,

@@ -125,6 +125,9 @@ class AgentState:
         self.history: List[Any] = []
         self.turn_accounting: List[Dict] = []
         self.context_usage: Dict[str, Any] = {}
+        # GC configuration (set when agent is created with GC)
+        self.gc_threshold: Optional[float] = None
+        self.gc_strategy: Optional[str] = None
 
 
 class JaatoServer:
@@ -499,9 +502,15 @@ class JaatoServer:
         self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
         gc_result = load_gc_from_file()
+        gc_threshold = None
+        gc_strategy = None
         if gc_result:
             gc_plugin, gc_config = gc_result
             self._jaato.set_gc_plugin(gc_plugin, gc_config)
+            gc_threshold = gc_config.threshold_percent
+            gc_strategy = getattr(gc_plugin, 'name', 'gc')
+            if gc_strategy.startswith('gc_'):
+                gc_strategy = gc_strategy[3:]  # Remove 'gc_' prefix
         self._emit_init_progress("Configuring tools", "done", 4, total_steps)
 
         # Step 5: Set up session
@@ -514,6 +523,10 @@ class JaatoServer:
         self._setup_plan_hooks()
         self._setup_queue_channels()
         self._create_main_agent()
+        # Store GC config in main agent state
+        if "main" in self._agents and gc_threshold is not None:
+            self._agents["main"].gc_threshold = gc_threshold
+            self._agents["main"].gc_strategy = gc_strategy
         self._emit_init_progress("Setting up session", "done", 5, total_steps)
 
         self.emit(SystemMessageEvent(
@@ -777,6 +790,12 @@ class JaatoServer:
                         'percent_used': percent_used,
                     }
                 context_limit = server._jaato.get_context_limit() if server._jaato else 0
+                # Get GC config from agent state
+                gc_threshold = None
+                gc_strategy = None
+                if agent_id in server._agents:
+                    gc_threshold = server._agents[agent_id].gc_threshold
+                    gc_strategy = server._agents[agent_id].gc_strategy
                 server.emit(ContextUpdatedEvent(
                     agent_id=agent_id,
                     total_tokens=total_tokens,
@@ -786,7 +805,30 @@ class JaatoServer:
                     percent_used=percent_used,
                     tokens_remaining=max(0, context_limit - total_tokens),
                     turns=turns,
+                    gc_threshold=gc_threshold,
+                    gc_strategy=gc_strategy,
                 ))
+
+            def on_agent_gc_config(self, agent_id, threshold, strategy):
+                # Store GC config in agent state
+                if agent_id in server._agents:
+                    server._agents[agent_id].gc_threshold = threshold
+                    server._agents[agent_id].gc_strategy = strategy
+                    # Emit ContextUpdatedEvent with GC config so client gets notified
+                    agent = server._agents[agent_id]
+                    server.emit(ContextUpdatedEvent(
+                        agent_id=agent_id,
+                        gc_threshold=threshold,
+                        gc_strategy=strategy,
+                        # Include current context usage if available
+                        total_tokens=agent.context_usage.get('total_tokens', 0),
+                        prompt_tokens=agent.context_usage.get('prompt_tokens', 0),
+                        output_tokens=agent.context_usage.get('output_tokens', 0),
+                        context_limit=agent.context_usage.get('context_limit', 0),
+                        percent_used=agent.context_usage.get('percent_used', 0.0),
+                        tokens_remaining=agent.context_usage.get('tokens_remaining', 0),
+                        turns=agent.context_usage.get('turns', 0),
+                    ))
 
             def on_agent_history_updated(self, agent_id, history):
                 if agent_id in server._agents:
@@ -1201,6 +1243,12 @@ class JaatoServer:
                 # Get current turn count from accounting
                 turn_accounting = server._jaato.get_turn_accounting()
                 turns = len(turn_accounting)
+                # Get GC config from main agent state
+                gc_threshold = None
+                gc_strategy = None
+                if "main" in server._agents:
+                    gc_threshold = server._agents["main"].gc_threshold
+                    gc_strategy = server._agents["main"].gc_strategy
                 server.emit(ContextUpdatedEvent(
                     agent_id="main",
                     total_tokens=usage.total_tokens,
@@ -1210,6 +1258,8 @@ class JaatoServer:
                     percent_used=percent_used,
                     tokens_remaining=max(0, context_limit - usage.total_tokens),
                     turns=turns,
+                    gc_threshold=gc_threshold,
+                    gc_strategy=gc_strategy,
                 ))
 
         def gc_threshold_callback(percent_used: float, threshold: float) -> None:
@@ -1234,6 +1284,12 @@ class JaatoServer:
                     if server._jaato:
                         usage = server._jaato.get_context_usage()
                         context_limit = server._jaato.get_context_limit()
+                        # Get GC config from main agent state
+                        gc_threshold = None
+                        gc_strategy = None
+                        if "main" in server._agents:
+                            gc_threshold = server._agents["main"].gc_threshold
+                            gc_strategy = server._agents["main"].gc_strategy
                         server.emit(ContextUpdatedEvent(
                             agent_id="main",
                             total_tokens=usage.get('total_tokens', 0),
@@ -1243,6 +1299,8 @@ class JaatoServer:
                             percent_used=usage.get('percent_used', 0),
                             tokens_remaining=usage.get('tokens_remaining', 0),
                             turns=usage.get('turns', 0),
+                            gc_threshold=gc_threshold,
+                            gc_strategy=gc_strategy,
                         ))
 
             except KeyboardInterrupt:
