@@ -237,10 +237,11 @@ class SubagentPlugin:
                                 "Optional context to provide to the subagent. Can be either:\n"
                                 "- A string: Simple text context\n"
                                 "- An object with structured context from your memory:\n"
-                                "  - files: {path: content_from_memory} - files you've already read\n"
+                                "  - files: {path: COMPLETE_CONTENT} - full file contents you've read\n"
                                 "  - findings: [list of facts/conclusions]\n"
                                 "  - notes: free-form guidance\n\n"
-                                "IMPORTANT: Do NOT re-read files to populate this. Share from memory."
+                                "CRITICAL: Share COMPLETE file contents, not summaries or excerpts. "
+                                "Never omit content 'for brevity'. Do NOT re-read files - use your memory."
                             ),
                             "oneOf": [
                                 {"type": "string"},
@@ -249,7 +250,7 @@ class SubagentPlugin:
                                     "properties": {
                                         "files": {
                                             "type": "object",
-                                            "description": "Files from memory: {path: content}",
+                                            "description": "Files from memory: {path: COMPLETE content, not summarized}",
                                             "additionalProperties": {"type": "string"}
                                         },
                                         "findings": {
@@ -484,11 +485,12 @@ class SubagentPlugin:
             "- preserve_recent_turns: Number of recent turns to keep after GC\n\n"
             "CONTEXT SHARING (TELEPATHY):\n"
             "When spawning subagents, share context from YOUR MEMORY (not disk):\n"
-            "- Use context parameter: {files: {path: content}, findings: [...], notes: '...'}\n"
-            "- CRITICAL: Share from MEMORY, not disk. Do NOT re-read files before sharing.\n"
+            "- Use context parameter: {files: {path: COMPLETE_CONTENT}, findings: [...], notes: '...'}\n"
+            "- CRITICAL: Share COMPLETE file contents, never summarize or omit 'for brevity'.\n"
+            "- Do NOT re-read files - copy the full content directly from your context.\n"
             "- Subagents will automatically have a share_context tool to send findings back to you.\n\n"
             "Example spawn with context:\n"
-            "  spawn_subagent(task='analyze auth', context={files: {'auth.py': '<content from memory>'}, findings: ['Uses JWT']})"
+            "  spawn_subagent(task='analyze auth', context={files: {'auth.py': '<FULL FILE CONTENT HERE>'}, findings: ['Uses JWT']})"
         )
 
         if not self._config or not self._config.profiles:
@@ -978,9 +980,20 @@ class SubagentPlugin:
             notes: Free-form notes or guidance.
 
         Returns:
-            Formatted context string in XML-like structure.
+            Formatted context string in XML-like structure with instructions.
         """
-        parts = ['<shared_context>']
+        parts = []
+
+        # Add instruction prefix so the receiving agent knows to use this content
+        if files:
+            parts.append(
+                "IMPORTANT: The following files have been shared with you from the parent agent's memory. "
+                "DO NOT re-read these files - use the content provided below directly. "
+                "This saves time and avoids redundant tool calls."
+            )
+            parts.append("")
+
+        parts.append('<shared_context>')
 
         if files:
             for path, content in files.items():
