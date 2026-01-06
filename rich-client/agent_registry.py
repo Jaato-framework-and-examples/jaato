@@ -42,6 +42,10 @@ class AgentInfo:
     context_usage: Dict[str, Any] = field(default_factory=dict)
     plan_data: Optional[Dict[str, Any]] = None  # Plan state for this agent
 
+    # GC configuration (per-agent)
+    gc_threshold: Optional[float] = None  # GC trigger threshold percentage
+    gc_strategy: Optional[str] = None  # GC strategy name (e.g., "truncate", "hybrid")
+
     # Timestamps
     created_at: datetime = field(default_factory=datetime.now)
     completed_at: Optional[datetime] = None
@@ -450,6 +454,37 @@ class AgentRegistry:
         with self._lock:
             agent = self.get_selected_agent()
             return agent.context_usage if agent else {}
+
+    def update_gc_config(
+        self,
+        agent_id: str,
+        threshold: Optional[float],
+        strategy: Optional[str] = None
+    ) -> None:
+        """Update an agent's GC configuration.
+
+        Args:
+            agent_id: The agent to update
+            threshold: GC trigger threshold percentage (e.g., 80.0)
+            strategy: GC strategy name (e.g., "truncate", "hybrid")
+        """
+        with self._lock:
+            agent = self._agents.get(agent_id)
+            if agent:
+                agent.gc_threshold = threshold
+                agent.gc_strategy = strategy
+
+    def get_selected_gc_config(self) -> tuple[Optional[float], Optional[str]]:
+        """Get selected agent's GC configuration.
+
+        Returns:
+            Tuple of (gc_threshold, gc_strategy) for the selected agent.
+        """
+        with self._lock:
+            agent = self.get_selected_agent()
+            if agent:
+                return agent.gc_threshold, agent.gc_strategy
+            return None, None
 
     def get_selected_turn_accounting(self) -> List[Dict[str, Any]]:
         """Get selected agent's turn accounting."""
