@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -31,6 +32,11 @@ class ClarificationPlugin:
     - Context explanation for why clarification is needed
     """
 
+    # Thread-local storage for per-session channels
+    # This allows subagents (which run in separate threads) to have their own
+    # channels without modifying the shared plugin instance's default channel.
+    _thread_local = threading.local()
+
     def __init__(self):
         self._initialized = False
         self._channel: Optional[ClarificationChannel] = None
@@ -42,6 +48,15 @@ class ClarificationPlugin:
         # Per-question hooks for progressive display
         self._on_question_displayed: Optional[Callable[[str, int, int, List[str]], None]] = None
         self._on_question_answered: Optional[Callable[[str, int, str], None]] = None
+
+    def _get_channel(self) -> Optional[ClarificationChannel]:
+        """Get the channel for the current thread.
+
+        Returns the thread-local channel if set (for subagents),
+        otherwise returns the default channel.
+        """
+        thread_channel = getattr(self._thread_local, 'channel', None)
+        return thread_channel if thread_channel is not None else self._channel
 
     @property
     def name(self) -> str:
@@ -301,7 +316,9 @@ The tool returns responses keyed by question number (1-based):
         questions = args.get("questions", [])
         self._trace(f"request_clarification: context={context!r}, questions={len(questions)}")
 
-        if not self._initialized or not self._channel:
+        # Get channel for current thread (may be thread-local for subagents)
+        channel = self._get_channel()
+        if not self._initialized or not channel:
             return {"error": "Plugin not initialized"}
 
         try:
@@ -317,7 +334,7 @@ The tool returns responses keyed by question number (1-based):
                 self._on_clarification_requested("request_clarification", context_lines)
 
             # Get user responses via the channel, passing per-question hooks
-            response = self._channel.request_clarification(
+            response = channel.request_clarification(
                 request,
                 on_question_displayed=self._on_question_displayed,
                 on_question_answered=self._on_question_answered
@@ -465,10 +482,15 @@ The tool returns responses keyed by question number (1-based):
         return ["console", "queue", "auto", "parent_bridged"]
 
     def configure_for_subagent(self, session: Any) -> None:
-        """Configure this plugin for subagent mode.
+        """Configure this plugin for subagent mode in the current thread.
 
-        Sets up the parent-bridged channel and connects it to the session
-        so that clarification requests are forwarded to the parent agent.
+        Sets up the parent-bridged channel and stores it in thread-local storage
+        so that clarification requests from this subagent are forwarded to the
+        parent agent. This doesn't affect the main agent's channel.
+
+        IMPORTANT: This uses thread-local storage because plugins are singletons
+        shared across all sessions. Each subagent runs in its own thread, so
+        setting the channel in thread-local storage ensures isolation.
 
         Args:
             session: JaatoSession instance with parent reference.
@@ -476,7 +498,8 @@ The tool returns responses keyed by question number (1-based):
         from .channels import ParentBridgedChannel
         channel = ParentBridgedChannel()
         channel.set_session(session)
-        self._channel = channel
+        # Store in thread-local storage, not the shared instance
+        self._thread_local.channel = channel
 
     def set_channel(
         self,
