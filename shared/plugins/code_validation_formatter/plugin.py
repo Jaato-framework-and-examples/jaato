@@ -155,11 +155,20 @@ class CodeValidationFormatterPlugin:
         if not self._lsp_plugin:
             return False
 
+        # Check if LSP has any connected servers (check dynamically, not just at init)
+        connected_servers = getattr(self._lsp_plugin, '_connected_servers', set())
+        if not connected_servers:
+            return False
+
         # Only process if there are code blocks with supported languages
+        # that we have LSP servers for
         for match in CODE_BLOCK_PATTERN.finditer(text):
             language = match.group(1).lower()
             if language in LANGUAGE_EXTENSIONS:
-                return True
+                # Check if we have an LSP server for this language
+                if self._has_server_for_language(language):
+                    _trace(f"should_format: found {language} block with LSP server available")
+                    return True
 
         return False
 
@@ -369,10 +378,12 @@ class CodeValidationFormatterPlugin:
             True if a server is available.
         """
         if not self._lsp_plugin:
+            _trace(f"_has_server_for_language({language}): no LSP plugin")
             return False
 
         # Check connected servers
         connected = getattr(self._lsp_plugin, '_connected_servers', set())
+        _trace(f"_has_server_for_language({language}): connected_servers={connected}")
         if not connected:
             return False
 
@@ -380,6 +391,8 @@ class CodeValidationFormatterPlugin:
         lang_variants = {language}
         if language == 'py':
             lang_variants.add('python')
+        elif language == 'python':
+            lang_variants.add('py')
         elif language == 'js':
             lang_variants.add('javascript')
         elif language == 'ts':
@@ -389,6 +402,7 @@ class CodeValidationFormatterPlugin:
             server_lower = server_name.lower()
             for variant in lang_variants:
                 if variant in server_lower:
+                    _trace(f"_has_server_for_language({language}): found match {server_name}")
                     return True
 
         # Also check by languageId in server config
@@ -396,8 +410,10 @@ class CodeValidationFormatterPlugin:
         for name, client in clients.items():
             if hasattr(client, 'config') and hasattr(client.config, 'language_id'):
                 if client.config.language_id in lang_variants:
+                    _trace(f"_has_server_for_language({language}): found by languageId in {name}")
                     return True
 
+        _trace(f"_has_server_for_language({language}): no match found")
         return False
 
     def _format_diagnostics(
