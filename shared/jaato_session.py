@@ -743,14 +743,15 @@ class JaatoSession:
                 'Share context from your memory with your parent agent. '
                 'Use this to transfer knowledge without the parent needing to '
                 're-read files or re-execute tools.\n\n'
+                'CRITICAL: Share the COMPLETE file content, not summaries or excerpts. '
+                'The parent needs the full content to work with it. Never omit content '
+                '"for brevity" - that defeats the purpose of this tool.\n\n'
                 'IMPORTANT: Do NOT re-read files before sharing. Use your memory of files '
-                'you have already read. Share your understanding, summaries, or relevant '
-                'excerpts directly from what you remember.\n\n'
+                'you have already read. Copy the full content from your context.\n\n'
                 'Use this to:\n'
-                '- Share files you have already read (from memory, not disk)\n'
+                '- Share complete file contents you have already read\n'
                 '- Share your analysis or findings\n'
-                '- Share relevant facts you have discovered\n'
-                '- Provide context to help your parent without them re-doing your work'
+                '- Share relevant facts you have discovered'
             ),
             parameters={
                 "type": "object",
@@ -759,8 +760,8 @@ class JaatoSession:
                         "type": "object",
                         "description": (
                             "Files to share from your memory. Keys are file paths, "
-                            "values are the content/summary you remember. Do NOT re-read "
-                            "files - use what is already in your context."
+                            "values are the COMPLETE file content from your context. "
+                            "Do NOT summarize or omit content - share the full text."
                         ),
                         "additionalProperties": {"type": "string"}
                     },
@@ -879,9 +880,19 @@ class JaatoSession:
             notes: Free-form notes
 
         Returns:
-            Formatted string for injection.
+            Formatted string for injection with instructions.
         """
-        parts = ['<shared_context from_agent="subagent">']
+        parts = []
+
+        # Add instruction prefix so the receiving agent knows to use this content
+        if files:
+            parts.append(
+                "CONTEXT FROM SUBAGENT: The following files and findings are shared from the subagent's memory. "
+                "DO NOT re-read these files - use the content provided below directly."
+            )
+            parts.append("")
+
+        parts.append('<shared_context from_agent="subagent">')
 
         if files:
             parts.append('<files>')
