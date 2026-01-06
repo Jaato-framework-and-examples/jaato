@@ -46,6 +46,12 @@ from shared.plugins.session import create_plugin as create_session_plugin, load_
 from shared.plugins.base import parse_command_args
 from shared.plugins.gc import load_gc_from_file
 
+# Formatter pipeline for server-side output formatting
+from shared.plugins.formatter_pipeline import create_pipeline as create_formatter_pipeline
+from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter
+from shared.plugins.diff_formatter import create_plugin as create_diff_formatter
+from shared.plugins.code_validation_formatter import create_plugin as create_code_validation_formatter
+
 # Reuse input handling from simple-client
 from input_handler import InputHandler
 
@@ -198,6 +204,14 @@ class JaatoServer:
         # Terminal width for formatting (default 80)
         self._terminal_width: int = 80
 
+        # Formatter pipeline for server-side output formatting
+        # Initialized in _setup_formatter_pipeline() after registry is available
+        self._formatter_pipeline = None
+
+        # Output accumulator for streaming (per agent)
+        # Used to format complete text after accumulation
+        self._output_accumulators: Dict[str, str] = {}
+
     # =========================================================================
     # Workspace Management
     # =========================================================================
@@ -230,6 +244,9 @@ class JaatoServer:
         # Propagate to JaatoClient if connected
         if self._jaato:
             self._jaato.set_terminal_width(width)
+        # Propagate to formatter pipeline if initialized
+        if self._formatter_pipeline:
+            self._formatter_pipeline.set_console_width(width)
 
     @contextlib.contextmanager
     def _in_workspace(self):
@@ -474,6 +491,9 @@ class JaatoServer:
         })
         self._emit_init_progress("Loading plugins", "done", 3, total_steps)
 
+        # Set up formatter pipeline for server-side output formatting
+        self._setup_formatter_pipeline()
+
         # Step 4: Configure tools
         self._emit_init_progress("Configuring tools", "running", 4, total_steps)
         self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
@@ -528,6 +548,43 @@ class JaatoServer:
 
         # Note: AgentCreatedEvent is NOT emitted here - it's handled by
         # ServerAgentHooks.on_agent_created() when set_ui_hooks() is called
+
+    def _setup_formatter_pipeline(self) -> None:
+        """Set up the formatter pipeline for server-side output formatting.
+
+        Creates the pipeline and registers formatters:
+        - DiffFormatter (priority 20): Colorizes diffs
+        - CodeValidationFormatter (priority 35): LSP diagnostics on code blocks
+        - CodeBlockFormatter (priority 40): Syntax highlighting
+
+        The CodeValidationFormatter is wired with the LSP plugin from the registry.
+        """
+        self._formatter_pipeline = create_formatter_pipeline()
+
+        # Register formatters in priority order (lower = runs first)
+        self._formatter_pipeline.register(create_diff_formatter())  # priority 20
+
+        # Set up code validation formatter with LSP plugin
+        lsp_plugin = self.registry.get_plugin("lsp") if self.registry else None
+        if lsp_plugin:
+            code_validator = create_code_validation_formatter()
+            code_validator.set_lsp_plugin(lsp_plugin)
+            code_validator.initialize({
+                "enabled": True,
+                "max_errors_per_block": 5,
+                "max_warnings_per_block": 3,
+            })
+            self._formatter_pipeline.register(code_validator)  # priority 35
+            self._trace("Code validation formatter registered with LSP plugin")
+        else:
+            self._trace("Code validation formatter skipped - no LSP plugin available")
+
+        self._formatter_pipeline.register(create_code_block_formatter())  # priority 40
+
+        # Set console width for proper rendering
+        self._formatter_pipeline.set_console_width(self._terminal_width)
+
+        self._trace(f"Formatter pipeline initialized with {len(self._formatter_pipeline.list_formatters())} formatters")
 
     def _setup_session_plugin(self) -> None:
         """Set up session persistence plugin.
@@ -621,10 +678,47 @@ class JaatoServer:
                 ))
 
             def on_agent_output(self, agent_id, source, text, mode):
+                # Apply server-side formatting for model output
+                formatted_text = text
+                if source == "model" and server._formatter_pipeline:
+                    # Accumulate text for this agent
+                    acc_key = f"{agent_id}:{source}"
+                    if mode == "write":
+                        # Start fresh accumulator
+                        server._output_accumulators[acc_key] = text
+                    else:  # append
+                        # Add to accumulator
+                        prev = server._output_accumulators.get(acc_key, "")
+                        server._output_accumulators[acc_key] = prev + text
+
+                    # Format the accumulated text
+                    accumulated = server._output_accumulators[acc_key]
+                    formatted_accumulated = server._formatter_pipeline.format(accumulated)
+
+                    # Calculate what's new compared to last emitted formatted text
+                    last_formatted_key = f"{acc_key}:formatted"
+                    last_formatted = server._output_accumulators.get(last_formatted_key, "")
+
+                    if mode == "write":
+                        # Write mode: emit all formatted text
+                        formatted_text = formatted_accumulated
+                        server._output_accumulators[last_formatted_key] = formatted_accumulated
+                    else:
+                        # Append mode: emit only the new delta
+                        if formatted_accumulated.startswith(last_formatted):
+                            # Simple case: formatted text grew at the end
+                            formatted_text = formatted_accumulated[len(last_formatted):]
+                        else:
+                            # Formatted text changed (e.g., code block completed)
+                            # Re-emit all with mode="write" to replace
+                            formatted_text = formatted_accumulated
+                            mode = "write"
+                        server._output_accumulators[last_formatted_key] = formatted_accumulated
+
                 server.emit(AgentOutputEvent(
                     agent_id=agent_id,
                     source=source,
-                    text=text,
+                    text=formatted_text,
                     mode=mode,
                 ))
 
@@ -648,6 +742,12 @@ class JaatoServer:
 
                 if agent_id in server._agents:
                     server._agents[agent_id].completed_at = completed_at_str
+
+                # Clear output accumulators for this agent
+                keys_to_remove = [k for k in server._output_accumulators if k.startswith(f"{agent_id}:")]
+                for k in keys_to_remove:
+                    del server._output_accumulators[k]
+
                 server.emit(AgentCompletedEvent(
                     agent_id=agent_id,
                     completed_at=completed_at_str,

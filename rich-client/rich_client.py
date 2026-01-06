@@ -2308,10 +2308,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     # Session provider will be set after state variables are defined (below)
 
     # Create display with full features
+    # server_formatted=True because server handles syntax highlighting and code validation
     display = PTDisplay(
         keybinding_config=keybindings,
         agent_registry=agent_registry,
         input_handler=input_handler,
+        server_formatted=True,
     )
 
     # Create IPC client
