@@ -707,6 +707,13 @@ If permission is denied, do not attempt to proceed with that action."""
         if not self._policy:
             return True, {'reason': 'Permission plugin not initialized', 'method': 'not_initialized'}
 
+        # Check if using ParentBridgedChannel (subagent mode)
+        # In subagent mode, we don't invoke the parent's hooks as that would
+        # incorrectly set the parent's UI to "waiting for permission input"
+        from .channels import ParentBridgedChannel
+        channel = self._get_channel()
+        is_subagent_mode = isinstance(channel, ParentBridgedChannel)
+
         # Evaluate against policy
         match = self._policy.check(tool_name, args)
 
@@ -714,7 +721,8 @@ If permission is denied, do not attempt to proceed with that action."""
             self._log_decision(tool_name, args, "allow", match.reason)
             method = match.rule_type or 'policy'
             # Emit resolved hook for auto-approved (whitelist)
-            if self._on_permission_resolved:
+            # SKIP in subagent mode
+            if self._on_permission_resolved and not is_subagent_mode:
                 self._on_permission_resolved(tool_name, "", True, method)
             return True, {'reason': match.reason, 'method': method}
 
@@ -722,13 +730,13 @@ If permission is denied, do not attempt to proceed with that action."""
             self._log_decision(tool_name, args, "deny", match.reason)
             method = match.rule_type or 'policy'
             # Emit resolved hook for auto-denied (blacklist)
-            if self._on_permission_resolved:
+            # SKIP in subagent mode
+            if self._on_permission_resolved and not is_subagent_mode:
                 self._on_permission_resolved(tool_name, "", False, method)
             return False, {'reason': match.reason, 'method': method}
 
         elif match.decision == PermissionDecision.ASK_CHANNEL:
-            # Need to ask the channel (use thread-local channel for subagents)
-            channel = self._get_channel()
+            # Need to ask the channel (already retrieved above for subagent check)
             if not channel:
                 self._log_decision(tool_name, args, "deny", "No channel configured")
                 return False, {'reason': 'No channel configured for approval', 'method': 'no_channel'}
@@ -750,7 +758,8 @@ If permission is denied, do not attempt to proceed with that action."""
             )
 
             # Emit permission requested hook with raw args (client formats display)
-            if self._on_permission_requested:
+            # SKIP in subagent mode
+            if self._on_permission_requested and not is_subagent_mode:
                 self._on_permission_requested(
                     tool_name, request.request_id, args, request.response_options
                 )
@@ -759,7 +768,8 @@ If permission is denied, do not attempt to proceed with that action."""
             allowed, info = self._handle_channel_response(tool_name, args, response)
 
             # Emit permission resolved hook
-            if self._on_permission_resolved:
+            # SKIP in subagent mode
+            if self._on_permission_resolved and not is_subagent_mode:
                 self._on_permission_resolved(
                     tool_name, request.request_id, allowed, info.get('method', 'unknown')
                 )
