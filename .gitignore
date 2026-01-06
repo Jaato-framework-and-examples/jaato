@@ -46,3 +46,24 @@ Thumbs.db
 
 # Test folders
 tests_enablement_2.0/
+
+# IDE / Language Server
+.jdtls/
+
+# Generated output
+generated-tests/
+src/
+**/target/
+
+# Logs
+*_trace.log
+
+# Scratch files
+generation-request.json
+system-api-config-sample.java
+
+# Analysis docs (scratch)
+shared/plugins/template/SINGLE_BRACE_SYNTAX_ANALYSIS.md
+
+# Template examples (generated)
+knowledge/skills/code/soi/skill-020-microservice-java-spring/examples/example-01-customer-domain-api/template/src/
