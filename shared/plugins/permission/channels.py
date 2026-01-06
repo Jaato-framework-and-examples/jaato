@@ -975,11 +975,235 @@ class QueueChannel(ConsoleChannel):
                 self._prompt_callback(False)
 
 
+class ParentBridgedChannel(Channel):
+    """Channel for subagents that routes permission requests through parent.
+
+    Instead of blocking on a local queue waiting for user input, this channel:
+    1. Forwards the permission request to the parent agent
+    2. Waits for the parent's response on the session's injection queue
+    3. Parses the response and returns it
+
+    This unifies the communication model - all subagent input comes through
+    the same injection queue mechanism.
+    """
+
+    def __init__(self):
+        """Initialize the parent-bridged channel."""
+        self._session: Optional[Any] = None  # JaatoSession reference
+        self._pending_request_id: Optional[str] = None
+        self._timeout: float = 300.0  # 5 minute timeout for parent response
+
+    @property
+    def name(self) -> str:
+        return "parent_bridged"
+
+    def set_session(self, session: Any) -> None:
+        """Set the session reference for forwarding to parent.
+
+        Args:
+            session: JaatoSession instance that has parent reference.
+        """
+        self._session = session
+
+    def _format_request_for_parent(self, request: PermissionRequest) -> str:
+        """Format permission request as structured message for parent.
+
+        Args:
+            request: The permission request.
+
+        Returns:
+            Formatted string for parent to parse.
+        """
+        lines = [f'<permission_request request_id="{request.request_id}">']
+        lines.append(f'  <tool_name>{request.tool_name}</tool_name>')
+
+        # Format arguments
+        lines.append('  <arguments>')
+        for key, value in request.arguments.items():
+            # Truncate long values
+            str_value = str(value)
+            if len(str_value) > 500:
+                str_value = str_value[:500] + '...'
+            lines.append(f'    <arg name="{key}">{str_value}</arg>')
+        lines.append('  </arguments>')
+
+        # Include response options
+        lines.append('  <options>')
+        for opt in request.response_options:
+            lines.append(f'    <option short="{opt.short}" full="{opt.full}">{opt.description}</option>')
+        lines.append('  </options>')
+
+        lines.append('</permission_request>')
+        return '\n'.join(lines)
+
+    def _parse_response_from_parent(self, response: str, request: PermissionRequest) -> ChannelResponse:
+        """Parse parent's response into ChannelResponse.
+
+        Args:
+            response: Raw response string from parent.
+            request: Original request (for context and options).
+
+        Returns:
+            Parsed ChannelResponse.
+        """
+        import re
+
+        # Try to extract decision from structured response
+        # Format: <permission_response request_id="..."><decision>yes</decision></permission_response>
+        decision_pattern = r'<decision>(.*?)</decision>'
+        match = re.search(decision_pattern, response, re.IGNORECASE | re.DOTALL)
+
+        if match:
+            decision_text = match.group(1).strip().lower()
+        else:
+            # Fallback: treat entire response as decision
+            decision_text = response.strip().lower()
+
+        # Match against response options
+        for option in request.response_options:
+            if option.matches(decision_text):
+                return ChannelResponse(
+                    request_id=request.request_id,
+                    decision=option.decision,
+                    reason=f"Parent responded: {decision_text}",
+                    remember=(option.decision in [ChannelDecision.ALLOW_SESSION, ChannelDecision.DENY_SESSION]),
+                )
+
+        # Default to deny if unrecognized
+        return ChannelResponse(
+            request_id=request.request_id,
+            decision=ChannelDecision.DENY,
+            reason=f"Unrecognized response from parent: {decision_text}",
+        )
+
+    def _wait_for_response(self, request_id: str) -> Optional[str]:
+        """Wait for parent's response on injection queue.
+
+        Args:
+            request_id: The request ID to match.
+
+        Returns:
+            Response string or None on timeout.
+        """
+        import queue as queue_module
+
+        if not self._session:
+            return None
+
+        # Access the session's injection queue
+        injection_queue = getattr(self._session, '_injection_queue', None)
+        if not injection_queue:
+            return None
+
+        poll_interval = 0.1
+        elapsed = 0.0
+        held_messages = []  # Messages that aren't our response
+
+        while elapsed < self._timeout:
+            # Check for cancellation
+            cancel_token = getattr(self._session, '_cancel_token', None)
+            if cancel_token and hasattr(cancel_token, 'is_cancelled'):
+                if cancel_token.is_cancelled:
+                    # Put held messages back
+                    for msg in held_messages:
+                        injection_queue.put(msg)
+                    return None
+
+            try:
+                message = injection_queue.get(timeout=poll_interval)
+
+                # Check if this is our response
+                if f'request_id="{request_id}"' in message or f"request_id='{request_id}'" in message:
+                    # Put held messages back
+                    for msg in held_messages:
+                        injection_queue.put(msg)
+                    return message
+
+                # Check if it's a permission response without explicit request_id
+                if '<permission_response' in message.lower() and self._pending_request_id == request_id:
+                    for msg in held_messages:
+                        injection_queue.put(msg)
+                    return message
+
+                # Check for simple yes/no/allow/deny responses (single pending request)
+                simple_response = message.strip().lower()
+                if self._pending_request_id == request_id and simple_response in ['y', 'yes', 'n', 'no', 'a', 'always', 'once', 'deny']:
+                    for msg in held_messages:
+                        injection_queue.put(msg)
+                    return message
+
+                # Not our response, hold it
+                held_messages.append(message)
+
+            except queue_module.Empty:
+                elapsed += poll_interval
+
+        # Timeout - put held messages back
+        for msg in held_messages:
+            injection_queue.put(msg)
+        return None
+
+    def request_permission(self, request: PermissionRequest) -> ChannelResponse:
+        """Request permission by forwarding to parent agent.
+
+        Args:
+            request: The permission request.
+
+        Returns:
+            ChannelResponse from parent.
+        """
+        if not self._session:
+            return ChannelResponse(
+                request_id=request.request_id,
+                decision=ChannelDecision.DENY,
+                reason="No session configured for parent-bridged channel",
+            )
+
+        # Check if we have a parent
+        parent_session = getattr(self._session, '_parent_session', None)
+        if not parent_session:
+            return ChannelResponse(
+                request_id=request.request_id,
+                decision=ChannelDecision.DENY,
+                reason="No parent session - this agent cannot request permission from parent",
+            )
+
+        self._pending_request_id = request.request_id
+
+        # Format request for parent
+        formatted_request = self._format_request_for_parent(request)
+
+        # Forward to parent via session's mechanism
+        forward_method = getattr(self._session, '_forward_to_parent', None)
+        if forward_method:
+            forward_method("PERMISSION_REQUESTED", formatted_request)
+        else:
+            # Fallback: direct inject to parent
+            agent_id = getattr(self._session, '_agent_id', 'unknown')
+            parent_session.inject_prompt(
+                f"[SUBAGENT agent_id={agent_id} event=PERMISSION_REQUESTED]\n{formatted_request}"
+            )
+
+        # Wait for response
+        response = self._wait_for_response(request.request_id)
+        self._pending_request_id = None
+
+        if response is None:
+            return ChannelResponse(
+                request_id=request.request_id,
+                decision=ChannelDecision.TIMEOUT,
+                reason="Timeout waiting for parent response",
+            )
+
+        # Parse response
+        return self._parse_response_from_parent(response, request)
+
+
 def create_channel(channel_type: str, config: Optional[Dict[str, Any]] = None) -> Channel:
     """Factory function to create an channel by type.
 
     Args:
-        channel_type: One of "console", "queue", "webhook", "file"
+        channel_type: One of "console", "queue", "webhook", "file", "parent_bridged"
         config: Optional configuration for the channel
 
     Returns:
@@ -993,6 +1217,7 @@ def create_channel(channel_type: str, config: Optional[Dict[str, Any]] = None) -
         "queue": QueueChannel,
         "webhook": WebhookChannel,
         "file": FileChannel,
+        "parent_bridged": ParentBridgedChannel,
     }
 
     if channel_type not in channels:

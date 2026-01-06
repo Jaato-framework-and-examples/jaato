@@ -347,8 +347,15 @@ class JaatoSession:
         The subagent's output is visible in its own UI panel via UI hooks.
 
         Args:
-            event_type: Type of event (MODEL_OUTPUT, TOOL_CALL, TOOL_OUTPUT,
-                       COMPLETED, ERROR, CANCELLED).
+            event_type: Type of event:
+                - MODEL_OUTPUT: Text the subagent is generating
+                - TOOL_CALL: Tool the subagent is calling
+                - TOOL_OUTPUT: Output from subagent's tool execution
+                - COMPLETED: Subagent finished its task
+                - ERROR: Subagent encountered an error
+                - CANCELLED: Subagent was cancelled
+                - CLARIFICATION_REQUESTED: Subagent needs clarification from parent
+                - PERMISSION_REQUESTED: Subagent needs permission approval from parent
             content: Event content/payload.
         """
         if self._parent_session:
