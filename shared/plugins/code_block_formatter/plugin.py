@@ -182,17 +182,20 @@ class CodeBlockFormatterPlugin:
     # ==================== Internal Methods ====================
 
     def _render_code_block(self, code: str, language: str) -> str:
-        """Render a single code block with syntax highlighting.
+        """Render a single code block with syntax highlighting and block indent.
 
         Args:
             code: The code content (without ``` markers).
             language: The language identifier.
 
         Returns:
-            ANSI-escaped string with syntax highlighting.
+            ANSI-escaped string with syntax highlighting, indented as a block.
         """
         # Map language aliases
         lang = LANGUAGE_ALIASES.get(language.lower(), language.lower())
+
+        # Block indent for visual distinction
+        indent = "    "  # 4 spaces
 
         try:
             syntax = Syntax(
@@ -205,8 +208,9 @@ class CodeBlockFormatterPlugin:
             )
 
             # Render to ANSI string using a temporary console
+            # Reduce width to account for indent
             console = Console(
-                width=self._console_width,
+                width=max(40, self._console_width - len(indent)),
                 force_terminal=True,
                 no_color=False,
                 highlight=False,
@@ -214,11 +218,15 @@ class CodeBlockFormatterPlugin:
             with console.capture() as capture:
                 console.print(syntax, end="")
 
-            return capture.get()
+            # Add block indent to each line
+            rendered = capture.get()
+            indented_lines = [indent + line for line in rendered.split('\n')]
+            return '\n'.join(indented_lines)
 
         except Exception:
-            # Fallback: return code as-is if highlighting fails
-            return code
+            # Fallback: return code as-is with indent if highlighting fails
+            indented_lines = [indent + line for line in code.split('\n')]
+            return '\n'.join(indented_lines)
 
     # ==================== Convenience Methods ====================
 
