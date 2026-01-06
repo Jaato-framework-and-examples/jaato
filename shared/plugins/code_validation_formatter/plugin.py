@@ -428,7 +428,8 @@ class CodeValidationFormatterPlugin:
                 lines.append(f"{indent}  ... and {len(warnings) - self._max_warnings_per_block} more")
 
         lines.append("    └─")
-        return "\n" + "\n".join(lines)
+        # No leading \n (code block ends with one), add trailing \n for spacing
+        return "\n".join(lines) + "\n"
 
     def _build_feedback_message(self) -> str:
         """Build a feedback message for conversation injection."""
