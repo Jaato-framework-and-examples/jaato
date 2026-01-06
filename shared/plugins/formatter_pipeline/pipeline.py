@@ -166,6 +166,29 @@ class FormatterPipeline:
         return result, was_formatted
 
 
+    def get_accumulated_validation_issues(self) -> List[Dict[str, Any]]:
+        """Get accumulated validation issues from all formatters.
+
+        Returns:
+            List of validation issue dicts from formatters that support validation.
+        """
+        all_issues: List[Dict[str, Any]] = []
+
+        for formatter in self._formatters:
+            if hasattr(formatter, 'get_accumulated_issues'):
+                issues = formatter.get_accumulated_issues()
+                if issues:
+                    all_issues.extend(issues)
+
+        return all_issues
+
+    def clear_accumulated_validation_issues(self) -> None:
+        """Clear accumulated validation issues from all formatters."""
+        for formatter in self._formatters:
+            if hasattr(formatter, 'clear_accumulated_issues'):
+                formatter.clear_accumulated_issues()
+
+
 def create_pipeline() -> FormatterPipeline:
     """Factory function to create a FormatterPipeline instance."""
     return FormatterPipeline()
