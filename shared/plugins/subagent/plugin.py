@@ -236,11 +236,37 @@ class SubagentPlugin:
                             )
                         },
                         "context": {
-                            "type": "string",
                             "description": (
-                                "Optional additional context to provide to the subagent. "
-                                "Include relevant information from the current conversation."
-                            )
+                                "Optional context to provide to the subagent. Can be either:\n"
+                                "- A string: Simple text context\n"
+                                "- An object with structured context from your memory:\n"
+                                "  - files: {path: content_from_memory} - files you've already read\n"
+                                "  - findings: [list of facts/conclusions]\n"
+                                "  - notes: free-form guidance\n\n"
+                                "IMPORTANT: Do NOT re-read files to populate this. Share from memory."
+                            ),
+                            "oneOf": [
+                                {"type": "string"},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "files": {
+                                            "type": "object",
+                                            "description": "Files from memory: {path: content}",
+                                            "additionalProperties": {"type": "string"}
+                                        },
+                                        "findings": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                            "description": "Key findings or facts"
+                                        },
+                                        "notes": {
+                                            "type": "string",
+                                            "description": "Free-form notes or guidance"
+                                        }
+                                    }
+                                }
+                            ]
                         },
                         "inline_config": {
                             "type": "object",
@@ -438,6 +464,64 @@ class SubagentPlugin:
                     "properties": {},
                     "required": []
                 }
+            ),
+            ToolSchema(
+                name='share_context',
+                description=(
+                    'Share context from your memory with another agent (parent or subagent). '
+                    'Use this to transfer knowledge without the receiving agent needing to '
+                    're-read files or re-execute tools.\n\n'
+                    'IMPORTANT: Do NOT re-read files before sharing. Use your memory of files '
+                    'you have already read. Share your understanding, summaries, or relevant '
+                    'excerpts directly from what you remember.\n\n'
+                    'Use this to:\n'
+                    '- Share files you have already read (from memory, not disk)\n'
+                    '- Share your analysis or findings\n'
+                    '- Share relevant facts you have discovered\n'
+                    '- Provide context to help another agent without them re-doing your work\n\n'
+                    'Examples:\n'
+                    '- You read auth.py earlier → share your memory of its contents\n'
+                    '- You discovered a bug → share your understanding of the issue\n'
+                    '- You analyzed a pattern → share your conclusions'
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "to": {
+                            "type": "string",
+                            "description": (
+                                "Target agent: 'parent' to share with your parent agent, "
+                                "or a subagent_id to share with a specific subagent. "
+                                "Use list_active_subagents to see available subagent IDs."
+                            )
+                        },
+                        "files": {
+                            "type": "object",
+                            "description": (
+                                "Files to share from your memory. Keys are file paths, "
+                                "values are the content/summary you remember. Do NOT re-read "
+                                "files - use what is already in your context."
+                            ),
+                            "additionalProperties": {"type": "string"}
+                        },
+                        "findings": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Key findings, facts, or conclusions to share. "
+                                "These should be insights from your analysis."
+                            )
+                        },
+                        "notes": {
+                            "type": "string",
+                            "description": (
+                                "Free-form context, analysis, guidance, or explanation "
+                                "to help the receiving agent understand the shared context."
+                            )
+                        }
+                    },
+                    "required": ["to"]
+                }
             )
         ]
         return declarations
@@ -454,6 +538,7 @@ class SubagentPlugin:
             'set_shared_state': self._execute_set_shared_state,
             'get_shared_state': self._execute_get_shared_state,
             'list_shared_state': self._execute_list_shared_state,
+            'share_context': self._execute_share_context,
             # User command aliases
             'profiles': self._execute_list_profiles,
             'active': self._execute_list_active_subagents,
@@ -491,7 +576,15 @@ class SubagentPlugin:
             "Use inline_config.gc to specify:\n"
             "- type: 'truncate', 'summarize', or 'hybrid'\n"
             "- threshold_percent: Trigger GC at this context usage (e.g., 5.0 for early testing)\n"
-            "- preserve_recent_turns: Number of recent turns to keep after GC"
+            "- preserve_recent_turns: Number of recent turns to keep after GC\n\n"
+            "CONTEXT SHARING (TELEPATHY):\n"
+            "Share knowledge between agents WITHOUT re-reading files or re-executing tools:\n"
+            "- At spawn: Use context parameter with {files: {path: content}, findings: [...], notes: '...'}\n"
+            "- Mid-execution: Use share_context tool to send context to parent or subagents\n"
+            "- IMPORTANT: Share from MEMORY, not disk. If you read a file earlier, share your memory of it.\n"
+            "- This avoids duplicate work and keeps agents synchronized.\n"
+            "Example: You read auth.py, spawn a subagent - pass your memory of auth.py in context, "
+            "don't make the subagent re-read it."
         )
 
         if not self._config or not self._config.profiles:
@@ -1041,6 +1134,144 @@ class SubagentPlugin:
             'count': len(keys)
         }
 
+    def _format_shared_context(
+        self,
+        files: Optional[Dict[str, str]] = None,
+        findings: Optional[List[str]] = None,
+        notes: Optional[str] = None
+    ) -> str:
+        """Format shared context into a structured message.
+
+        Args:
+            files: Dict of file paths to content/summaries from memory.
+            findings: List of key findings or facts.
+            notes: Free-form notes or guidance.
+
+        Returns:
+            Formatted context string in XML-like structure.
+        """
+        parts = ['<shared_context>']
+
+        if files:
+            for path, content in files.items():
+                parts.append(f'  <file path="{path}">')
+                parts.append(f'    {content}')
+                parts.append('  </file>')
+
+        if findings:
+            parts.append('  <findings>')
+            for finding in findings:
+                parts.append(f'    <finding>{finding}</finding>')
+            parts.append('  </findings>')
+
+        if notes:
+            parts.append('  <notes>')
+            parts.append(f'    {notes}')
+            parts.append('  </notes>')
+
+        parts.append('</shared_context>')
+        return '\n'.join(parts)
+
+    def _execute_share_context(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Share context with another agent (parent or subagent).
+
+        Uses the same send pattern as send_to_subagent: direct send_message
+        if target is idle, inject_prompt if target is busy.
+
+        Args:
+            args: Tool arguments containing:
+                - to: Target agent ('parent' or subagent_id)
+                - files: Optional dict of path -> content from memory
+                - findings: Optional list of key findings
+                - notes: Optional free-form notes
+
+        Returns:
+            Status dict indicating success or error.
+        """
+        target = args.get('to', '')
+        files = args.get('files', {})
+        findings = args.get('findings', [])
+        notes = args.get('notes', '')
+
+        if not target:
+            return {
+                'success': False,
+                'error': 'No target specified. Use "parent" or a subagent_id.'
+            }
+
+        # Check if there's anything to share
+        if not files and not findings and not notes:
+            return {
+                'success': False,
+                'error': 'No context to share. Provide at least one of: files, findings, notes.'
+            }
+
+        # Format the context
+        formatted_context = self._format_shared_context(files, findings, notes)
+
+        # Determine target session
+        if target == 'parent':
+            if not self._parent_session:
+                return {
+                    'success': False,
+                    'error': 'No parent session available. This agent may be the main agent.'
+                }
+            target_session = self._parent_session
+            target_name = 'parent'
+        else:
+            # Target is a subagent_id
+            with self._sessions_lock:
+                session_info = self._active_sessions.get(target)
+
+            if not session_info:
+                return {
+                    'success': False,
+                    'error': f'No active subagent found with ID: {target}. Use list_active_subagents to see available sessions.'
+                }
+            target_session = session_info['session']
+            target_name = target
+
+        try:
+            # Use same pattern as send_to_subagent: direct send if idle, inject if busy
+            if target_session.is_running:
+                # Target is busy - queue for mid-turn processing
+                logger.info(f"SHARE_CONTEXT: {target_name} is busy, queuing context")
+                target_session.inject_prompt(formatted_context)
+                return {
+                    'success': True,
+                    'status': 'queued',
+                    'target': target_name,
+                    'message': f'Context queued for {target_name}. Will be processed at next yield point.',
+                    'shared': {
+                        'files': list(files.keys()) if files else [],
+                        'findings_count': len(findings) if findings else 0,
+                        'has_notes': bool(notes)
+                    }
+                }
+
+            # Target is idle - send directly
+            logger.info(f"SHARE_CONTEXT: {target_name} is idle, sending directly")
+            response = target_session.send_message(formatted_context)
+
+            return {
+                'success': True,
+                'status': 'delivered',
+                'target': target_name,
+                'response': response,
+                'shared': {
+                    'files': list(files.keys()) if files else [],
+                    'findings_count': len(findings) if findings else 0,
+                    'has_notes': bool(notes)
+                }
+            }
+
+        except Exception as e:
+            logger.exception(f"Error sharing context with {target_name}")
+            return {
+                'success': False,
+                'error': f'Failed to share context: {str(e)}'
+            }
+
     def _close_session(self, agent_id: str) -> None:
         """Close and cleanup a subagent session.
 
@@ -1177,7 +1408,19 @@ class SubagentPlugin:
         # Build the full prompt
         full_prompt = task
         if context:
-            full_prompt = f"Context:\n{context}\n\nTask:\n{task}"
+            # Handle both string and structured context
+            if isinstance(context, str):
+                context_str = context
+            elif isinstance(context, dict):
+                # Structured context with files/findings/notes
+                context_str = self._format_shared_context(
+                    files=context.get('files'),
+                    findings=context.get('findings'),
+                    notes=context.get('notes')
+                )
+            else:
+                context_str = str(context)
+            full_prompt = f"Context:\n{context_str}\n\nTask:\n{task}"
 
         # Add profile's system instructions
         if profile.system_instructions:
