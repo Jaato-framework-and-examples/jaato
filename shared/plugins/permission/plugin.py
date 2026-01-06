@@ -7,6 +7,7 @@ through blacklist/whitelist rules and interactive channel approval.
 import fnmatch
 import os
 import tempfile
+import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..model_provider.types import ToolSchema
@@ -56,6 +57,11 @@ class PermissionPlugin:
     - Enforcement + proactive: set_permission_plugin() AND expose_tool()
     """
 
+    # Thread-local storage for per-session channels
+    # This allows subagents (which run in separate threads) to have their own
+    # channels without modifying the shared plugin instance's default channel.
+    _thread_local = threading.local()
+
     def __init__(self):
         self._config: Optional[PermissionConfig] = None
         self._policy: Optional[PermissionPolicy] = None
@@ -72,6 +78,15 @@ class PermissionPlugin:
         # on_requested: (tool_name, request_id, prompt_lines, response_options) -> None
         self._on_permission_requested: Optional[Callable[[str, str, List[str], List[PermissionResponseOption]], None]] = None
         self._on_permission_resolved: Optional[Callable[[str, str, bool, str], None]] = None
+
+    def _get_channel(self) -> Optional[Channel]:
+        """Get the channel for the current thread.
+
+        Returns the thread-local channel if set (for subagents),
+        otherwise returns the default channel.
+        """
+        thread_channel = getattr(self._thread_local, 'channel', None)
+        return thread_channel if thread_channel is not None else self._channel
 
     def set_registry(self, registry: 'PluginRegistry') -> None:
         """Set the plugin registry for tool-to-plugin lookups.
@@ -712,13 +727,14 @@ If permission is denied, do not attempt to proceed with that action."""
             return False, {'reason': match.reason, 'method': method}
 
         elif match.decision == PermissionDecision.ASK_CHANNEL:
-            # Need to ask the channel
-            if not self._channel:
+            # Need to ask the channel (use thread-local channel for subagents)
+            channel = self._get_channel()
+            if not channel:
                 self._log_decision(tool_name, args, "deny", "No channel configured")
                 return False, {'reason': 'No channel configured for approval', 'method': 'no_channel'}
 
             # Get custom display info from source plugin if available
-            channel_type = self._channel.name if self._channel else "console"
+            channel_type = channel.name if channel else "console"
             display_info = self._get_display_info(tool_name, args, channel_type)
 
             # Build context with display info
@@ -739,7 +755,7 @@ If permission is denied, do not attempt to proceed with that action."""
                     tool_name, request.request_id, args, request.response_options
                 )
 
-            response = self._channel.request_permission(request)
+            response = channel.request_permission(request)
             allowed, info = self._handle_channel_response(tool_name, args, response)
 
             # Emit permission resolved hook
@@ -1000,10 +1016,15 @@ If permission is denied, do not attempt to proceed with that action."""
         return ["console", "queue", "webhook", "file", "parent_bridged"]
 
     def configure_for_subagent(self, session: Any) -> None:
-        """Configure this plugin for subagent mode.
+        """Configure this plugin for subagent mode in the current thread.
 
-        Sets up the parent-bridged channel and connects it to the session
-        so that permission requests are forwarded to the parent agent.
+        Sets up the parent-bridged channel and stores it in thread-local storage
+        so that permission requests from this subagent are forwarded to the
+        parent agent. This doesn't affect the main agent's channel.
+
+        IMPORTANT: This uses thread-local storage because plugins are singletons
+        shared across all sessions. Each subagent runs in its own thread, so
+        setting the channel in thread-local storage ensures isolation.
 
         Args:
             session: JaatoSession instance with parent reference.
@@ -1011,7 +1032,8 @@ If permission is denied, do not attempt to proceed with that action."""
         from .channels import ParentBridgedChannel
         channel = ParentBridgedChannel()
         channel.set_session(session)
-        self._channel = channel
+        # Store in thread-local storage, not the shared instance
+        self._thread_local.channel = channel
 
     def set_channel(
         self,
