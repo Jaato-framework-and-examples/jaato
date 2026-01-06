@@ -206,11 +206,8 @@ class JaatoServer:
 
         # Formatter pipeline for server-side output formatting
         # Initialized in _setup_formatter_pipeline() after registry is available
+        # The pipeline handles buffering internally for streaming
         self._formatter_pipeline = None
-
-        # Output accumulator for streaming (per agent)
-        # Used to format complete text after accumulation
-        self._output_accumulators: Dict[str, str] = {}
 
     # =========================================================================
     # Workspace Management
@@ -579,7 +576,10 @@ class JaatoServer:
         else:
             self._trace("Code validation formatter skipped - no LSP plugin available")
 
-        self._formatter_pipeline.register(create_code_block_formatter())  # priority 40
+        # Code block formatter with line numbers enabled
+        code_block_formatter = create_code_block_formatter()
+        code_block_formatter.initialize({"line_numbers": True})
+        self._formatter_pipeline.register(code_block_formatter)  # priority 40
 
         # Set console width for proper rendering
         self._formatter_pipeline.set_console_width(self._terminal_width)
@@ -678,49 +678,26 @@ class JaatoServer:
                 ))
 
             def on_agent_output(self, agent_id, source, text, mode):
-                # Apply server-side formatting for model output
-                formatted_text = text
+                # For model output with streaming formatter pipeline
                 if source == "model" and server._formatter_pipeline:
-                    # Accumulate text for this agent
-                    acc_key = f"{agent_id}:{source}"
-                    if mode == "write":
-                        # Start fresh accumulator
-                        server._output_accumulators[acc_key] = text
-                    else:  # append
-                        # Add to accumulator
-                        prev = server._output_accumulators.get(acc_key, "")
-                        server._output_accumulators[acc_key] = prev + text
-
-                    # Format the accumulated text
-                    accumulated = server._output_accumulators[acc_key]
-                    formatted_accumulated = server._formatter_pipeline.format(accumulated)
-
-                    # Calculate what's new compared to last emitted formatted text
-                    last_formatted_key = f"{acc_key}:formatted"
-                    last_formatted = server._output_accumulators.get(last_formatted_key, "")
-
-                    if mode == "write":
-                        # Write mode: emit all formatted text
-                        formatted_text = formatted_accumulated
-                        server._output_accumulators[last_formatted_key] = formatted_accumulated
-                    else:
-                        # Append mode: emit only the new delta
-                        if formatted_accumulated.startswith(last_formatted):
-                            # Simple case: formatted text grew at the end
-                            formatted_text = formatted_accumulated[len(last_formatted):]
-                        else:
-                            # Formatted text changed (e.g., code block completed)
-                            # Re-emit all with mode="write" to replace
-                            formatted_text = formatted_accumulated
-                            mode = "write"
-                        server._output_accumulators[last_formatted_key] = formatted_accumulated
-
-                server.emit(AgentOutputEvent(
-                    agent_id=agent_id,
-                    source=source,
-                    text=formatted_text,
-                    mode=mode,
-                ))
+                    # Process chunk through streaming pipeline
+                    # Pipeline buffers code blocks, passes through regular text
+                    for output in server._formatter_pipeline.process_chunk(text):
+                        if output:
+                            server.emit(AgentOutputEvent(
+                                agent_id=agent_id,
+                                source=source,
+                                text=output,
+                                mode=mode,
+                            ))
+                else:
+                    # Non-model or no formatter: pass through as-is
+                    server.emit(AgentOutputEvent(
+                        agent_id=agent_id,
+                        source=source,
+                        text=text,
+                        mode=mode,
+                    ))
 
             def on_agent_status_changed(self, agent_id, status, error=None):
                 if agent_id in server._agents:
@@ -743,11 +720,6 @@ class JaatoServer:
                 if agent_id in server._agents:
                     server._agents[agent_id].completed_at = completed_at_str
 
-                # Clear output accumulators for this agent
-                keys_to_remove = [k for k in server._output_accumulators if k.startswith(f"{agent_id}:")]
-                for k in keys_to_remove:
-                    del server._output_accumulators[k]
-
                 server.emit(AgentCompletedEvent(
                     agent_id=agent_id,
                     completed_at=completed_at_str,
@@ -759,6 +731,19 @@ class JaatoServer:
             def on_agent_turn_completed(self, agent_id, turn_number, prompt_tokens,
                                         output_tokens, total_tokens, duration_seconds,
                                         function_calls):
+                # Flush any remaining buffered content from the formatter pipeline
+                if server._formatter_pipeline:
+                    for output in server._formatter_pipeline.flush():
+                        if output:
+                            server.emit(AgentOutputEvent(
+                                agent_id=agent_id,
+                                source="model",
+                                text=output,
+                                mode="append",
+                            ))
+                    # Reset pipeline for next turn
+                    server._formatter_pipeline.reset()
+
                 if agent_id in server._agents:
                     server._agents[agent_id].turn_accounting.append({
                         'turn': turn_number,
