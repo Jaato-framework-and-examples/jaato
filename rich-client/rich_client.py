@@ -655,6 +655,9 @@ class RichClient:
 
         Creates the code validation formatter, wires it with the LSP plugin,
         and registers it with the display's formatter pipeline.
+
+        Note: Registers the formatter even if no LSP servers are connected yet,
+        since servers may connect asynchronously. The formatter checks dynamically.
         """
         if not self._display or not self.registry:
             return
@@ -665,13 +668,7 @@ class RichClient:
             self._trace("Code validation formatter: LSP plugin not available")
             return
 
-        # Check if LSP has any connected servers
-        connected_servers = getattr(lsp_plugin, '_connected_servers', set())
-        if not connected_servers:
-            self._trace("Code validation formatter: No LSP servers connected, skipping")
-            return
-
-        # Create code validation formatter
+        # Create code validation formatter (register regardless of current LSP state)
         code_validator = create_code_validation_formatter()
         code_validator.set_lsp_plugin(lsp_plugin)
         code_validator.initialize({
@@ -696,7 +693,10 @@ class RichClient:
 
         # Register with display's formatter pipeline
         self._display.register_formatter(code_validator)
-        self._trace(f"Code validation formatter registered (LSP servers: {connected_servers})")
+
+        # Log current state (servers may connect later)
+        connected_servers = getattr(lsp_plugin, '_connected_servers', set())
+        self._trace(f"Code validation formatter registered (current LSP servers: {connected_servers or 'none yet'})")
 
     def _setup_agent_hooks(self) -> None:
         """Set up agent lifecycle hooks for UI integration."""
