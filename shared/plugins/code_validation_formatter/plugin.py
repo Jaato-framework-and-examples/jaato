@@ -150,15 +150,16 @@ class CodeValidationFormatterPlugin:
                     self._buffer = self._buffer[match.start():]
                     self._in_code_block = True
                 else:
-                    # Check if we might have a partial ``` at the end
-                    if self._buffer.endswith('`'):
-                        for i in range(min(3, len(self._buffer)), 0, -1):
-                            if self._buffer[-i:] == '`' * i:
-                                to_yield = self._buffer[:-i]
-                                self._buffer = self._buffer[-i:]
-                                if to_yield:
-                                    yield to_yield
-                                return
+                    # Check if we might have a partial code block start at the end
+                    # This includes: `, ``, ```, ```lang (without trailing \n)
+                    partial_match = re.search(r'`{1,3}\w*$', self._buffer)
+                    if partial_match:
+                        # Hold back the potential code block start
+                        to_yield = self._buffer[:partial_match.start()]
+                        self._buffer = self._buffer[partial_match.start():]
+                        if to_yield:
+                            yield to_yield
+                        return
                     # No code block, yield everything
                     yield self._buffer
                     self._buffer = ""
