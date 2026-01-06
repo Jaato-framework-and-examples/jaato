@@ -1908,6 +1908,57 @@ Example:
             diagnostics = client.get_diagnostics(file_path)
             return self._format_diagnostics(diagnostics)
 
+        elif method == 'validate_snippet':
+            # Validate a code snippet by creating a temp file, opening it,
+            # waiting for diagnostics, and cleaning up
+            code = args.get('code', '')
+            language = args.get('language', 'python')
+            extension = args.get('extension', '.py')
+
+            if not code:
+                return {"error": "code parameter is required"}
+
+            # Create temp file in a temp directory
+            import tempfile
+            temp_dir = tempfile.mkdtemp(prefix="lsp_validate_")
+            temp_file = os.path.join(temp_dir, f"snippet{extension}")
+
+            try:
+                # Write code to temp file
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    f.write(code)
+
+                self._trace(f"validate_snippet: created temp file {temp_file}")
+
+                # Open document with LSP server
+                await client.open_document(temp_file, code)
+
+                # Wait a bit for server to analyze (jedi/pylsp needs time)
+                await asyncio.sleep(0.5)
+
+                # Get diagnostics
+                diagnostics = client.get_diagnostics(temp_file)
+                self._trace(f"validate_snippet: got {len(diagnostics)} diagnostics")
+
+                # Close document
+                await client.close_document(temp_file)
+
+                return self._format_diagnostics(diagnostics)
+
+            except Exception as e:
+                self._trace(f"validate_snippet: error - {e}")
+                return {"error": str(e)}
+
+            finally:
+                # Cleanup temp file
+                try:
+                    if os.path.exists(temp_file):
+                        os.unlink(temp_file)
+                    if os.path.exists(temp_dir):
+                        os.rmdir(temp_dir)
+                except OSError:
+                    pass
+
         elif method == '_ensure_workspace_indexed':
             # Internal method to index all files of a type in a directory
             directory = args.get('directory', '')
@@ -2174,6 +2225,23 @@ Example:
     def _exec_get_diagnostics(self, args: Dict[str, Any]) -> Any:
         """Get diagnostics for a file (unchanged - already file-based)."""
         return self._execute_method('get_diagnostics', args)
+
+    def _exec_validate_snippet(self, args: Dict[str, Any]) -> Any:
+        """Validate a code snippet by opening it as a temp file and getting diagnostics.
+
+        This is designed for validating code blocks in model output before they're
+        written to files.
+
+        Args:
+            args: Dict with:
+                - code: The code snippet to validate
+                - language: Language identifier (python, javascript, etc.)
+                - extension: File extension (.py, .js, etc.)
+
+        Returns:
+            List of diagnostic dicts or {"error": ...}
+        """
+        return self._execute_method('validate_snippet', args)
 
     def _exec_document_symbols(self, args: Dict[str, Any]) -> Any:
         """Get symbols in a file (unchanged - already file-based)."""
