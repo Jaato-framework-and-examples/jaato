@@ -1,21 +1,31 @@
 # shared/plugins/formatter_pipeline/__init__.py
-"""Formatter pipeline for processing output through registered formatters.
+"""Streaming formatter pipeline for processing output through registered formatters.
 
-This module provides the infrastructure for a priority-based formatter pipeline
-where multiple formatter plugins can subscribe to process output text.
+This module provides a streaming pipeline where formatters process chunks
+incrementally. Each formatter can either pass chunks through immediately
+or buffer them until ready (e.g., for code blocks).
 
-Example:
+Example (streaming):
     from shared.plugins.formatter_pipeline import FormatterPipeline, create_pipeline
-    from shared.plugins.diff_formatter import create_plugin as create_diff_formatter
     from shared.plugins.code_block_formatter import create_plugin as create_code_formatter
 
-    # Create pipeline and register formatters
     pipeline = create_pipeline()
-    pipeline.register(create_diff_formatter())      # priority 20
-    pipeline.register(create_code_formatter())      # priority 40
+    pipeline.register(create_code_formatter())
 
-    # Process output
-    formatted = pipeline.format(text, format_hint="diff")
+    # Process streaming chunks
+    for chunk in model_output_stream:
+        for output in pipeline.process_chunk(chunk):
+            display(output)  # Display immediately
+
+    # At turn end, flush any remaining buffered content
+    for output in pipeline.flush():
+        display(output)
+
+    # Reset for next turn
+    pipeline.reset()
+
+Example (batch):
+    formatted = pipeline.format(complete_text)  # Convenience method
 """
 
 from .protocol import FormatterPlugin, ConfigurableFormatter

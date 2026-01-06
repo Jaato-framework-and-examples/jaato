@@ -1,54 +1,34 @@
 # shared/plugins/code_validation_formatter/plugin.py
-"""Code validation formatter plugin for LSP diagnostics on output code blocks.
+"""Streaming code validation formatter plugin for LSP diagnostics on output code blocks.
 
 This plugin intercepts code blocks in model output, validates them via LSP,
-and appends diagnostic warnings/errors. This enables the model to see issues
-before code is written to files.
+and appends diagnostic warnings/errors. It buffers code blocks until complete,
+while passing through regular text immediately.
 
 The plugin runs BEFORE the code_block_formatter (priority 35 vs 40) because
 the syntax highlighter strips the ``` markers. Validation warnings are inserted
 after each code block, then syntax highlighting is applied to everything.
 
-Usage (standalone):
+Usage:
     from shared.plugins.code_validation_formatter import create_plugin
 
     formatter = create_plugin()
     formatter.set_lsp_plugin(lsp_plugin)
     formatter.initialize({"enabled": True})
-    formatted = formatter.format_output(text)
 
-Usage (pipeline):
-    from shared.plugins.formatter_pipeline import create_pipeline
-    from shared.plugins.code_validation_formatter import create_plugin
-
-    pipeline = create_pipeline()
-    code_validator = create_plugin()
-    code_validator.set_lsp_plugin(lsp_plugin)
-    pipeline.register(code_validator)
-    formatted = pipeline.format(text)
+    # Streaming mode
+    for chunk in model_output:
+        for output in formatter.process_chunk(chunk):
+            print(output, end='')
+    for output in formatter.flush():
+        print(output, end='')
 """
 
 import os
 import re
-import tempfile
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
-# Try to import Rich for colored output (optional)
-try:
-    from rich.console import Console
-    from rich.text import Text
-    HAS_RICH = True
-except ImportError:
-    HAS_RICH = False
-
-
-# Regex pattern for detecting code blocks with optional language specifier
-# Matches: ```lang\ncode\n``` or ```\ncode\n```
-CODE_BLOCK_PATTERN = re.compile(
-    r'```(\w*)\n(.*?)```',
-    re.DOTALL
-)
 
 # Map of language identifiers to file extensions for temp file creation
 LANGUAGE_EXTENSIONS = {
@@ -80,7 +60,6 @@ LANGUAGE_EXTENSIONS = {
 }
 
 # Priority for pipeline ordering (35 = BEFORE code_block_formatter at 40)
-# Must run before syntax highlighting because that strips the ``` markers
 DEFAULT_PRIORITY = 35
 
 # Severity icons for diagnostic output
@@ -96,7 +75,7 @@ def _trace(msg: str) -> None:
     """Write trace message to log file (only if JAATO_TRACE_LOG is set)."""
     trace_path = os.environ.get('JAATO_TRACE_LOG')
     if not trace_path:
-        return  # No tracing if env var not set
+        return
     try:
         with open(trace_path, "a") as f:
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -107,23 +86,26 @@ def _trace(msg: str) -> None:
 
 
 class CodeValidationFormatterPlugin:
-    """Plugin that validates code blocks via LSP and appends diagnostics.
+    """Streaming plugin that validates code blocks via LSP and appends diagnostics.
 
-    Implements the FormatterPlugin protocol for use in a formatter pipeline.
-    Detects markdown code blocks, runs LSP diagnostics, and appends warnings.
+    Implements the FormatterPlugin protocol. Buffers code blocks until complete,
+    validates them, and appends warnings. Regular text passes through immediately.
     """
 
     def __init__(self):
         self._enabled = True
-        self._lsp_plugin: Optional[Any] = None  # LSPToolPlugin instance
+        self._lsp_plugin: Optional[Any] = None
         self._console_width = 80
         self._priority = DEFAULT_PRIORITY
-        self._max_errors_per_block = 5  # Limit errors shown per code block
-        self._max_warnings_per_block = 3  # Limit warnings shown per code block
-        # Callback for injecting feedback into conversation
+        self._max_errors_per_block = 5
+        self._max_warnings_per_block = 3
         self._feedback_callback: Optional[Callable[[str], None]] = None
-        # Accumulated validation issues for feedback injection
         self._accumulated_issues: List[Dict[str, Any]] = []
+
+        # Streaming state
+        self._buffer = ""
+        self._in_code_block = False
+        self._code_block_lang = ""
 
     # ==================== FormatterPlugin Protocol ====================
 
@@ -137,120 +119,104 @@ class CodeValidationFormatterPlugin:
         """Execution priority (35 = before syntax highlighting at 40)."""
         return self._priority
 
-    def should_format(self, text: str, format_hint: Optional[str] = None) -> bool:
-        """Check if this formatter should process the text.
+    def process_chunk(self, chunk: str) -> Iterator[str]:
+        """Process a chunk, buffering code blocks for validation.
 
         Args:
-            text: Text to check.
-            format_hint: Optional hint (e.g., "model" for model output).
+            chunk: Incoming text chunk.
 
-        Returns:
-            True if enabled and text contains code blocks we can validate.
+        Yields:
+            Output chunks - immediate for regular text, validated code blocks
+            with diagnostics appended.
         """
-        _trace(f"should_format: called, enabled={self._enabled}, has_lsp={self._lsp_plugin is not None}")
         if not self._enabled:
-            _trace("should_format: disabled")
-            return False
+            yield chunk
+            return
 
-        if not self._lsp_plugin:
-            _trace("should_format: no LSP plugin")
-            return False
+        self._buffer += chunk
 
-        # Check if LSP has any connected servers (check dynamically, not just at init)
-        connected_servers = getattr(self._lsp_plugin, '_connected_servers', set())
-        _trace(f"should_format: connected_servers={connected_servers}")
-        if not connected_servers:
-            _trace("should_format: no connected servers")
-            return False
+        while self._buffer:
+            if not self._in_code_block:
+                # Look for code block start: ```lang\n
+                match = re.search(r'```(\w*)\n', self._buffer)
+                if match:
+                    # Yield text before the code block
+                    before = self._buffer[:match.start()]
+                    if before:
+                        yield before
 
-        # Only process if there are code blocks with supported languages
-        # that we have LSP servers for
-        matches = list(CODE_BLOCK_PATTERN.finditer(text))
-        _trace(f"should_format: found {len(matches)} code blocks in text ({len(text)} chars)")
-        for match in matches:
-            language = match.group(1).lower()
-            _trace(f"should_format: checking language '{language}', in LANGUAGE_EXTENSIONS={language in LANGUAGE_EXTENSIONS}")
-            if language in LANGUAGE_EXTENSIONS:
-                # Check if we have an LSP server for this language
-                has_server = self._has_server_for_language(language)
-                _trace(f"should_format: _has_server_for_language({language})={has_server}")
-                if has_server:
-                    _trace(f"should_format: found {language} block with LSP server available")
-                    return True
+                    # Enter code block mode, keep the ``` marker in buffer
+                    self._code_block_lang = match.group(1) or ""
+                    self._buffer = self._buffer[match.start():]
+                    self._in_code_block = True
+                else:
+                    # Check if we might have a partial ``` at the end
+                    if self._buffer.endswith('`'):
+                        for i in range(min(3, len(self._buffer)), 0, -1):
+                            if self._buffer[-i:] == '`' * i:
+                                to_yield = self._buffer[:-i]
+                                self._buffer = self._buffer[-i:]
+                                if to_yield:
+                                    yield to_yield
+                                return
+                    # No code block, yield everything
+                    yield self._buffer
+                    self._buffer = ""
+            else:
+                # In code block, look for closing \n```
+                # Need to find ``` that's not part of the opening
+                search_start = self._buffer.find('\n') + 1  # Skip opening line
+                if search_start > 0:
+                    end_match = re.search(r'\n```(?:\s|$)', self._buffer[search_start:])
+                    if end_match:
+                        # Found complete code block
+                        end_pos = search_start + end_match.end()
+                        code_block_text = self._buffer[:end_pos]
 
-        _trace("should_format: no matching code blocks found")
-        return False
+                        # Validate and possibly add diagnostics
+                        validated = self._validate_and_annotate(code_block_text)
+                        yield validated
 
-    def format_output(self, text: str) -> str:
-        """Validate code blocks and append diagnostics.
+                        # Exit code block mode
+                        self._buffer = self._buffer[end_pos:]
+                        self._in_code_block = False
+                        self._code_block_lang = ""
+                    else:
+                        # Code block not complete yet
+                        return
+                else:
+                    # Haven't even seen the opening newline yet
+                    return
 
-        Args:
-            text: Text potentially containing markdown code blocks.
+    def flush(self) -> Iterator[str]:
+        """Flush any remaining buffered content."""
+        if self._buffer:
+            if self._in_code_block:
+                # Incomplete code block - still validate what we have
+                validated = self._validate_and_annotate(self._buffer)
+                yield validated
+            else:
+                yield self._buffer
+            self._buffer = ""
+            self._in_code_block = False
+            self._code_block_lang = ""
 
-        Returns:
-            Text with validation warnings appended after code blocks.
-        """
-        if not self.should_format(text):
-            return text
-
-        _trace(f"format_output: processing text with {len(list(CODE_BLOCK_PATTERN.finditer(text)))} code blocks")
-
-        # Clear accumulated issues for this output
-        self._accumulated_issues = []
-
-        # Process code blocks in reverse order to preserve positions
-        matches = list(CODE_BLOCK_PATTERN.finditer(text))
-        result = text
-
-        for match in reversed(matches):
-            language = match.group(1).lower()
-            code = match.group(2)
-
-            if language not in LANGUAGE_EXTENSIONS:
-                continue
-
-            # Remove trailing newline from code if present
-            if code.endswith('\n'):
-                code = code[:-1]
-
-            # Validate the code block
-            diagnostics = self._validate_code(code, language)
-
-            if diagnostics:
-                # Build warning text to append after the code block
-                warning_text = self._format_diagnostics(diagnostics, language)
-
-                # Insert warning after the code block
-                insert_pos = match.end()
-                result = result[:insert_pos] + warning_text + result[insert_pos:]
-
-                # Accumulate for feedback injection
-                self._accumulated_issues.append({
-                    'language': language,
-                    'code_snippet': code[:100] + '...' if len(code) > 100 else code,
-                    'diagnostics': diagnostics
-                })
-
-        # Trigger feedback callback if there are issues
+        # Trigger feedback callback if there are accumulated issues
         if self._accumulated_issues and self._feedback_callback:
             feedback = self._build_feedback_message()
             self._feedback_callback(feedback)
 
-        return result
+    def reset(self) -> None:
+        """Reset state for a new turn."""
+        self._buffer = ""
+        self._in_code_block = False
+        self._code_block_lang = ""
+        self._accumulated_issues = []
 
     # ==================== ConfigurableFormatter Protocol ====================
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
-        """Initialize the formatter with configuration.
-
-        Args:
-            config: Dict with optional settings:
-                - enabled: Enable/disable validation (default: True)
-                - max_errors_per_block: Max errors to show (default: 5)
-                - max_warnings_per_block: Max warnings to show (default: 3)
-                - console_width: Width for rendering (default: 80)
-                - priority: Pipeline priority (default: 35)
-        """
+        """Initialize the formatter with configuration."""
         config = config or {}
         self._enabled = config.get("enabled", True)
         self._max_errors_per_block = config.get("max_errors_per_block", 5)
@@ -260,47 +226,28 @@ class CodeValidationFormatterPlugin:
         _trace(f"initialize: enabled={self._enabled}")
 
     def set_console_width(self, width: int) -> None:
-        """Update the console width for rendering.
-
-        Args:
-            width: New console width in characters.
-        """
+        """Update the console width for rendering."""
         self._console_width = max(20, width)
 
     def shutdown(self) -> None:
         """Cleanup when plugin is disabled."""
         self._enabled = False
+        self.reset()
         _trace("shutdown: disabled")
 
     # ==================== LSP Integration ====================
 
     def set_lsp_plugin(self, lsp_plugin: Any) -> None:
-        """Set the LSP plugin for validation.
-
-        Args:
-            lsp_plugin: An LSPToolPlugin instance.
-        """
+        """Set the LSP plugin for validation."""
         self._lsp_plugin = lsp_plugin
-        _trace(f"set_lsp_plugin: plugin set, connected_servers={getattr(lsp_plugin, '_connected_servers', set())}")
+        _trace(f"set_lsp_plugin: plugin set")
 
     def set_feedback_callback(self, callback: Callable[[str], None]) -> None:
-        """Set callback for injecting feedback into conversation.
-
-        The callback will be called with a formatted message when validation
-        issues are found. This message can be injected into the conversation
-        to trigger model self-correction.
-
-        Args:
-            callback: Function that takes a feedback message string.
-        """
+        """Set callback for injecting feedback into conversation."""
         self._feedback_callback = callback
 
     def get_accumulated_issues(self) -> List[Dict[str, Any]]:
-        """Get accumulated validation issues from the last format_output call.
-
-        Returns:
-            List of issue dicts with 'language', 'code_snippet', 'diagnostics'.
-        """
+        """Get accumulated validation issues from the last format_output call."""
         return self._accumulated_issues
 
     def clear_accumulated_issues(self) -> None:
@@ -309,34 +256,66 @@ class CodeValidationFormatterPlugin:
 
     # ==================== Internal Methods ====================
 
-    def _validate_code(self, code: str, language: str) -> List[Dict[str, Any]]:
-        """Validate a code snippet via LSP.
+    def _validate_and_annotate(self, code_block_text: str) -> str:
+        """Validate a code block and append diagnostics if any.
 
         Args:
-            code: The code content.
-            language: Programming language identifier.
+            code_block_text: Complete code block including ``` markers.
 
         Returns:
-            List of diagnostic dicts with severity, message, line, etc.
+            Code block text with diagnostics appended after closing ```.
         """
-        if not self._lsp_plugin:
-            _trace(f"_validate_code: no LSP plugin")
-            return []
+        # Extract language and code from the block
+        match = re.match(r'```(\w*)\n(.*?)(\n```)', code_block_text, re.DOTALL)
+        if not match:
+            return code_block_text
 
-        # Get file extension for this language
+        language = match.group(1).lower()
+        code = match.group(2)
+
+        if language not in LANGUAGE_EXTENSIONS:
+            return code_block_text
+
+        # Validate the code
+        diagnostics = self._validate_code(code, language)
+
+        if not diagnostics:
+            return code_block_text
+
+        # Build warning text
+        warning_text = self._format_diagnostics(diagnostics, language)
+
+        # Accumulate for feedback
+        self._accumulated_issues.append({
+            'language': language,
+            'code_snippet': code[:100] + '...' if len(code) > 100 else code,
+            'diagnostics': diagnostics
+        })
+
+        # Insert warning after the closing ```
+        return code_block_text + warning_text
+
+    def _validate_code(self, code: str, language: str) -> List[Dict[str, Any]]:
+        """Validate a code snippet via syntax check and LSP."""
+        diagnostics = []
+
+        # First pass: syntax validation for supported languages
+        syntax_errors = self._validate_syntax(code, language)
+        if syntax_errors:
+            diagnostics.extend(syntax_errors)
+            _trace(f"_validate_code: found {len(syntax_errors)} syntax errors for {language}")
+
+        if not self._lsp_plugin:
+            return diagnostics
+
         extension = LANGUAGE_EXTENSIONS.get(language)
         if not extension:
-            _trace(f"_validate_code: no extension for {language}")
-            return []
+            return diagnostics
 
-        # Check if LSP has a server for this language
         if not self._has_server_for_language(language):
-            _trace(f"_validate_code: no LSP server for {language}")
-            return []
+            return diagnostics
 
         try:
-            # Use the dedicated validate_snippet method which properly opens/closes
-            # the file with the LSP server and waits for diagnostics
             _trace(f"_validate_code: calling validate_snippet for {language}")
             result = self._lsp_plugin._exec_validate_snippet({
                 'code': code,
@@ -346,39 +325,55 @@ class CodeValidationFormatterPlugin:
 
             if isinstance(result, dict) and result.get('error'):
                 _trace(f"_validate_code: LSP error: {result.get('error')}")
-                return []
+                return diagnostics
 
             if isinstance(result, list):
-                _trace(f"_validate_code: found {len(result)} diagnostics for {language}")
-                return result
+                _trace(f"_validate_code: found {len(result)} LSP diagnostics for {language}")
+                diagnostics.extend(result)
 
-            _trace(f"_validate_code: unexpected result type: {type(result)}")
-            return []
+            return diagnostics
 
         except Exception as e:
             _trace(f"_validate_code: exception: {e}")
-            return []
+            return diagnostics
+
+    def _validate_syntax(self, code: str, language: str) -> List[Dict[str, Any]]:
+        """Validate syntax using language-specific compile/parse."""
+        diagnostics = []
+
+        if language in ('python', 'py'):
+            try:
+                compile(code, '<code_block>', 'exec')
+            except SyntaxError as e:
+                _trace(f"_validate_syntax: Python SyntaxError: {e}")
+                diagnostics.append({
+                    'severity': 'Error',
+                    'message': str(e.msg) if e.msg else str(e),
+                    'line': e.lineno or 1,
+                    'character': e.offset or 0,
+                    'source': 'syntax_check'
+                })
+            except Exception as e:
+                _trace(f"_validate_syntax: Python compile error: {e}")
+                diagnostics.append({
+                    'severity': 'Error',
+                    'message': str(e),
+                    'line': 1,
+                    'character': 0,
+                    'source': 'syntax_check'
+                })
+
+        return diagnostics
 
     def _has_server_for_language(self, language: str) -> bool:
-        """Check if LSP has a server for the given language.
-
-        Args:
-            language: Language identifier (e.g., 'python', 'javascript').
-
-        Returns:
-            True if a server is available.
-        """
+        """Check if LSP has a server for the given language."""
         if not self._lsp_plugin:
-            _trace(f"_has_server_for_language({language}): no LSP plugin")
             return False
 
-        # Check connected servers
         connected = getattr(self._lsp_plugin, '_connected_servers', set())
-        _trace(f"_has_server_for_language({language}): connected_servers={connected}")
         if not connected:
             return False
 
-        # Map language to what LSP servers might be named
         lang_variants = {language}
         if language == 'py':
             lang_variants.add('python')
@@ -393,49 +388,27 @@ class CodeValidationFormatterPlugin:
             server_lower = server_name.lower()
             for variant in lang_variants:
                 if variant in server_lower:
-                    _trace(f"_has_server_for_language({language}): found match {server_name}")
                     return True
 
-        # Also check by languageId in server config
         clients = getattr(self._lsp_plugin, '_clients', {})
         for name, client in clients.items():
             if hasattr(client, 'config') and hasattr(client.config, 'language_id'):
                 if client.config.language_id in lang_variants:
-                    _trace(f"_has_server_for_language({language}): found by languageId in {name}")
                     return True
 
-        _trace(f"_has_server_for_language({language}): no match found")
         return False
 
-    def _format_diagnostics(
-        self,
-        diagnostics: List[Dict[str, Any]],
-        language: str
-    ) -> str:
-        """Format diagnostics as a visually distinct warning block.
-
-        Args:
-            diagnostics: List of diagnostic dicts.
-            language: The language of the code block.
-
-        Returns:
-            Formatted warning text to append after the code block.
-        """
-        # Separate by severity
+    def _format_diagnostics(self, diagnostics: List[Dict[str, Any]], language: str) -> str:
+        """Format diagnostics as a visually distinct warning block."""
         errors = [d for d in diagnostics if d.get('severity') == 'Error']
         warnings = [d for d in diagnostics if d.get('severity') == 'Warning']
 
         if not errors and not warnings:
-            # Only info/hints - skip unless verbose
             return ""
 
-        # Block indent prefix for visual distinction
         indent = "    │ "
+        lines = [f"    ┌─ Code Validation ({language}) ─"]
 
-        lines = ["\n"]  # Start with newline after code block
-        lines.append(f"    ┌─ Code Validation ({language}) ─")
-
-        # Format errors
         if errors:
             lines.append(f"{indent}{SEVERITY_ICONS['Error']} {len(errors)} error(s) found:")
             for err in errors[:self._max_errors_per_block]:
@@ -445,7 +418,6 @@ class CodeValidationFormatterPlugin:
             if len(errors) > self._max_errors_per_block:
                 lines.append(f"{indent}  ... and {len(errors) - self._max_errors_per_block} more")
 
-        # Format warnings (also show if there are errors, for completeness)
         if warnings:
             lines.append(f"{indent}{SEVERITY_ICONS['Warning']} {len(warnings)} warning(s):")
             for warn in warnings[:self._max_warnings_per_block]:
@@ -456,16 +428,10 @@ class CodeValidationFormatterPlugin:
                 lines.append(f"{indent}  ... and {len(warnings) - self._max_warnings_per_block} more")
 
         lines.append("    └─")
-
-        lines.append("")  # Blank line after warnings
-        return "\n".join(lines)
+        return "\n" + "\n".join(lines)
 
     def _build_feedback_message(self) -> str:
-        """Build a feedback message for conversation injection.
-
-        Returns:
-            Formatted feedback message for the model.
-        """
+        """Build a feedback message for conversation injection."""
         if not self._accumulated_issues:
             return ""
 
@@ -493,6 +459,24 @@ class CodeValidationFormatterPlugin:
         lines.append("Please review and correct these issues before writing to files.")
 
         return "\n".join(lines)
+
+    # ==================== Legacy Methods ====================
+
+    def should_format(self, text: str, format_hint: Optional[str] = None) -> bool:
+        """Legacy method for backwards compatibility."""
+        if not self._enabled or not self._lsp_plugin:
+            return False
+        return '```' in text
+
+    def format_output(self, text: str) -> str:
+        """Legacy method for backwards compatibility."""
+        self.reset()
+        result_parts = []
+        for output in self.process_chunk(text):
+            result_parts.append(output)
+        for output in self.flush():
+            result_parts.append(output)
+        return ''.join(result_parts)
 
 
 def create_plugin() -> CodeValidationFormatterPlugin:

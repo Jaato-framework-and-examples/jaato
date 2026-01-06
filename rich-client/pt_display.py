@@ -142,7 +142,10 @@ class PTDisplay:
         if not server_formatted:
             self._formatter_pipeline = create_pipeline()
             self._formatter_pipeline.register(create_diff_formatter())        # priority 20
-            self._formatter_pipeline.register(create_code_block_formatter())  # priority 40
+            # Code block formatter with line numbers enabled
+            code_block_formatter = create_code_block_formatter()
+            code_block_formatter.initialize({"line_numbers": True})
+            self._formatter_pipeline.register(code_block_formatter)           # priority 40
             self._formatter_pipeline.set_console_width(output_width)
             self._output_buffer.set_formatter_pipeline(self._formatter_pipeline)
 

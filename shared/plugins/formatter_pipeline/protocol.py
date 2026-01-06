@@ -1,34 +1,48 @@
 # shared/plugins/formatter_pipeline/protocol.py
-"""Protocol definition for output formatter plugins.
+"""Protocol definition for streaming formatter plugins.
 
-Formatter plugins subscribe to the output pipeline and transform text
-based on detection rules. Each formatter has a priority that determines
-execution order (lower priority runs first).
+Formatter plugins process output text in a streaming pipeline. Each formatter
+receives chunks incrementally and decides whether to:
+- Pass through immediately (yield chunk as-is)
+- Buffer internally (yield nothing, accumulate)
+- Emit processed content (yield transformed text when ready)
+
+This enables efficient streaming where regular text flows through immediately
+while special content (code blocks, diffs) is buffered until complete.
 
 Usage:
     class MyFormatter:
         name = "my_formatter"
         priority = 50  # Lower = runs earlier
 
-        def should_format(self, text: str, format_hint: Optional[str] = None) -> bool:
-            return "my_pattern" in text
+        def process_chunk(self, chunk: str) -> Iterator[str]:
+            # For simple pass-through with transform:
+            yield self._transform(chunk)
 
-        def format_output(self, text: str) -> str:
-            return transform(text)
+            # For buffering until pattern complete:
+            # ... accumulate, yield when ready ...
+
+        def flush(self) -> Iterator[str]:
+            if self._buffer:
+                yield self._process(self._buffer)
+
+        def reset(self) -> None:
+            self._buffer = ""
 """
 
-from typing import Optional, Protocol, runtime_checkable
+from typing import Iterator, Optional, Protocol, runtime_checkable
 
 
 @runtime_checkable
 class FormatterPlugin(Protocol):
-    """Protocol for output formatter plugins.
+    """Protocol for streaming formatter plugins.
 
     Formatters transform text in the output pipeline. Each formatter:
     - Has a unique name for identification
     - Has a priority for ordering (lower = runs first)
-    - Decides if it should format given text (via should_format)
-    - Transforms text if applicable (via format_output)
+    - Processes chunks incrementally via process_chunk()
+    - Flushes remaining content at turn end via flush()
+    - Resets state for new turns via reset()
     """
 
     @property
@@ -49,27 +63,38 @@ class FormatterPlugin(Protocol):
         """
         ...
 
-    def should_format(self, text: str, format_hint: Optional[str] = None) -> bool:
-        """Determine if this formatter should process the text.
+    def process_chunk(self, chunk: str) -> Iterator[str]:
+        """Process an incoming chunk, yielding output chunks.
+
+        The formatter may:
+        - Yield the chunk immediately (pass-through)
+        - Yield nothing and buffer internally (accumulating)
+        - Yield processed content (when accumulation is complete)
+        - Yield multiple chunks (if chunk completes a buffer and has more)
 
         Args:
-            text: The text to potentially format.
-            format_hint: Optional hint about content type (e.g., "diff", "json").
-                        Formatters can use this for fast-path detection.
+            chunk: Incoming text chunk from the stream.
 
-        Returns:
-            True if this formatter should process the text.
+        Yields:
+            Zero or more output chunks to pass to the next stage.
         """
         ...
 
-    def format_output(self, text: str) -> str:
-        """Transform the text.
+    def flush(self) -> Iterator[str]:
+        """Flush any buffered content.
 
-        Args:
-            text: The input text (may contain ANSI codes from prior formatters).
+        Called at turn end to ensure all buffered content is emitted,
+        even if accumulation patterns weren't completed.
 
-        Returns:
-            Transformed text with ANSI codes for styling.
+        Yields:
+            Any remaining buffered content, possibly processed.
+        """
+        ...
+
+    def reset(self) -> None:
+        """Reset internal state for a new turn.
+
+        Called at the start of a new turn to clear any lingering state.
         """
         ...
 

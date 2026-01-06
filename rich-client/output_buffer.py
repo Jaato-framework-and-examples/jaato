@@ -395,6 +395,22 @@ class OutputBuffer:
                     is_new_turn = (self._last_turn_source != effective_source)
                     self._last_turn_source = effective_source
                 self._current_block = (source, [text], is_new_turn)
+        elif mode == "replace":
+            # Replace mode: server has sent formatted text to replace accumulated output
+            # Clear current block if from same source and replace with full text
+            if self._current_block and self._current_block[0] == source:
+                # Preserve is_new_turn from existing block
+                _, _, is_new_turn = self._current_block
+                self._current_block = (source, [text], is_new_turn)
+            else:
+                # First chunk or source changed - create new block
+                self._flush_current_block()
+                is_new_turn = False
+                if source in ("user", "parent", "model"):
+                    effective_source = "user" if source == "parent" else source
+                    is_new_turn = (self._last_turn_source != effective_source)
+                    self._last_turn_source = effective_source
+                self._current_block = (source, [text], is_new_turn)
         elif mode == "flush":
             # Flush mode: process pending output but don't add any content
             # Used to synchronize output before UI events like tool tree rendering
