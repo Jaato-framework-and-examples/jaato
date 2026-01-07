@@ -50,6 +50,16 @@ class SideBySideRenderer:
         Returns:
             Formatted side-by-side diff with box drawing.
         """
+        # Use single-column mode for new/deleted files, two-column for modifications
+        if diff.is_new_file or diff.is_deleted_file:
+            return self._render_single_column(diff, width, colors)
+
+        return self._render_two_column(diff, width, colors)
+
+    def _render_two_column(
+        self, diff: ParsedDiff, width: int, colors: ColorScheme
+    ) -> str:
+        """Render diff in two-column side-by-side format for modifications."""
         # Calculate column widths
         # Layout: │ ln_old │ content_old │ ln_new │ content_new │
         # That's 5 separators + 2 line number columns + 2 content columns
@@ -81,6 +91,44 @@ class SideBySideRenderer:
 
         # Bottom border
         lines.append(self._render_bottom_border(
+            line_no_width, content_width, colors
+        ))
+
+        # Stats summary
+        lines.append(self._render_stats(diff, colors))
+
+        return "\n".join(lines)
+
+    def _render_single_column(
+        self, diff: ParsedDiff, width: int, colors: ColorScheme
+    ) -> str:
+        """Render diff in single-column format for new/deleted files."""
+        # Layout: │ ln │ content │
+        # That's 3 separators + 1 line number column + 1 content column
+        line_no_width = 6
+        separator_count = 3
+        content_width = width - line_no_width - separator_count
+
+        is_new = diff.is_new_file
+        lines = []
+
+        # Top border with file path
+        lines.append(self._render_top_border(diff, width, colors))
+
+        # Single column header (no header row for cleaner look)
+        # Just go straight to the separator
+        lines.append(self._render_single_separator(
+            line_no_width, content_width, colors, is_top=True
+        ))
+
+        # Render each hunk
+        for hunk in diff.hunks:
+            lines.extend(self._render_hunk_single(
+                hunk, line_no_width, content_width, colors, is_new
+            ))
+
+        # Bottom border
+        lines.append(self._render_single_bottom_border(
             line_no_width, content_width, colors
         ))
 
@@ -354,3 +402,98 @@ class SideBySideRenderer:
             result.append(" " * padding)
 
         return "".join(result)
+
+    # -------------------------------------------------------------------------
+    # Single-column rendering methods (for new/deleted files)
+    # -------------------------------------------------------------------------
+
+    def _render_single_separator(
+        self,
+        line_no_width: int,
+        content_width: int,
+        colors: ColorScheme,
+        is_top: bool = False,
+    ) -> str:
+        """Render horizontal separator for single-column layout."""
+        left = BOX_T_RIGHT
+        right = BOX_T_LEFT
+        cross = BOX_CROSS if not is_top else BOX_T_DOWN
+
+        return (
+            f"{colors.box}"
+            f"{left}{BOX_H * line_no_width}"
+            f"{cross}{BOX_H * content_width}"
+            f"{right}"
+            f"{colors.reset}"
+        )
+
+    def _render_single_bottom_border(
+        self, line_no_width: int, content_width: int, colors: ColorScheme
+    ) -> str:
+        """Render bottom border for single-column layout."""
+        return (
+            f"{colors.box}"
+            f"{BOX_BL}{BOX_H * line_no_width}"
+            f"{BOX_T_UP}{BOX_H * content_width}"
+            f"{BOX_BR}"
+            f"{colors.reset}"
+        )
+
+    def _render_hunk_single(
+        self,
+        hunk: DiffHunk,
+        line_no_width: int,
+        content_width: int,
+        colors: ColorScheme,
+        is_new: bool,
+    ) -> List[str]:
+        """Render a single hunk in single-column format."""
+        lines = []
+
+        for line in hunk.lines:
+            lines.append(self._render_line_single(
+                line, line_no_width, content_width, colors, is_new
+            ))
+
+        return lines
+
+    def _render_line_single(
+        self,
+        line: DiffLine,
+        line_no_width: int,
+        content_width: int,
+        colors: ColorScheme,
+        is_new: bool,
+    ) -> str:
+        """Render a single line in single-column format."""
+        # Get appropriate line number
+        if is_new:
+            ln = str(line.new_line_no) if line.new_line_no is not None else ""
+            color = colors.added if line.change_type == "added" else ""
+        else:
+            ln = str(line.old_line_no) if line.old_line_no is not None else ""
+            color = colors.deleted if line.change_type == "deleted" else ""
+
+        # Format line number (right-aligned)
+        ln_fmt = pad_text(ln, line_no_width, align="right")
+
+        # Format content
+        content_fmt = self._format_content(line.content, content_width)
+
+        # Build the row
+        if color:
+            return (
+                f"{colors.box}{BOX_V}{colors.reset}"
+                f"{colors.line_numbers}{ln_fmt}{colors.reset}"
+                f"{colors.box}{BOX_V}{colors.reset}"
+                f"{color}{content_fmt}{colors.reset}"
+                f"{colors.box}{BOX_V}{colors.reset}"
+            )
+        else:
+            return (
+                f"{colors.box}{BOX_V}{colors.reset}"
+                f"{colors.line_numbers}{ln_fmt}{colors.reset}"
+                f"{colors.box}{BOX_V}{colors.reset}"
+                f"{content_fmt}"
+                f"{colors.box}{BOX_V}{colors.reset}"
+            )
