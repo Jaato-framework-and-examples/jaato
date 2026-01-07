@@ -893,9 +893,16 @@ class RichClient:
             self._trace(f"on_permission_requested: built {len(prompt_lines)} prompt lines, format_hint={format_hint}")
 
             # Format prompt lines through the pipeline (for diff coloring, etc.)
-            formatted_lines = [
-                registry.format_text(line, format_hint=format_hint) for line in prompt_lines
-            ]
+            # For diffs, we need to join lines and format as a block so the diff
+            # formatter can detect the complete diff pattern and apply proper rendering
+            if format_hint == "diff":
+                combined = "\n".join(prompt_lines)
+                formatted = registry.format_text(combined, format_hint=format_hint)
+                formatted_lines = formatted.split("\n")
+            else:
+                formatted_lines = [
+                    registry.format_text(line, format_hint=format_hint) for line in prompt_lines
+                ]
 
             # Update the tool in the main agent's buffer
             buffer = registry.get_buffer("main")
@@ -2574,10 +2581,17 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     )
 
                 # Format prompt lines through the pipeline (for diff coloring, etc.)
-                formatted_lines = [
-                    agent_registry.format_text(line, format_hint=event.format_hint)
-                    for line in prompt_lines
-                ]
+                # For diffs, join lines and format as a block so the diff formatter
+                # can detect the complete diff pattern and apply proper rendering
+                if event.format_hint == "diff":
+                    combined = "\n".join(prompt_lines)
+                    formatted = agent_registry.format_text(combined, format_hint=event.format_hint)
+                    formatted_lines = formatted.split("\n")
+                else:
+                    formatted_lines = [
+                        agent_registry.format_text(line, format_hint=event.format_hint)
+                        for line in prompt_lines
+                    ]
 
                 # Integrate into tool tree (same as direct mode)
                 # Route to the agent that requested permission, not the selected agent
