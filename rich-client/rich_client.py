@@ -901,7 +901,7 @@ class RichClient:
             buffer = registry.get_buffer("main")
             self._trace(f"on_permission_requested: buffer={buffer}, active_tools={len(buffer._active_tools) if buffer else 0}")
             if buffer:
-                buffer.set_tool_permission_pending(tool_name, formatted_lines)
+                buffer.set_tool_permission_pending(tool_name, formatted_lines, format_hint)
                 self._trace(f"on_permission_requested: set_tool_permission_pending called")
                 if display:
                     display.refresh()
@@ -2585,7 +2585,8 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 if buffer:
                     buffer.set_tool_permission_pending(
                         event.tool_name,
-                        formatted_lines
+                        formatted_lines,
+                        event.format_hint
                     )
                 display.refresh()
                 # Enable permission input mode
