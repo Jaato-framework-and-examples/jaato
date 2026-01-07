@@ -108,24 +108,33 @@ class PluginRegistry:
 
     def _emit_enrichment_notifications(
         self,
-        notifications: List[EnrichmentNotification]
+        notifications: List[EnrichmentNotification],
+        output_callback: Optional[OutputCallback] = None,
+        terminal_width: Optional[int] = None
     ) -> None:
         """Emit enrichment notifications through the output callback.
 
         Args:
             notifications: List of enrichment notifications to display.
+            output_callback: Optional callback to use instead of the registry's
+                shared callback. Used for session-specific routing.
+            terminal_width: Terminal width for formatting (uses registry default if not provided).
         """
-        _trace(f"_emit_enrichment_notifications: {len(notifications)} notifications, callback={self._output_callback is not None}")
-        if not self._output_callback or not notifications:
+        # Use provided callback or fall back to shared one
+        callback = output_callback if output_callback is not None else self._output_callback
+        width = terminal_width if terminal_width is not None else self._terminal_width
+
+        _trace(f"_emit_enrichment_notifications: {len(notifications)} notifications, callback={callback is not None}")
+        if not callback or not notifications:
             return
 
         formatted = format_enrichment_notifications(
             notifications,
-            terminal_width=self._terminal_width
+            terminal_width=width
         )
         _trace(f"_emit_enrichment_notifications: formatted={repr(formatted[:100]) if formatted else 'empty'}")
         if formatted:
-            self._output_callback("enrichment", formatted, "write")
+            callback("enrichment", formatted, "write")
 
     def _build_notification(
         self,
@@ -1033,7 +1042,9 @@ class PluginRegistry:
     def enrich_tool_result(
         self,
         tool_name: str,
-        result: str
+        result: str,
+        output_callback: Optional[OutputCallback] = None,
+        terminal_width: Optional[int] = None
     ) -> ToolResultEnrichmentResult:
         """Run a tool result through all subscribed enrichment plugins.
 
@@ -1043,6 +1054,12 @@ class PluginRegistry:
         Args:
             tool_name: Name of the tool that produced the result.
             result: The tool's output as a string.
+            output_callback: Optional callback for emitting notifications.
+                If provided, this callback is used instead of the registry's
+                shared callback. This is important for concurrent sessions
+                (e.g., subagents) that need notifications routed to their
+                specific output panel.
+            terminal_width: Terminal width for formatting (uses registry default if not provided).
 
         Returns:
             ToolResultEnrichmentResult with enriched result.
@@ -1073,8 +1090,12 @@ class PluginRegistry:
             except Exception as exc:
                 _trace(f" Error in tool result enrichment for '{plugin.name}': {exc}")
 
-        # Emit notifications
-        self._emit_enrichment_notifications(notifications)
+        # Emit notifications using provided callback or fallback to shared one
+        self._emit_enrichment_notifications(
+            notifications,
+            output_callback=output_callback,
+            terminal_width=terminal_width
+        )
 
         return ToolResultEnrichmentResult(
             result=current_result,
