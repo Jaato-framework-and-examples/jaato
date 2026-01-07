@@ -64,6 +64,8 @@ class ReferencesPlugin:
         self._on_selection_resolved: Optional[Callable[[str, List[str]], None]] = None
         # Project root for resolving relative paths (stored during initialize)
         self._project_root: Optional[str] = None
+        # Plugin registry for cross-plugin communication (e.g., authorizing external paths)
+        self._plugin_registry = None
 
     @property
     def name(self) -> str:
@@ -88,6 +90,44 @@ class ReferencesPlugin:
                     f.flush()
             except (IOError, OSError):
                 pass  # Silently skip if trace file cannot be written
+
+    def set_plugin_registry(self, registry) -> None:
+        """Set the plugin registry for cross-plugin communication.
+
+        This enables the references plugin to authorize external paths for
+        readFile access, allowing the model to read reference documents
+        that are outside the workspace.
+
+        Args:
+            registry: The PluginRegistry instance.
+        """
+        self._plugin_registry = registry
+        self._trace(f"set_plugin_registry: registry set")
+
+    def _authorize_source_path(self, source: ReferenceSource) -> None:
+        """Authorize a source's path for external access via the plugin registry.
+
+        For LOCAL sources outside the workspace, this registers them with the
+        plugin registry so that readFile can access them.
+
+        Args:
+            source: The reference source whose path should be authorized.
+        """
+        if not self._plugin_registry:
+            return
+
+        if source.type != SourceType.LOCAL:
+            return
+
+        # Get the resolved path
+        resolved_path = self._resolve_path_for_access(source)
+        if not resolved_path:
+            return
+
+        # Authorize this path
+        path_str = str(resolved_path)
+        self._plugin_registry.authorize_external_path(path_str, self._name)
+        self._trace(f"authorized external path: {path_str}")
 
     def _resolve_source_for_context(self, source: ReferenceSource) -> None:
         """Resolve a catalog source's path for the current project context.
@@ -538,6 +578,13 @@ class ReferencesPlugin:
         if self._exclude_tools:
             self._trace(f"initialize: exclude_tools={self._exclude_tools}")
 
+        # Authorize paths for pre-selected sources so readFile can access them
+        if self._selected_source_ids:
+            for sid in self._selected_source_ids:
+                source = next((s for s in self._sources if s.id == sid), None)
+                if source:
+                    self._authorize_source_path(source)
+
     def shutdown(self) -> None:
         """Shutdown the plugin and clean up resources."""
         self._trace("shutdown: cleaning up resources")
@@ -547,6 +594,10 @@ class ReferencesPlugin:
         self._sources = []
         self._selected_source_ids = []
         self._initialized = False
+
+        # Clear any authorized paths this plugin registered
+        if self._plugin_registry:
+            self._plugin_registry.clear_authorized_paths(self._name)
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool declarations for the references plugin.
@@ -700,6 +751,11 @@ class ReferencesPlugin:
 
         # Build instructions for the model
         selected_sources = [s for s in available if s.id in selected_ids]
+
+        # Authorize paths for newly selected sources
+        for source in selected_sources:
+            self._authorize_source_path(source)
+
         instructions = []
 
         for source in selected_sources:
@@ -1020,6 +1076,10 @@ class ReferencesPlugin:
 
         # Get the sources for mentioned IDs
         mentioned_sources = [s for s in self._sources if s.id in mentioned_ids]
+
+        # Authorize paths for mentioned sources so readFile can access them
+        for source in mentioned_sources:
+            self._authorize_source_path(source)
 
         # Build instruction block for each mentioned source
         instructions = []
