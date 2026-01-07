@@ -578,9 +578,78 @@ Use the `/keybindings reload` command to reload keybindings without restarting:
 - Plugin tests: `shared/plugins/<plugin>/tests/`
 - Provider tests: `shared/plugins/model_provider/<provider>/tests/`
 
+## Telemetry (OpenTelemetry Integration)
+
+jaato supports optional OpenTelemetry tracing for observability. When enabled, it exports traces to any OTel-compatible backend (Langfuse, Arize Phoenix, Helicone, etc.).
+
+### Installation
+
+```bash
+# Install telemetry dependencies
+.venv/bin/pip install -r requirements-telemetry.txt
+```
+
+### Configuration
+
+**Environment Variables:**
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `JAATO_TELEMETRY_ENABLED` | Enable telemetry | `false` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint URL | None |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Auth headers (key=value,key2=value2) | None |
+| `OTEL_SERVICE_NAME` | Service name | `jaato` |
+| `JAATO_TELEMETRY_REDACT_CONTENT` | Redact prompts/responses | `true` |
+
+**Programmatic Configuration:**
+
+```python
+from shared.plugins.telemetry import create_otel_plugin
+
+# Create and configure telemetry
+telemetry = create_otel_plugin()
+telemetry.initialize({
+    "enabled": True,
+    "exporter": "otlp",
+    "endpoint": "http://localhost:4317",
+    "headers": {"Authorization": "Bearer xxx"},
+    "redact_content": True,
+})
+
+# Set on runtime
+runtime.set_telemetry_plugin(telemetry)
+```
+
+### Span Hierarchy
+
+```
+jaato.turn                    # Root span for send_message()
+├── jaato.tool                # Tool execution (per tool)
+│   └── jaato.permission      # Permission check (if needed)
+└── jaato.gc                  # GC operation (if triggered)
+```
+
+### Telemetry Attributes
+
+**Turn Span (`jaato.turn`):**
+- `jaato.session_id`: Session identifier
+- `jaato.agent_type`: "main" or "subagent"
+- `jaato.agent_name`: Agent name (if set)
+- `jaato.turn_index`: Turn number in session
+- `jaato.streaming`: Whether streaming was used
+- `jaato.cancelled`: Whether turn was cancelled
+
+**Tool Span (`jaato.tool`):**
+- `jaato.tool.name`: Tool name
+- `jaato.tool.call_id`: Function call ID
+- `jaato.tool.plugin_type`: Plugin type (cli, mcp, etc.)
+- `jaato.tool.success`: Execution success
+- `jaato.tool.duration_seconds`: Execution time
+- `jaato.tool.error`: Error message (if failed)
+
 ## Additional Documentation
 
 - [Architecture Overview](docs/architecture.md) - Server-first architecture, event protocol, component diagrams
 - [Sequence Diagram Architecture](docs/sequence-diagram-architecture.md) - Detailed sequence diagrams for client-server interaction, tool execution, and output rendering
+- [OpenTelemetry Design](docs/opentelemetry-design.md) - Comprehensive design for OTel tracing integration
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI
 - [ModLog Training README](modlog-training-set-test/README.md) - COBOL training set generation
