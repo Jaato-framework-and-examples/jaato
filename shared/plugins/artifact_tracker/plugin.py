@@ -70,6 +70,29 @@ def _normalize_path(path: str) -> str:
     return normalized
 
 
+def _detect_workspace_root() -> Optional[str]:
+    """Auto-detect workspace root from environment variables.
+
+    Priority:
+    1. JAATO_WORKSPACE_ROOT environment variable
+    2. workspaceRoot environment variable (typically from .env file)
+
+    Returns:
+        Resolved absolute path to workspace root, or None if not found.
+    """
+    # Priority 1: JAATO_WORKSPACE_ROOT
+    workspace = os.environ.get('JAATO_WORKSPACE_ROOT')
+    if workspace:
+        return os.path.realpath(os.path.abspath(workspace))
+
+    # Priority 2: workspaceRoot (from .env)
+    workspace = os.environ.get('workspaceRoot')
+    if workspace:
+        return os.path.realpath(os.path.abspath(workspace))
+
+    return None
+
+
 class ArtifactTrackerPlugin:
     """Plugin that tracks artifacts created/modified by the model.
 
@@ -96,6 +119,7 @@ class ArtifactTrackerPlugin:
         self._initialized = False
         self._agent_name: Optional[str] = None
         self._plugin_registry = None  # Set via set_plugin_registry() for cross-plugin access
+        self._workspace_root: Optional[str] = None  # For converting paths to relative display
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
@@ -124,12 +148,21 @@ class ArtifactTrackerPlugin:
             config: Optional configuration dict:
                 - storage_path: Path to JSON file for persistence
                 - auto_load: Whether to load existing state (default: True)
+                - workspace_root: Root directory for displaying relative paths.
+                    If not provided, auto-detects from JAATO_WORKSPACE_ROOT or
+                    workspaceRoot environment variables.
         """
         config = config or {}
         self._agent_name = config.get("agent_name")
 
         # Set storage path
         self._storage_path = config.get("storage_path", DEFAULT_STORAGE_PATH)
+
+        # Set workspace root for relative path display
+        if 'workspace_root' in config and config['workspace_root']:
+            self._workspace_root = os.path.realpath(os.path.abspath(config['workspace_root']))
+        else:
+            self._workspace_root = _detect_workspace_root()
 
         # Initialize registry
         self._registry = ArtifactRegistry()
@@ -139,7 +172,7 @@ class ArtifactTrackerPlugin:
             self._load_state()
 
         self._initialized = True
-        self._trace(f"initialize: storage_path={self._storage_path}")
+        self._trace(f"initialize: storage_path={self._storage_path}, workspace_root={self._workspace_root}")
 
     def shutdown(self) -> None:
         """Shutdown the plugin and save state."""
@@ -147,7 +180,43 @@ class ArtifactTrackerPlugin:
         if self._registry:
             self._save_state()
         self._registry = None
+        self._workspace_root = None
         self._initialized = False
+
+    def _to_display_path(self, path: str) -> str:
+        """Convert an absolute path to a display path relative to workspace_root.
+
+        If workspace_root is set and the path is within it, returns a relative path.
+        Otherwise returns the original path.
+
+        Args:
+            path: The absolute path to convert.
+
+        Returns:
+            Relative path if within workspace_root, otherwise the original path.
+        """
+        if not self._workspace_root or not path:
+            return path
+
+        try:
+            # Ensure both paths are absolute and normalized
+            abs_path = os.path.realpath(os.path.abspath(path))
+            workspace_prefix = self._workspace_root.rstrip(os.sep) + os.sep
+
+            # Check if path is within workspace
+            if abs_path == self._workspace_root:
+                return "."
+            elif abs_path.startswith(workspace_prefix):
+                return abs_path[len(workspace_prefix):]
+            else:
+                # Path is outside workspace - return as-is
+                return path
+        except (OSError, ValueError):
+            return path
+
+    def _to_display_paths(self, paths: List[str]) -> List[str]:
+        """Convert a list of paths to display paths."""
+        return [self._to_display_path(p) for p in paths]
 
     def _load_state(self) -> None:
         """Load state from storage file."""
@@ -463,7 +532,7 @@ class ArtifactTrackerPlugin:
             if needs_review:
                 reminders.append(
                     f"**ATTENTION**: {len(needs_review)} artifact(s) need review:\n" +
-                    "\n".join(f"  - {a.path}: {a.review_reason}" for a in needs_review)
+                    "\n".join(f"  - {self._to_display_path(a.path)}: {a.review_reason}" for a in needs_review)
                 )
 
             # Count tracked artifacts
@@ -566,7 +635,8 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
 
         # Check if already tracked
         if self._registry and self._registry.get_by_path(path):
-            return {"error": f"Artifact already tracked: {path}. Use updateArtifact to modify."}
+            display_path = self._to_display_path(path)
+            return {"error": f"Artifact already tracked: {display_path}. Use updateArtifact to modify."}
 
         # Parse artifact type
         try:
@@ -589,15 +659,17 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             self._registry.add(artifact)
             self._save_state()
 
+        # Return with display paths (relative to workspace)
+        display_path = self._to_display_path(artifact.path)
         return {
             "success": True,
             "artifact_id": artifact.artifact_id,
-            "path": artifact.path,
+            "path": display_path,
             "artifact_type": artifact.artifact_type.value,
             "description": artifact.description,
-            "related_to": artifact.related_to,
+            "related_to": self._to_display_paths(artifact.related_to),
             "tags": artifact.tags,
-            "message": f"Now tracking: {path}"
+            "message": f"Now tracking: {display_path}"
         }
 
     def _execute_update_artifact(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -616,7 +688,8 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
 
         artifact = self._registry.get_by_path(path)
         if not artifact:
-            return {"error": f"Artifact not found: {path}"}
+            display_path = self._to_display_path(path)
+            return {"error": f"Artifact not found: {display_path}"}
 
         # Apply updates
         if "description" in args and args["description"]:
@@ -652,9 +725,9 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         return {
             "success": True,
             "artifact_id": artifact.artifact_id,
-            "path": artifact.path,
+            "path": self._to_display_path(artifact.path),
             "description": artifact.description,
-            "related_to": artifact.related_to,
+            "related_to": self._to_display_paths(artifact.related_to),
             "tags": artifact.tags,
             "review_status": artifact.review_status.value,
         }
@@ -685,16 +758,16 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         if args.get("needs_review", False):
             artifacts = [a for a in artifacts if a.review_status == ReviewStatus.NEEDS_REVIEW]
 
-        # Format results
+        # Format results with display paths (relative to workspace)
         results = []
         for artifact in artifacts:
             results.append({
-                "path": artifact.path,
+                "path": self._to_display_path(artifact.path),
                 "type": artifact.artifact_type.value,
                 "description": artifact.description,
                 "review_status": artifact.review_status.value,
                 "review_reason": artifact.review_reason,
-                "related_to": artifact.related_to,
+                "related_to": self._to_display_paths(artifact.related_to),
                 "tags": artifact.tags,
                 "updated_at": artifact.updated_at,
             })
@@ -723,17 +796,19 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
 
         artifact = self._registry.get_by_path(path)
         if not artifact:
-            return {"error": f"Artifact not found: {path}"}
+            display_path = self._to_display_path(path)
+            return {"error": f"Artifact not found: {display_path}"}
 
         artifact.mark_for_review(reason)
         self._save_state()
 
+        display_path = self._to_display_path(artifact.path)
         return {
             "success": True,
-            "path": artifact.path,
+            "path": display_path,
             "review_status": artifact.review_status.value,
             "review_reason": artifact.review_reason,
-            "message": f"Flagged for review: {path}",
+            "message": f"Flagged for review: {display_path}",
         }
 
     def _execute_acknowledge_review(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -774,11 +849,11 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
                 else:
                     artifact.acknowledge_review(notes)
                 acknowledged.append({
-                    "path": artifact.path,
+                    "path": self._to_display_path(artifact.path),
                     "review_status": artifact.review_status.value,
                 })
             else:
-                not_found.append(path)
+                not_found.append(self._to_display_path(path))
 
         if acknowledged:
             self._save_state()
@@ -819,6 +894,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
 
         # Normalize path for lookup
         path = _normalize_path(path)
+        display_path = self._to_display_path(path)
 
         if not self._registry:
             return {"error": "Plugin not initialized"}
@@ -828,10 +904,10 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
 
         if not affected:
             result = {
-                "path": path,
+                "path": display_path,
                 "related_count": 0,
                 "related": [],
-                "message": f"No tracked artifacts depend on: {path}",
+                "message": f"No tracked artifacts depend on: {display_path}",
             }
             if verbose:
                 result["next_step"] = "You can proceed with your changes. No artifacts will need review."
@@ -839,8 +915,9 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
 
         results = []
         for artifact in affected:
+            artifact_display_path = self._to_display_path(artifact.path)
             results.append({
-                "path": artifact.path,
+                "path": artifact_display_path,
                 "type": artifact.artifact_type.value,
                 "description": artifact.description,
                 "review_status": artifact.review_status.value,
@@ -848,7 +925,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             })
 
         result = {
-            "path": path,
+            "path": display_path,
             "related_count": len(results),
             "related": results,
             "message": f"⚠️  {len(results)} artifact(s) depend on this file and will need review if you modify it.",
@@ -858,12 +935,12 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         if verbose:
             result["workflow_reminder"] = (
                 "IMPORTANT: After you finish editing this file, you MUST call:\n"
-                f"  notifyChange(path=\"{path}\", reason=\"<describe your changes>\")\n"
+                f"  notifyChange(path=\"{display_path}\", reason=\"<describe your changes>\")\n"
                 "This will automatically flag the dependent artifacts for review."
             )
             result["next_steps"] = [
-                f"1. Make your changes to {path}",
-                f"2. Call notifyChange(\"{path}\", \"<reason>\") to flag dependents",
+                f"1. Make your changes to {display_path}",
+                f"2. Call notifyChange(\"{display_path}\", \"<reason>\") to flag dependents",
                 "3. Review each flagged artifact",
                 "4. Call acknowledgeReview() for each after reviewing",
             ]
@@ -902,9 +979,9 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             artifact = self._registry.get_by_path(path)
             if artifact:
                 self._registry.remove(artifact.artifact_id)
-                removed.append(path)
+                removed.append(self._to_display_path(path))
             else:
-                not_found.append(path)
+                not_found.append(self._to_display_path(path))
 
         if removed:
             self._save_state()
@@ -949,6 +1026,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
 
         # Normalize path for matching
         path = _normalize_path(path)
+        display_path = self._to_display_path(path)
 
         if not self._registry:
             return {"error": "Plugin not initialized"}
@@ -960,7 +1038,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             if path in artifact.related_to:
                 artifact.mark_for_review(f"Source changed: {reason}")
                 flagged.append({
-                    "path": artifact.path,
+                    "path": self._to_display_path(artifact.path),
                     "type": artifact.artifact_type.value,
                     "description": artifact.description,
                 })
@@ -970,13 +1048,13 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
 
         return {
             "success": True,
-            "changed_path": path,
+            "changed_path": display_path,
             "reason": reason,
             "flagged_count": len(flagged),
             "flagged_artifacts": flagged,
             "message": (
-                f"Flagged {len(flagged)} artifact(s) for review due to changes in: {path}"
-                if flagged else f"No tracked artifacts depend on: {path}"
+                f"Flagged {len(flagged)} artifact(s) for review due to changes in: {display_path}"
+                if flagged else f"No tracked artifacts depend on: {display_path}"
             ),
             "next_step": (
                 "Review each flagged artifact and call `acknowledgeReview` when done."
