@@ -45,6 +45,70 @@ def _visible_len(text: str) -> int:
     return len(_ANSI_ESCAPE_PATTERN.sub('', text))
 
 
+def _slice_ansi_string(text: str, start: int, width: int) -> tuple[str, bool, bool]:
+    """Slice a string with ANSI codes to a visible width range.
+
+    Args:
+        text: String potentially containing ANSI escape codes.
+        start: Starting visible character position (0-indexed).
+        width: Maximum visible width to return.
+
+    Returns:
+        Tuple of (sliced_string, has_more_left, has_more_right):
+        - sliced_string: The visible portion with ANSI codes preserved
+        - has_more_left: True if there's content before start
+        - has_more_right: True if there's content after start+width
+    """
+    # Pattern to find ANSI sequences
+    ansi_pattern = re.compile(r'(\x1b\[[0-9;]*m)')
+
+    result = []
+    visible_pos = 0  # Current visible character position
+    active_codes = []  # Track active ANSI codes for proper reset/restore
+
+    # Split into segments (alternating text and ANSI codes)
+    segments = ansi_pattern.split(text)
+
+    for segment in segments:
+        if not segment:
+            continue
+
+        if ansi_pattern.match(segment):
+            # This is an ANSI code
+            # Track it if we're in or before the viewport (for proper styling)
+            if visible_pos < start + width:
+                if segment == '\x1b[0m':
+                    active_codes.clear()
+                else:
+                    active_codes.append(segment)
+                # Only include in output if we've started outputting
+                if visible_pos >= start or (visible_pos < start and visible_pos + len(active_codes) > 0):
+                    result.append(segment)
+        else:
+            # This is regular text
+            for char in segment:
+                if visible_pos >= start and visible_pos < start + width:
+                    # Character is in viewport
+                    result.append(char)
+                visible_pos += 1
+
+                if visible_pos >= start + width:
+                    # We've filled the viewport, but continue counting for has_more_right
+                    pass
+
+    # Calculate overflow indicators
+    total_visible = _visible_len(text)
+    has_more_left = start > 0
+    has_more_right = total_visible > start + width
+
+    # Ensure we close any open ANSI codes
+    sliced = ''.join(result)
+    if active_codes and sliced:
+        sliced += '\x1b[0m'
+
+    return sliced, has_more_left, has_more_right
+
+
 @dataclass
 class OutputLine:
     """A single line of output with metadata."""
@@ -86,6 +150,7 @@ class ActiveToolCall:
     permission_prompt_lines: Optional[List[str]] = None  # Expanded prompt (may contain ANSI codes)
     permission_format_hint: Optional[str] = None  # "diff" for pre-formatted content (skip box wrapping)
     permission_truncated: bool = False  # True if prompt is truncated
+    permission_h_scroll: int = 0  # Horizontal scroll offset for diff viewport (stage 2)
     # Clarification tracking (per-question progressive display)
     clarification_state: Optional[str] = None  # None, "pending", "resolved"
     clarification_prompt_lines: Optional[List[str]] = None  # Current question lines
@@ -2197,18 +2262,51 @@ class OutputBuffer:
                     prompt_lines = tool.permission_prompt_lines
 
                     # Check if content is pre-formatted (e.g., diff output with its own box)
-                    # In this case, render lines directly without wrapping in another box
+                    # In this case, render in a viewport that fits the available width
                     if tool.permission_format_hint == "diff":
-                        # Pre-formatted content - render directly
+                        # Calculate effective viewport width
+                        # Prefix is "  {continuation}     " = 11 chars, plus scroll indicators = 2
+                        prefix_width = 11
+                        scroll_indicator_width = 2  # "◀" or "▶" with space
+                        viewport_width = max(40, self._console_width - prefix_width - scroll_indicator_width)
+
+                        # Track if any line has overflow (for future horizontal scroll)
+                        any_overflow_left = False
+                        any_overflow_right = False
+
+                        # Pre-formatted content - render in viewport
                         for prompt_line in prompt_lines:
                             output.append("\n")
                             output.append(f"  {continuation}     ", style="dim")
-                            # Check for options line (style cyan)
+
+                            # Check for options line (style cyan) - don't slice these
                             stripped = _ANSI_ESCAPE_PATTERN.sub('', prompt_line)
                             if stripped.strip().startswith('[') and ']' in stripped:
                                 output.append_text(Text.from_ansi(prompt_line, style="cyan"))
                             else:
-                                output.append_text(Text.from_ansi(prompt_line))
+                                # Apply viewport slicing
+                                h_scroll = tool.permission_h_scroll
+                                sliced, has_left, has_right = _slice_ansi_string(
+                                    prompt_line, h_scroll, viewport_width
+                                )
+                                any_overflow_left = any_overflow_left or has_left
+                                any_overflow_right = any_overflow_right or has_right
+
+                                # Show left overflow indicator
+                                if has_left:
+                                    output.append("◀", style="cyan dim")
+                                else:
+                                    output.append(" ", style="dim")
+
+                                # Render sliced content
+                                output.append_text(Text.from_ansi(sliced))
+
+                                # Show right overflow indicator
+                                if has_right:
+                                    output.append("▶", style="cyan dim")
+
+                        # Store overflow state for potential scroll hint
+                        tool.permission_truncated = any_overflow_right or any_overflow_left
                     else:
                         # Standard content - wrap in a box
                         # Limit lines to show (keep options visible at end)
