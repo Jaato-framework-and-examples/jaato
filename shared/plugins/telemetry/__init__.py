@@ -23,7 +23,8 @@ Usage:
 
 Environment Variables:
     JAATO_TELEMETRY_ENABLED: Enable telemetry (default: false)
-    JAATO_TELEMETRY_EXPORTER: Exporter type (otlp, console, none)
+    JAATO_TELEMETRY_EXPORTER: Exporter type (otlp, console, file, none)
+    JAATO_TELEMETRY_FILE: Output file path for file exporter (default: /tmp/jaato-traces.jsonl)
     JAATO_TELEMETRY_REDACT_CONTENT: Redact prompts/responses (default: true)
     OTEL_EXPORTER_OTLP_ENDPOINT: OTLP endpoint URL
     OTEL_EXPORTER_OTLP_HEADERS: Auth headers (key=value,key2=value2)
