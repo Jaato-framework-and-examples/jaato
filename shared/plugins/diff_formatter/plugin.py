@@ -46,6 +46,10 @@ SIDE_BY_SIDE_MIN_WIDTH = 120
 COMPACT_MIN_WIDTH = 80
 
 
+# Pattern to detect lines that are part of a unified diff
+DIFF_LINE_START = re.compile(r'^(---|\+\+\+|@@|[ +-])')
+
+
 class DiffFormatterPlugin:
     """Plugin that formats unified diff output with adaptive rendering.
 
@@ -66,6 +70,10 @@ class DiffFormatterPlugin:
         - Standard +/- line prefixes
         - Colored output (green/red)
         - Full context preserved
+
+    The plugin buffers incoming lines that appear to be part of a diff,
+    then renders the complete diff when the buffer is flushed or when
+    a non-diff line is encountered.
     """
 
     def __init__(self):
@@ -80,6 +88,10 @@ class DiffFormatterPlugin:
             UnifiedRenderer(),
         ]
 
+        # Buffer for accumulating diff lines
+        self._buffer: List[str] = []
+        self._in_diff = False
+
     # ==================== FormatterPlugin Protocol ====================
 
     @property
@@ -93,30 +105,114 @@ class DiffFormatterPlugin:
         return self._priority
 
     def process_chunk(self, chunk: str) -> Iterator[str]:
-        """Process a chunk, formatting diffs inline.
+        """Process a chunk, buffering diff lines for complete rendering.
 
-        Diffs are typically complete blocks, so we format them immediately
-        when detected. Non-diff text passes through unchanged.
+        Lines that appear to be part of a unified diff are buffered until
+        the diff is complete (detected by a non-diff line or flush).
+        Complete diffs in a single chunk are formatted immediately.
 
         Args:
             chunk: Incoming text chunk.
 
         Yields:
-            Formatted chunk if it's a diff, otherwise unchanged.
+            Formatted output when appropriate.
         """
-        if self._is_diff(chunk):
+        # If this is a complete diff block (multi-line with headers AND content),
+        # format immediately without buffering
+        if '\n' in chunk and self._is_complete_diff(chunk):
+            # First flush any existing buffer
+            for output in self._flush_buffer():
+                yield output
             yield self._format_diff(chunk)
+            return
+
+        # Process line by line for streaming mode
+        # Handle chunks that may contain multiple lines or partial lines
+        lines = chunk.split('\n')
+        for i, line in enumerate(lines):
+            is_last_line = (i == len(lines) - 1)
+
+            # Skip empty string from trailing newline (don't let it trigger flush)
+            if is_last_line and line == '' and chunk.endswith('\n'):
+                continue
+
+            if self._is_diff_line(line):
+                # Start or continue buffering diff content
+                self._in_diff = True
+                self._buffer.append(line)
+            else:
+                # Non-diff line - flush any buffered diff first
+                if self._buffer:
+                    for output in self._flush_buffer():
+                        yield output
+
+                # Pass through non-diff content with newline
+                # Add newline for all but last line in chunk, or if chunk ends with \n
+                has_trailing_newline = not is_last_line or chunk.endswith('\n')
+                yield line + ('\n' if has_trailing_newline else '')
+
+    def _is_diff_line(self, line: str) -> bool:
+        """Check if a single line appears to be part of a unified diff."""
+        # Check for diff header lines - these start a new diff
+        if line.startswith('--- '):
+            return True
+        if line.startswith('+++ '):
+            return True
+        # Check for hunk headers
+        if line.startswith('@@') and ' @@' in line:
+            return True
+        # Check for diff content lines (context, addition, deletion)
+        # Only valid when we're already in a diff context
+        if self._in_diff:
+            # Context line (starts with single space)
+            if line.startswith(' '):
+                return True
+            # Addition (starts with + but not +++)
+            if line.startswith('+') and not line.startswith('+++'):
+                return True
+            # Deletion (starts with - but not ---)
+            if line.startswith('-') and not line.startswith('---'):
+                return True
+        return False
+
+    def _is_complete_diff(self, text: str) -> bool:
+        """Check if text is a complete unified diff (has headers AND content)."""
+        # Must have hunk header
+        if not HUNK_HEADER.search(text):
+            return False
+        # Must have file headers
+        if not UNIFIED_DIFF_HEADER.search(text):
+            return False
+        # Must have actual content lines (not just headers)
+        if not DIFF_LINE_PATTERN.search(text):
+            return False
+        return True
+
+    def _flush_buffer(self) -> Iterator[str]:
+        """Flush the diff buffer and yield formatted output."""
+        if not self._buffer:
+            return
+
+        # Join buffered lines and format as a diff
+        diff_text = '\n'.join(self._buffer)
+        self._buffer = []
+        self._in_diff = False
+
+        if self._is_complete_diff(diff_text):
+            yield self._format_diff(diff_text)
         else:
-            yield chunk
+            # Wasn't a complete diff, pass through with basic colorization
+            yield render_raw_unified(diff_text, self._colors)
 
     def flush(self) -> Iterator[str]:
-        """Flush any remaining content (no-op for diff formatter)."""
-        return
-        yield  # Make this a generator
+        """Flush any remaining buffered diff content."""
+        for output in self._flush_buffer():
+            yield output
 
     def reset(self) -> None:
-        """Reset state for a new turn (no-op for diff formatter)."""
-        pass
+        """Reset state for a new turn."""
+        self._buffer = []
+        self._in_diff = False
 
     def _is_diff(self, text: str) -> bool:
         """Check if text appears to be a unified diff."""
@@ -152,8 +248,12 @@ class DiffFormatterPlugin:
         # Select renderer based on width
         renderer = self._select_renderer()
 
-        # Render the diff
-        return renderer.render(parsed, self._console_width, self._colors)
+        # Render the diff (with fallback on error)
+        try:
+            return renderer.render(parsed, self._console_width, self._colors)
+        except Exception:
+            # If rendering fails, fall back to simple colorization
+            return render_raw_unified(text, self._colors)
 
     # Legacy method for backwards compatibility
     def format_output(self, text: str) -> str:

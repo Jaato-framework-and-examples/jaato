@@ -18,10 +18,10 @@ class ColorScheme:
     bold: str = "\033[1m"
 
     # Diff-specific colors
-    added: str = "\033[32m"           # Green for additions
-    deleted: str = "\033[31m"         # Red for deletions
-    added_bold: str = "\033[1;32m"    # Bold green for word-level highlight
-    deleted_bold: str = "\033[1;31m"  # Bold red for word-level highlight
+    added: str = "\033[102;30m"       # Pale green background for additions
+    deleted: str = "\033[101;30m"     # Pale red background for deletions
+    added_bold: str = "\033[102;30m"  # Pale green background for word-level highlight
+    deleted_bold: str = "\033[101;30m"  # Pale red background for word-level highlight
 
     # Structure colors
     header_path: str = "\033[1;36m"   # Bold cyan for file path
