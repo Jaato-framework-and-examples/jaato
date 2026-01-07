@@ -2562,8 +2562,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 }
 
                 # Use pre-formatted prompt lines from server if available (includes diff)
+                # Server already formats through its pipeline, so don't format again
                 if event.prompt_lines:
-                    prompt_lines = event.prompt_lines
+                    formatted_lines = event.prompt_lines
                 else:
                     # Fall back to building prompt lines locally
                     from shared.ui_utils import build_permission_prompt_lines
@@ -2572,12 +2573,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         response_options=event.response_options,
                         include_tool_name=False,  # Tool name already shown in tool tree
                     )
-
-                # Format prompt lines through the pipeline (for diff coloring, etc.)
-                formatted_lines = [
-                    agent_registry.format_text(line, format_hint=event.format_hint)
-                    for line in prompt_lines
-                ]
+                    # Only format locally-built prompts (server prompts are pre-formatted)
+                    formatted_lines = [
+                        agent_registry.format_text(line, format_hint=event.format_hint)
+                        for line in prompt_lines
+                    ]
 
                 # Integrate into tool tree (same as direct mode)
                 # Route to the agent that requested permission, not the selected agent
