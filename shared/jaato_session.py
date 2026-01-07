@@ -10,6 +10,7 @@ import queue
 import re
 import tempfile
 from datetime import datetime
+from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .ai_tool_runner import ToolExecutor
@@ -45,6 +46,18 @@ from .jaato_runtime import _TASK_COMPLETION_INSTRUCTION
 
 # Pattern to match @references in prompts
 AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
+
+
+class ActivityPhase(Enum):
+    """Activity phases for tracking what a session is doing.
+
+    Used to help parent agents/UIs understand whether a session is
+    actively working vs genuinely idle.
+    """
+    IDLE = "idle"                        # Waiting for input, ready to receive messages
+    WAITING_FOR_LLM = "waiting_for_llm"  # Request sent, awaiting cloud response
+    STREAMING = "streaming"              # Receiving tokens from LLM
+    EXECUTING_TOOL = "executing_tool"    # Running a tool
 
 
 class JaatoSession:
@@ -137,6 +150,10 @@ class JaatoSession:
         self._parent_cancel_token: Optional[CancelToken] = None  # For parent→child propagation
         self._is_running: bool = False
         self._use_streaming: bool = True  # Enable streaming by default if provider supports it
+
+        # Activity phase tracking (for parent agents/UIs to understand what we're doing)
+        self._activity_phase: ActivityPhase = ActivityPhase.IDLE
+        self._phase_started_at: Optional[datetime] = None
         # Disable model notifications about cancellation by default - they cause
         # the model to hallucinate "interruptions" on subsequent turns
         self._notify_model_on_cancel: bool = False
@@ -381,6 +398,44 @@ class JaatoSession:
             True if send_message() is in progress, False otherwise.
         """
         return self._is_running
+
+    @property
+    def activity_phase(self) -> ActivityPhase:
+        """Get the current activity phase.
+
+        Returns:
+            The current ActivityPhase (IDLE, WAITING_FOR_LLM, STREAMING, EXECUTING_TOOL).
+        """
+        return self._activity_phase
+
+    @property
+    def phase_started_at(self) -> Optional[datetime]:
+        """Get when the current activity phase started.
+
+        Returns:
+            Datetime when the current phase began, or None if IDLE.
+        """
+        return self._phase_started_at
+
+    @property
+    def phase_duration_seconds(self) -> Optional[float]:
+        """Get how long we've been in the current phase.
+
+        Returns:
+            Duration in seconds, or None if IDLE (no active phase).
+        """
+        if self._phase_started_at is None:
+            return None
+        return (datetime.now() - self._phase_started_at).total_seconds()
+
+    def _set_activity_phase(self, phase: ActivityPhase) -> None:
+        """Set the current activity phase (internal use).
+
+        Args:
+            phase: The new activity phase.
+        """
+        self._activity_phase = phase
+        self._phase_started_at = datetime.now() if phase != ActivityPhase.IDLE else None
 
     def request_stop(self) -> bool:
         """Request cancellation of the current message processing.
@@ -1181,6 +1236,9 @@ class JaatoSession:
             # Proactive rate limiting: wait if needed before request
             self._pacer.pace()
 
+            # Set activity phase: we're about to wait for LLM response
+            self._set_activity_phase(ActivityPhase.WAITING_FOR_LLM)
+
             # Send message (streaming or batched)
             if use_streaming:
                 # Track whether we've sent the first chunk (to use "write" vs "append")
@@ -1189,6 +1247,9 @@ class JaatoSession:
                 # Streaming callback that routes to on_output and forwards to parent
                 def streaming_callback(chunk: str) -> None:
                     nonlocal first_chunk_sent
+                    # Transition to STREAMING phase on first chunk
+                    if not first_chunk_sent:
+                        self._set_activity_phase(ActivityPhase.STREAMING)
                     if on_output:
                         # First chunk uses "write" to start block, subsequent use "append"
                         mode = "append" if first_chunk_sent else "write"
@@ -1679,9 +1740,10 @@ class JaatoSession:
             if turn_data['total'] > 0:
                 self._turn_accounting.append(turn_data)
 
-            # Clean up cancellation state
+            # Clean up cancellation state and activity phase
             self._is_running = False
             self._cancel_token = None
+            self._set_activity_phase(ActivityPhase.IDLE)
 
     def _execute_function_call_group(
         self,
@@ -1691,6 +1753,9 @@ class JaatoSession:
         cancellation_notified: bool
     ) -> List[ToolResult]:
         """Execute a group of function calls and return their results."""
+        # Set activity phase: we're executing tools
+        self._set_activity_phase(ActivityPhase.EXECUTING_TOOL)
+
         tool_results: List[ToolResult] = []
 
         for fc in function_calls:
@@ -1804,6 +1869,9 @@ class JaatoSession:
 
         # Proactive rate limiting
         self._pacer.pace()
+
+        # Set activity phase: we're waiting for LLM response again
+        self._set_activity_phase(ActivityPhase.WAITING_FOR_LLM)
 
         try:
             return self._do_send_tool_results(

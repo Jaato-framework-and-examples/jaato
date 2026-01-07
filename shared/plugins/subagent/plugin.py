@@ -394,8 +394,23 @@ class SubagentPlugin:
             ToolSchema(
                 name='list_active_subagents',
                 description=(
-                    'List currently active subagent sessions that can receive follow-up '
-                    'messages. Shows subagent ID, profile, status (running/waiting), and turn count.'
+                    'List currently active subagent sessions with detailed status information.\n\n'
+                    'RESPONSE FIELDS:\n'
+                    '- agent_id: Unique identifier for the subagent\n'
+                    '- profile: The subagent profile name\n'
+                    '- activity_phase: Current activity (see below)\n'
+                    '- phase_duration_sec: How long in current phase\n'
+                    '- turn_count / max_turns: Progress tracking\n\n'
+                    'ACTIVITY PHASES:\n'
+                    '- "idle": Waiting for input, ready to receive messages\n'
+                    '- "waiting_for_llm": Request sent, awaiting cloud response\n'
+                    '- "streaming": Receiving tokens from LLM\n'
+                    '- "executing_tool": Running a tool\n\n'
+                    'IMPORTANT: A subagent in "waiting_for_llm" phase is NOT stuck - it is '
+                    'actively waiting for the cloud model to respond. Thinking/reasoning models '
+                    'can take 60-120+ seconds before producing tokens. This is normal.\n\n'
+                    'Only "executing_tool" can potentially hang (if a local tool is unresponsive). '
+                    'LLM cloud calls will always eventually return a response or error.'
                 ),
                 parameters={
                     "type": "object",
@@ -476,6 +491,14 @@ class SubagentPlugin:
             "- Use close_subagent to free resources after receiving COMPLETED\n"
             "- Sessions auto-close after max_turns, but explicit closure is preferred\n"
             "- Use list_active_subagents to see running subagents\n\n"
+            "CHECKING SUBAGENT STATUS:\n"
+            "- Use list_active_subagents to check status - it shows activity_phase\n"
+            "- 'waiting_for_llm' phase is NORMAL - the subagent is waiting for the cloud model to respond\n"
+            "- Thinking/reasoning models can take 60-120+ seconds - this is NOT stuck\n"
+            "- 'streaming' phase means actively receiving output - definitely alive\n"
+            "- Only 'executing_tool' can potentially hang (local tools may be unresponsive)\n"
+            "- 'idle' means ready for new messages via send_to_subagent\n"
+            "- Do NOT cancel a subagent just because it hasn't produced output yet\n\n"
             "GC CONFIGURATION:\n"
             "Subagents can have their own garbage collection (GC) settings independent of the parent. "
             "This is useful for testing GC behavior or when subagents need different context management. "
@@ -911,7 +934,7 @@ class SubagentPlugin:
             args: Tool arguments (unused).
 
         Returns:
-            Dict containing list of active sessions.
+            Dict containing list of active sessions with activity phase info.
         """
         sessions = []
 
@@ -921,10 +944,19 @@ class SubagentPlugin:
                 session = info.get('session')
                 is_running = session.is_running if session else False
                 supports_stop = session.supports_stop if session else False
+
+                # Get activity phase information
+                activity_phase = session.activity_phase.value if session else "idle"
+                phase_duration = session.phase_duration_seconds if session else None
+                phase_started = session.phase_started_at.isoformat() if session and session.phase_started_at else None
+
                 sessions.append({
                     'agent_id': agent_id,
                     'profile': info['profile'].name,
                     'status': 'running' if is_running else 'idle',
+                    'activity_phase': activity_phase,
+                    'phase_duration_sec': round(phase_duration, 1) if phase_duration else None,
+                    'phase_started_at': phase_started,
                     'can_cancel': is_running and supports_stop,
                     'can_send': True,  # Can always inject prompts
                     'created_at': info['created_at'].isoformat(),
