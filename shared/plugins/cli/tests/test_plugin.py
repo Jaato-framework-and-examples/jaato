@@ -372,3 +372,346 @@ class TestCLIPluginBackgroundCapability:
 
         plugin.shutdown()
         assert plugin._initialized is False
+
+
+class TestCLIPluginPathSandboxing:
+    """Tests for path sandboxing functionality."""
+
+    def test_initialize_with_workspace_root(self):
+        """Test initialization with workspace_root config."""
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": "/tmp/workspace"})
+
+        assert plugin._workspace_root is not None
+        # Should be resolved to absolute path
+        assert os.path.isabs(plugin._workspace_root)
+
+    def test_initialize_without_workspace_root(self, monkeypatch):
+        """Test initialization without workspace_root (no sandboxing)."""
+        # Clear env vars to ensure no auto-detection
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+
+        assert plugin._workspace_root is None
+
+    def test_shutdown_clears_workspace_root(self):
+        """Test that shutdown clears workspace_root."""
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": "/tmp/workspace"})
+        plugin.shutdown()
+
+        assert plugin._workspace_root is None
+
+    def test_extract_path_tokens_absolute_paths(self):
+        """Test extraction of absolute paths from commands."""
+        plugin = CLIToolPlugin()
+
+        tokens = plugin._extract_path_tokens("cat /etc/passwd")
+        assert "/etc/passwd" in tokens
+
+        tokens = plugin._extract_path_tokens("ls /home/user /tmp")
+        assert "/home/user" in tokens
+        assert "/tmp" in tokens
+
+    def test_extract_path_tokens_relative_traversal(self):
+        """Test extraction of paths with .. traversal."""
+        plugin = CLIToolPlugin()
+
+        tokens = plugin._extract_path_tokens("cat ../../../etc/passwd")
+        assert "../../../etc/passwd" in tokens
+
+        tokens = plugin._extract_path_tokens("ls foo/../bar")
+        assert "foo/../bar" in tokens
+
+    def test_extract_path_tokens_explicit_relative(self):
+        """Test extraction of ./ relative paths."""
+        plugin = CLIToolPlugin()
+
+        tokens = plugin._extract_path_tokens("cat ./config.yaml")
+        assert "./config.yaml" in tokens
+
+    def test_extract_path_tokens_home_directory(self):
+        """Test extraction of ~ home directory paths."""
+        plugin = CLIToolPlugin()
+
+        tokens = plugin._extract_path_tokens("cat ~/.bashrc")
+        assert "~/.bashrc" in tokens
+
+        tokens = plugin._extract_path_tokens("ls ~/Documents")
+        assert "~/Documents" in tokens
+
+    def test_extract_path_tokens_excludes_urls(self):
+        """Test that URLs are not extracted as paths."""
+        plugin = CLIToolPlugin()
+
+        tokens = plugin._extract_path_tokens("curl https://example.com/path/to/file")
+        assert "https://example.com/path/to/file" not in tokens
+
+        tokens = plugin._extract_path_tokens("wget http://example.com/download")
+        assert "http://example.com/download" not in tokens
+
+    def test_extract_path_tokens_excludes_options(self):
+        """Test that option flags are not extracted as paths."""
+        plugin = CLIToolPlugin()
+
+        tokens = plugin._extract_path_tokens("ls -la --color=auto")
+        assert "-la" not in tokens
+        assert "--color=auto" not in tokens
+
+    def test_extract_path_tokens_excludes_npm_packages(self):
+        """Test that npm package names are not extracted as paths."""
+        plugin = CLIToolPlugin()
+
+        tokens = plugin._extract_path_tokens("npm install @scope/package")
+        assert "@scope/package" not in tokens
+
+    def test_is_path_within_workspace_no_sandboxing(self, monkeypatch):
+        """Test that all paths are allowed when no workspace_root is set."""
+        # Clear env vars to ensure no auto-detection
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        plugin = CLIToolPlugin()
+        plugin.initialize()  # No workspace_root
+
+        assert plugin._is_path_within_workspace("/etc/passwd") is True
+        assert plugin._is_path_within_workspace("../../../anywhere") is True
+
+    def test_is_path_within_workspace_inside(self, tmp_path):
+        """Test that paths inside workspace are allowed."""
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+
+        # Direct child
+        assert plugin._is_path_within_workspace(str(tmp_path / "file.txt")) is True
+
+        # Nested child
+        assert plugin._is_path_within_workspace(str(tmp_path / "sub" / "file.txt")) is True
+
+        # Workspace root itself
+        assert plugin._is_path_within_workspace(str(tmp_path)) is True
+
+    def test_is_path_within_workspace_outside(self, tmp_path):
+        """Test that paths outside workspace are blocked."""
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+
+        # Absolute path outside
+        assert plugin._is_path_within_workspace("/etc/passwd") is False
+
+        # Parent directory
+        assert plugin._is_path_within_workspace(str(tmp_path.parent)) is False
+
+        # Home directory (likely outside tmp_path)
+        assert plugin._is_path_within_workspace("~/.bashrc") is False
+
+    def test_is_path_within_workspace_traversal_blocked(self, tmp_path):
+        """Test that .. traversal out of workspace is blocked."""
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+
+        # Create cwd context - simulate being inside workspace
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(tmp_path)
+
+            # Traversal that stays inside is allowed
+            subdir = tmp_path / "sub"
+            subdir.mkdir()
+            assert plugin._is_path_within_workspace("sub/../file.txt") is True
+
+            # Traversal that escapes is blocked
+            assert plugin._is_path_within_workspace("../outside.txt") is False
+            assert plugin._is_path_within_workspace("../../etc/passwd") is False
+
+        finally:
+            os.chdir(original_cwd)
+
+    def test_validate_command_paths_no_sandboxing(self, monkeypatch):
+        """Test validation passes when no workspace_root is set."""
+        # Clear env vars to ensure no auto-detection
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+
+        result = plugin._validate_command_paths("cat /etc/passwd")
+        assert result is None  # No blocking
+
+    def test_validate_command_paths_allowed(self, tmp_path):
+        """Test validation passes for paths inside workspace."""
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+
+        # Command with path inside workspace
+        result = plugin._validate_command_paths(f"cat {tmp_path}/file.txt")
+        assert result is None
+
+    def test_validate_command_paths_blocked(self, tmp_path):
+        """Test validation returns blocked path for paths outside workspace."""
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+
+        result = plugin._validate_command_paths("cat /etc/passwd")
+        assert result == "/etc/passwd"
+
+    def test_make_not_found_result(self):
+        """Test generation of not-found error result."""
+        plugin = CLIToolPlugin()
+
+        result = plugin._make_not_found_result("/etc/passwd", "cat /etc/passwd")
+
+        assert result["stdout"] == ""
+        assert "No such file or directory" in result["stderr"]
+        assert "/etc/passwd" in result["stderr"]
+        assert result["returncode"] == 1
+
+    def test_make_not_found_result_uses_command_name(self):
+        """Test that error message uses the command name."""
+        plugin = CLIToolPlugin()
+
+        result = plugin._make_not_found_result("/etc/passwd", "cat /etc/passwd")
+        assert result["stderr"].startswith("cat:")
+
+        result = plugin._make_not_found_result("/etc/passwd", "ls /etc/passwd")
+        assert result["stderr"].startswith("ls:")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
+    def test_execute_blocks_path_outside_workspace(self, tmp_path):
+        """Test that execute blocks commands accessing paths outside workspace."""
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+
+        result = plugin._execute({"command": "cat /etc/passwd"})
+
+        assert result["returncode"] == 1
+        assert "No such file or directory" in result["stderr"]
+        assert result["stdout"] == ""
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
+    def test_execute_allows_path_inside_workspace(self, tmp_path):
+        """Test that execute allows commands accessing paths inside workspace."""
+        # Create a file inside workspace
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("hello")
+
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+
+        result = plugin._execute({"command": f"cat {test_file}"})
+
+        assert result["returncode"] == 0
+        assert "hello" in result["stdout"]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
+    def test_execute_blocks_traversal_out_of_workspace(self, tmp_path):
+        """Test that .. traversal out of workspace is blocked."""
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+
+        # Try to traverse out of workspace
+        result = plugin._execute({"command": "cat ../../../etc/passwd"})
+
+        assert result["returncode"] == 1
+        assert "No such file or directory" in result["stderr"]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
+    def test_execute_blocks_home_directory_access(self, tmp_path):
+        """Test that ~ home directory access is blocked when outside workspace."""
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+
+        result = plugin._execute({"command": "cat ~/.bashrc"})
+
+        assert result["returncode"] == 1
+        assert "No such file or directory" in result["stderr"]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
+    def test_execute_allows_commands_without_paths(self, tmp_path):
+        """Test that commands without path arguments work normally."""
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+
+        # Simple command without paths
+        result = plugin._execute({"command": "echo hello"})
+
+        assert result["returncode"] == 0
+        assert "hello" in result["stdout"]
+
+    def test_validate_arg_list_paths(self, tmp_path):
+        """Test that paths in arg_list are also validated."""
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
+
+        # Path in arg_list should be validated
+        result = plugin._validate_command_paths("cat", arg_list=["/etc/passwd"])
+        assert result == "/etc/passwd"
+
+        # Path inside workspace should pass
+        result = plugin._validate_command_paths("cat", arg_list=[f"{tmp_path}/file.txt"])
+        assert result is None
+
+    def test_auto_detect_workspace_root_from_jaato_env(self, tmp_path, monkeypatch):
+        """Test auto-detection of workspace_root from JAATO_WORKSPACE_ROOT."""
+        monkeypatch.setenv("JAATO_WORKSPACE_ROOT", str(tmp_path))
+        # Clear workspaceRoot to ensure priority is tested
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        plugin = CLIToolPlugin()
+        plugin.initialize()  # No explicit workspace_root
+
+        assert plugin._workspace_root == str(tmp_path.resolve())
+
+    def test_auto_detect_workspace_root_from_dotenv(self, tmp_path, monkeypatch):
+        """Test auto-detection of workspace_root from workspaceRoot (.env style)."""
+        # Clear JAATO_WORKSPACE_ROOT to test fallback
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.setenv("workspaceRoot", str(tmp_path))
+
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+
+        assert plugin._workspace_root == str(tmp_path.resolve())
+
+    def test_auto_detect_jaato_takes_precedence(self, tmp_path, monkeypatch):
+        """Test that JAATO_WORKSPACE_ROOT takes precedence over workspaceRoot."""
+        jaato_path = tmp_path / "jaato"
+        jaato_path.mkdir()
+        dotenv_path = tmp_path / "dotenv"
+        dotenv_path.mkdir()
+
+        monkeypatch.setenv("JAATO_WORKSPACE_ROOT", str(jaato_path))
+        monkeypatch.setenv("workspaceRoot", str(dotenv_path))
+
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+
+        assert plugin._workspace_root == str(jaato_path.resolve())
+
+    def test_explicit_config_overrides_auto_detect(self, tmp_path, monkeypatch):
+        """Test that explicit workspace_root config overrides auto-detection."""
+        explicit_path = tmp_path / "explicit"
+        explicit_path.mkdir()
+        env_path = tmp_path / "env"
+        env_path.mkdir()
+
+        monkeypatch.setenv("JAATO_WORKSPACE_ROOT", str(env_path))
+
+        plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(explicit_path)})
+
+        assert plugin._workspace_root == str(explicit_path.resolve())
+
+    def test_no_workspace_root_when_env_not_set(self, monkeypatch):
+        """Test that sandboxing is disabled when no env vars are set."""
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        plugin = CLIToolPlugin()
+        plugin.initialize()
+
+        assert plugin._workspace_root is None

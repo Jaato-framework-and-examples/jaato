@@ -79,6 +79,8 @@ class CLIToolPlugin(BackgroundCapableMixin):
         max_output_chars: Maximum characters to return from stdout/stderr (default: 50000).
         auto_background_threshold: Seconds before auto-backgrounding (default: 10.0).
         background_max_workers: Max concurrent background tasks (default: 4).
+        workspace_root: Root directory for path sandboxing. Paths outside this
+            directory will appear as "No such file or directory" to the model.
     """
 
     def __init__(self):
@@ -93,6 +95,8 @@ class CLIToolPlugin(BackgroundCapableMixin):
         self._agent_name: Optional[str] = None
         # Callback for streaming output during execution (tail -f style)
         self._tool_output_callback: Optional[Callable[[str], None]] = None
+        # Workspace root for path sandboxing (None = no sandboxing)
+        self._workspace_root: Optional[str] = None
 
     @property
     def name(self) -> str:
@@ -114,6 +118,33 @@ class CLIToolPlugin(BackgroundCapableMixin):
             except (IOError, OSError):
                 pass
 
+    def _detect_workspace_root(self) -> Optional[str]:
+        """Auto-detect workspace root from environment variables.
+
+        Priority:
+        1. JAATO_WORKSPACE_ROOT environment variable
+        2. workspaceRoot environment variable (typically from .env file)
+
+        Returns:
+            Resolved absolute path to workspace root, or None if not found.
+        """
+        # Priority 1: JAATO_WORKSPACE_ROOT
+        workspace = os.environ.get('JAATO_WORKSPACE_ROOT')
+        if workspace:
+            resolved = os.path.realpath(os.path.abspath(workspace))
+            self._trace(f"_detect_workspace_root: using JAATO_WORKSPACE_ROOT={resolved}")
+            return resolved
+
+        # Priority 2: workspaceRoot (from .env)
+        workspace = os.environ.get('workspaceRoot')
+        if workspace:
+            resolved = os.path.realpath(os.path.abspath(workspace))
+            self._trace(f"_detect_workspace_root: using workspaceRoot={resolved}")
+            return resolved
+
+        self._trace("_detect_workspace_root: no workspace root found, sandboxing disabled")
+        return None
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the CLI plugin.
 
@@ -123,6 +154,10 @@ class CLIToolPlugin(BackgroundCapableMixin):
                 - max_output_chars: Max characters to return (default: 50000)
                 - auto_background_threshold: Seconds before auto-backgrounding (default: 10.0)
                 - background_max_workers: Max concurrent background tasks (default: 4)
+                - workspace_root: Root directory for path sandboxing. Paths outside
+                    this directory will appear as "No such file or directory".
+                    If not provided, auto-detects from JAATO_WORKSPACE_ROOT or
+                    workspaceRoot environment variables.
         """
         if config:
             # Extract agent name for trace logging
@@ -137,8 +172,18 @@ class CLIToolPlugin(BackgroundCapableMixin):
                 self._auto_background_threshold = config['auto_background_threshold']
             if 'background_max_workers' in config:
                 self._bg_max_workers = config['background_max_workers']
+            if 'workspace_root' in config:
+                # Resolve to absolute path and normalize
+                workspace = config['workspace_root']
+                if workspace:
+                    self._workspace_root = os.path.realpath(os.path.abspath(workspace))
+
+        # Auto-detect workspace_root from environment if not explicitly provided
+        if not self._workspace_root:
+            self._workspace_root = self._detect_workspace_root()
+
         self._initialized = True
-        self._trace(f"initialize: extra_paths={self._extra_paths}, max_output={self._max_output_chars}, auto_bg_threshold={self._auto_background_threshold}")
+        self._trace(f"initialize: extra_paths={self._extra_paths}, max_output={self._max_output_chars}, auto_bg_threshold={self._auto_background_threshold}, workspace_root={self._workspace_root}")
 
     def set_tool_output_callback(self, callback: Optional[Callable[[str], None]]) -> None:
         """Set the callback for streaming output during execution.
@@ -156,6 +201,7 @@ class CLIToolPlugin(BackgroundCapableMixin):
         """Shutdown the CLI plugin."""
         self._trace("shutdown: cleaning up")
         self._extra_paths = []
+        self._workspace_root = None
         self._initialized = False
         # Cleanup background executor
         self._shutdown_bg_executor()
@@ -405,6 +451,15 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             cmd_preview = command[:100] + "..." if len(command) > 100 else command
             self._trace(f"execute_streaming: {cmd_preview}")
 
+            # Validate paths are within workspace (if sandboxing enabled)
+            blocked_path = self._validate_command_paths(command, arg_list)
+            if blocked_path:
+                result = self._make_not_found_result(blocked_path, command)
+                # Call callbacks with the fake error
+                on_stderr(result['stderr'].encode('utf-8'))
+                on_returncode(result['returncode'])
+                return result
+
             # Prepare environment
             env = os.environ.copy()
             if extra_paths:
@@ -532,6 +587,173 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         """
         return bool(SHELL_METACHAR_PATTERN.search(command))
 
+    # --- Path sandboxing implementation ---
+
+    def _extract_path_tokens(self, command: str) -> List[str]:
+        """Extract tokens that look like filesystem paths from a command.
+
+        Identifies tokens that are likely filesystem paths:
+        - Absolute paths starting with /
+        - Relative paths with .. traversal
+        - Relative paths starting with ./
+
+        Excludes:
+        - URLs (http://, https://, ftp://, etc.)
+        - Option flags starting with - or --
+        - Package names with @ (npm @scope/package)
+
+        Args:
+            command: The shell command string.
+
+        Returns:
+            List of tokens that appear to be filesystem paths.
+        """
+        try:
+            # Use shlex to properly handle quoting
+            tokens = shlex.split(command)
+        except ValueError:
+            # If shlex fails (unbalanced quotes), fall back to simple split
+            tokens = command.split()
+
+        path_tokens = []
+        for token in tokens:
+            # Skip empty tokens
+            if not token:
+                continue
+
+            # Skip option flags
+            if token.startswith('-'):
+                continue
+
+            # Skip URLs
+            if re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', token):
+                continue
+
+            # Skip npm-style package names (@scope/package)
+            if token.startswith('@') and '/' in token and not token.startswith('@/'):
+                continue
+
+            # Include if it looks like a path:
+            # - Absolute path (starts with /)
+            # - Relative path with traversal (contains ..)
+            # - Explicit relative path (starts with ./)
+            # - Contains path separator and doesn't look like an option value
+            if (token.startswith('/') or
+                    '..' in token or
+                    token.startswith('./') or
+                    token.startswith('~')):
+                path_tokens.append(token)
+
+        return path_tokens
+
+    def _is_path_within_workspace(self, path: str) -> bool:
+        """Check if a path resolves within the workspace root.
+
+        Handles:
+        - Absolute paths
+        - Relative paths (resolved against cwd)
+        - Paths with .. traversal
+        - Symlinks (resolved to real path)
+        - ~ home directory expansion
+
+        Args:
+            path: The path to check.
+
+        Returns:
+            True if the path is within workspace_root, False otherwise.
+        """
+        if not self._workspace_root:
+            # No sandboxing configured
+            return True
+
+        try:
+            # Expand ~ to home directory
+            expanded = os.path.expanduser(path)
+
+            # Resolve to absolute path, following symlinks
+            # Use realpath to resolve symlinks and normalize
+            resolved = os.path.realpath(os.path.abspath(expanded))
+
+            # Check if the resolved path starts with workspace_root
+            # Add trailing separator to prevent /workspace matching /workspace2
+            workspace_prefix = self._workspace_root.rstrip(os.sep) + os.sep
+            return resolved == self._workspace_root or resolved.startswith(workspace_prefix)
+
+        except (OSError, ValueError):
+            # If path resolution fails, treat as outside workspace for safety
+            return False
+
+    def _validate_command_paths(
+        self,
+        command: str,
+        arg_list: Optional[List[str]] = None
+    ) -> Optional[str]:
+        """Validate that all paths in a command are within workspace_root.
+
+        If any path is outside the workspace, returns a fake "not found" error
+        message. The model sees this as if the path simply doesn't exist.
+
+        Args:
+            command: The command string.
+            arg_list: Optional separate argument list.
+
+        Returns:
+            None if all paths are valid, or an error message if any path
+            is outside workspace_root.
+        """
+        if not self._workspace_root:
+            # No sandboxing configured
+            return None
+
+        # Collect paths from command string
+        paths_to_check = self._extract_path_tokens(command)
+
+        # Also check explicit arg_list if provided
+        if arg_list:
+            for arg in arg_list:
+                if (arg.startswith('/') or '..' in arg or
+                        arg.startswith('./') or arg.startswith('~')):
+                    paths_to_check.append(arg)
+
+        # Validate each path
+        for path in paths_to_check:
+            if not self._is_path_within_workspace(path):
+                self._trace(f"path_sandbox: blocked access to '{path}' (outside workspace)")
+                # Return a natural-looking error as if the path doesn't exist
+                # Use the first blocked path in the error message
+                return path
+
+        return None
+
+    def _make_not_found_result(self, path: str, command: str) -> Dict[str, Any]:
+        """Create a result dict that mimics "file/directory not found".
+
+        Args:
+            path: The path that "doesn't exist".
+            command: The original command (used to determine error format).
+
+        Returns:
+            Dict with stdout, stderr, returncode mimicking not found error.
+        """
+        # Extract the base command name for realistic error messages
+        try:
+            cmd_name = shlex.split(command)[0]
+            # Get just the executable name without path
+            cmd_name = os.path.basename(cmd_name)
+        except (ValueError, IndexError):
+            cmd_name = "command"
+
+        # Format error message based on common command patterns
+        stderr = f"{cmd_name}: {path}: No such file or directory"
+
+        return {
+            'stdout': '',
+            'stderr': stderr,
+            'returncode': 1
+        }
+
+    # --- End path sandboxing implementation ---
+
     def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a CLI command.
 
@@ -559,6 +781,11 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # Truncate command for logging (avoid huge commands in trace)
             cmd_preview = command[:100] + "..." if len(command) > 100 else command
             self._trace(f"execute: {cmd_preview}")
+
+            # Validate paths are within workspace (if sandboxing enabled)
+            blocked_path = self._validate_command_paths(command, arg_list)
+            if blocked_path:
+                return self._make_not_found_result(blocked_path, command)
 
             # Prepare environment with extended PATH if extra_paths is provided
             env = os.environ.copy()
