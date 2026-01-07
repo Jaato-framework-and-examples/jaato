@@ -39,6 +39,7 @@ from agent_tab_bar import AgentTabBar
 from clipboard import ClipboardConfig, ClipboardProvider, create_provider
 from keybindings import KeybindingConfig, load_keybindings
 from shared.plugins.formatter_pipeline import create_pipeline
+from shared.plugins.hidden_content_filter import create_plugin as create_hidden_filter
 from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter
 from shared.plugins.diff_formatter import create_plugin as create_diff_formatter
 
@@ -141,6 +142,7 @@ class PTDisplay:
         self._formatter_pipeline = None
         if not server_formatted:
             self._formatter_pipeline = create_pipeline()
+            self._formatter_pipeline.register(create_hidden_filter())         # priority 5
             self._formatter_pipeline.register(create_diff_formatter())        # priority 20
             # Code block formatter with line numbers enabled
             code_block_formatter = create_code_block_formatter()
