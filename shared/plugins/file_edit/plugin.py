@@ -131,13 +131,22 @@ class FileEditPlugin:
                 name="readFile",
                 description="Read the contents of a file. ALWAYS use this instead of `cat`, `head`, "
                            "`tail`, or `less` CLI commands. Returns file content as text with proper "
-                           "encoding handling and structured metadata.",
+                           "encoding handling and structured metadata. Supports chunked reading with "
+                           "offset and limit parameters for large files.",
                 parameters={
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
                             "description": "Path to the file to read"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Line number to start reading from (1-indexed). Default is 1 (start of file)."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of lines to read. If not specified, reads the entire file."
                         }
                     },
                     "required": ["path"]
@@ -298,7 +307,11 @@ IMPORTANT: Always prefer these tools over CLI commands:
 These tools provide structured output, automatic backups, and proper encoding handling.
 
 Tools available:
-- `readFile(path)`: Read file contents. Safe operation, no approval needed.
+- `readFile(path, offset=None, limit=None)`: Read file contents. Safe operation, no approval needed.
+  - For large files, use `offset` (1-indexed line number) and `limit` (max lines) for chunked reading.
+  - Example: `readFile(path="large.txt", offset=1, limit=100)` reads lines 1-100.
+  - Example: `readFile(path="large.txt", offset=101, limit=100)` reads lines 101-200.
+  - Chunked responses include: `total_lines`, `start_line`, `end_line`, and `has_more` (boolean).
 - `updateFile(path, new_content)`: Update an existing file. Shows diff for approval and creates backup.
 - `writeNewFile(path, content)`: Create a new file. Shows content for approval. Fails if file exists.
 - `removeFile(path)`: Delete a file. Creates backup before deletion.
@@ -495,9 +508,18 @@ updateFile, removeFile, and moveFile operations."""
     # Tool executors
 
     def _execute_read_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute readFile tool."""
+        """Execute readFile tool.
+
+        Supports chunked reading via offset and limit parameters:
+        - offset: Line number to start from (1-indexed, default: 1)
+        - limit: Maximum lines to read (default: entire file)
+
+        Returns metadata including has_more flag when limit is used.
+        """
         path = args.get("path", "")
-        self._trace(f"readFile: path={path}")
+        offset = args.get("offset")  # 1-indexed line number
+        limit = args.get("limit")    # Max lines to read
+        self._trace(f"readFile: path={path}, offset={offset}, limit={limit}")
 
         if not path:
             return {"error": "path is required"}
@@ -509,14 +531,57 @@ updateFile, removeFile, and moveFile operations."""
         if not file_path.is_file():
             return {"error": f"Not a file: {path}"}
 
+        # Validate offset and limit if provided
+        if offset is not None:
+            if not isinstance(offset, int) or offset < 1:
+                return {"error": "offset must be a positive integer (1-indexed)"}
+
+        if limit is not None:
+            if not isinstance(limit, int) or limit < 1:
+                return {"error": "limit must be a positive integer"}
+
         try:
             content = file_path.read_text()
-            return {
-                "path": path,
-                "content": content,
-                "size": len(content),
-                "lines": len(content.splitlines())
-            }
+            all_lines = content.splitlines(keepends=True)
+            total_lines = len(all_lines)
+
+            # Apply chunking if offset or limit specified
+            if offset is not None or limit is not None:
+                start_idx = (offset - 1) if offset else 0  # Convert to 0-indexed
+
+                if limit is not None:
+                    end_idx = start_idx + limit
+                    selected_lines = all_lines[start_idx:end_idx]
+                    has_more = end_idx < total_lines
+                else:
+                    selected_lines = all_lines[start_idx:]
+                    has_more = False
+
+                # Reconstruct content from selected lines
+                chunk_content = "".join(selected_lines)
+
+                # Calculate actual start/end line numbers (1-indexed)
+                actual_start = start_idx + 1
+                actual_end = min(start_idx + len(selected_lines), total_lines)
+
+                return {
+                    "path": path,
+                    "content": chunk_content,
+                    "size": len(chunk_content),
+                    "lines": len(selected_lines),
+                    "total_lines": total_lines,
+                    "start_line": actual_start,
+                    "end_line": actual_end,
+                    "has_more": has_more
+                }
+            else:
+                # No chunking - return entire file
+                return {
+                    "path": path,
+                    "content": content,
+                    "size": len(content),
+                    "lines": total_lines
+                }
         except OSError as e:
             return {"error": f"Failed to read file: {e}"}
 
