@@ -67,6 +67,21 @@ class PluginRegistry:
         # Later, unexpose plugins
         registry.unexpose_tool('mcp')
         registry.unexpose_all()
+
+    External Path Authorization:
+        Plugins can authorize external paths (outside workspace) for model access.
+        This is used by the references plugin to allow readFile to access
+        referenced documents outside the workspace.
+
+        # Register an authorized external path
+        registry.authorize_external_path('/docs/external/guide.md', 'references')
+
+        # Check if a path is authorized
+        if registry.is_path_authorized('/docs/external/guide.md'):
+            # Allow access
+
+        # Clear authorizations from a specific plugin
+        registry.clear_authorized_paths('references')
     """
 
     def __init__(self, model_name: Optional[str] = None):
@@ -86,6 +101,8 @@ class PluginRegistry:
         self._disabled_tools: Set[str] = set()  # Individual tools disabled by user
         self._output_callback: Optional[OutputCallback] = None
         self._terminal_width: int = 80
+        # Authorized external paths: path -> source plugin name
+        self._authorized_external_paths: Dict[str, str] = {}
 
     def set_output_callback(
         self,
@@ -817,6 +834,125 @@ class PluginRegistry:
             Dict mapping plugin names to their required model patterns.
         """
         return dict(self._skipped_plugins)
+
+    # ==================== External Path Authorization ====================
+
+    def authorize_external_path(self, path: str, source_plugin: str) -> None:
+        """Authorize an external path for model access.
+
+        Plugins (like references) can use this to allow the model to access
+        specific files outside the workspace that are needed for the task.
+
+        Args:
+            path: Absolute path to authorize (will be normalized).
+            source_plugin: Name of the plugin granting authorization.
+        """
+        # Normalize to absolute path
+        normalized = os.path.realpath(os.path.abspath(path))
+        self._authorized_external_paths[normalized] = source_plugin
+        _trace(f"authorize_external_path: {normalized} (from {source_plugin})")
+
+    def authorize_external_paths(self, paths: List[str], source_plugin: str) -> None:
+        """Authorize multiple external paths for model access.
+
+        Args:
+            paths: List of absolute paths to authorize.
+            source_plugin: Name of the plugin granting authorization.
+        """
+        for path in paths:
+            self.authorize_external_path(path, source_plugin)
+
+    def is_path_authorized(self, path: str) -> bool:
+        """Check if a path is authorized for model access.
+
+        This checks both exact path matches and parent directory matches
+        (if a directory is authorized, all files within it are authorized).
+
+        Args:
+            path: Path to check (will be normalized).
+
+        Returns:
+            True if the path or a parent directory is authorized.
+        """
+        if not self._authorized_external_paths:
+            return False
+
+        # Normalize the path
+        normalized = os.path.realpath(os.path.abspath(path))
+
+        # Check exact match
+        if normalized in self._authorized_external_paths:
+            return True
+
+        # Check if any authorized path is a parent directory
+        for authorized_path in self._authorized_external_paths:
+            # Check if normalized path is under an authorized directory
+            auth_with_sep = authorized_path.rstrip(os.sep) + os.sep
+            if normalized.startswith(auth_with_sep):
+                return True
+
+        return False
+
+    def get_path_authorization_source(self, path: str) -> Optional[str]:
+        """Get the plugin that authorized a path.
+
+        Args:
+            path: Path to check (will be normalized).
+
+        Returns:
+            Name of the plugin that authorized this path, or None if not authorized.
+        """
+        if not self._authorized_external_paths:
+            return None
+
+        normalized = os.path.realpath(os.path.abspath(path))
+
+        # Check exact match
+        if normalized in self._authorized_external_paths:
+            return self._authorized_external_paths[normalized]
+
+        # Check parent directories
+        for authorized_path, source in self._authorized_external_paths.items():
+            auth_with_sep = authorized_path.rstrip(os.sep) + os.sep
+            if normalized.startswith(auth_with_sep):
+                return source
+
+        return None
+
+    def clear_authorized_paths(self, source_plugin: Optional[str] = None) -> int:
+        """Clear authorized external paths.
+
+        Args:
+            source_plugin: If specified, only clear paths from this plugin.
+                          If None, clear all authorized paths.
+
+        Returns:
+            Number of paths cleared.
+        """
+        if source_plugin is None:
+            count = len(self._authorized_external_paths)
+            self._authorized_external_paths.clear()
+            _trace(f"clear_authorized_paths: cleared all {count} paths")
+            return count
+
+        # Clear only paths from the specified plugin
+        to_remove = [
+            path for path, source in self._authorized_external_paths.items()
+            if source == source_plugin
+        ]
+        for path in to_remove:
+            del self._authorized_external_paths[path]
+
+        _trace(f"clear_authorized_paths: cleared {len(to_remove)} paths from {source_plugin}")
+        return len(to_remove)
+
+    def list_authorized_paths(self) -> Dict[str, str]:
+        """List all authorized external paths.
+
+        Returns:
+            Dict mapping normalized paths to the source plugin that authorized them.
+        """
+        return dict(self._authorized_external_paths)
 
     # ==================== Prompt Enrichment ====================
 
