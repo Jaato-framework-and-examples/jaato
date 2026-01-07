@@ -276,28 +276,31 @@ class SideBySideRenderer:
             new_content = new_line.content
 
         # Determine colors and apply word-level diff for modified lines
+        # In side-by-side view, we rely on word-level highlighting rather than
+        # full line coloring since the columns already separate OLD from NEW
         if old_line and new_line:
             if old_line.change_type == "modified" and new_line.change_type == "modified":
-                # Modified - compute word-level diff
+                # Modified - compute word-level diff (no line-level coloring)
                 word_diff = compute_word_diff(old_content, new_content)
 
-                # Render with word-level highlighting
+                # Render with word-level highlighting only
                 old_content = render_word_diff_old(
                     word_diff, colors.deleted_bold, colors.reset
                 )
                 new_content = render_word_diff_new(
                     word_diff, colors.added_bold, colors.reset
                 )
-                old_color = colors.deleted
-                new_color = colors.added
+                # Don't set old_color/new_color - word highlighting is sufficient
             elif old_line.change_type == "unchanged":
                 # Unchanged - apply syntax highlighting for context lines
                 if filename:
                     old_content = highlight_line(old_content, filename)
                     new_content = highlight_line(new_content, filename)
         elif old_line and old_line.change_type in ("deleted", "modified"):
+            # Pure deletion - subtle coloring to indicate removed line
             old_color = colors.deleted
         elif new_line and new_line.change_type in ("added", "modified"):
+            # Pure addition - subtle coloring to indicate new line
             new_color = colors.added
 
         # Format single line number (right-aligned)
