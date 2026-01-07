@@ -3,6 +3,7 @@
 
 Displays old and new versions in parallel columns with box drawing,
 line numbers on both sides, and word-level highlighting for changes.
+Applies syntax highlighting to context (unchanged) lines.
 """
 
 from typing import List, Optional, Tuple
@@ -14,6 +15,7 @@ from ..box_drawing import (
     BOX_T_DOWN, BOX_T_UP, BOX_T_RIGHT, BOX_T_LEFT, BOX_CROSS,
     truncate_text, pad_text,
 )
+from ..syntax_highlight import highlight_line, can_highlight
 from .base import ColorScheme
 
 
@@ -24,14 +26,14 @@ MIN_SIDE_BY_SIDE_WIDTH = 120
 class SideBySideRenderer:
     """Renders diff in side-by-side format with box drawing.
 
-    Output format:
+    Output format (single line number column for cleaner display):
         ┌─ src/utils/parser.py ─────────────────────────────────────────────┐
-        │      │ OLD                         │      │ NEW                   │
-        ├──────┼─────────────────────────────┼──────┼───────────────────────┤
-        │   10 │ def parse(path):            │   10 │ def parse(path):      │
-        │   11 │     data = load(path)       │   11 │     data = load(path) │
-        │   12 │     return validate(data)   │   12 │     return validate(d…│
-        └──────┴─────────────────────────────┴──────┴───────────────────────┘
+        │      │ OLD                              │ NEW                     │
+        ├──────┼──────────────────────────────────┼─────────────────────────┤
+        │   10 │ def parse(path):                 │ def parse(path):        │
+        │   11 │     data = load(path)            │     data = load(path)   │
+        │   12 │     return validate(data)        │     return check(data)  │
+        └──────┴──────────────────────────────────┴─────────────────────────┘
          +3 lines, -2 lines
     """
 
@@ -61,11 +63,11 @@ class SideBySideRenderer:
     ) -> str:
         """Render diff in two-column side-by-side format for modifications."""
         # Calculate column widths
-        # Layout: │ ln_old │ content_old │ ln_new │ content_new │
-        # That's 5 separators + 2 line number columns + 2 content columns
+        # Layout: │ ln │ content_old │ content_new │
+        # That's 4 separators + 1 line number column + 2 content columns
         line_no_width = 6  # "  123 " - space for up to 4-digit line numbers
-        separator_count = 5
-        available_for_content = width - (2 * line_no_width) - separator_count
+        separator_count = 4
+        available_for_content = width - line_no_width - separator_count
         content_width = available_for_content // 2
 
         lines = []
@@ -86,7 +88,7 @@ class SideBySideRenderer:
         # Render each hunk
         for hunk in diff.hunks:
             lines.extend(self._render_hunk(
-                hunk, line_no_width, content_width, colors
+                hunk, line_no_width, content_width, colors, diff.path
             ))
 
         # Bottom border
@@ -124,7 +126,7 @@ class SideBySideRenderer:
         # Render each hunk
         for hunk in diff.hunks:
             lines.extend(self._render_hunk_single(
-                hunk, line_no_width, content_width, colors, is_new
+                hunk, line_no_width, content_width, colors, is_new, diff.path
             ))
 
         # Bottom border
@@ -158,10 +160,9 @@ class SideBySideRenderer:
     def _render_column_headers(
         self, line_no_width: int, content_width: int, colors: ColorScheme
     ) -> str:
-        """Render OLD/NEW column headers."""
-        # Format line number columns (empty for headers)
-        ln_old = pad_text("", line_no_width)
-        ln_new = pad_text("", line_no_width)
+        """Render OLD/NEW column headers (single line number column)."""
+        # Format line number column (empty for header row)
+        ln_col = pad_text("", line_no_width)
 
         # Format content columns with headers
         old_header = pad_text("OLD", content_width)
@@ -169,11 +170,9 @@ class SideBySideRenderer:
 
         return (
             f"{colors.box}{BOX_V}{colors.reset}"
-            f"{colors.line_numbers}{ln_old}{colors.reset}"
+            f"{colors.line_numbers}{ln_col}{colors.reset}"
             f"{colors.box}{BOX_V}{colors.reset}"
             f"{colors.header_old}{old_header}{colors.reset}"
-            f"{colors.box}{BOX_V}{colors.reset}"
-            f"{colors.line_numbers}{ln_new}{colors.reset}"
             f"{colors.box}{BOX_V}{colors.reset}"
             f"{colors.header_new}{new_header}{colors.reset}"
             f"{colors.box}{BOX_V}{colors.reset}"
@@ -186,7 +185,7 @@ class SideBySideRenderer:
         colors: ColorScheme,
         is_header: bool = False,
     ) -> str:
-        """Render horizontal separator line."""
+        """Render horizontal separator line (single line number column)."""
         left = BOX_T_RIGHT if is_header else BOX_T_RIGHT
         right = BOX_T_LEFT if is_header else BOX_T_LEFT
         cross = BOX_CROSS
@@ -195,7 +194,6 @@ class SideBySideRenderer:
             f"{colors.box}"
             f"{left}{BOX_H * line_no_width}"
             f"{cross}{BOX_H * content_width}"
-            f"{cross}{BOX_H * line_no_width}"
             f"{cross}{BOX_H * content_width}"
             f"{right}"
             f"{colors.reset}"
@@ -204,12 +202,11 @@ class SideBySideRenderer:
     def _render_bottom_border(
         self, line_no_width: int, content_width: int, colors: ColorScheme
     ) -> str:
-        """Render bottom border."""
+        """Render bottom border (single line number column)."""
         return (
             f"{colors.box}"
             f"{BOX_BL}{BOX_H * line_no_width}"
             f"{BOX_T_UP}{BOX_H * content_width}"
-            f"{BOX_T_UP}{BOX_H * line_no_width}"
             f"{BOX_T_UP}{BOX_H * content_width}"
             f"{BOX_BR}"
             f"{colors.reset}"
@@ -236,6 +233,7 @@ class SideBySideRenderer:
         line_no_width: int,
         content_width: int,
         colors: ColorScheme,
+        filename: str = "",
     ) -> List[str]:
         """Render a single hunk as side-by-side rows."""
         lines = []
@@ -245,7 +243,7 @@ class SideBySideRenderer:
             lines.append(self._render_pair(
                 old_line, new_line,
                 line_no_width, content_width,
-                colors
+                colors, filename
             ))
 
         return lines
@@ -257,11 +255,11 @@ class SideBySideRenderer:
         line_no_width: int,
         content_width: int,
         colors: ColorScheme,
+        filename: str = "",
     ) -> str:
-        """Render a pair of old/new lines as a single row."""
-        # Determine line numbers
-        old_ln = ""
-        new_ln = ""
+        """Render a pair of old/new lines as a single row (single line number column)."""
+        # Determine line number (prefer new, fall back to old)
+        line_no = ""
         old_content = ""
         new_content = ""
         old_color = ""
@@ -269,12 +267,12 @@ class SideBySideRenderer:
 
         if old_line:
             if old_line.old_line_no is not None:
-                old_ln = str(old_line.old_line_no)
+                line_no = str(old_line.old_line_no)
             old_content = old_line.content
 
         if new_line:
             if new_line.new_line_no is not None:
-                new_ln = str(new_line.new_line_no)
+                line_no = str(new_line.new_line_no)  # Prefer new line number
             new_content = new_line.content
 
         # Determine colors and apply word-level diff for modified lines
@@ -293,26 +291,27 @@ class SideBySideRenderer:
                 old_color = colors.deleted
                 new_color = colors.added
             elif old_line.change_type == "unchanged":
-                # Unchanged - no special coloring
-                pass
+                # Unchanged - apply syntax highlighting for context lines
+                if filename:
+                    old_content = highlight_line(old_content, filename)
+                    new_content = highlight_line(new_content, filename)
         elif old_line and old_line.change_type in ("deleted", "modified"):
             old_color = colors.deleted
         elif new_line and new_line.change_type in ("added", "modified"):
             new_color = colors.added
 
-        # Format line numbers (right-aligned)
-        old_ln_fmt = pad_text(old_ln, line_no_width, align="right")
-        new_ln_fmt = pad_text(new_ln, line_no_width, align="right")
+        # Format single line number (right-aligned)
+        ln_fmt = pad_text(line_no, line_no_width, align="right")
 
         # Truncate and pad content
         # Need to handle ANSI codes in content for word-level diff
         old_content_fmt = self._format_content(old_content, content_width)
         new_content_fmt = self._format_content(new_content, content_width)
 
-        # Build the row
+        # Build the row with single line number column
         parts = [
             f"{colors.box}{BOX_V}{colors.reset}",
-            f"{colors.line_numbers}{old_ln_fmt}{colors.reset}",
+            f"{colors.line_numbers}{ln_fmt}{colors.reset}",
             f"{colors.box}{BOX_V}{colors.reset}",
         ]
 
@@ -322,11 +321,8 @@ class SideBySideRenderer:
         else:
             parts.append(old_content_fmt)
 
-        parts.extend([
-            f"{colors.box}{BOX_V}{colors.reset}",
-            f"{colors.line_numbers}{new_ln_fmt}{colors.reset}",
-            f"{colors.box}{BOX_V}{colors.reset}",
-        ])
+        # Separator between OLD and NEW content (no line number)
+        parts.append(f"{colors.box}{BOX_V}{colors.reset}")
 
         # New content with color
         if new_color:
@@ -446,13 +442,14 @@ class SideBySideRenderer:
         content_width: int,
         colors: ColorScheme,
         is_new: bool,
+        filename: str = "",
     ) -> List[str]:
         """Render a single hunk in single-column format."""
         lines = []
 
         for line in hunk.lines:
             lines.append(self._render_line_single(
-                line, line_no_width, content_width, colors, is_new
+                line, line_no_width, content_width, colors, is_new, filename
             ))
 
         return lines
@@ -464,8 +461,11 @@ class SideBySideRenderer:
         content_width: int,
         colors: ColorScheme,
         is_new: bool,
+        filename: str = "",
     ) -> str:
         """Render a single line in single-column format."""
+        content = line.content
+
         # Get appropriate line number
         if is_new:
             ln = str(line.new_line_no) if line.new_line_no is not None else ""
@@ -474,11 +474,16 @@ class SideBySideRenderer:
             ln = str(line.old_line_no) if line.old_line_no is not None else ""
             color = colors.deleted if line.change_type == "deleted" else ""
 
+        # Apply syntax highlighting if no diff color (context lines)
+        # For new/deleted files, all lines have color so this won't apply
+        if not color and filename:
+            content = highlight_line(content, filename)
+
         # Format line number (right-aligned)
         ln_fmt = pad_text(ln, line_no_width, align="right")
 
         # Format content
-        content_fmt = self._format_content(line.content, content_width)
+        content_fmt = self._format_content(content, content_width)
 
         # Build the row
         if color:
