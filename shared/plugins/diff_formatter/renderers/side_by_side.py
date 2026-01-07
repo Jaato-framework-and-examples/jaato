@@ -85,10 +85,10 @@ class SideBySideRenderer:
             line_no_width, content_width, colors, is_header=True
         ))
 
-        # Render each hunk
+        # Render each hunk (use new_path for syntax highlighting filename detection)
         for hunk in diff.hunks:
             lines.extend(self._render_hunk(
-                hunk, line_no_width, content_width, colors, diff.path
+                hunk, line_no_width, content_width, colors, diff.new_path
             ))
 
         # Bottom border
@@ -123,10 +123,10 @@ class SideBySideRenderer:
             line_no_width, content_width, colors, is_top=True
         ))
 
-        # Render each hunk
+        # Render each hunk (use new_path for syntax highlighting filename detection)
         for hunk in diff.hunks:
             lines.extend(self._render_hunk_single(
-                hunk, line_no_width, content_width, colors, is_new, diff.path
+                hunk, line_no_width, content_width, colors, is_new, diff.new_path
             ))
 
         # Bottom border

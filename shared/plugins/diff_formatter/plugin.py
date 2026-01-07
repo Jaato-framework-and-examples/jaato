@@ -248,8 +248,12 @@ class DiffFormatterPlugin:
         # Select renderer based on width
         renderer = self._select_renderer()
 
-        # Render the diff
-        return renderer.render(parsed, self._console_width, self._colors)
+        # Render the diff (with fallback on error)
+        try:
+            return renderer.render(parsed, self._console_width, self._colors)
+        except Exception:
+            # If rendering fails, fall back to simple colorization
+            return render_raw_unified(text, self._colors)
 
     # Legacy method for backwards compatibility
     def format_output(self, text: str) -> str:
