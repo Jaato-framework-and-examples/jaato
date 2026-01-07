@@ -1745,6 +1745,13 @@ class JaatoSession:
             self._cancel_token = None
             self._set_activity_phase(ActivityPhase.IDLE)
 
+            # Notify parent that this subagent is now idle
+            # This is a hidden status update so the parent knows we're ready for input
+            self._forward_to_parent(
+                "STATUS",
+                f"<hidden>Subagent {self._agent_id} is now idle and ready for input.</hidden>"
+            )
+
     def _execute_function_call_group(
         self,
         function_calls: List[FunctionCall],
