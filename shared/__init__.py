@@ -20,7 +20,7 @@ from .ai_tool_runner import ToolExecutor
 # Core client and runtime
 from .jaato_client import JaatoClient
 from .jaato_runtime import JaatoRuntime
-from .jaato_session import JaatoSession
+from .jaato_session import JaatoSession, ActivityPhase
 
 # Plugin system
 from .plugins.registry import PluginRegistry
@@ -71,6 +71,7 @@ __all__ = [
     "JaatoClient",
     "JaatoRuntime",
     "JaatoSession",
+    "ActivityPhase",
     # Plugin system
     "PluginRegistry",
     "PermissionPlugin",
