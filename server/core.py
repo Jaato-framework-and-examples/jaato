@@ -913,6 +913,15 @@ class JaatoServer:
                     prompt_lines, format_hint = server.permission_plugin.get_formatted_prompt(
                         tool_name, tool_args or {}, "ipc"
                     )
+                    # Format diff content through the formatter pipeline
+                    # The pipeline needs the complete diff as a single block to detect
+                    # and render it properly (side-by-side, compact, or unified)
+                    if prompt_lines and format_hint == "diff" and server._formatter_pipeline:
+                        combined = "\n".join(prompt_lines)
+                        formatted_parts = list(server._formatter_pipeline.process_chunk(combined))
+                        if formatted_parts:
+                            formatted = "".join(formatted_parts)
+                            prompt_lines = formatted.split("\n")
                 except Exception:
                     pass  # Fall back to client-side formatting
 
