@@ -149,6 +149,20 @@ class FileEditPlugin:
         self._plugin_registry = registry
         self._trace("set_plugin_registry: registry set")
 
+    def set_workspace_path(self, path: Optional[str]) -> None:
+        """Update the workspace root path.
+
+        Called when a client connects with a different working directory.
+
+        Args:
+            path: The new workspace root path, or None to disable sandboxing.
+        """
+        if path:
+            self._workspace_root = os.path.realpath(os.path.abspath(path))
+        else:
+            self._workspace_root = None
+        self._trace(f"set_workspace_path: workspace_root={self._workspace_root}")
+
     def _is_path_allowed(self, path: str) -> bool:
         """Check if a path is allowed for access.
 

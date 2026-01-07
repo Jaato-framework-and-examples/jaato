@@ -456,6 +456,24 @@ class LSPToolPlugin:
             if self._initialized:
                 self._load_config_cache(force=True)
 
+    def _resolve_path(self, path: str) -> str:
+        """Resolve a path to an absolute path.
+
+        If path is relative, resolves it against workspace_path (if set)
+        or falls back to os.path.abspath (resolves against cwd).
+
+        Args:
+            path: Path to resolve (can be relative or absolute).
+
+        Returns:
+            Absolute path.
+        """
+        if os.path.isabs(path):
+            return path
+        if self._workspace_path:
+            return os.path.abspath(os.path.join(self._workspace_path, path))
+        return os.path.abspath(path)
+
     def shutdown(self) -> None:
         """Shutdown the LSP plugin and clean up resources."""
         self._trace("shutdown: cleaning up resources")
@@ -1091,24 +1109,27 @@ Use 'lsp status' to see connected language servers and their capabilities."""
             self._trace("get_file_dependents: no servers connected")
             return []
 
+        # Resolve path against workspace
+        abs_file_path = self._resolve_path(file_path)
+
         # Check if file type is supported
-        ext = os.path.splitext(file_path)[1].lower()
+        ext = os.path.splitext(abs_file_path)[1].lower()
         if ext not in EXT_TO_LANGUAGE:
             self._trace(f"get_file_dependents: unsupported file type {ext}")
             return []
 
         # Ensure all files of the same type in the workspace are indexed
         # This is needed for find_references to work across files
-        workspace_dir = os.path.dirname(os.path.abspath(file_path))
+        workspace_dir = os.path.dirname(abs_file_path)
         self._trace(f"get_file_dependents: ensuring workspace indexed at {workspace_dir}")
         self._execute_method('_ensure_workspace_indexed', {
             'directory': workspace_dir,
             'extension': ext,  # Pass the file extension to filter by language
-            'file_path': file_path  # Pass file_path so correct LSP server is selected
+            'file_path': abs_file_path  # Pass resolved path so correct LSP server is selected
         })
 
         # Get document symbols
-        symbols_result = self._execute_method('document_symbols', {'file_path': file_path})
+        symbols_result = self._execute_method('document_symbols', {'file_path': abs_file_path})
         if isinstance(symbols_result, dict) and symbols_result.get("error"):
             self._trace(f"get_file_dependents: failed to get symbols: {symbols_result['error']}")
             return []
@@ -1133,7 +1154,7 @@ Use 'lsp status' to see connected language servers and their capabilities."""
 
         # Read file content once to check for import lines
         try:
-            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+            with open(abs_file_path, 'r', encoding='utf-8', errors='replace') as f:
                 file_lines = f.readlines()
         except (IOError, OSError):
             file_lines = []

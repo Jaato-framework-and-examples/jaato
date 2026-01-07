@@ -97,6 +97,8 @@ class CLIToolPlugin(BackgroundCapableMixin):
         self._tool_output_callback: Optional[Callable[[str], None]] = None
         # Workspace root for path sandboxing (None = no sandboxing)
         self._workspace_root: Optional[str] = None
+        # Plugin registry for checking authorized external paths
+        self._plugin_registry = None
 
     @property
     def name(self) -> str:
@@ -196,6 +198,29 @@ class CLIToolPlugin(BackgroundCapableMixin):
         """
         self._tool_output_callback = callback
         self._trace(f"set_tool_output_callback: callback={'SET' if callback else 'CLEARED'}")
+
+    def set_workspace_path(self, path: Optional[str]) -> None:
+        """Update the workspace root path.
+
+        Called when a client connects with a different working directory.
+
+        Args:
+            path: The new workspace root path, or None to disable sandboxing.
+        """
+        if path:
+            self._workspace_root = os.path.realpath(os.path.abspath(path))
+        else:
+            self._workspace_root = None
+        self._trace(f"set_workspace_path: workspace_root={self._workspace_root}")
+
+    def set_plugin_registry(self, registry) -> None:
+        """Set the plugin registry for checking authorized external paths.
+
+        Args:
+            registry: The PluginRegistry instance.
+        """
+        self._plugin_registry = registry
+        self._trace("set_plugin_registry: registry set")
 
     def shutdown(self) -> None:
         """Shutdown the CLI plugin."""
@@ -647,7 +672,12 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         return path_tokens
 
     def _is_path_within_workspace(self, path: str) -> bool:
-        """Check if a path resolves within the workspace root.
+        """Check if a path is allowed for access.
+
+        A path is allowed if:
+        1. No workspace_root is configured (sandboxing disabled)
+        2. The path is within the workspace_root
+        3. The path is authorized via the plugin registry
 
         Handles:
         - Absolute paths
@@ -660,7 +690,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             path: The path to check.
 
         Returns:
-            True if the path is within workspace_root, False otherwise.
+            True if the path is allowed, False otherwise.
         """
         if not self._workspace_root:
             # No sandboxing configured
@@ -677,7 +707,15 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # Check if the resolved path starts with workspace_root
             # Add trailing separator to prevent /workspace matching /workspace2
             workspace_prefix = self._workspace_root.rstrip(os.sep) + os.sep
-            return resolved == self._workspace_root or resolved.startswith(workspace_prefix)
+            if resolved == self._workspace_root or resolved.startswith(workspace_prefix):
+                return True
+
+            # Check if authorized via plugin registry (for external paths like knowledge base)
+            if self._plugin_registry and self._plugin_registry.is_path_authorized(resolved):
+                self._trace(f"_is_path_within_workspace: {path} authorized via registry")
+                return True
+
+            return False
 
         except (OSError, ValueError):
             # If path resolution fails, treat as outside workspace for safety

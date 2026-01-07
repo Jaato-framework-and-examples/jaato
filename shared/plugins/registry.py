@@ -525,11 +525,19 @@ class PluginRegistry:
             if config:
                 self._configs[name] = config
             self._exposed.add(name)
+            # Wire up plugin with registry for authorized external paths
+            if hasattr(plugin, 'set_plugin_registry'):
+                plugin.set_plugin_registry(self)
+                _trace(f" Plugin '{name}' wired with registry")
         elif config and config != self._configs.get(name):
             # Re-initialize with new config
             plugin.shutdown()
             plugin.initialize(config)
             self._configs[name] = config
+            # Re-wire after re-initialization
+            if hasattr(plugin, 'set_plugin_registry'):
+                plugin.set_plugin_registry(self)
+                _trace(f" Plugin '{name}' re-wired with registry")
 
         return True
 

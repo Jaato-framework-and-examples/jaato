@@ -10,6 +10,7 @@ subscribe and render appropriately.
 import contextlib
 import logging
 import os
+import re
 import sys
 import pathlib
 import queue
@@ -294,6 +295,18 @@ class JaatoServer:
             mcp_plugin.set_workspace_path(path)
             logger.debug(f"Updated MCP plugin workspace_path to {path}")
 
+        # Update file_edit plugin if registered
+        file_edit_plugin = self.registry.get_plugin('file_edit')
+        if file_edit_plugin and hasattr(file_edit_plugin, 'set_workspace_path'):
+            file_edit_plugin.set_workspace_path(path)
+            logger.debug(f"Updated file_edit plugin workspace_path to {path}")
+
+        # Update CLI plugin if registered
+        cli_plugin = self.registry.get_plugin('cli')
+        if cli_plugin and hasattr(cli_plugin, 'set_workspace_path'):
+            cli_plugin.set_workspace_path(path)
+            logger.debug(f"Updated CLI plugin workspace_path to {path}")
+
     # =========================================================================
     # Event Emission
     # =========================================================================
@@ -471,6 +484,14 @@ class JaatoServer:
                 "workspace_path": self._workspace_path,
                 "session_id": self._session_id,
             },
+            # Pass workspace_root to file_edit and CLI plugins for path sandboxing
+            # Without this, they fall back to global env vars which are process-wide
+            "file_edit": {
+                "workspace_root": self._workspace_path,
+            },
+            "cli": {
+                "workspace_root": self._workspace_path,
+            },
         }
         self.registry.expose_all(plugin_configs)
         self.todo_plugin = self.registry.get_plugin("todo")
@@ -482,6 +503,24 @@ class JaatoServer:
             self._trace("artifact_tracker wired with registry (LSP integration enabled)")
         else:
             self._trace("artifact_tracker not found or missing set_plugin_registry - LSP integration disabled")
+
+        # Wire up file_edit plugin with registry for authorized external paths
+        file_edit_plugin = self.registry.get_plugin("file_edit")
+        if file_edit_plugin and hasattr(file_edit_plugin, 'set_plugin_registry'):
+            file_edit_plugin.set_plugin_registry(self.registry)
+            self._trace("file_edit wired with registry (authorized paths enabled)")
+
+        # Wire up CLI plugin with registry for authorized external paths
+        cli_plugin = self.registry.get_plugin("cli")
+        if cli_plugin and hasattr(cli_plugin, 'set_plugin_registry'):
+            cli_plugin.set_plugin_registry(self.registry)
+            self._trace("cli wired with registry (authorized paths enabled)")
+
+        # Wire up references plugin with registry for authorizing external paths
+        references_plugin = self.registry.get_plugin("references")
+        if references_plugin and hasattr(references_plugin, 'set_plugin_registry'):
+            references_plugin.set_plugin_registry(self.registry)
+            self._trace("references wired with registry (can authorize external paths)")
 
         self.permission_plugin = PermissionPlugin()
         self.permission_plugin.initialize({
@@ -710,13 +749,16 @@ class JaatoServer:
                                 mode=mode,
                             ))
                 else:
-                    # Non-model or no formatter: pass through as-is
-                    server.emit(AgentOutputEvent(
-                        agent_id=agent_id,
-                        source=source,
-                        text=text,
-                        mode=mode,
-                    ))
+                    # Non-model output: strip <hidden>...</hidden> content
+                    # These are mid-turn prompts that may contain internal tags
+                    filtered_text = re.sub(r'<hidden>.*?</hidden>', '', text, flags=re.DOTALL)
+                    if filtered_text.strip():  # Only emit if content remains after filtering
+                        server.emit(AgentOutputEvent(
+                            agent_id=agent_id,
+                            source=source,
+                            text=filtered_text,
+                            mode=mode,
+                        ))
 
             def on_agent_status_changed(self, agent_id, status, error=None):
                 if agent_id in server._agents:
