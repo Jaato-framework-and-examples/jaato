@@ -225,3 +225,169 @@ class TestAutoDetectWorkspace:
         })
 
         assert plugin._workspace_root == os.path.realpath(config_workspace)
+
+
+class TestPathResolution:
+    """Tests for path resolution (relative paths resolved against workspace_root)."""
+
+    @pytest.fixture
+    def plugin_with_workspace(self, monkeypatch, tmp_path):
+        """Create a plugin with a workspace root configured."""
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        workspace = str(tmp_path / "workspace")
+        os.makedirs(workspace, exist_ok=True)
+
+        # Create subdirectories and files
+        subdir = Path(workspace) / "subdir"
+        subdir.mkdir()
+        (subdir / "test.txt").write_text("subdir file")
+        (Path(workspace) / "root.txt").write_text("root file")
+
+        plugin = create_plugin()
+        plugin.initialize({
+            "workspace_root": workspace,
+        })
+        return plugin, workspace
+
+    @pytest.fixture
+    def plugin_no_workspace(self, monkeypatch):
+        """Create a plugin without workspace root."""
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        plugin = create_plugin()
+        plugin.initialize({})
+        return plugin
+
+    def test_resolve_absolute_path_unchanged(self, plugin_with_workspace):
+        """Test that absolute paths are returned as-is."""
+        plugin, workspace = plugin_with_workspace
+
+        abs_path = "/some/absolute/path/file.txt"
+        resolved = plugin._resolve_path(abs_path)
+
+        assert str(resolved) == abs_path
+
+    def test_resolve_relative_path_with_workspace(self, plugin_with_workspace):
+        """Test that relative paths are resolved against workspace_root."""
+        plugin, workspace = plugin_with_workspace
+
+        relative_path = "subdir/test.txt"
+        resolved = plugin._resolve_path(relative_path)
+
+        expected = Path(workspace) / relative_path
+        assert resolved == expected
+
+    def test_resolve_relative_path_without_workspace(self, plugin_no_workspace):
+        """Test that relative paths are returned as-is when no workspace configured."""
+        plugin = plugin_no_workspace
+
+        relative_path = "some/relative/path.txt"
+        resolved = plugin._resolve_path(relative_path)
+
+        # Without workspace, should return Path(relative_path) unchanged
+        assert resolved == Path(relative_path)
+
+    def test_resolve_nested_relative_path(self, plugin_with_workspace):
+        """Test resolving deeply nested relative paths."""
+        plugin, workspace = plugin_with_workspace
+
+        nested_path = "a/b/c/d/file.txt"
+        resolved = plugin._resolve_path(nested_path)
+
+        expected = Path(workspace) / nested_path
+        assert resolved == expected
+
+    def test_write_new_file_uses_resolved_path(self, plugin_with_workspace):
+        """Test that writeNewFile resolves relative paths correctly."""
+        plugin, workspace = plugin_with_workspace
+
+        # Write a file using relative path
+        result = plugin._execute_write_new_file({
+            "path": "new_file.txt",
+            "content": "test content",
+        })
+
+        assert "error" not in result
+        assert result["success"] is True
+
+        # Verify file was created in workspace, not CWD
+        expected_file = Path(workspace) / "new_file.txt"
+        assert expected_file.exists()
+        assert expected_file.read_text() == "test content"
+
+        # Verify file was NOT created in CWD
+        cwd_file = Path.cwd() / "new_file.txt"
+        if cwd_file != expected_file:  # Only check if different paths
+            assert not cwd_file.exists()
+
+    def test_update_file_uses_resolved_path(self, plugin_with_workspace):
+        """Test that updateFile resolves relative paths correctly."""
+        plugin, workspace = plugin_with_workspace
+
+        # Update existing file using relative path
+        result = plugin._execute_update_file({
+            "path": "root.txt",
+            "content": "updated content",
+        })
+
+        assert "error" not in result
+        assert result["success"] is True
+
+        # Verify file was updated in workspace
+        expected_file = Path(workspace) / "root.txt"
+        assert expected_file.read_text() == "updated content"
+
+    def test_read_file_uses_resolved_path(self, plugin_with_workspace):
+        """Test that readFile resolves relative paths correctly."""
+        plugin, workspace = plugin_with_workspace
+
+        # Read file using relative path
+        result = plugin._execute_read_file({
+            "path": "subdir/test.txt",
+        })
+
+        assert "error" not in result
+        assert result["content"] == "subdir file"
+
+    def test_remove_file_uses_resolved_path(self, plugin_with_workspace):
+        """Test that removeFile resolves relative paths correctly."""
+        plugin, workspace = plugin_with_workspace
+
+        # Create a file to remove
+        file_to_remove = Path(workspace) / "to_remove.txt"
+        file_to_remove.write_text("delete me")
+
+        # Remove using relative path
+        result = plugin._execute_remove_file({
+            "path": "to_remove.txt",
+        })
+
+        assert "error" not in result
+        assert result["success"] is True
+        assert not file_to_remove.exists()
+
+    def test_move_file_uses_resolved_path(self, plugin_with_workspace):
+        """Test that moveFile resolves both source and destination paths."""
+        plugin, workspace = plugin_with_workspace
+
+        # Create source file
+        source_file = Path(workspace) / "source.txt"
+        source_file.write_text("move me")
+
+        # Move using relative paths
+        result = plugin._execute_move_file({
+            "source_path": "source.txt",
+            "destination_path": "subdir/moved.txt",
+        })
+
+        assert "error" not in result
+        assert result["success"] is True
+
+        # Verify file was moved within workspace
+        assert not source_file.exists()
+        dest_file = Path(workspace) / "subdir" / "moved.txt"
+        assert dest_file.exists()
+        assert dest_file.read_text() == "move me"

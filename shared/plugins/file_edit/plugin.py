@@ -183,6 +183,29 @@ class FileEditPlugin:
         self._trace(f"_is_path_allowed: {path} blocked (outside workspace)")
         return False
 
+    def _resolve_path(self, path: str) -> Path:
+        """Resolve a path, making relative paths relative to workspace_root.
+
+        This ensures that when a client specifies a relative path like
+        'customer-domain-api/pom.xml', it resolves to the client's workspace
+        directory rather than the server's current working directory.
+
+        Args:
+            path: Path string (absolute or relative).
+
+        Returns:
+            Resolved Path object. Relative paths are resolved against
+            workspace_root if configured, otherwise against CWD.
+        """
+        p = Path(path)
+        if p.is_absolute():
+            return p
+        if self._workspace_root:
+            resolved = Path(self._workspace_root) / p
+            self._trace(f"_resolve_path: {path} -> {resolved} (relative to workspace)")
+            return resolved
+        return p
+
     def _ensure_gitignore(self) -> None:
         """Add .jaato to .gitignore if it exists and entry is missing."""
         gitignore = Path(".gitignore")
@@ -458,7 +481,7 @@ updateFile, removeFile, and moveFile operations."""
         # Accept both 'new_content' (canonical) and 'content' (for consistency with writeNewFile)
         new_content = arguments.get("new_content") or arguments.get("content", "")
 
-        file_path = Path(path)
+        file_path = self._resolve_path(path)
         if not file_path.exists():
             # File doesn't exist - skip permission, let executor return the error
             return None
@@ -491,7 +514,7 @@ updateFile, removeFile, and moveFile operations."""
         path = arguments.get("path", "")
         content = arguments.get("content", "")
 
-        file_path = Path(path)
+        file_path = self._resolve_path(path)
         if file_path.exists():
             # File already exists - skip permission, let executor return the error
             return None
@@ -515,7 +538,7 @@ updateFile, removeFile, and moveFile operations."""
         """Format removeFile for permission display."""
         path = arguments.get("path", "")
 
-        file_path = Path(path)
+        file_path = self._resolve_path(path)
         if not file_path.exists():
             # File doesn't exist - skip permission, let executor return the error
             return None
@@ -550,8 +573,8 @@ updateFile, removeFile, and moveFile operations."""
         destination_path = arguments.get("destination_path", "")
         overwrite = arguments.get("overwrite", False)
 
-        source = Path(source_path)
-        destination = Path(destination_path)
+        source = self._resolve_path(source_path)
+        destination = self._resolve_path(destination_path)
 
         if not source.exists():
             # Source doesn't exist - skip permission, let executor return the error
@@ -607,11 +630,13 @@ updateFile, removeFile, and moveFile operations."""
         if not path:
             return {"error": "path is required"}
 
-        # Check if path is allowed (within workspace or authorized)
-        if not self._is_path_allowed(path):
+        # Resolve path first, then check if allowed
+        file_path = self._resolve_path(path)
+
+        # Check if resolved path is allowed (within workspace or authorized)
+        if not self._is_path_allowed(str(file_path)):
             return {"error": f"File not found: {path}"}
 
-        file_path = Path(path)
         if not file_path.exists():
             return {"error": f"File not found: {path}"}
 
@@ -682,7 +707,7 @@ updateFile, removeFile, and moveFile operations."""
         if not path:
             return {"error": "path is required"}
 
-        file_path = Path(path)
+        file_path = self._resolve_path(path)
         if not file_path.exists():
             return {"error": f"File not found: {path}. Use writeNewFile for new files."}
 
@@ -717,7 +742,7 @@ updateFile, removeFile, and moveFile operations."""
         if not path:
             return {"error": "path is required"}
 
-        file_path = Path(path)
+        file_path = self._resolve_path(path)
         if file_path.exists():
             return {"error": f"File already exists: {path}. Use updateFile to modify existing files."}
 
@@ -742,7 +767,7 @@ updateFile, removeFile, and moveFile operations."""
         if not path:
             return {"error": "path is required"}
 
-        file_path = Path(path)
+        file_path = self._resolve_path(path)
         if not file_path.exists():
             return {"error": f"File not found: {path}"}
 
@@ -780,8 +805,8 @@ updateFile, removeFile, and moveFile operations."""
         if not destination_path:
             return {"error": "destination_path is required", "source": source_path}
 
-        source = Path(source_path)
-        destination = Path(destination_path)
+        source = self._resolve_path(source_path)
+        destination = self._resolve_path(destination_path)
 
         if not source.exists():
             return {"error": "Source file does not exist", "source": source_path}
@@ -841,7 +866,7 @@ updateFile, removeFile, and moveFile operations."""
         if not self._backup_manager:
             return {"error": "Backup manager not initialized"}
 
-        file_path = Path(path)
+        file_path = self._resolve_path(path)
 
         # Check if backup exists
         if not self._backup_manager.has_backup(file_path):
