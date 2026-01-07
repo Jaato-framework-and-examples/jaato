@@ -19,6 +19,12 @@ if TYPE_CHECKING:
     from .plugins.permission import PermissionPlugin
     from .plugins.model_provider.base import ModelProviderPlugin
 
+# Framework-level instruction appended to all system prompts and tool results
+_TASK_COMPLETION_INSTRUCTION = (
+    "After each action, continue working until the request is truly fulfilled. "
+    "Pause only for permissions or clarifications—never from uncertainty."
+)
+
 
 class JaatoRuntime:
     """Shared runtime environment for jaato agents.
@@ -555,7 +561,10 @@ class JaatoRuntime:
         if plugin_instructions:
             result_parts.append(plugin_instructions)
 
-        return "\n\n".join(result_parts) if result_parts else None
+        # 4. Framework-level task completion instruction (always included)
+        result_parts.append(_TASK_COMPLETION_INSTRUCTION)
+
+        return "\n\n".join(result_parts)
 
     def list_available_models(
         self,
