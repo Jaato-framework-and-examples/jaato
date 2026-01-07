@@ -1691,6 +1691,56 @@ class JaatoSession:
         # Proactive rate limiting
         self._pacer.pace()
 
+        try:
+            return self._do_send_tool_results(
+                tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
+            )
+        except Exception as e:
+            # Check if this is a token limit error
+            error_str = str(e).lower()
+            if 'token' in error_str and ('exceed' in error_str or 'limit' in error_str or 'maximum' in error_str):
+                self._trace(f"TOKEN_LIMIT_ERROR: Tool results too large, retrying with truncated results")
+                # Replace oversized results with error messages
+                truncated_results = self._truncate_oversized_results(tool_results)
+                return self._do_send_tool_results(
+                    truncated_results, use_streaming, on_output, wrapped_usage_callback, turn_data
+                )
+            raise
+
+    def _truncate_oversized_results(self, tool_results: List[ToolResult]) -> List[ToolResult]:
+        """Replace oversized tool results with error messages guiding the model to retry."""
+        truncated = []
+        for tr in tool_results:
+            result_str = str(tr.result) if tr.result is not None else ""
+            # Estimate tokens (~4 chars per token) - if over 100K tokens, truncate
+            estimated_tokens = len(result_str) // 4
+            if estimated_tokens > 100000:
+                error_msg = (
+                    f"[ERROR: Result too large ({estimated_tokens:,} estimated tokens). "
+                    f"This exceeds the context window. "
+                    f"Use chunked reading with offset/limit parameters, or process in smaller pieces.]"
+                    f"\n\n<hidden>{_TASK_COMPLETION_INSTRUCTION}</hidden>"
+                )
+                truncated.append(ToolResult(
+                    call_id=tr.call_id,
+                    name=tr.name,
+                    result=error_msg,
+                    is_error=True,
+                    attachments=None  # Drop attachments too
+                ))
+            else:
+                truncated.append(tr)
+        return truncated
+
+    def _do_send_tool_results(
+        self,
+        tool_results: List[ToolResult],
+        use_streaming: bool,
+        on_output: Optional[OutputCallback],
+        wrapped_usage_callback: Optional[UsageUpdateCallback],
+        turn_data: Dict[str, Any]
+    ) -> ProviderResponse:
+        """Actually send tool results to the provider."""
         if use_streaming:
             # Track first chunk to use "write" for new block, "append" for continuation
             first_chunk_after_tools = [False]  # Use list to allow mutation in closure
