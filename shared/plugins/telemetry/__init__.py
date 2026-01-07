@@ -47,6 +47,13 @@ def create_plugin() -> TelemetryPlugin:
 
     Returns OTelPlugin if opentelemetry is installed and JAATO_TELEMETRY_ENABLED
     is set, otherwise returns NullTelemetryPlugin (zero overhead).
+
+    When enabled, automatically initializes from environment variables:
+        JAATO_TELEMETRY_EXPORTER: Exporter type (otlp, console, none)
+        JAATO_TELEMETRY_REDACT_CONTENT: Redact prompts/responses (default: true)
+        OTEL_EXPORTER_OTLP_ENDPOINT: OTLP endpoint URL
+        OTEL_EXPORTER_OTLP_HEADERS: Auth headers (key=value,key2=value2)
+        OTEL_SERVICE_NAME: Service name (default: jaato)
     """
     import os
 
@@ -56,7 +63,21 @@ def create_plugin() -> TelemetryPlugin:
 
     try:
         from .otel_plugin import OTelPlugin
-        return OTelPlugin()
+        plugin = OTelPlugin()
+
+        # Auto-initialize from environment variables
+        redact = os.environ.get("JAATO_TELEMETRY_REDACT_CONTENT", "true").lower() not in ("0", "false", "no")
+        exporter = os.environ.get("JAATO_TELEMETRY_EXPORTER", "otlp")
+
+        plugin.initialize({
+            "enabled": True,
+            "exporter": exporter,
+            "redact_content": redact,
+            # These are read inside initialize() from standard OTel env vars:
+            # OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, OTEL_SERVICE_NAME
+        })
+
+        return plugin
     except ImportError:
         # OTel not installed, return no-op
         return NullTelemetryPlugin()
