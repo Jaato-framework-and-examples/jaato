@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from .jaato_runtime import JaatoRuntime
     from .plugins.model_provider.base import ModelProviderPlugin
     from .plugins.subagent.ui_hooks import AgentUIHooks
+    from .plugins.telemetry import TelemetryPlugin
 
 # Import framework instruction for tool result injection
 from .jaato_runtime import _TASK_COMPLETION_INSTRUCTION
@@ -182,6 +183,14 @@ class JaatoSession:
         # This ensures enrichment notifications go to the correct agent panel even when
         # multiple sessions share the same registry (e.g., subagents)
         self._current_output_callback: Optional['OutputCallback'] = None
+
+        # Turn counter for telemetry
+        self._turn_index: int = 0
+
+    @property
+    def _telemetry(self) -> 'TelemetryPlugin':
+        """Get telemetry plugin from runtime."""
+        return self._runtime.telemetry
 
     def set_terminal_width(self, width: int) -> None:
         """Set the terminal width for formatting.
@@ -1053,41 +1062,61 @@ class JaatoSession:
 
         self._trace(f"SESSION_SEND_MESSAGE len={len(message)} streaming={self._use_streaming}")
 
-        # Check and perform GC if needed (pre-send)
-        if self._gc_plugin and self._gc_config and self._gc_config.check_before_send:
-            self._maybe_collect_before_send()
+        # Increment turn counter
+        self._turn_index += 1
 
-        # Reset proactive GC tracking for this turn
-        self._gc_threshold_crossed = False
-        self._gc_threshold_callback = on_gc_threshold
+        # Wrap entire turn with telemetry span
+        with self._telemetry.turn_span(
+            session_id=self._agent_id,
+            agent_type=self._agent_type,
+            agent_name=self._agent_name,
+            turn_index=self._turn_index,
+        ) as turn_span:
+            # Check and perform GC if needed (pre-send)
+            if self._gc_plugin and self._gc_config and self._gc_config.check_before_send:
+                self._maybe_collect_before_send()
 
-        # Store output callback for this turn so enrichment can use it directly
-        # This avoids the race condition where concurrent sessions overwrite
-        # the shared registry callback
-        self._current_output_callback = on_output
+            # Reset proactive GC tracking for this turn
+            self._gc_threshold_crossed = False
+            self._gc_threshold_callback = on_gc_threshold
 
-        # Wrap usage callback to check GC threshold
-        wrapped_usage_callback = self._wrap_usage_callback_with_gc_check(on_usage_update)
+            # Store output callback for this turn so enrichment can use it directly
+            # This avoids the race condition where concurrent sessions overwrite
+            # the shared registry callback
+            self._current_output_callback = on_output
 
-        # Set output callback on registry BEFORE prompt enrichment
-        # so enrichment notifications are visible to the user
-        if self._runtime.registry and on_output:
-            self._runtime.registry.set_output_callback(on_output, self._terminal_width)
+            # Wrap usage callback to check GC threshold
+            wrapped_usage_callback = self._wrap_usage_callback_with_gc_check(on_usage_update)
 
-        # Run prompt enrichment if registry is available
-        processed_message = self._enrich_and_clean_prompt(message)
+            # Set output callback on registry BEFORE prompt enrichment
+            # so enrichment notifications are visible to the user
+            if self._runtime.registry and on_output:
+                self._runtime.registry.set_output_callback(on_output, self._terminal_width)
 
-        response = self._run_chat_loop(processed_message, on_output, wrapped_usage_callback)
+            # Run prompt enrichment if registry is available
+            processed_message = self._enrich_and_clean_prompt(message)
 
-        # Proactive GC: if threshold was crossed during streaming, trigger GC now
-        if self._gc_threshold_crossed and self._gc_plugin and self._gc_config:
-            self._trace("PROACTIVE_GC: Threshold crossed during streaming, triggering post-turn GC")
-            self._maybe_collect_after_turn()
+            try:
+                response = self._run_chat_loop(processed_message, on_output, wrapped_usage_callback)
+                turn_span.set_status_ok()
+            except Exception as e:
+                turn_span.record_exception(e)
+                turn_span.set_status_error(str(e))
+                raise
 
-        # Notify session plugin
-        self._notify_session_turn_complete()
+            # Record turn completion attributes
+            turn_span.set_attribute("jaato.cancelled", self._is_cancelled())
+            turn_span.set_attribute("jaato.streaming", self._use_streaming)
 
-        return response
+            # Proactive GC: if threshold was crossed during streaming, trigger GC now
+            if self._gc_threshold_crossed and self._gc_plugin and self._gc_config:
+                self._trace("PROACTIVE_GC: Threshold crossed during streaming, triggering post-turn GC")
+                self._maybe_collect_after_turn()
+
+            # Notify session plugin
+            self._notify_session_turn_complete()
+
+            return response
 
     def _wrap_usage_callback_with_gc_check(
         self,
@@ -1792,38 +1821,62 @@ class JaatoSession:
                 )
 
             fc_start = datetime.now()
-            if self._executor:
-                # Set up tool output callback for streaming output during execution
-                # Captures _name for use in the closure
-                def tool_output_callback(chunk: str, _call_id=fc.id, _name=name) -> None:
-                    if self._ui_hooks and _call_id:
-                        self._ui_hooks.on_tool_output(
-                            agent_id=self._agent_id,
-                            call_id=_call_id,
-                            chunk=chunk
-                        )
-                    # Forward tool output to parent for visibility
-                    self._forward_to_parent("TOOL_OUTPUT", f"[{_name}] {chunk}")
-                self._executor.set_tool_output_callback(tool_output_callback)
 
-                executor_result = self._executor.execute(name, args)
+            # Determine plugin type for telemetry
+            plugin_type = "unknown"
+            if self._runtime.registry:
+                plugin = self._runtime.registry.get_plugin_for_tool(name)
+                if plugin:
+                    plugin_type = getattr(plugin, 'plugin_type', type(plugin).__name__)
 
-                # Clear the callback after execution
-                self._executor.set_tool_output_callback(None)
-            else:
-                executor_result = (False, {"error": f"No executor registered for {name}"})
-            fc_end = datetime.now()
+            # Wrap tool execution with telemetry span
+            with self._telemetry.tool_span(
+                tool_name=name,
+                call_id=fc.id or "",
+                plugin_type=plugin_type,
+            ) as tool_span:
+                if self._executor:
+                    # Set up tool output callback for streaming output during execution
+                    # Captures _name for use in the closure
+                    def tool_output_callback(chunk: str, _call_id=fc.id, _name=name) -> None:
+                        if self._ui_hooks and _call_id:
+                            self._ui_hooks.on_tool_output(
+                                agent_id=self._agent_id,
+                                call_id=_call_id,
+                                chunk=chunk
+                            )
+                        # Forward tool output to parent for visibility
+                        self._forward_to_parent("TOOL_OUTPUT", f"[{_name}] {chunk}")
+                    self._executor.set_tool_output_callback(tool_output_callback)
 
-            # Determine success and error message from executor result
-            fc_success = True
-            fc_error_message = None
-            if isinstance(executor_result, tuple) and len(executor_result) == 2:
-                fc_success = executor_result[0]
-                if not fc_success and isinstance(executor_result[1], dict):
-                    fc_error_message = executor_result[1].get('error')
+                    executor_result = self._executor.execute(name, args)
+
+                    # Clear the callback after execution
+                    self._executor.set_tool_output_callback(None)
+                else:
+                    executor_result = (False, {"error": f"No executor registered for {name}"})
+
+                fc_end = datetime.now()
+
+                # Determine success and error message from executor result
+                fc_success = True
+                fc_error_message = None
+                if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                    fc_success = executor_result[0]
+                    if not fc_success and isinstance(executor_result[1], dict):
+                        fc_error_message = executor_result[1].get('error')
+
+                # Record tool execution attributes in telemetry
+                fc_duration = (fc_end - fc_start).total_seconds()
+                tool_span.set_attribute("jaato.tool.success", fc_success)
+                tool_span.set_attribute("jaato.tool.duration_seconds", fc_duration)
+                if fc_error_message:
+                    tool_span.set_attribute("jaato.tool.error", fc_error_message)
+                    tool_span.set_status_error(fc_error_message)
+                else:
+                    tool_span.set_status_ok()
 
             # Emit hook: tool ended
-            fc_duration = (fc_end - fc_start).total_seconds()
             if self._ui_hooks:
                 self._ui_hooks.on_tool_call_end(
                     agent_id=self._agent_id,

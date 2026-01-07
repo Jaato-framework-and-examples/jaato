@@ -13,6 +13,7 @@ from .token_accounting import TokenLedger
 from .plugins.model_provider.types import ToolSchema
 from .plugins.model_provider.base import ProviderConfig
 from .plugins.model_provider import load_provider
+from .plugins.telemetry import TelemetryPlugin, create_plugin as create_telemetry_plugin
 
 if TYPE_CHECKING:
     from .plugins.registry import PluginRegistry
@@ -89,6 +90,9 @@ class JaatoRuntime:
         # Connection state
         self._connected: bool = False
 
+        # Telemetry plugin (created lazily, opt-in)
+        self._telemetry: TelemetryPlugin = create_telemetry_plugin()
+
     def _load_base_system_instructions(self) -> None:
         """Load base system instructions from .jaato/system_instructions.md.
 
@@ -148,6 +152,33 @@ class JaatoRuntime:
     def ledger(self) -> Optional[TokenLedger]:
         """Get the token ledger."""
         return self._ledger
+
+    @property
+    def telemetry(self) -> TelemetryPlugin:
+        """Get the telemetry plugin."""
+        return self._telemetry
+
+    def set_telemetry_plugin(self, plugin: TelemetryPlugin) -> None:
+        """Set a custom telemetry plugin.
+
+        Use this to configure OpenTelemetry tracing for observability.
+        The plugin should be initialized before setting.
+
+        Args:
+            plugin: Configured TelemetryPlugin instance.
+
+        Example:
+            from shared.plugins.telemetry import create_otel_plugin
+
+            telemetry = create_otel_plugin()
+            telemetry.initialize({
+                "enabled": True,
+                "exporter": "otlp",
+                "endpoint": "http://localhost:4317",
+            })
+            runtime.set_telemetry_plugin(telemetry)
+        """
+        self._telemetry = plugin
 
     def connect(self, project: str, location: str) -> None:
         """Connect to the AI provider.
