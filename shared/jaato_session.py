@@ -1255,6 +1255,38 @@ class JaatoSession:
                 return ''.join(texts) if texts else ''
 
             pending_calls = get_pending_function_calls()
+
+            # Handle edge case: finish_reason indicates tool use but no function calls present
+            # This can happen when the model "narrates" intent to call a tool but doesn't emit the call
+            tool_use_nudge_attempts = 0
+            max_tool_use_nudge_attempts = 3
+            while (not pending_calls and response.finish_reason == FinishReason.TOOL_USE
+                   and tool_use_nudge_attempts < max_tool_use_nudge_attempts):
+                tool_use_nudge_attempts += 1
+                self._trace(f"TOOL_USE_WITHOUT_CALL: Model indicated tool use but no function call emitted (attempt {tool_use_nudge_attempts}/{max_tool_use_nudge_attempts})")
+                # Inject a prompt to push the model to execute the intended tool call
+                nudge_prompt = (
+                    "<hidden>Your response indicated TOOL_USE but contained no function call. "
+                    "Do NOT describe or re-read files. Execute the tool call you just mentioned directly. "
+                    "Your next response MUST start with the function call, not text.</hidden>"
+                )
+                self._injection_queue.put(nudge_prompt)
+                # Process the injected prompt to get a new response
+                nudge_response = self._check_and_handle_mid_turn_prompt(
+                    use_streaming, on_output, wrapped_usage_callback, turn_data
+                )
+                if nudge_response:
+                    response = nudge_response
+                    pending_calls = get_pending_function_calls()
+                    self._trace(f"TOOL_USE_NUDGE_RESULT: Got response with {len(pending_calls)} function calls")
+                else:
+                    # No response from nudge, break to avoid infinite loop
+                    self._trace("TOOL_USE_NUDGE_NO_RESPONSE: Nudge did not produce a response")
+                    break
+
+            if tool_use_nudge_attempts >= max_tool_use_nudge_attempts and not pending_calls:
+                self._trace("TOOL_USE_NUDGE_EXHAUSTED: Max attempts reached, model still not calling tools")
+
             while pending_calls:
                 # Check for cancellation before processing tools (including parent)
                 if self._is_cancelled():
@@ -1372,6 +1404,30 @@ class JaatoSession:
                     # Only inject if response doesn't have more function calls
                     # (otherwise we'd break the tool_use -> tool_result sequence)
                     response_has_fc = any(p.function_call for p in response.parts)
+
+                    # Handle edge case: TOOL_USE without function calls after tool results in main loop
+                    main_loop_nudge_attempts = 0
+                    while (not response_has_fc and response.finish_reason == FinishReason.TOOL_USE
+                           and main_loop_nudge_attempts < max_tool_use_nudge_attempts):
+                        main_loop_nudge_attempts += 1
+                        self._trace(f"TOOL_USE_WITHOUT_CALL: In main loop after tool results, no function call (attempt {main_loop_nudge_attempts}/{max_tool_use_nudge_attempts})")
+                        nudge_prompt = (
+                            "<hidden>Your response indicated TOOL_USE but contained no function call. "
+                            "Do NOT describe or re-read files. Execute the tool call you just mentioned directly. "
+                            "Your next response MUST start with the function call, not text.</hidden>"
+                        )
+                        self._injection_queue.put(nudge_prompt)
+                        nudge_response = self._check_and_handle_mid_turn_prompt(
+                            use_streaming, on_output, wrapped_usage_callback, turn_data
+                        )
+                        if nudge_response:
+                            response = nudge_response
+                            response_has_fc = any(p.function_call for p in response.parts)
+                            self._trace(f"TOOL_USE_NUDGE_RESULT: Got response, has_fc={response_has_fc}")
+                        else:
+                            self._trace("TOOL_USE_NUDGE_NO_RESPONSE: Nudge did not produce a response")
+                            break
+
                     if not response_has_fc:
                         mid_turn_response = self._check_and_handle_mid_turn_prompt(
                             use_streaming, on_output, wrapped_usage_callback, turn_data
@@ -1450,6 +1506,30 @@ class JaatoSession:
 
                     # Continue the main loop with this response if it has function calls
                     pending_calls = [p.function_call for p in response.parts if p.function_call]
+
+                    # Handle edge case: TOOL_USE without function calls after tool results
+                    inner_nudge_attempts = 0
+                    while (not pending_calls and response.finish_reason == FinishReason.TOOL_USE
+                           and inner_nudge_attempts < max_tool_use_nudge_attempts):
+                        inner_nudge_attempts += 1
+                        self._trace(f"TOOL_USE_WITHOUT_CALL: After tool results, no function call (attempt {inner_nudge_attempts}/{max_tool_use_nudge_attempts})")
+                        nudge_prompt = (
+                            "<hidden>Your response indicated TOOL_USE but contained no function call. "
+                            "Do NOT describe or re-read files. Execute the tool call you just mentioned directly. "
+                            "Your next response MUST start with the function call, not text.</hidden>"
+                        )
+                        self._injection_queue.put(nudge_prompt)
+                        nudge_response = self._check_and_handle_mid_turn_prompt(
+                            use_streaming, on_output, wrapped_usage_callback, turn_data
+                        )
+                        if nudge_response:
+                            response = nudge_response
+                            pending_calls = [p.function_call for p in response.parts if p.function_call]
+                            self._trace(f"TOOL_USE_NUDGE_RESULT: Got response with {len(pending_calls)} function calls")
+                        else:
+                            self._trace("TOOL_USE_NUDGE_NO_RESPONSE: Nudge did not produce a response")
+                            break
+
                     while pending_calls:
                         # Re-enter the main processing loop for tool calls
                         current_fc_group = []
@@ -1480,6 +1560,29 @@ class JaatoSession:
                             )
 
                         pending_calls = [p.function_call for p in response.parts if p.function_call]
+
+                        # Handle edge case: TOOL_USE without function calls in nested loop
+                        nested_nudge_attempts = 0
+                        while (not pending_calls and response.finish_reason == FinishReason.TOOL_USE
+                               and nested_nudge_attempts < max_tool_use_nudge_attempts):
+                            nested_nudge_attempts += 1
+                            self._trace(f"TOOL_USE_WITHOUT_CALL: In nested loop, no function call (attempt {nested_nudge_attempts}/{max_tool_use_nudge_attempts})")
+                            nudge_prompt = (
+                                "<hidden>Your response indicated TOOL_USE but contained no function call. "
+                                "Do NOT describe or re-read files. Execute the tool call you just mentioned directly. "
+                                "Your next response MUST start with the function call, not text.</hidden>"
+                            )
+                            self._injection_queue.put(nudge_prompt)
+                            nudge_response = self._check_and_handle_mid_turn_prompt(
+                                use_streaming, on_output, wrapped_usage_callback, turn_data
+                            )
+                            if nudge_response:
+                                response = nudge_response
+                                pending_calls = [p.function_call for p in response.parts if p.function_call]
+                                self._trace(f"TOOL_USE_NUDGE_RESULT: Got response with {len(pending_calls)} function calls")
+                            else:
+                                self._trace("TOOL_USE_NUDGE_NO_RESPONSE: Nudge did not produce a response")
+                                break
 
                     # Collect final text from nested response
                     for part in response.parts:
