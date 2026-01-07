@@ -45,6 +45,70 @@ def _visible_len(text: str) -> int:
     return len(_ANSI_ESCAPE_PATTERN.sub('', text))
 
 
+def _slice_ansi_string(text: str, start: int, width: int) -> tuple[str, bool, bool]:
+    """Slice a string with ANSI codes to a visible width range.
+
+    Args:
+        text: String potentially containing ANSI escape codes.
+        start: Starting visible character position (0-indexed).
+        width: Maximum visible width to return.
+
+    Returns:
+        Tuple of (sliced_string, has_more_left, has_more_right):
+        - sliced_string: The visible portion with ANSI codes preserved
+        - has_more_left: True if there's content before start
+        - has_more_right: True if there's content after start+width
+    """
+    # Pattern to find ANSI sequences
+    ansi_pattern = re.compile(r'(\x1b\[[0-9;]*m)')
+
+    result = []
+    visible_pos = 0  # Current visible character position
+    active_codes = []  # Track active ANSI codes for proper reset/restore
+
+    # Split into segments (alternating text and ANSI codes)
+    segments = ansi_pattern.split(text)
+
+    for segment in segments:
+        if not segment:
+            continue
+
+        if ansi_pattern.match(segment):
+            # This is an ANSI code
+            # Track it if we're in or before the viewport (for proper styling)
+            if visible_pos < start + width:
+                if segment == '\x1b[0m':
+                    active_codes.clear()
+                else:
+                    active_codes.append(segment)
+                # Only include in output if we've started outputting
+                if visible_pos >= start or (visible_pos < start and visible_pos + len(active_codes) > 0):
+                    result.append(segment)
+        else:
+            # This is regular text
+            for char in segment:
+                if visible_pos >= start and visible_pos < start + width:
+                    # Character is in viewport
+                    result.append(char)
+                visible_pos += 1
+
+                if visible_pos >= start + width:
+                    # We've filled the viewport, but continue counting for has_more_right
+                    pass
+
+    # Calculate overflow indicators
+    total_visible = _visible_len(text)
+    has_more_left = start > 0
+    has_more_right = total_visible > start + width
+
+    # Ensure we close any open ANSI codes
+    sliced = ''.join(result)
+    if active_codes and sliced:
+        sliced += '\x1b[0m'
+
+    return sliced, has_more_left, has_more_right
+
+
 @dataclass
 class OutputLine:
     """A single line of output with metadata."""
@@ -84,7 +148,9 @@ class ActiveToolCall:
     permission_state: Optional[str] = None  # None, "pending", "granted", "denied"
     permission_method: Optional[str] = None  # "yes", "always", "once", "never", "whitelist", "blacklist"
     permission_prompt_lines: Optional[List[str]] = None  # Expanded prompt (may contain ANSI codes)
+    permission_format_hint: Optional[str] = None  # "diff" for pre-formatted content (skip box wrapping)
     permission_truncated: bool = False  # True if prompt is truncated
+    permission_h_scroll: int = 0  # Horizontal scroll offset for diff viewport (stage 2)
     # Clarification tracking (per-question progressive display)
     clarification_state: Optional[str] = None  # None, "pending", "resolved"
     clarification_prompt_lines: Optional[List[str]] = None  # Current question lines
@@ -1093,12 +1159,14 @@ class OutputBuffer:
         self,
         tool_name: str,
         prompt_lines: List[str],
+        format_hint: Optional[str] = None,
     ) -> None:
         """Mark a tool as awaiting permission with the prompt to display.
 
         Args:
             tool_name: Name of the tool awaiting permission.
             prompt_lines: Lines of the permission prompt to display (may contain ANSI codes).
+            format_hint: Optional hint about content format ("diff" = pre-formatted, skip box).
         """
         _trace(f"set_tool_permission_pending: looking for tool={tool_name}")
         _trace(f"set_tool_permission_pending: active_tools={[(t.name, t.completed) for t in self._active_tools]}")
@@ -1106,6 +1174,7 @@ class OutputBuffer:
             if tool.name == tool_name and not tool.completed:
                 tool.permission_state = "pending"
                 tool.permission_prompt_lines = prompt_lines
+                tool.permission_format_hint = format_hint
                 # Scroll to bottom to show the prompt
                 self._scroll_offset = 0
                 _trace(f"set_tool_permission_pending: FOUND and set pending for {tool_name}")
@@ -1356,45 +1425,50 @@ class OutputBuffer:
                 if tool.permission_state == "pending" and tool.permission_prompt_lines:
                     height += 1  # "Permission required" header
 
-                    # Box calculation
                     prompt_lines = tool.permission_prompt_lines
-                    max_prompt_lines = 18
-                    max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
-                    box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
-                    content_width = box_width - 4
 
-                    # First count ALL wrapped lines to decide truncation (matches render logic)
-                    total_wrapped_lines = 0
-                    for prompt_line in prompt_lines:
-                        if len(prompt_line) > content_width:
-                            wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
-                            total_wrapped_lines += len(wrapped) if wrapped else 1
-                        else:
-                            total_wrapped_lines += 1
-
-                    if total_wrapped_lines > max_prompt_lines:
-                        # Truncation triggered - render shows:
-                        # - max_lines_before_truncation content lines
-                        # - 1 truncation message
-                        # - Last line (may wrap to multiple lines)
-                        max_lines_before_truncation = max_prompt_lines - 3
-
-                        # Calculate wrapped lines for last line
-                        last_line = prompt_lines[-1]
-                        if len(last_line) > content_width:
-                            last_wrapped = textwrap.wrap(last_line, width=content_width, break_long_words=True)
-                            last_line_count = len(last_wrapped) if last_wrapped else 1
-                        else:
-                            last_line_count = 1
-
-                        rendered_lines = max_lines_before_truncation + 1 + last_line_count  # content + truncation + last
+                    # Pre-formatted content (e.g., diff) - no box, just lines
+                    if tool.permission_format_hint == "diff":
+                        height += len(prompt_lines)
                     else:
-                        # No truncation - show all wrapped lines
-                        rendered_lines = total_wrapped_lines
+                        # Box calculation
+                        max_prompt_lines = 18
+                        max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
+                        box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4)
+                        content_width = box_width - 4
 
-                    height += 1  # top border
-                    height += rendered_lines
-                    height += 1  # bottom border
+                        # First count ALL wrapped lines to decide truncation (matches render logic)
+                        total_wrapped_lines = 0
+                        for prompt_line in prompt_lines:
+                            if len(prompt_line) > content_width:
+                                wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
+                                total_wrapped_lines += len(wrapped) if wrapped else 1
+                            else:
+                                total_wrapped_lines += 1
+
+                        if total_wrapped_lines > max_prompt_lines:
+                            # Truncation triggered - render shows:
+                            # - max_lines_before_truncation content lines
+                            # - 1 truncation message
+                            # - Last line (may wrap to multiple lines)
+                            max_lines_before_truncation = max_prompt_lines - 3
+
+                            # Calculate wrapped lines for last line
+                            last_line = prompt_lines[-1]
+                            if len(last_line) > content_width:
+                                last_wrapped = textwrap.wrap(last_line, width=content_width, break_long_words=True)
+                                last_line_count = len(last_wrapped) if last_wrapped else 1
+                            else:
+                                last_line_count = 1
+
+                            rendered_lines = max_lines_before_truncation + 1 + last_line_count  # content + truncation + last
+                        else:
+                            # No truncation - show all wrapped lines
+                            rendered_lines = total_wrapped_lines
+
+                        height += 1  # top border
+                        height += rendered_lines
+                        height += 1  # bottom border
 
                 # Clarification prompt (if pending)
                 if tool.clarification_state == "pending":
@@ -2185,102 +2259,151 @@ class OutputBuffer:
                     output.append("⚠ ", style="yellow")
                     output.append("Permission required", style="yellow")
 
-                    # Limit lines to show (keep options visible at end)
-                    max_prompt_lines = 18
                     prompt_lines = tool.permission_prompt_lines
-                    truncated = False
-                    hidden_count = 0
 
-                    # Draw box around permission prompt
-                    # Box prefix is ~18 chars ("       │       │ "), leave room for border
-                    max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
-                    box_width = min(max_box_width, max(_visible_len(line) for line in prompt_lines) + 4)
-                    content_width = box_width - 4  # Space for "│ " and " │"
+                    # Check if content is pre-formatted (e.g., diff output with its own box)
+                    # In this case, render in a viewport that fits the available width
+                    if tool.permission_format_hint == "diff":
+                        # Calculate effective viewport width
+                        # Prefix is "  {continuation}     " = 11 chars, plus scroll indicators = 2
+                        prefix_width = 11
+                        scroll_indicator_width = 2  # "◀" or "▶" with space
+                        viewport_width = max(40, self._console_width - prefix_width - scroll_indicator_width)
 
-                    # Count lines after wrapping to properly truncate
-                    # Note: lines with ANSI codes are not wrapped (textwrap doesn't handle them)
-                    wrapped_line_count = 0
-                    for line in prompt_lines:
-                        visible_len = _visible_len(line)
-                        has_ansi = visible_len != len(line)
-                        if not has_ansi and visible_len > content_width:
-                            wrapped = textwrap.wrap(line, width=content_width, break_long_words=True)
-                            wrapped_line_count += len(wrapped) if wrapped else 1
-                        else:
-                            wrapped_line_count += 1
+                        # Track if any line has overflow (for future horizontal scroll)
+                        any_overflow_left = False
+                        any_overflow_right = False
 
-                    if wrapped_line_count > max_prompt_lines:
-                        truncated = True
-                        tool.permission_truncated = True
-                        hidden_count = wrapped_line_count - max_prompt_lines + 1
-                    else:
-                        tool.permission_truncated = False
-
-                    output.append("\n")
-                    output.append(f"  {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
-
-                    # Track rendered lines to enforce truncation
-                    rendered_lines = 0
-                    truncation_triggered = False
-                    # Reserve space for truncation message and last line (options)
-                    max_lines_before_truncation = max_prompt_lines - 3 if truncated else max_prompt_lines
-
-                    for prompt_line in prompt_lines[:-1] if truncated else prompt_lines:
-                        if truncation_triggered:
-                            break
-                        # Wrap long lines (but not lines with ANSI codes - textwrap doesn't handle them)
-                        visible_len = _visible_len(prompt_line)
-                        has_ansi = visible_len != len(prompt_line)
-                        if not has_ansi and visible_len > content_width:
-                            wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
-                            if not wrapped:
-                                wrapped = [prompt_line[:content_width]]
-                        else:
-                            wrapped = [prompt_line]
-
-                        for display_line in wrapped:
-                            if rendered_lines >= max_lines_before_truncation:
-                                truncation_triggered = True
-                                break
+                        # Pre-formatted content - render in viewport
+                        for prompt_line in prompt_lines:
                             output.append("\n")
-                            padding = box_width - _visible_len(display_line) - 4
-                            output.append(f"  {continuation}     │ ", style="dim")
-                            # Render line (may contain ANSI codes from formatter pipeline)
-                            # Use Text.from_ansi() to handle any ANSI escape codes
-                            stripped = _ANSI_ESCAPE_PATTERN.sub('', display_line)
+                            output.append(f"  {continuation}     ", style="dim")
+
+                            # Check for options line (style cyan) - don't slice these
+                            stripped = _ANSI_ESCAPE_PATTERN.sub('', prompt_line)
                             if stripped.strip().startswith('[') and ']' in stripped:
-                                # Options line - style cyan
-                                output.append_text(Text.from_ansi(display_line, style="cyan"))
+                                output.append_text(Text.from_ansi(prompt_line, style="cyan"))
                             else:
-                                output.append_text(Text.from_ansi(display_line))
-                            output.append(" " * max(0, padding) + " │", style="dim")
-                            rendered_lines += 1
+                                # Apply viewport slicing
+                                h_scroll = tool.permission_h_scroll
+                                sliced, has_left, has_right = _slice_ansi_string(
+                                    prompt_line, h_scroll, viewport_width
+                                )
+                                any_overflow_left = any_overflow_left or has_left
+                                any_overflow_right = any_overflow_right or has_right
 
-                    # Show truncation indicator if needed
-                    if truncated:
-                        output.append("\n")
-                        truncation_msg = f"[...{hidden_count} more - 'v' to view...]"
-                        padding = box_width - len(truncation_msg) - 4
-                        output.append(f"  {continuation}     │ ", style="dim")
-                        output.append(truncation_msg, style="dim italic cyan")
-                        output.append(" " * max(0, padding) + " │", style="dim")
-                        # Show last line (usually options) - wrap if needed
-                        last_line = prompt_lines[-1]
-                        last_visible_len = _visible_len(last_line)
-                        last_has_ansi = last_visible_len != len(last_line)
-                        if not last_has_ansi and last_visible_len > content_width:
-                            last_wrapped = textwrap.wrap(last_line, width=content_width, break_long_words=True)
+                                # Show left overflow indicator
+                                if has_left:
+                                    output.append("◀", style="cyan dim")
+                                else:
+                                    output.append(" ", style="dim")
+
+                                # Render sliced content
+                                output.append_text(Text.from_ansi(sliced))
+
+                                # Show right overflow indicator
+                                if has_right:
+                                    output.append("▶", style="cyan dim")
+
+                        # Store overflow state for potential scroll hint
+                        tool.permission_truncated = any_overflow_right or any_overflow_left
+                    else:
+                        # Standard content - wrap in a box
+                        # Limit lines to show (keep options visible at end)
+                        max_prompt_lines = 18
+                        truncated = False
+                        hidden_count = 0
+
+                        # Draw box around permission prompt
+                        # Box prefix is ~18 chars ("       │       │ "), leave room for border
+                        max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
+                        box_width = min(max_box_width, max(_visible_len(line) for line in prompt_lines) + 4)
+                        content_width = box_width - 4  # Space for "│ " and " │"
+
+                        # Count lines after wrapping to properly truncate
+                        # Note: lines with ANSI codes are not wrapped (textwrap doesn't handle them)
+                        wrapped_line_count = 0
+                        for line in prompt_lines:
+                            visible_len = _visible_len(line)
+                            has_ansi = visible_len != len(line)
+                            if not has_ansi and visible_len > content_width:
+                                wrapped = textwrap.wrap(line, width=content_width, break_long_words=True)
+                                wrapped_line_count += len(wrapped) if wrapped else 1
+                            else:
+                                wrapped_line_count += 1
+
+                        if wrapped_line_count > max_prompt_lines:
+                            truncated = True
+                            tool.permission_truncated = True
+                            hidden_count = wrapped_line_count - max_prompt_lines + 1
                         else:
-                            last_wrapped = [last_line]
-                        for display_line in last_wrapped:
-                            output.append("\n")
-                            padding = box_width - _visible_len(display_line) - 4
-                            output.append(f"  {continuation}     │ ", style="dim")
-                            output.append_text(Text.from_ansi(display_line, style="cyan"))
-                            output.append(" " * max(0, padding) + " │", style="dim")
+                            tool.permission_truncated = False
 
-                    output.append("\n")
-                    output.append(f"  {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
+                        output.append("\n")
+                        output.append(f"  {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
+
+                        # Track rendered lines to enforce truncation
+                        rendered_lines = 0
+                        truncation_triggered = False
+                        # Reserve space for truncation message and last line (options)
+                        max_lines_before_truncation = max_prompt_lines - 3 if truncated else max_prompt_lines
+
+                        for prompt_line in prompt_lines[:-1] if truncated else prompt_lines:
+                            if truncation_triggered:
+                                break
+                            # Wrap long lines (but not lines with ANSI codes - textwrap doesn't handle them)
+                            visible_len = _visible_len(prompt_line)
+                            has_ansi = visible_len != len(prompt_line)
+                            if not has_ansi and visible_len > content_width:
+                                wrapped = textwrap.wrap(prompt_line, width=content_width, break_long_words=True)
+                                if not wrapped:
+                                    wrapped = [prompt_line[:content_width]]
+                            else:
+                                wrapped = [prompt_line]
+
+                            for display_line in wrapped:
+                                if rendered_lines >= max_lines_before_truncation:
+                                    truncation_triggered = True
+                                    break
+                                output.append("\n")
+                                padding = box_width - _visible_len(display_line) - 4
+                                output.append(f"  {continuation}     │ ", style="dim")
+                                # Render line (may contain ANSI codes from formatter pipeline)
+                                # Use Text.from_ansi() to handle any ANSI escape codes
+                                stripped = _ANSI_ESCAPE_PATTERN.sub('', display_line)
+                                if stripped.strip().startswith('[') and ']' in stripped:
+                                    # Options line - style cyan
+                                    output.append_text(Text.from_ansi(display_line, style="cyan"))
+                                else:
+                                    output.append_text(Text.from_ansi(display_line))
+                                output.append(" " * max(0, padding) + " │", style="dim")
+                                rendered_lines += 1
+
+                        # Show truncation indicator if needed
+                        if truncated:
+                            output.append("\n")
+                            truncation_msg = f"[...{hidden_count} more - 'v' to view...]"
+                            padding = box_width - len(truncation_msg) - 4
+                            output.append(f"  {continuation}     │ ", style="dim")
+                            output.append(truncation_msg, style="dim italic cyan")
+                            output.append(" " * max(0, padding) + " │", style="dim")
+                            # Show last line (usually options) - wrap if needed
+                            last_line = prompt_lines[-1]
+                            last_visible_len = _visible_len(last_line)
+                            last_has_ansi = last_visible_len != len(last_line)
+                            if not last_has_ansi and last_visible_len > content_width:
+                                last_wrapped = textwrap.wrap(last_line, width=content_width, break_long_words=True)
+                            else:
+                                last_wrapped = [last_line]
+                            for display_line in last_wrapped:
+                                output.append("\n")
+                                padding = box_width - _visible_len(display_line) - 4
+                                output.append(f"  {continuation}     │ ", style="dim")
+                                output.append_text(Text.from_ansi(display_line, style="cyan"))
+                                output.append(" " * max(0, padding) + " │", style="dim")
+
+                        output.append("\n")
+                        output.append(f"  {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
 
                 # Show clarification info for pending tool
                 if pending_tool.clarification_state == "pending":

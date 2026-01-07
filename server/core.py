@@ -913,6 +913,18 @@ class JaatoServer:
                     prompt_lines, format_hint = server.permission_plugin.get_formatted_prompt(
                         tool_name, tool_args or {}, "ipc"
                     )
+                    # Format through the pipeline - the diff formatter buffers lines
+                    # internally and renders when complete
+                    if prompt_lines and server._formatter_pipeline:
+                        formatted_lines = []
+                        for line in prompt_lines:
+                            for output in server._formatter_pipeline.process_chunk(line + "\n"):
+                                formatted_lines.extend(output.rstrip("\n").split("\n"))
+                        # Flush any remaining buffered content
+                        for output in server._formatter_pipeline.flush():
+                            formatted_lines.extend(output.rstrip("\n").split("\n"))
+                        server._formatter_pipeline.reset()
+                        prompt_lines = formatted_lines
                 except Exception:
                     pass  # Fall back to client-side formatting
 
