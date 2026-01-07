@@ -31,6 +31,60 @@ def _ensure_imports():
         _StatusCode = StatusCode
 
 
+class _FileSpanExporter:
+    """Simple file-based span exporter that writes JSONL.
+
+    Each span is written as a single JSON line to the output file.
+    This provides a non-HTTP telemetry option for local processing.
+    """
+
+    def __init__(self, file_path: str):
+        self._file_path = file_path
+        self._file = None
+
+    def export(self, spans):
+        """Export spans to the file."""
+        import json
+        from opentelemetry.sdk.trace.export import SpanExportResult
+
+        try:
+            with open(self._file_path, "a") as f:
+                for span in spans:
+                    span_dict = {
+                        "name": span.name,
+                        "trace_id": format(span.context.trace_id, "032x"),
+                        "span_id": format(span.context.span_id, "016x"),
+                        "parent_span_id": format(span.parent.span_id, "016x") if span.parent else None,
+                        "start_time": span.start_time,
+                        "end_time": span.end_time,
+                        "attributes": dict(span.attributes) if span.attributes else {},
+                        "status": {
+                            "status_code": span.status.status_code.name,
+                            "description": span.status.description,
+                        },
+                        "events": [
+                            {
+                                "name": e.name,
+                                "timestamp": e.timestamp,
+                                "attributes": dict(e.attributes) if e.attributes else {},
+                            }
+                            for e in span.events
+                        ] if span.events else [],
+                    }
+                    f.write(json.dumps(span_dict) + "\n")
+            return SpanExportResult.SUCCESS
+        except Exception:
+            return SpanExportResult.FAILURE
+
+    def shutdown(self):
+        """Shutdown the exporter."""
+        pass
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        """Force flush - no-op for file exporter."""
+        return True
+
+
 class _SpanWrapper:
     """Wrapper providing consistent interface with content redaction."""
 
@@ -172,6 +226,14 @@ class OTelPlugin:
         if exporter_type == "console":
             from opentelemetry.sdk.trace.export import ConsoleSpanExporter
             return ConsoleSpanExporter()
+
+        if exporter_type == "file":
+            # File exporter - writes OTLP JSON to a file (one span per line)
+            file_path = config.get(
+                "file_path",
+                os.environ.get("JAATO_TELEMETRY_FILE", "/tmp/jaato-traces.jsonl")
+            )
+            return _FileSpanExporter(file_path)
 
         if exporter_type == "otlp":
             # Get endpoint from config or environment
