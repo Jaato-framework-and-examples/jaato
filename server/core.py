@@ -48,6 +48,7 @@ from shared.plugins.gc import load_gc_from_file
 
 # Formatter pipeline for server-side output formatting
 from shared.plugins.formatter_pipeline import create_pipeline as create_formatter_pipeline
+from shared.plugins.hidden_content_filter import create_plugin as create_hidden_filter
 from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter
 from shared.plugins.diff_formatter import create_plugin as create_diff_formatter
 from shared.plugins.code_validation_formatter import create_plugin as create_code_validation_formatter
@@ -566,6 +567,7 @@ class JaatoServer:
         """Set up the formatter pipeline for server-side output formatting.
 
         Creates the pipeline and registers formatters:
+        - HiddenContentFilter (priority 5): Strips <hidden>...</hidden> content
         - DiffFormatter (priority 20): Colorizes diffs
         - CodeValidationFormatter (priority 35): LSP diagnostics on code blocks
         - CodeBlockFormatter (priority 40): Syntax highlighting
@@ -575,6 +577,7 @@ class JaatoServer:
         self._formatter_pipeline = create_formatter_pipeline()
 
         # Register formatters in priority order (lower = runs first)
+        self._formatter_pipeline.register(create_hidden_filter())  # priority 5
         self._formatter_pipeline.register(create_diff_formatter())  # priority 20
 
         # Set up code validation formatter with LSP plugin

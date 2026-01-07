@@ -40,6 +40,9 @@ if TYPE_CHECKING:
     from .plugins.model_provider.base import ModelProviderPlugin
     from .plugins.subagent.ui_hooks import AgentUIHooks
 
+# Import framework instruction for tool result injection
+from .jaato_runtime import _TASK_COMPLETION_INSTRUCTION
+
 # Pattern to match @references in prompts
 AT_REFERENCE_PATTERN = re.compile(r'@([\w./\-]+(?:\.\w+)?)')
 
@@ -1669,6 +1672,21 @@ class JaatoSession:
     ) -> ProviderResponse:
         """Send tool results back to the model and get the continuation response."""
         # with_retry is already imported at module level from .retry_utils
+
+        # Inject task completion spur into last tool result
+        if tool_results:
+            last = tool_results[-1]
+            result_text = str(last.result) if last.result is not None else ""
+            spurred_result = f"{result_text}\n\n<hidden>{_TASK_COMPLETION_INSTRUCTION}</hidden>"
+            tool_results = tool_results[:-1] + [
+                ToolResult(
+                    call_id=last.call_id,
+                    name=last.name,
+                    result=spurred_result,
+                    is_error=last.is_error,
+                    attachments=last.attachments
+                )
+            ]
 
         # Proactive rate limiting
         self._pacer.pace()
