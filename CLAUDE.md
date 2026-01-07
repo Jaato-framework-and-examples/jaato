@@ -545,8 +545,42 @@ Use the `/keybindings reload` command to reload keybindings without restarting:
 /keybindings reload
 ```
 
+## Testing
+
+### Install Dev Dependencies
+```bash
+.venv/bin/pip install -e ".[dev]"
+```
+
+### Running Tests
+```bash
+# Run all tests
+.venv/bin/pytest
+
+# Run tests for a specific module
+.venv/bin/pytest shared/tests/
+
+# Run tests for a specific plugin
+.venv/bin/pytest shared/plugins/cli/tests/
+
+# Run a single test file
+.venv/bin/pytest shared/plugins/file_edit/tests/test_diff_utils.py
+
+# Run a single test function
+.venv/bin/pytest shared/plugins/cli/tests/test_plugin.py::test_cli_execute -v
+
+# Run with verbose output
+.venv/bin/pytest -v
+```
+
+### Test Organization
+- Core tests: `shared/tests/`
+- Plugin tests: `shared/plugins/<plugin>/tests/`
+- Provider tests: `shared/plugins/model_provider/<provider>/tests/`
+
 ## Additional Documentation
 
 - [Architecture Overview](docs/architecture.md) - Server-first architecture, event protocol, component diagrams
+- [Sequence Diagram Architecture](docs/sequence-diagram-architecture.md) - Detailed sequence diagrams for client-server interaction, tool execution, and output rendering
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI
 - [ModLog Training README](modlog-training-set-test/README.md) - COBOL training set generation
