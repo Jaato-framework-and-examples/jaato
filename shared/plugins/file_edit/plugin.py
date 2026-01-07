@@ -24,6 +24,23 @@ from .diff_utils import (
 )
 
 
+def _detect_workspace_root() -> Optional[str]:
+    """Auto-detect workspace root from environment variables.
+
+    Checks JAATO_WORKSPACE_ROOT first, then workspaceRoot.
+
+    Returns:
+        Absolute path to workspace root, or None if not configured.
+    """
+    workspace = os.environ.get('JAATO_WORKSPACE_ROOT')
+    if workspace:
+        return os.path.realpath(os.path.abspath(workspace))
+    workspace = os.environ.get('workspaceRoot')
+    if workspace:
+        return os.path.realpath(os.path.abspath(workspace))
+    return None
+
+
 class FileEditPlugin:
     """Plugin for file reading and editing operations.
 
@@ -38,6 +55,12 @@ class FileEditPlugin:
 
     Integrates with the permission system to show formatted diffs
     when requesting approval for file modifications.
+
+    Path Sandboxing:
+        When workspace_root is configured, file operations are restricted to
+        paths within the workspace. Paths outside the workspace are only
+        allowed if they've been authorized via the plugin registry (e.g.,
+        by the references plugin for external documentation).
     """
 
     def __init__(self):
@@ -45,6 +68,10 @@ class FileEditPlugin:
         self._initialized = False
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
+        # Workspace root for path sandboxing
+        self._workspace_root: Optional[str] = None
+        # Plugin registry for checking external path authorization
+        self._plugin_registry = None
 
     @property
     def name(self) -> str:
@@ -74,11 +101,21 @@ class FileEditPlugin:
         Args:
             config: Optional configuration dict with:
                 - backup_dir: Custom backup directory (default: .jaato/backups)
+                - workspace_root: Path to workspace root for sandboxing.
+                                  Auto-detected from JAATO_WORKSPACE_ROOT or
+                                  workspaceRoot env vars if not specified.
         """
         config = config or {}
 
         # Extract agent name for trace logging
         self._agent_name = config.get("agent_name")
+
+        # Configure workspace root for path sandboxing
+        workspace_root = config.get("workspace_root")
+        if workspace_root:
+            self._workspace_root = os.path.realpath(os.path.abspath(workspace_root))
+        else:
+            self._workspace_root = _detect_workspace_root()
 
         # Initialize backup manager
         backup_dir = config.get("backup_dir")
@@ -92,13 +129,59 @@ class FileEditPlugin:
 
         self._initialized = True
         backup_dir_str = str(self._backup_manager._base_dir) if self._backup_manager else "none"
-        self._trace(f"initialize: backup_dir={backup_dir_str}")
+        workspace_str = self._workspace_root or "none"
+        self._trace(f"initialize: backup_dir={backup_dir_str}, workspace_root={workspace_str}")
 
     def shutdown(self) -> None:
         """Shutdown the plugin."""
         self._trace("shutdown: cleaning up")
         self._backup_manager = None
         self._initialized = False
+        self._workspace_root = None
+        self._plugin_registry = None
+
+    def set_plugin_registry(self, registry) -> None:
+        """Set the plugin registry for checking external path authorization.
+
+        Args:
+            registry: The PluginRegistry instance.
+        """
+        self._plugin_registry = registry
+        self._trace("set_plugin_registry: registry set")
+
+    def _is_path_allowed(self, path: str) -> bool:
+        """Check if a path is allowed for access.
+
+        A path is allowed if:
+        1. No workspace_root is configured (sandboxing disabled)
+        2. The path is within the workspace_root
+        3. The path is authorized via the plugin registry
+
+        Args:
+            path: Path to check.
+
+        Returns:
+            True if access is allowed, False otherwise.
+        """
+        # If no workspace_root, allow all paths
+        if not self._workspace_root:
+            return True
+
+        # Normalize the path
+        abs_path = os.path.realpath(os.path.abspath(path))
+
+        # Check if within workspace
+        workspace_prefix = self._workspace_root.rstrip(os.sep) + os.sep
+        if abs_path == self._workspace_root or abs_path.startswith(workspace_prefix):
+            return True
+
+        # Check if authorized via plugin registry
+        if self._plugin_registry and self._plugin_registry.is_path_authorized(abs_path):
+            self._trace(f"_is_path_allowed: {path} authorized via registry")
+            return True
+
+        self._trace(f"_is_path_allowed: {path} blocked (outside workspace)")
+        return False
 
     def _ensure_gitignore(self) -> None:
         """Add .jaato to .gitignore if it exists and entry is missing."""
@@ -523,6 +606,10 @@ updateFile, removeFile, and moveFile operations."""
 
         if not path:
             return {"error": "path is required"}
+
+        # Check if path is allowed (within workspace or authorized)
+        if not self._is_path_allowed(path):
+            return {"error": f"File not found: {path}"}
 
         file_path = Path(path)
         if not file_path.exists():
