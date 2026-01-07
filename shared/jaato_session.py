@@ -160,6 +160,12 @@ class JaatoSession:
         # Used by server to emit MidTurnPromptInjectedEvent
         self._on_prompt_injected: Optional[Callable[[str], None]] = None
 
+        # Current output callback for this turn (used by enrichment to route notifications)
+        # Stored here so _enrich_tool_result_dict can pass it to registry.enrich_tool_result()
+        # This ensures enrichment notifications go to the correct agent panel even when
+        # multiple sessions share the same registry (e.g., subagents)
+        self._current_output_callback: Optional['OutputCallback'] = None
+
     def set_terminal_width(self, width: int) -> None:
         """Set the terminal width for formatting.
 
@@ -999,6 +1005,11 @@ class JaatoSession:
         # Reset proactive GC tracking for this turn
         self._gc_threshold_crossed = False
         self._gc_threshold_callback = on_gc_threshold
+
+        # Store output callback for this turn so enrichment can use it directly
+        # This avoids the race condition where concurrent sessions overwrite
+        # the shared registry callback
+        self._current_output_callback = on_output
 
         # Wrap usage callback to check GC threshold
         wrapped_usage_callback = self._wrap_usage_callback_with_gc_check(on_usage_update)
@@ -1941,6 +1952,11 @@ class JaatoSession:
            result so enrichers can extract file paths and run diagnostics.
         2. For other tools with large text fields: Enrich individual text fields.
 
+        Note: Passes the session's output callback to enrich_tool_result() so that
+        enrichment notifications are routed to the correct agent panel. This is
+        critical for concurrent sessions (e.g., subagents running in parallel with
+        the parent) that share the same registry.
+
         Args:
             tool_name: Name of the tool that produced the result.
             result_dict: The result dictionary to enrich.
@@ -1957,7 +1973,13 @@ class JaatoSession:
             # Pass full result as JSON so LSP can extract file paths
             import json
             result_json = json.dumps(result_dict)
-            enrichment = self._runtime.registry.enrich_tool_result(tool_name, result_json)
+            # Pass session's callback to route notifications to correct agent panel
+            enrichment = self._runtime.registry.enrich_tool_result(
+                tool_name,
+                result_json,
+                output_callback=self._current_output_callback,
+                terminal_width=self._terminal_width
+            )
             if enrichment.result != result_json:
                 try:
                     enriched_dict = json.loads(enrichment.result)
@@ -1974,8 +1996,12 @@ class JaatoSession:
             if field in enriched_dict:
                 value = enriched_dict[field]
                 if isinstance(value, str) and len(value) >= min_length:
+                    # Pass session's callback to route notifications to correct agent panel
                     enrichment = self._runtime.registry.enrich_tool_result(
-                        tool_name, value
+                        tool_name,
+                        value,
+                        output_callback=self._current_output_callback,
+                        terminal_width=self._terminal_width
                     )
                     if enrichment.result != value:
                         enriched_dict[field] = enrichment.result
