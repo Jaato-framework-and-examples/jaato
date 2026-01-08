@@ -21,6 +21,8 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from ..base import PermissionDisplayInfo, OutputCallback
 
+from ...message_queue import SourceType
+
 try:
     import requests
     HAS_REQUESTS = True
@@ -1178,10 +1180,12 @@ class ParentBridgedChannel(Channel):
         if forward_method:
             forward_method("PERMISSION_REQUESTED", formatted_request)
         else:
-            # Fallback: direct inject to parent
+            # Fallback: direct inject to parent (CHILD source - from subagent)
             agent_id = getattr(self._session, '_agent_id', 'unknown')
             parent_session.inject_prompt(
-                f"[SUBAGENT agent_id={agent_id} event=PERMISSION_REQUESTED]\n{formatted_request}"
+                f"[SUBAGENT agent_id={agent_id} event=PERMISSION_REQUESTED]\n{formatted_request}",
+                source_id=agent_id,
+                source_type=SourceType.CHILD
             )
 
         # Wait for response
