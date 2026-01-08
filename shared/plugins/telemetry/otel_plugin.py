@@ -32,46 +32,109 @@ def _ensure_imports():
 
 
 class _FileSpanExporter:
-    """Simple file-based span exporter that writes JSONL.
+    """File-based span exporter that writes OTLP JSON format.
 
-    Each span is written as a single JSON line to the output file.
-    This provides a non-HTTP telemetry option for local processing.
+    Each line is a complete OTLP export request, compatible with tools
+    like otel-tui that expect OTLP JSON format.
     """
 
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, service_name: str = "jaato"):
         self._file_path = file_path
-        self._file = None
+        self._service_name = service_name
+
+    def _convert_value(self, value: Any) -> Dict[str, Any]:
+        """Convert a Python value to OTLP AnyValue format."""
+        if isinstance(value, bool):
+            return {"boolValue": value}
+        elif isinstance(value, int):
+            return {"intValue": str(value)}
+        elif isinstance(value, float):
+            return {"doubleValue": value}
+        elif isinstance(value, str):
+            return {"stringValue": value}
+        elif isinstance(value, (list, tuple)):
+            return {"arrayValue": {"values": [self._convert_value(v) for v in value]}}
+        elif isinstance(value, dict):
+            return {"kvlistValue": {"values": [
+                {"key": k, "value": self._convert_value(v)} for k, v in value.items()
+            ]}}
+        else:
+            return {"stringValue": str(value)}
+
+    def _convert_attributes(self, attributes: Dict[str, Any]) -> list:
+        """Convert attributes dict to OTLP KeyValue array format."""
+        if not attributes:
+            return []
+        return [
+            {"key": k, "value": self._convert_value(v)}
+            for k, v in attributes.items()
+        ]
+
+    def _convert_span(self, span) -> Dict[str, Any]:
+        """Convert an OpenTelemetry span to OTLP JSON format."""
+        otlp_span = {
+            "traceId": format(span.context.trace_id, "032x"),
+            "spanId": format(span.context.span_id, "016x"),
+            "name": span.name,
+            "kind": span.kind.value if hasattr(span.kind, 'value') else 1,
+            "startTimeUnixNano": str(span.start_time),
+            "endTimeUnixNano": str(span.end_time),
+            "attributes": self._convert_attributes(dict(span.attributes) if span.attributes else {}),
+            "status": {
+                "code": 1 if span.status.status_code.name == "OK" else (
+                    2 if span.status.status_code.name == "ERROR" else 0
+                ),
+            },
+        }
+
+        if span.parent:
+            otlp_span["parentSpanId"] = format(span.parent.span_id, "016x")
+
+        if span.status.description:
+            otlp_span["status"]["message"] = span.status.description
+
+        if span.events:
+            otlp_span["events"] = [
+                {
+                    "name": e.name,
+                    "timeUnixNano": str(e.timestamp),
+                    "attributes": self._convert_attributes(dict(e.attributes) if e.attributes else {}),
+                }
+                for e in span.events
+            ]
+
+        return otlp_span
 
     def export(self, spans):
-        """Export spans to the file."""
+        """Export spans to the file in OTLP JSON format."""
         import json
         from opentelemetry.sdk.trace.export import SpanExportResult
 
+        if not spans:
+            return SpanExportResult.SUCCESS
+
         try:
+            # Convert all spans to OTLP format
+            otlp_spans = [self._convert_span(span) for span in spans]
+
+            # Wrap in OTLP resourceSpans structure
+            otlp_export = {
+                "resourceSpans": [{
+                    "resource": {
+                        "attributes": [
+                            {"key": "service.name", "value": {"stringValue": self._service_name}}
+                        ]
+                    },
+                    "scopeSpans": [{
+                        "scope": {"name": "jaato.telemetry"},
+                        "spans": otlp_spans
+                    }]
+                }]
+            }
+
             with open(self._file_path, "a") as f:
-                for span in spans:
-                    span_dict = {
-                        "name": span.name,
-                        "trace_id": format(span.context.trace_id, "032x"),
-                        "span_id": format(span.context.span_id, "016x"),
-                        "parent_span_id": format(span.parent.span_id, "016x") if span.parent else None,
-                        "start_time": span.start_time,
-                        "end_time": span.end_time,
-                        "attributes": dict(span.attributes) if span.attributes else {},
-                        "status": {
-                            "status_code": span.status.status_code.name,
-                            "description": span.status.description,
-                        },
-                        "events": [
-                            {
-                                "name": e.name,
-                                "timestamp": e.timestamp,
-                                "attributes": dict(e.attributes) if e.attributes else {},
-                            }
-                            for e in span.events
-                        ] if span.events else [],
-                    }
-                    f.write(json.dumps(span_dict) + "\n")
+                f.write(json.dumps(otlp_export) + "\n")
+
             return SpanExportResult.SUCCESS
         except Exception:
             return SpanExportResult.FAILURE
@@ -228,12 +291,16 @@ class OTelPlugin:
             return ConsoleSpanExporter()
 
         if exporter_type == "file":
-            # File exporter - writes OTLP JSON to a file (one span per line)
+            # File exporter - writes OTLP JSON to a file
             file_path = config.get(
                 "file_path",
                 os.environ.get("JAATO_TELEMETRY_FILE", "/tmp/jaato-traces.jsonl")
             )
-            return _FileSpanExporter(file_path)
+            service_name = config.get(
+                "service_name",
+                os.environ.get("OTEL_SERVICE_NAME", "jaato")
+            )
+            return _FileSpanExporter(file_path, service_name)
 
         if exporter_type == "otlp":
             # Get endpoint from config or environment
