@@ -43,6 +43,7 @@ from shared import (
     TodoPlugin,
     active_cert_bundle,
 )
+from shared.message_queue import SourceType
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
 from shared.plugins.base import parse_command_args
 from shared.plugins.gc import load_gc_from_file
@@ -1242,10 +1243,10 @@ class JaatoServer:
             return
 
         if self._model_running:
-            # Inject directly into the session's queue
+            # Inject directly into the session's queue (USER source - high priority)
             if self._jaato:
                 session = self._jaato.get_session()
-                session.inject_prompt(text)
+                session.inject_prompt(text, source_id="user", source_type=SourceType.USER)
                 self.emit(MidTurnPromptQueuedEvent(
                     text=text,
                     position_in_queue=0,
