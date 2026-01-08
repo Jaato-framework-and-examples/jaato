@@ -76,6 +76,7 @@ class TemplatePlugin:
     - renderTemplate: Render a template with variables and write to file
     - renderTemplateToFile: Same as renderTemplate with overwrite option
     - listExtractedTemplates: List templates extracted in this session
+    - listTemplateVariables: List all variables required by a template
 
     Prompt enrichment:
     - Detects code blocks containing Jinja2 or Mustache template syntax
@@ -236,6 +237,24 @@ class TemplatePlugin:
                     "required": ["output_path", "variables"]
                 }
             ),
+            ToolSchema(
+                name="listTemplateVariables",
+                description=(
+                    "List all variables required by a template. Call this before renderTemplateToFile "
+                    "to know exactly what variables to provide. Analyzes the template and returns "
+                    "all variable names that need to be substituted."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "template_path": {
+                            "type": "string",
+                            "description": "Path to the template file (absolute or relative to workspace)"
+                        }
+                    },
+                    "required": ["template_path"]
+                }
+            ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
@@ -244,6 +263,7 @@ class TemplatePlugin:
             "renderTemplate": self._execute_render_template,
             "listExtractedTemplates": self._execute_list_extracted,
             "renderTemplateToFile": self._execute_render_template_to_file,
+            "listTemplateVariables": self._execute_list_template_variables,
         }
 
     def get_system_instructions(self) -> Optional[str]:
@@ -268,6 +288,12 @@ patterns. Manual coding when a template exists is NOT acceptable.
 
 **listExtractedTemplates()** - List templates extracted from documentation
   - Shows all templates extracted in this session
+  - Auto-approved (no permission required)
+
+**listTemplateVariables(template_path)** - List variables required by a template
+  - Call BEFORE renderTemplateToFile to know exactly what variables to provide
+  - Returns list of variable names that need to be substituted
+  - Supports both Jinja2 and Mustache templates (auto-detected)
   - Auto-approved (no permission required)
 
 ### CRITICAL: Directory Creation Rules
@@ -357,7 +383,7 @@ Template rendering requires approval since it writes files."""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved."""
-        return ["listExtractedTemplates"]
+        return ["listExtractedTemplates", "listTemplateVariables"]
 
     def format_permission_request(
         self,
@@ -1253,6 +1279,96 @@ Template rendering requires approval since it writes files."""
             "template_source": template_source,
             "template_syntax": syntax
         }
+
+    def _execute_list_template_variables(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract all undeclared variables from a template.
+
+        Uses Jinja2's AST parser for Jinja2 templates to find undeclared variables,
+        or regex for Mustache templates.
+
+        Args:
+            args: Tool arguments containing 'template_path'.
+
+        Returns:
+            Dict with 'variables' list and 'syntax' type, or 'error' on failure.
+        """
+        template_path = args.get("template_path", "")
+
+        if not template_path:
+            return {"error": "template_path is required"}
+
+        # Resolve the template path
+        resolved_path, paths_tried = self._resolve_template_path(template_path)
+        if not resolved_path or not resolved_path.exists():
+            return {
+                "error": f"Template not found: {template_path}",
+                "paths_tried": paths_tried
+            }
+
+        # Read template content
+        try:
+            template_content = resolved_path.read_text()
+        except IOError as e:
+            return {
+                "error": f"Failed to read template: {e}",
+                "resolved_path": str(resolved_path)
+            }
+
+        # Detect template syntax
+        syntax = self._detect_template_syntax(template_content)
+
+        if syntax == "jinja2":
+            # Use Jinja2's AST parser for accurate variable extraction
+            try:
+                from jinja2 import Environment, meta
+            except ImportError:
+                return {
+                    "error": "Jinja2 is not installed. Install with: pip install Jinja2",
+                    "status": "dependency_missing"
+                }
+
+            try:
+                env = Environment()
+                ast = env.parse(template_content)
+                variables = meta.find_undeclared_variables(ast)
+                return {
+                    "variables": sorted(list(variables)),
+                    "syntax": "jinja2",
+                    "template_path": str(resolved_path),
+                    "count": len(variables)
+                }
+            except Exception as e:
+                return {
+                    "error": f"Failed to parse Jinja2 template: {e}",
+                    "syntax": "jinja2",
+                    "template_path": str(resolved_path)
+                }
+
+        elif syntax == "mustache":
+            # Use regex to find {{variable}} patterns for Mustache
+            # Match simple variables {{var}}, but not section markers {{#...}}, {{/...}}, {{^...}}
+            # Also exclude comments {{!...}}
+            matches = re.findall(r'\{\{([^#/^!}]+)\}\}', template_content)
+            variables = set()
+            for m in matches:
+                var = m.strip()
+                # Skip special Mustache markers like {{.}} (current context) and {{this}}
+                if var and var not in ('.', 'this'):
+                    variables.add(var)
+
+            return {
+                "variables": sorted(list(variables)),
+                "syntax": "mustache",
+                "template_path": str(resolved_path),
+                "count": len(variables)
+            }
+
+        else:
+            return {
+                "error": f"Unknown template syntax",
+                "syntax": syntax,
+                "template_path": str(resolved_path)
+            }
 
 
 def create_plugin() -> TemplatePlugin:
