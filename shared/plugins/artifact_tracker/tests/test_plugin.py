@@ -8,38 +8,158 @@ from unittest.mock import patch
 
 from ..plugin import (
     ArtifactTrackerPlugin,
-    _normalize_path,
+    _normalize_path_standalone,
     _detect_workspace_root,
     create_plugin,
 )
 
 
-class TestNormalizePath:
-    """Tests for path normalization."""
+class TestNormalizePathStandalone:
+    """Tests for standalone path normalization (uses CWD)."""
 
     def test_normalize_relative_path(self):
-        """Test that relative paths are converted to absolute."""
-        result = _normalize_path("doc.md")
+        """Test that relative paths are converted to absolute (against CWD)."""
+        result = _normalize_path_standalone("doc.md")
         assert os.path.isabs(result)
         assert result.endswith("doc.md")
 
     def test_normalize_dot_prefix(self):
         """Test that ./ prefix is handled."""
-        result = _normalize_path("./doc.md")
+        result = _normalize_path_standalone("./doc.md")
         assert os.path.isabs(result)
         assert result.endswith("doc.md")
 
     def test_normalize_double_dot(self):
         """Test that .. references are collapsed."""
-        result = _normalize_path("./foo/../doc.md")
+        result = _normalize_path_standalone("./foo/../doc.md")
         assert os.path.isabs(result)
         assert ".." not in result
         assert result.endswith("doc.md")
 
     def test_normalize_empty_string(self):
         """Test that empty string returns empty string."""
-        result = _normalize_path("")
+        result = _normalize_path_standalone("")
         assert result == ""
+
+
+class TestNormalizePathWithWorkspace:
+    """Tests for instance method path normalization (uses workspace_root)."""
+
+    @pytest.fixture
+    def plugin_with_workspace(self, monkeypatch, tmp_path):
+        """Create a plugin with a workspace root configured."""
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        workspace = str(tmp_path / "workspace")
+        os.makedirs(workspace, exist_ok=True)
+
+        plugin = create_plugin()
+        plugin.initialize({
+            "workspace_root": workspace,
+            "auto_load": False,
+        })
+        return plugin, workspace
+
+    @pytest.fixture
+    def plugin_no_workspace(self, monkeypatch):
+        """Create a plugin without workspace root."""
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        plugin = create_plugin()
+        plugin.initialize({"auto_load": False})
+        return plugin
+
+    def test_relative_path_resolved_against_workspace(self, plugin_with_workspace):
+        """Test that relative paths are resolved against workspace_root, not CWD."""
+        plugin, workspace = plugin_with_workspace
+
+        # Relative path should be joined with workspace_root
+        result = plugin._normalize_path("customer-domain-api/file.java")
+
+        expected = os.path.normpath(os.path.join(workspace, "customer-domain-api/file.java"))
+        assert result == expected
+
+    def test_relative_path_with_dot_prefix(self, plugin_with_workspace):
+        """Test that ./prefix relative paths are resolved against workspace_root."""
+        plugin, workspace = plugin_with_workspace
+
+        result = plugin._normalize_path("./src/main.py")
+
+        expected = os.path.normpath(os.path.join(workspace, "src/main.py"))
+        assert result == expected
+
+    def test_relative_path_with_double_dot(self, plugin_with_workspace):
+        """Test that ../ in paths are collapsed correctly with workspace_root."""
+        plugin, workspace = plugin_with_workspace
+
+        result = plugin._normalize_path("foo/../bar/file.py")
+
+        expected = os.path.normpath(os.path.join(workspace, "bar/file.py"))
+        assert result == expected
+
+    def test_absolute_path_unchanged(self, plugin_with_workspace):
+        """Test that absolute paths are just normalized, not joined with workspace."""
+        plugin, workspace = plugin_with_workspace
+
+        abs_path = "/some/absolute/path/file.py"
+        result = plugin._normalize_path(abs_path)
+
+        # Absolute path should just be normalized, not joined with workspace
+        assert result == os.path.normpath(abs_path)
+
+    def test_empty_string_unchanged(self, plugin_with_workspace):
+        """Test that empty string returns empty string."""
+        plugin, workspace = plugin_with_workspace
+
+        result = plugin._normalize_path("")
+        assert result == ""
+
+    def test_relative_path_without_workspace_uses_cwd(self, plugin_no_workspace):
+        """Test that relative paths fall back to CWD when no workspace_root is set."""
+        plugin = plugin_no_workspace
+
+        result = plugin._normalize_path("doc.md")
+
+        # Should fall back to os.path.abspath behavior (against CWD)
+        expected = os.path.abspath("doc.md")
+        assert result == expected
+
+    def test_subagent_workspace_different_from_cwd(self, monkeypatch, tmp_path):
+        """Test the specific bug scenario: subagent workspace differs from process CWD.
+
+        This is the bug we're fixing: when a subagent has a different workspace
+        than the main process CWD, relative paths should resolve against the
+        subagent's workspace, not the process CWD.
+        """
+        monkeypatch.delenv("JAATO_WORKSPACE_ROOT", raising=False)
+        monkeypatch.delenv("workspaceRoot", raising=False)
+
+        # Simulate: CWD is /home/user/jaato
+        # Subagent workspace is .../tests_enablement_2.0/test_2/
+        cwd = os.getcwd()
+        subagent_workspace = str(tmp_path / "tests_enablement_2.0" / "test_2")
+        os.makedirs(subagent_workspace, exist_ok=True)
+
+        plugin = create_plugin()
+        plugin.initialize({
+            "workspace_root": subagent_workspace,
+            "auto_load": False,
+        })
+
+        # Relative path: customer-domain-api/file.java
+        # BUG: would become {CWD}/customer-domain-api/file.java (wrong)
+        # FIX: should become {subagent_workspace}/customer-domain-api/file.java (correct)
+        result = plugin._normalize_path("customer-domain-api/file.java")
+
+        # Should NOT be relative to CWD
+        wrong_result = os.path.normpath(os.path.join(cwd, "customer-domain-api/file.java"))
+        assert result != wrong_result, "Bug: path resolved against CWD instead of workspace_root"
+
+        # Should be relative to subagent_workspace
+        expected = os.path.normpath(os.path.join(subagent_workspace, "customer-domain-api/file.java"))
+        assert result == expected
 
 
 class TestDetectWorkspaceRoot:

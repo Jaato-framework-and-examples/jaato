@@ -42,15 +42,11 @@ FILE_WRITING_TOOLS = {
 }
 
 
-def _normalize_path(path: str) -> str:
-    """Normalize a path to absolute path to prevent duplicates.
+def _normalize_path_standalone(path: str) -> str:
+    """Normalize a path to absolute path (standalone version for module-level use).
 
-    Handles:
-    - Converts relative paths to absolute paths
-    - Removes leading ./
-    - Normalizes path separators
-    - Removes trailing slashes (except for root)
-    - Collapses redundant separators and .. references
+    NOTE: This function resolves relative paths against CWD. For correct behavior
+    with workspace-relative paths, use ArtifactTrackerPlugin._normalize_path() instead.
 
     Args:
         path: The path to normalize
@@ -65,9 +61,7 @@ def _normalize_path(path: str) -> str:
     abs_path = os.path.abspath(path)
 
     # Use os.path.normpath to handle .., redundant separators, etc.
-    normalized = os.path.normpath(abs_path)
-
-    return normalized
+    return os.path.normpath(abs_path)
 
 
 def _detect_workspace_root() -> Optional[str]:
@@ -136,6 +130,37 @@ class ArtifactTrackerPlugin:
                     f.flush()
             except (IOError, OSError):
                 pass
+
+    def _normalize_path(self, path: str) -> str:
+        """Normalize a path to absolute path to prevent duplicates.
+
+        Handles:
+        - Converts relative paths to absolute paths (resolved against workspace_root)
+        - Removes leading ./
+        - Normalizes path separators
+        - Removes trailing slashes (except for root)
+        - Collapses redundant separators and .. references
+
+        Args:
+            path: The path to normalize
+
+        Returns:
+            Normalized absolute path string
+        """
+        if not path:
+            return path
+
+        # If already absolute, just normalize
+        if os.path.isabs(path):
+            return os.path.normpath(path)
+
+        # Resolve relative paths against workspace_root (not CWD)
+        if self._workspace_root:
+            abs_path = os.path.join(self._workspace_root, path)
+        else:
+            abs_path = os.path.abspath(path)
+
+        return os.path.normpath(abs_path)
 
     @property
     def name(self) -> str:
@@ -630,8 +655,8 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             return {"error": "description is required"}
 
         # Normalize paths to prevent duplicates (e.g., ./doc.md vs doc.md)
-        path = _normalize_path(path)
-        related_to = [_normalize_path(p) for p in related_to]
+        path = self._normalize_path(path)
+        related_to = [self._normalize_path(p) for p in related_to]
 
         # Check if already tracked
         if self._registry and self._registry.get_by_path(path):
@@ -681,7 +706,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             return {"error": "path is required"}
 
         # Normalize path for lookup
-        path = _normalize_path(path)
+        path = self._normalize_path(path)
 
         if not self._registry:
             return {"error": "Plugin not initialized"}
@@ -697,10 +722,10 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
 
         # Normalize relation paths
         for rel_path in args.get("add_related", []):
-            artifact.add_relation(_normalize_path(rel_path))
+            artifact.add_relation(self._normalize_path(rel_path))
 
         for rel_path in args.get("remove_related", []):
-            artifact.remove_relation(_normalize_path(rel_path))
+            artifact.remove_relation(self._normalize_path(rel_path))
 
         # Handle tags - "tags" replaces all, add_tags/remove_tags are incremental
         if "tags" in args:
@@ -789,7 +814,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             return {"error": "reason is required"}
 
         # Normalize path for lookup
-        path = _normalize_path(path)
+        path = self._normalize_path(path)
 
         if not self._registry:
             return {"error": "Plugin not initialized"}
@@ -833,7 +858,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             return {"error": "Either 'path' or 'paths' is required"}
 
         # Normalize all paths
-        paths_to_ack = [_normalize_path(p) for p in paths_to_ack]
+        paths_to_ack = [self._normalize_path(p) for p in paths_to_ack]
 
         if not self._registry:
             return {"error": "Plugin not initialized"}
@@ -893,7 +918,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             return {"error": "path is required"}
 
         # Normalize path for lookup
-        path = _normalize_path(path)
+        path = self._normalize_path(path)
         display_path = self._to_display_path(path)
 
         if not self._registry:
@@ -967,7 +992,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             return {"error": "Either 'path' or 'paths' is required"}
 
         # Normalize all paths
-        paths_to_remove = [_normalize_path(p) for p in paths_to_remove]
+        paths_to_remove = [self._normalize_path(p) for p in paths_to_remove]
 
         if not self._registry:
             return {"error": "Plugin not initialized"}
@@ -1025,7 +1050,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             return {"error": "reason is required"}
 
         # Normalize path for matching
-        path = _normalize_path(path)
+        path = self._normalize_path(path)
         display_path = self._to_display_path(path)
 
         if not self._registry:
@@ -1249,7 +1274,7 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
                     file_paths.append(change["file"])
 
         self._trace(f"_extract_file_paths: returning {len(file_paths)} paths: {file_paths}")
-        return [_normalize_path(p) for p in file_paths if p]
+        return [self._normalize_path(p) for p in file_paths if p]
 
     def _flag_dependent_for_review(self, dep_path: str, source_path: str) -> None:
         """Flag a dependent file for review.
@@ -1261,8 +1286,8 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
             dep_path: Path to the dependent file.
             source_path: Path to the source file that changed.
         """
-        dep_path = _normalize_path(dep_path)
-        source_path = _normalize_path(source_path)
+        dep_path = self._normalize_path(dep_path)
+        source_path = self._normalize_path(source_path)
 
         # Check if already tracked
         artifact = self._registry.get_by_path(dep_path)
