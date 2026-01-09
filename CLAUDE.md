@@ -216,6 +216,41 @@ async for event in client.events():
 5. Access history when needed: `history = jaato.get_history()`
 6. Reset session: `jaato.reset_session()` or `jaato.reset_session(modified_history)`
 
+### Parallel Tool Execution
+
+When a model returns multiple function calls in a single response, jaato executes them
+in parallel using a thread pool. This significantly reduces latency for turns with
+multiple independent tool calls.
+
+```
+Model Response: [read_file(a.py), read_file(b.py), grep(pattern)]
+                              │
+              ┌───────────────┼───────────────┐
+              ▼               ▼               ▼
+        ┌─────────┐     ┌─────────┐     ┌─────────┐
+        │Thread 1 │     │Thread 2 │     │Thread 3 │
+        │read a.py│     │read b.py│     │  grep   │
+        └────┬────┘     └────┬────┘     └────┬────┘
+              │               │               │
+              └───────────────┴───────────────┘
+                              │
+                      [All results]
+                              │
+                              ▼
+                    Send to model together
+```
+
+**Configuration:**
+- Enabled by default (`JAATO_PARALLEL_TOOLS=true`)
+- Set `JAATO_PARALLEL_TOOLS=false` to disable
+- Single tool calls always execute sequentially (no thread pool overhead)
+- Maximum 8 concurrent tools per turn
+
+**Thread-safe callbacks:**
+- Each parallel tool gets its own output callback via thread-local storage
+- UI hooks (`on_tool_call_start`, `on_tool_output`, `on_tool_call_end`) are thread-safe
+- Telemetry spans are created per-tool with `jaato.tool.parallel=True` attribute
+
 ### Subagent Architecture
 
 Subagents share the parent's `JaatoRuntime` but get their own `JaatoSession`:
@@ -480,6 +515,7 @@ Configuration options via `ProviderConfig.extra`:
 | `AI_EXECUTE_TOOLS` | Allow generic tool execution (`1`/`true`) |
 | `LEDGER_PATH` | Output path for token accounting JSONL |
 | `JAATO_GC_THRESHOLD` | GC trigger threshold percentage (default: 80.0) |
+| `JAATO_PARALLEL_TOOLS` | Enable parallel tool execution (default: `true`) |
 
 ### Rate Limiting
 | Variable | Purpose |
