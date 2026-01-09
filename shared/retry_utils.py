@@ -65,6 +65,21 @@ try:
 except ImportError:
     GITHUB_RATE_LIMIT_CLASSES = ()
 
+# Import Anthropic errors for detection
+try:
+    from .plugins.model_provider.anthropic.errors import (
+        RateLimitError as AnthropicRateLimitError,
+        OverloadedError as AnthropicOverloadedError,
+    )
+    ANTHROPIC_RATE_LIMIT_CLASSES: Tuple[Type[Exception], ...] = (AnthropicRateLimitError,)
+    ANTHROPIC_TRANSIENT_CLASSES: Tuple[Type[Exception], ...] = (
+        AnthropicRateLimitError,
+        AnthropicOverloadedError,
+    )
+except ImportError:
+    ANTHROPIC_RATE_LIMIT_CLASSES = ()
+    ANTHROPIC_TRANSIENT_CLASSES = ()
+
 
 T = TypeVar('T')
 
@@ -111,6 +126,12 @@ def classify_error(exc: Exception) -> Dict[str, bool]:
     # Check GitHub rate limit
     elif GITHUB_RATE_LIMIT_CLASSES and isinstance(exc, GITHUB_RATE_LIMIT_CLASSES):
         rate_like = True
+    # Check Anthropic exceptions
+    elif ANTHROPIC_TRANSIENT_CLASSES and isinstance(exc, ANTHROPIC_TRANSIENT_CLASSES):
+        if ANTHROPIC_RATE_LIMIT_CLASSES and isinstance(exc, ANTHROPIC_RATE_LIMIT_CLASSES):
+            rate_like = True
+        else:
+            infra_like = True
     else:
         # Fallback: check error message for common patterns
         lower = str(exc).lower()
