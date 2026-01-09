@@ -274,9 +274,25 @@ class TemplatePlugin:
 manually writing code. Templates ensure consistency, reduce errors, and follow established
 patterns. Manual coding when a template exists is NOT acceptable.
 
+### IMPORTANT: Variable Names Are Provided Automatically
+
+When a template is detected and extracted, the system automatically injects an annotation
+showing the **exact variable names** required. Look for annotations like:
+
+```
+[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: .jaato/templates/Entity.java.tpl
+  Syntax: jinja2
+  Required variables: [entity_name, fields, package]
+  ...
+```
+
+**USE THESE EXACT VARIABLE NAMES** when calling renderTemplateToFile. Do NOT guess or
+invent variable names - use the ones shown in the annotation.
+
 ### TEMPLATE TOOLS:
 
 **renderTemplateToFile(output_path, template_path, variables)** - PREFERRED tool for file generation
+  - Use the EXACT variable names from the template annotation
   - Automatically creates parent directories - NO mkdir needed!
   - Supports both Jinja2 and Mustache/Handlebars syntax (auto-detected)
   - Checks if file exists (use overwrite=true to replace)
@@ -290,11 +306,11 @@ patterns. Manual coding when a template exists is NOT acceptable.
   - Shows all templates extracted in this session
   - Auto-approved (no permission required)
 
-**listTemplateVariables(template_path)** - List variables required by a template
-  - Call BEFORE renderTemplateToFile to know exactly what variables to provide
-  - Returns list of variable names that need to be substituted
-  - Supports both Jinja2 and Mustache templates (auto-detected)
+**listTemplateVariables(template_path)** - Get required variables for a template (OPTIONAL)
+  - Use this if you need to re-check the variables for a template
+  - Helpful if the original annotation is no longer visible in context
   - Auto-approved (no permission required)
+  - Returns: {"variables": ["var1", "var2", ...], "syntax": "jinja2|mustache", "count": N}
 
 ### CRITICAL: Directory Creation Rules
 
@@ -547,20 +563,32 @@ Template rendering requires approval since it writes files."""
             # Always add annotation for available templates (new or existing)
             if template_path:
                 variables = self._extract_variables(content)
+                syntax = self._detect_template_syntax(content)
                 extracted.append((content_hash, template_path, variables))
 
-                # Build annotation
+                # Build annotation with COMPLETE variable list
                 rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
-                var_list = ", ".join(variables[:5])
-                if len(variables) > 5:
-                    var_list += f", ... ({len(variables)} total)"
+
+                # Show ALL variables so the model knows exactly what to provide
+                if variables:
+                    var_list = ", ".join(variables)
+                    var_dict_example = ", ".join(f'"{v}": <value>' for v in variables[:3])
+                    if len(variables) > 3:
+                        var_dict_example += ", ..."
+                else:
+                    var_list = "(none detected)"
+                    var_dict_example = ""
 
                 annotations.append(
                     f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
-                    f"  Variables: {var_list or '(none detected)'}\n"
+                    f"  Syntax: {syntax}\n"
+                    f"  Required variables: [{var_list}]\n"
                     f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                    f"  Code generated without this template will be REJECTED as non-compliant.\n"
-                    f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
+                    f"  Call: renderTemplateToFile(\n"
+                    f"      template_path=\"{rel_path}\",\n"
+                    f"      variables={{{var_dict_example}}},\n"
+                    f"      output_path=\"<your-output-file>\"\n"
+                    f"  )"
                 )
 
         if not annotations:
@@ -672,19 +700,32 @@ Template rendering requires approval since it writes files."""
             # Always add annotation for available templates (new or existing)
             if template_path:
                 variables = self._extract_variables(content)
+                syntax = self._detect_template_syntax(content)
                 extracted.append((content_hash, template_path, variables))
 
+                # Build annotation with COMPLETE variable list
                 rel_path = template_path.relative_to(self._base_path) if template_path.is_relative_to(self._base_path) else template_path
-                var_list = ", ".join(variables[:5])
-                if len(variables) > 5:
-                    var_list += f", ... ({len(variables)} total)"
+
+                # Show ALL variables so the model knows exactly what to provide
+                if variables:
+                    var_list = ", ".join(variables)
+                    var_dict_example = ", ".join(f'"{v}": <value>' for v in variables[:3])
+                    if len(variables) > 3:
+                        var_dict_example += ", ..."
+                else:
+                    var_list = "(none detected)"
+                    var_dict_example = ""
 
                 annotations.append(
                     f"[!] **TEMPLATE AVAILABLE - MANDATORY USAGE**: {rel_path}\n"
-                    f"  Variables: {var_list or '(none detected)'}\n"
+                    f"  Syntax: {syntax}\n"
+                    f"  Required variables: [{var_list}]\n"
                     f"  **YOU MUST USE THIS TEMPLATE** instead of writing code manually.\n"
-                    f"  Code generated without this template will be REJECTED as non-compliant.\n"
-                    f"  Call: renderTemplate(template_path=\"{rel_path}\", variables={{...}}, output_path=\"...\")"
+                    f"  Call: renderTemplateToFile(\n"
+                    f"      template_path=\"{rel_path}\",\n"
+                    f"      variables={{{var_dict_example}}},\n"
+                    f"      output_path=\"<your-output-file>\"\n"
+                    f"  )"
                 )
 
         if not annotations:
@@ -881,17 +922,50 @@ Template rendering requires approval since it writes files."""
             return None, False
 
     def _extract_variables(self, content: str) -> List[str]:
-        """Extract variable names from template content."""
-        # Find all {{ variable }} patterns
+        """Extract variable names from template content.
+
+        Uses Jinja2's AST parser for accurate extraction from Jinja2 templates,
+        or regex for Mustache templates. This ensures the model knows exactly
+        which variables are required before rendering.
+
+        Args:
+            content: Template content string.
+
+        Returns:
+            Sorted list of variable names required by the template.
+        """
+        syntax = self._detect_template_syntax(content)
+
+        if syntax == "jinja2":
+            # Use Jinja2's AST parser for accurate variable extraction
+            try:
+                from jinja2 import Environment, meta
+                env = Environment()
+                ast = env.parse(content)
+                variables = meta.find_undeclared_variables(ast)
+                return sorted(list(variables))
+            except Exception:
+                # Fall back to regex if Jinja2 parsing fails
+                pass
+
+        # Regex fallback for Mustache or if Jinja2 parsing failed
+        if syntax == "mustache":
+            # Match simple variables {{var}}, excluding section markers and comments
+            matches = re.findall(r'\{\{([^#/^!}]+)\}\}', content)
+            variables = set()
+            for m in matches:
+                var = m.strip()
+                if var and var not in ('.', 'this'):
+                    variables.add(var)
+            return sorted(list(variables))
+
+        # Default regex for unknown syntax
         var_pattern = re.compile(r'\{\{\s*(\w+)')
         variables = set()
-
         for match in var_pattern.finditer(content):
             var_name = match.group(1)
-            # Filter out common Jinja2 built-ins
             if var_name not in ('if', 'else', 'elif', 'endif', 'for', 'endfor', 'loop', 'true', 'false', 'none'):
                 variables.add(var_name)
-
         return sorted(variables)
 
     # ==================== Template Rendering ====================
