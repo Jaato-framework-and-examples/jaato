@@ -480,19 +480,26 @@ class SubagentPlugin:
             "tasks to specialized subagents.\n\n"
             "ASYNC EXECUTION: spawn_subagent returns immediately with an agent_id. "
             "The subagent runs asynchronously in the background.\n\n"
-            "RECEIVING SUBAGENT OUTPUT: You will receive subagent output as "
-            "[SUBAGENT agent_id=X event=Y] messages injected into your conversation. "
-            "Events include:\n"
-            "- MODEL_OUTPUT: Text the subagent is generating\n"
-            "- TOOL_CALL: Tool the subagent is calling\n"
-            "- TOOL_OUTPUT: Output from subagent's tool execution\n"
-            "- COMPLETED: Subagent finished its turn successfully (includes final response)\n"
-            "- IDLE: Subagent is now idle and ready for more work or cleanup\n"
-            "- ERROR: Subagent encountered an error (abnormal termination)\n"
-            "- CANCELLED: Subagent was cancelled (abnormal termination)\n"
+            "CRITICAL - END YOUR TURN AFTER SPAWNING: After calling spawn_subagent, you MUST "
+            "end your turn immediately. Do NOT continue generating text. Do NOT write what you "
+            "think the subagent response might be. Just end your turn and WAIT for real events.\n\n"
+            "NEVER FABRICATE EVENTS: You must NEVER write '[SUBAGENT agent_id=... event=...]' "
+            "text yourself. These messages are ONLY sent TO you by the system when subagents "
+            "have status updates. If you generate this text yourself, you are hallucinating "
+            "a fake response that hasn't actually happened. The real events will arrive "
+            "automatically - just wait.\n\n"
+            "SUBAGENT EVENTS: You will receive status events as "
+            "[SUBAGENT agent_id=X event=Y] messages when subagents complete or need input. "
+            "Events you may receive:\n"
+            "- COMPLETED: Subagent finished its task (includes final response)\n"
+            "- IDLE: Subagent is ready for more work or cleanup\n"
+            "- ERROR: Subagent encountered an error\n"
+            "- CANCELLED: Subagent was cancelled\n"
             "- CLARIFICATION_REQUESTED: Subagent needs clarification (you must respond)\n"
             "- PERMISSION_REQUESTED: Subagent needs permission approval (you must respond)\n\n"
-            "SUBAGENT TURN LIFECYCLE - HOW NOTIFICATIONS WORK:\n"
+            "Note: You do NOT receive progress events (MODEL_OUTPUT, TOOL_CALL, TOOL_OUTPUT) - "
+            "those are shown directly to the user in the subagent panel.\n\n"
+            "SUBAGENT TURN LIFECYCLE:\n"
             "When a subagent completes a turn SUCCESSFULLY, you receive events in this order:\n"
             "1. COMPLETED event - contains the subagent's final response for that turn\n"
             "2. IDLE event - 'Subagent X is now idle and ready for input'\n\n"
@@ -1286,7 +1293,7 @@ class SubagentPlugin:
             'success': True,
             'agent_id': agent_id,
             'status': 'spawned',
-            'message': f'Subagent {agent_id} spawned. You will receive [SUBAGENT agent_id={agent_id} event=...] messages as it executes. Wait for COMPLETED event before using results.'
+            'message': f'Subagent {agent_id} spawned and running in background. END YOUR TURN NOW. Do NOT continue generating text. Do NOT write fake completion events. Real events will be sent to you automatically.'
         }
 
     def _run_subagent_async(

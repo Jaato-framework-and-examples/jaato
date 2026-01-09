@@ -1288,6 +1288,22 @@ class JaatoServer:
                 lambda text: server.emit(MidTurnPromptInjectedEvent(text=text))
             )
 
+            # Set up callback for when child messages need continuation
+            # This triggers a new turn when subagent sends messages while parent is idle
+            def continuation_callback(child_messages: str):
+                # Only trigger if not already running a model call
+                if not server._model_running and child_messages:
+                    server._trace(f"CONTINUATION: Child messages drained ({len(child_messages)} chars), triggering new turn")
+                    # Signal main agent is active
+                    server.emit(AgentStatusChangedEvent(
+                        agent_id="main",
+                        status="active",
+                    ))
+                    # Start model thread with child messages as the prompt
+                    server._start_model_thread(child_messages)
+
+            session.set_continuation_callback(continuation_callback)
+
         def output_callback(source: str, text: str, mode: str) -> None:
             # Skip - output is routed through agent hooks
             pass

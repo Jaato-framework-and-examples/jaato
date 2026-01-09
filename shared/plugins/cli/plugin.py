@@ -522,7 +522,8 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
-                shell=use_shell
+                shell=use_shell,
+                cwd=self._workspace_root
             )
 
             # Collect output while streaming to callbacks
@@ -873,7 +874,8 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                     encoding='utf-8',
                     errors='replace',
                     env=env,
-                    shell=use_shell
+                    shell=use_shell,
+                    cwd=self._workspace_root
                 )
 
                 # Read output line by line and stream to callback
@@ -907,7 +909,8 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                         errors='replace',
                         check=False,
                         env=env,
-                        shell=True
+                        shell=True,
+                        cwd=self._workspace_root
                     )
                 else:
                     proc = subprocess.run(
@@ -918,7 +921,8 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                         errors='replace',
                         check=False,
                         env=env,
-                        shell=False
+                        shell=False,
+                        cwd=self._workspace_root
                     )
                 stdout = proc.stdout
                 stderr = proc.stderr

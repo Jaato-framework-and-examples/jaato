@@ -158,7 +158,10 @@ class ArtifactTrackerPlugin:
         if self._workspace_root:
             abs_path = os.path.join(self._workspace_root, path)
         else:
+            # WARNING: Falling back to CWD - this likely indicates a bug where
+            # workspace_root was not set or was unexpectedly reset
             abs_path = os.path.abspath(path)
+            self._trace(f"_normalize_path: WARNING - using CWD fallback for '{path}' -> '{abs_path}' (workspace_root={self._workspace_root!r})")
 
         return os.path.normpath(abs_path)
 
@@ -1318,8 +1321,8 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         Returns:
             Result with dependency summary appended.
         """
-        # Get basenames for readability
-        names = [os.path.basename(p) for p in dependents]
+        # Use workspace-relative paths for better context
+        names = [self._to_display_path(p) for p in dependents]
 
         if len(names) <= 5:
             files_str = ", ".join(names)
@@ -1342,10 +1345,10 @@ Example: `tests/test_api.py` has `related_to: ["src/api.py"]`
         if not dependents:
             return "no dependents found"
 
-        # Format each dependent, marking non-existent files
+        # Format each dependent with workspace-relative path, marking non-existent files
         formatted_names = []
         for p in dependents:
-            name = os.path.basename(p)
+            name = self._to_display_path(p)
             exists = os.path.exists(p)
             self._trace(f"_format_dependents_message: checking {p} exists={exists}")
             if not exists:
