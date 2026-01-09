@@ -1434,51 +1434,60 @@ class JaatoSession:
             # Set activity phase: we're about to wait for LLM response
             self._set_activity_phase(ActivityPhase.WAITING_FOR_LLM)
 
-            # Send message (streaming or batched)
-            if use_streaming:
-                # Track whether we've sent the first chunk (to use "write" vs "append")
-                first_chunk_sent = False
+            # Send message (streaming or batched) with telemetry
+            with self._telemetry.llm_span(
+                model=self._model_name or "unknown",
+                provider=self._provider.name if self._provider else "unknown",
+                streaming=use_streaming,
+            ) as llm_telemetry:
+                if use_streaming:
+                    # Track whether we've sent the first chunk (to use "write" vs "append")
+                    first_chunk_sent = False
 
-                # Streaming callback that routes to on_output and forwards to parent
-                def streaming_callback(chunk: str) -> None:
-                    nonlocal first_chunk_sent
-                    # Transition to STREAMING phase on first chunk
-                    if not first_chunk_sent:
-                        self._set_activity_phase(ActivityPhase.STREAMING)
-                    if on_output:
-                        # First chunk uses "write" to start block, subsequent use "append"
-                        mode = "append" if first_chunk_sent else "write"
-                        self._trace(f"SESSION_OUTPUT mode={mode} len={len(chunk)} preview={repr(chunk[:50])}")
-                        on_output("model", chunk, mode)
-                        first_chunk_sent = True
-                    # Forward model output to parent for real-time visibility
-                    self._forward_to_parent("MODEL_OUTPUT", chunk)
+                    # Streaming callback that routes to on_output and forwards to parent
+                    def streaming_callback(chunk: str) -> None:
+                        nonlocal first_chunk_sent
+                        # Transition to STREAMING phase on first chunk
+                        if not first_chunk_sent:
+                            self._set_activity_phase(ActivityPhase.STREAMING)
+                        if on_output:
+                            # First chunk uses "write" to start block, subsequent use "append"
+                            mode = "append" if first_chunk_sent else "write"
+                            self._trace(f"SESSION_OUTPUT mode={mode} len={len(chunk)} preview={repr(chunk[:50])}")
+                            on_output("model", chunk, mode)
+                            first_chunk_sent = True
+                        # Forward model output to parent for real-time visibility
+                        self._forward_to_parent("MODEL_OUTPUT", chunk)
 
-                self._trace(f"STREAMING on_usage_update={'set' if wrapped_usage_callback else 'None'}")
-                response, _retry_stats = with_retry(
-                    lambda: self._provider.send_message_streaming(
-                        message,
-                        on_chunk=streaming_callback,
-                        cancel_token=self._cancel_token,
-                        on_usage_update=wrapped_usage_callback
-                        # Note: on_function_call is intentionally NOT used here.
-                        # The SDK may deliver function calls before preceding text,
-                        # which would cause tool trees to appear in wrong positions.
-                        # Tool trees are displayed during parts processing instead.
-                    ),
-                    context="send_message_streaming",
-                    on_retry=self._on_retry,
-                    cancel_token=self._cancel_token
-                )
-            else:
-                response, _retry_stats = with_retry(
-                    lambda: self._provider.send_message(message),
-                    context="send_message",
-                    on_retry=self._on_retry,
-                    cancel_token=self._cancel_token
-                )
-            self._record_token_usage(response)
-            self._accumulate_turn_tokens(response, turn_data)
+                    self._trace(f"STREAMING on_usage_update={'set' if wrapped_usage_callback else 'None'}")
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.send_message_streaming(
+                            message,
+                            on_chunk=streaming_callback,
+                            cancel_token=self._cancel_token,
+                            on_usage_update=wrapped_usage_callback
+                            # Note: on_function_call is intentionally NOT used here.
+                            # The SDK may deliver function calls before preceding text,
+                            # which would cause tool trees to appear in wrong positions.
+                            # Tool trees are displayed during parts processing instead.
+                        ),
+                        context="send_message_streaming",
+                        on_retry=self._on_retry,
+                        cancel_token=self._cancel_token
+                    )
+                else:
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.send_message(message),
+                        context="send_message",
+                        on_retry=self._on_retry,
+                        cancel_token=self._cancel_token
+                    )
+                self._record_token_usage(response)
+                self._accumulate_turn_tokens(response, turn_data)
+                # Record token usage to telemetry span
+                if response.usage:
+                    llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
+                    llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
             self._trace(f"SESSION_STREAMING_COMPLETE parts_count={len(response.parts)} finish={response.finish_reason}")
 
             # Check for cancellation after initial message (including parent)
@@ -2175,43 +2184,52 @@ class JaatoSession:
         turn_data: Dict[str, Any]
     ) -> ProviderResponse:
         """Actually send tool results to the provider."""
-        if use_streaming:
-            # Track first chunk to use "write" for new block, "append" for continuation
-            first_chunk_after_tools = [False]  # Use list to allow mutation in closure
+        with self._telemetry.llm_span(
+            model=self._model_name or "unknown",
+            provider=self._provider.name if self._provider else "unknown",
+            streaming=use_streaming,
+        ) as llm_telemetry:
+            if use_streaming:
+                # Track first chunk to use "write" for new block, "append" for continuation
+                first_chunk_after_tools = [False]  # Use list to allow mutation in closure
 
-            def streaming_callback(chunk: str) -> None:
-                if on_output:
-                    # First chunk after tool results starts a new block
-                    mode = "append" if first_chunk_after_tools[0] else "write"
-                    self._trace(f"SESSION_TOOL_RESULT_OUTPUT mode={mode} len={len(chunk)} preview={repr(chunk[:50])}")
-                    on_output("model", chunk, mode)
-                    first_chunk_after_tools[0] = True
+                def streaming_callback(chunk: str) -> None:
+                    if on_output:
+                        # First chunk after tool results starts a new block
+                        mode = "append" if first_chunk_after_tools[0] else "write"
+                        self._trace(f"SESSION_TOOL_RESULT_OUTPUT mode={mode} len={len(chunk)} preview={repr(chunk[:50])}")
+                        on_output("model", chunk, mode)
+                        first_chunk_after_tools[0] = True
 
-            response, _retry_stats = with_retry(
-                lambda: self._provider.send_tool_results_streaming(
-                    tool_results,
-                    on_chunk=streaming_callback,
-                    cancel_token=self._cancel_token,
-                    on_usage_update=wrapped_usage_callback
-                    # Note: on_function_call is intentionally NOT used here.
-                    # See comment in send_message for explanation.
-                ),
-                context="send_tool_results_streaming",
-                on_retry=self._on_retry,
-                cancel_token=self._cancel_token
-            )
-        else:
-            response, _retry_stats = with_retry(
-                lambda: self._provider.send_tool_results(tool_results),
-                context="send_tool_results",
-                on_retry=self._on_retry,
-                cancel_token=self._cancel_token
-            )
+                response, _retry_stats = with_retry(
+                    lambda: self._provider.send_tool_results_streaming(
+                        tool_results,
+                        on_chunk=streaming_callback,
+                        cancel_token=self._cancel_token,
+                        on_usage_update=wrapped_usage_callback
+                        # Note: on_function_call is intentionally NOT used here.
+                        # See comment in send_message for explanation.
+                    ),
+                    context="send_tool_results_streaming",
+                    on_retry=self._on_retry,
+                    cancel_token=self._cancel_token
+                )
+            else:
+                response, _retry_stats = with_retry(
+                    lambda: self._provider.send_tool_results(tool_results),
+                    context="send_tool_results",
+                    on_retry=self._on_retry,
+                    cancel_token=self._cancel_token
+                )
 
-        self._record_token_usage(response)
-        self._accumulate_turn_tokens(response, turn_data)
+            self._record_token_usage(response)
+            self._accumulate_turn_tokens(response, turn_data)
+            # Record token usage to telemetry span
+            if response.usage:
+                llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
+                llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
 
-        return response
+            return response
 
     def _check_and_handle_mid_turn_prompt(
         self,
@@ -2276,44 +2294,53 @@ class JaatoSession:
         # Proactive rate limiting
         self._pacer.pace()
 
-        # Send the prompt to the model
-        if use_streaming:
-            first_chunk_sent = [False]
+        # Send the prompt to the model with telemetry
+        with self._telemetry.llm_span(
+            model=self._model_name or "unknown",
+            provider=self._provider.name if self._provider else "unknown",
+            streaming=use_streaming,
+        ) as llm_telemetry:
+            if use_streaming:
+                first_chunk_sent = [False]
 
-            def streaming_callback(chunk: str) -> None:
-                if on_output:
-                    mode = "append" if first_chunk_sent[0] else "write"
-                    self._trace(f"MID_TURN_RESPONSE mode={mode} len={len(chunk)}")
-                    on_output("model", chunk, mode)
-                    first_chunk_sent[0] = True
+                def streaming_callback(chunk: str) -> None:
+                    if on_output:
+                        mode = "append" if first_chunk_sent[0] else "write"
+                        self._trace(f"MID_TURN_RESPONSE mode={mode} len={len(chunk)}")
+                        on_output("model", chunk, mode)
+                        first_chunk_sent[0] = True
 
-            response, _retry_stats = with_retry(
-                lambda: self._provider.send_message_streaming(
-                    prompt,
-                    on_chunk=streaming_callback,
-                    cancel_token=self._cancel_token,
-                    on_usage_update=wrapped_usage_callback
-                ),
-                context="mid_turn_prompt_streaming",
-                on_retry=self._on_retry,
-                cancel_token=self._cancel_token
-            )
-        else:
-            response, _retry_stats = with_retry(
-                lambda: self._provider.send_message(prompt),
-                context="mid_turn_prompt",
-                on_retry=self._on_retry,
-                cancel_token=self._cancel_token
-            )
+                response, _retry_stats = with_retry(
+                    lambda: self._provider.send_message_streaming(
+                        prompt,
+                        on_chunk=streaming_callback,
+                        cancel_token=self._cancel_token,
+                        on_usage_update=wrapped_usage_callback
+                    ),
+                    context="mid_turn_prompt_streaming",
+                    on_retry=self._on_retry,
+                    cancel_token=self._cancel_token
+                )
+            else:
+                response, _retry_stats = with_retry(
+                    lambda: self._provider.send_message(prompt),
+                    context="mid_turn_prompt",
+                    on_retry=self._on_retry,
+                    cancel_token=self._cancel_token
+                )
 
-            # Emit response text if not streaming
-            if on_output and response.get_text():
-                on_output("model", response.get_text(), "write")
+                # Emit response text if not streaming
+                if on_output and response.get_text():
+                    on_output("model", response.get_text(), "write")
 
-        self._record_token_usage(response)
-        self._accumulate_turn_tokens(response, turn_data)
+            self._record_token_usage(response)
+            self._accumulate_turn_tokens(response, turn_data)
+            # Record token usage to telemetry span
+            if response.usage:
+                llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
+                llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
 
-        return response
+            return response
 
     def _build_tool_result(
         self,
@@ -2737,13 +2764,22 @@ class JaatoSession:
             # Proactive rate limiting: wait if needed before request
             self._pacer.pace()
 
-            response, _retry_stats = with_retry(
-                lambda: self._provider.send_message_with_parts(parts),
-                context="send_message_with_parts",
-                on_retry=self._on_retry
-            )
-            self._record_token_usage(response)
-            self._accumulate_turn_tokens(response, turn_data)
+            with self._telemetry.llm_span(
+                model=self._model_name or "unknown",
+                provider=self._provider.name if self._provider else "unknown",
+                streaming=False,
+            ) as llm_telemetry:
+                response, _retry_stats = with_retry(
+                    lambda: self._provider.send_message_with_parts(parts),
+                    context="send_message_with_parts",
+                    on_retry=self._on_retry
+                )
+                self._record_token_usage(response)
+                self._accumulate_turn_tokens(response, turn_data)
+                # Record token usage to telemetry span
+                if response.usage:
+                    llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
+                    llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
 
             from .plugins.model_provider.types import FinishReason
             if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE):
@@ -2827,13 +2863,22 @@ class JaatoSession:
 
                 # Send tool results back (with retry for rate limits)
                 self._pacer.pace()  # Proactive rate limiting
-                response, _retry_stats = with_retry(
-                    lambda: self._provider.send_tool_results(tool_results),
-                    context="send_tool_results",
-                    on_retry=self._on_retry
-                )
-                self._record_token_usage(response)
-                self._accumulate_turn_tokens(response, turn_data)
+                with self._telemetry.llm_span(
+                    model=self._model_name or "unknown",
+                    provider=self._provider.name if self._provider else "unknown",
+                    streaming=False,
+                ) as llm_telemetry:
+                    response, _retry_stats = with_retry(
+                        lambda: self._provider.send_tool_results(tool_results),
+                        context="send_tool_results",
+                        on_retry=self._on_retry
+                    )
+                    self._record_token_usage(response)
+                    self._accumulate_turn_tokens(response, turn_data)
+                    # Record token usage to telemetry span
+                    if response.usage:
+                        llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
+                        llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
                 function_calls = list(response.function_calls) if response.function_calls else []
 
             if response.text and on_output:
