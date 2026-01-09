@@ -43,6 +43,7 @@ from shared import (
     TodoPlugin,
     active_cert_bundle,
 )
+from shared.message_queue import SourceType
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
 from shared.plugins.base import parse_command_args
 from shared.plugins.gc import load_gc_from_file
@@ -1242,10 +1243,10 @@ class JaatoServer:
             return
 
         if self._model_running:
-            # Inject directly into the session's queue
+            # Inject directly into the session's queue (USER source - high priority)
             if self._jaato:
                 session = self._jaato.get_session()
-                session.inject_prompt(text)
+                session.inject_prompt(text, source_id="user", source_type=SourceType.USER)
                 self.emit(MidTurnPromptQueuedEvent(
                     text=text,
                     position_in_queue=0,
@@ -1286,6 +1287,22 @@ class JaatoServer:
             session.set_prompt_injected_callback(
                 lambda text: server.emit(MidTurnPromptInjectedEvent(text=text))
             )
+
+            # Set up callback for when child messages need continuation
+            # This triggers a new turn when subagent sends messages while parent is idle
+            def continuation_callback(child_messages: str):
+                # Only trigger if not already running a model call
+                if not server._model_running and child_messages:
+                    server._trace(f"CONTINUATION: Child messages drained ({len(child_messages)} chars), triggering new turn")
+                    # Signal main agent is active
+                    server.emit(AgentStatusChangedEvent(
+                        agent_id="main",
+                        status="active",
+                    ))
+                    # Start model thread with child messages as the prompt
+                    server._start_model_thread(child_messages)
+
+            session.set_continuation_callback(continuation_callback)
 
         def output_callback(source: str, text: str, mode: str) -> None:
             # Skip - output is routed through agent hooks

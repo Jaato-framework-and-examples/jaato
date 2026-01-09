@@ -11,6 +11,7 @@ from .models import (
     Question,
     QuestionType,
 )
+from ...message_queue import SourceType
 
 
 class ClarificationChannel(ABC):
@@ -812,10 +813,12 @@ class ParentBridgedChannel(ClarificationChannel):
         if forward_method:
             forward_method("CLARIFICATION_REQUESTED", formatted_request)
         else:
-            # Fallback: direct inject to parent
+            # Fallback: direct inject to parent (CHILD source - from subagent)
+            agent_id = getattr(self._session, '_agent_id', 'unknown')
             parent_session.inject_prompt(
-                f"[SUBAGENT agent_id={getattr(self._session, '_agent_id', 'unknown')} "
-                f"event=CLARIFICATION_REQUESTED]\n{formatted_request}"
+                f"[SUBAGENT agent_id={agent_id} event=CLARIFICATION_REQUESTED]\n{formatted_request}",
+                source_id=agent_id,
+                source_type=SourceType.CHILD
             )
 
         # Wait for response

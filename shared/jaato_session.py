@@ -6,12 +6,13 @@ while sharing resources from the parent JaatoRuntime.
 
 import json
 import os
-import queue
 import re
 import tempfile
 from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+
+from .message_queue import MessageQueue, QueuedMessage, SourceType
 
 from .ai_tool_runner import ToolExecutor
 from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     from .jaato_runtime import JaatoRuntime
     from .plugins.model_provider.base import ModelProviderPlugin
     from .plugins.subagent.ui_hooks import AgentUIHooks
+    from .plugins.telemetry import TelemetryPlugin
 
 # Import framework instruction for tool result injection
 from .jaato_runtime import _TASK_COMPLETION_INSTRUCTION
@@ -165,9 +167,11 @@ class JaatoSession:
         # Terminal width for formatting (used by enrichment notifications)
         self._terminal_width: int = 80
 
-        # Injection queue for receiving prompts from parent/user mid-turn
-        # This is the core mechanism for async agent communication
-        self._injection_queue: queue.Queue[str] = queue.Queue()
+        # Priority-aware message queue for agent communication
+        # Uses double-linked list for efficient mid-queue removal of parent messages
+        # Parent/user messages: processed mid-turn (high priority)
+        # Child messages: processed when idle (lower priority)
+        self._message_queue: MessageQueue = MessageQueue()
 
         # Parent session for output forwarding (subagent -> parent visibility)
         # When set, all output events are forwarded to parent's injection queue
@@ -177,11 +181,24 @@ class JaatoSession:
         # Used by server to emit MidTurnPromptInjectedEvent
         self._on_prompt_injected: Optional[Callable[[str], None]] = None
 
+        # Callback when continuation is needed (child messages received while idle)
+        # Used by server to trigger a new turn when subagent sends messages
+        # Callback receives the collected child message text as argument
+        self._on_continuation_needed: Optional[Callable[[str], None]] = None
+
         # Current output callback for this turn (used by enrichment to route notifications)
         # Stored here so _enrich_tool_result_dict can pass it to registry.enrich_tool_result()
         # This ensures enrichment notifications go to the correct agent panel even when
         # multiple sessions share the same registry (e.g., subagents)
         self._current_output_callback: Optional['OutputCallback'] = None
+
+        # Turn counter for telemetry
+        self._turn_index: int = 0
+
+    @property
+    def _telemetry(self) -> 'TelemetryPlugin':
+        """Get telemetry plugin from runtime."""
+        return self._runtime.telemetry
 
     def set_terminal_width(self, width: int) -> None:
         """Set the terminal width for formatting.
@@ -337,56 +354,204 @@ class JaatoSession:
         """
         self._on_prompt_injected = callback
 
-    def inject_prompt(self, text: str) -> None:
+    def set_continuation_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Set callback for when continuation is needed after child messages.
+
+        This callback is invoked when child messages are drained while the
+        session is idle. The server uses this to trigger a new turn so the
+        model can react to subagent completion/error events.
+
+        Args:
+            callback: Function called with collected child message text.
+        """
+        self._on_continuation_needed = callback
+
+    def inject_prompt(
+        self,
+        text: str,
+        source_id: Optional[str] = None,
+        source_type: Optional[SourceType] = None
+    ) -> None:
         """Inject a prompt into this agent's queue.
 
-        The prompt will be processed at the next yield point in the chat loop
-        (e.g., after tool execution, after model response). This enables:
-        - User mid-turn input to main agent
-        - Parent agent sending messages to subagent
-        - Subagent returning results to parent
+        The prompt will be processed based on priority:
+        - Parent/user/system messages: processed mid-turn (high priority)
+        - Child messages: processed when agent becomes idle (lower priority)
 
         This method is thread-safe and can be called from any thread.
 
         Args:
             text: The prompt text to inject.
+            source_id: ID of the sender (defaults to "unknown").
+            source_type: Type of sender for priority (defaults to USER for
+                        backward compatibility with existing callers).
 
         Example:
+            # User input to main agent
+            session.inject_prompt("What's the status?", source_id="user", source_type=SourceType.USER)
+
             # Parent sending guidance to subagent
-            subagent_session.inject_prompt("Focus on the authentication module")
+            subagent_session.inject_prompt(
+                "Focus on the authentication module",
+                source_id="main",
+                source_type=SourceType.PARENT
+            )
 
             # Subagent returning result to parent
-            parent_session.inject_prompt("[SUBAGENT agent_id=researcher COMPLETED]\\nFound 3 issues")
+            parent_session.inject_prompt(
+                "[SUBAGENT agent_id=researcher event=COMPLETED]\\nFound 3 issues",
+                source_id="researcher",
+                source_type=SourceType.CHILD
+            )
         """
-        self._trace(f"INJECT_PROMPT: agent_id={self._agent_id}, queue_size_before={self._injection_queue.qsize()}, text={text[:50]}...")
-        self._injection_queue.put(text)
-        self._trace(f"INJECT_PROMPT: queue_size_after={self._injection_queue.qsize()}")
+        # Default to USER for backward compatibility
+        actual_source_id = source_id or "unknown"
+        actual_source_type = source_type or SourceType.USER
+
+        self._trace(
+            f"INJECT_PROMPT: agent_id={self._agent_id}, "
+            f"queue_size_before={len(self._message_queue)}, "
+            f"source_id={actual_source_id}, source_type={actual_source_type.value}, "
+            f"text={text[:50]}..."
+        )
+        # If this session is IDLE and we have a continuation callback, trigger it
+        # directly instead of queuing. This applies to:
+        # - CHILD messages: subagent status updates (COMPLETED, IDLE, etc.)
+        # - PARENT messages: instructions from parent agent (send_to_subagent)
+        # - USER messages: direct user input while idle
+        if (
+            self._activity_phase == ActivityPhase.IDLE
+            and not self._is_running
+            and self._on_continuation_needed
+        ):
+            self._trace(f"INJECT_PROMPT: Session is idle, triggering continuation for {actual_source_type.value} message")
+            # Notify for tracing (UI visibility)
+            if self._on_prompt_injected:
+                self._on_prompt_injected(text)
+            self._on_continuation_needed(text)
+        else:
+            # Session is busy - queue the message for later processing
+            # High-priority (PARENT/USER/SYSTEM) → processed mid-turn
+            # Low-priority (CHILD) → processed when becoming idle
+            self._message_queue.put(text, actual_source_id, actual_source_type)
+            self._trace(f"INJECT_PROMPT: queue_size_after={len(self._message_queue)}")
 
     def _forward_to_parent(self, event_type: str, content: str) -> None:
         """Forward an event to the parent session.
 
-        Forwards all event types so the parent model can monitor subagent progress
-        and react in real-time (e.g., provide guidance via send_to_subagent).
+        Only forwards essential events that require parent action. Progress events
+        (MODEL_OUTPUT, TOOL_CALL, TOOL_OUTPUT) are NOT forwarded to avoid cluttering
+        the parent's context and causing the model to echo them.
 
-        These messages are NOT echoed in the parent's output panel - the check in
-        _check_and_handle_mid_turn_prompt skips output for [SUBAGENT ...] messages.
-        The subagent's output is visible in its own UI panel via UI hooks.
+        These messages are queued with CHILD priority, meaning they will be
+        processed when the parent becomes idle (not mid-turn). This prevents
+        status updates from interrupting the parent's current work.
 
         Args:
             event_type: Type of event:
-                - MODEL_OUTPUT: Text the subagent is generating
-                - TOOL_CALL: Tool the subagent is calling
-                - TOOL_OUTPUT: Output from subagent's tool execution
+                - MODEL_OUTPUT: (NOT forwarded) Text the subagent is generating
+                - TOOL_CALL: (NOT forwarded) Tool the subagent is calling
+                - TOOL_OUTPUT: (NOT forwarded) Output from subagent's tool execution
                 - COMPLETED: Subagent finished its task
+                - IDLE: Subagent is idle and ready for input
                 - ERROR: Subagent encountered an error
                 - CANCELLED: Subagent was cancelled
                 - CLARIFICATION_REQUESTED: Subagent needs clarification from parent
                 - PERMISSION_REQUESTED: Subagent needs permission approval from parent
             content: Event content/payload.
         """
-        if self._parent_session:
-            message = f"[SUBAGENT agent_id={self._agent_id} event={event_type}]\n{content}"
-            self._parent_session.inject_prompt(message)
+        if not self._parent_session:
+            return
+
+        # Skip verbose progress events - parent doesn't need to see these
+        # and forwarding them causes the model to echo them in its output
+        if event_type in ("MODEL_OUTPUT", "TOOL_CALL", "TOOL_OUTPUT"):
+            return
+
+        message = f"[SUBAGENT agent_id={self._agent_id} event={event_type}]\n{content}"
+        self._parent_session.inject_prompt(
+            message,
+            source_id=self._agent_id,
+            source_type=SourceType.CHILD
+        )
+
+    def _drain_child_messages(self, on_output: Optional[OutputCallback] = None) -> str:
+        """Process all pending messages when becoming idle.
+
+        This drains both:
+        - Child messages: Status updates from subagents (COMPLETED, IDLE, etc.)
+        - High-priority messages: USER, PARENT, SYSTEM messages queued while busy
+
+        All queued messages are collected and returned so the caller can
+        send them to the model as the next prompt.
+
+        This method is called:
+        - In the finally block of send_message() before going idle
+        - In inject_prompt() when messages arrive while already idle
+
+        Args:
+            on_output: Optional callback for logging/tracing.
+
+        Returns:
+            Collected message text (empty string if no messages).
+        """
+        drained_count = 0
+        collected_messages: List[str] = []
+
+        # First drain high-priority messages (USER, PARENT, SYSTEM)
+        # These take precedence - if the user/parent sends a message, it should
+        # be processed before subagent status updates
+        while True:
+            msg = self._message_queue.pop_first_parent_message()
+            if msg is None:
+                break
+
+            drained_count += 1
+            collected_messages.append(msg.text)
+            self._trace(
+                f"DRAIN_PRIORITY_MESSAGE: agent_id={self._agent_id}, "
+                f"source_type={msg.source_type.value}, source_id={msg.source_id}, "
+                f"text={msg.text[:100]}..."
+            )
+
+            # Log the message for tracing (UI visibility)
+            if self._on_prompt_injected:
+                self._on_prompt_injected(msg.text)
+
+        # Then drain child messages (subagent status updates)
+        # These are lower priority and processed after user/parent messages
+        while True:
+            msg = self._message_queue.pop_first_child_message()
+            if msg is None:
+                break
+
+            drained_count += 1
+            collected_messages.append(msg.text)
+            self._trace(
+                f"DRAIN_CHILD_MESSAGE: agent_id={self._agent_id}, "
+                f"source_id={msg.source_id}, text={msg.text[:100]}..."
+            )
+
+            # Log the child message for tracing (UI visibility)
+            if self._on_prompt_injected:
+                self._on_prompt_injected(msg.text)
+
+        collected_text = "\n\n".join(collected_messages)
+
+        if drained_count > 0:
+            self._trace(f"DRAIN_MESSAGES: Processed {drained_count} messages total")
+
+            # If we're idle and drained messages, the model needs to react
+            # Trigger continuation callback so server can start a new turn
+            if (
+                self._activity_phase == ActivityPhase.IDLE
+                and not self._is_running
+                and self._on_continuation_needed
+            ):
+                self._trace(f"DRAIN_MESSAGES: Triggering continuation callback with {len(collected_text)} chars")
+                self._on_continuation_needed(collected_text)
+
+        return collected_text
 
     # ==================== Cancellation Support ====================
 
@@ -896,13 +1061,18 @@ class JaatoSession:
 
         try:
             # Use same pattern as subagent communication: inject if busy, send if idle
+            # CHILD source type - will be processed when parent is idle
             if self._parent_session.is_running:
-                # Parent is busy - queue for mid-turn processing
-                self._parent_session.inject_prompt(formatted_context)
+                # Parent is busy - queue for idle processing
+                self._parent_session.inject_prompt(
+                    formatted_context,
+                    source_id=self._agent_id,
+                    source_type=SourceType.CHILD
+                )
                 return {
                     'success': True,
                     'status': 'queued',
-                    'message': 'Context queued for parent. Will be processed at next yield point.',
+                    'message': 'Context queued for parent. Will be processed when parent is idle.',
                     'shared': {
                         'files': list(files.keys()) if files else [],
                         'findings_count': len(findings) if findings else 0,
@@ -912,7 +1082,11 @@ class JaatoSession:
 
             # Parent is idle - this shouldn't normally happen (subagent runs while parent waits)
             # But handle it gracefully by injecting anyway
-            self._parent_session.inject_prompt(formatted_context)
+            self._parent_session.inject_prompt(
+                formatted_context,
+                source_id=self._agent_id,
+                source_type=SourceType.CHILD
+            )
             return {
                 'success': True,
                 'status': 'sent',
@@ -1053,41 +1227,61 @@ class JaatoSession:
 
         self._trace(f"SESSION_SEND_MESSAGE len={len(message)} streaming={self._use_streaming}")
 
-        # Check and perform GC if needed (pre-send)
-        if self._gc_plugin and self._gc_config and self._gc_config.check_before_send:
-            self._maybe_collect_before_send()
+        # Increment turn counter
+        self._turn_index += 1
 
-        # Reset proactive GC tracking for this turn
-        self._gc_threshold_crossed = False
-        self._gc_threshold_callback = on_gc_threshold
+        # Wrap entire turn with telemetry span
+        with self._telemetry.turn_span(
+            session_id=self._agent_id,
+            agent_type=self._agent_type,
+            agent_name=self._agent_name,
+            turn_index=self._turn_index,
+        ) as turn_span:
+            # Check and perform GC if needed (pre-send)
+            if self._gc_plugin and self._gc_config and self._gc_config.check_before_send:
+                self._maybe_collect_before_send()
 
-        # Store output callback for this turn so enrichment can use it directly
-        # This avoids the race condition where concurrent sessions overwrite
-        # the shared registry callback
-        self._current_output_callback = on_output
+            # Reset proactive GC tracking for this turn
+            self._gc_threshold_crossed = False
+            self._gc_threshold_callback = on_gc_threshold
 
-        # Wrap usage callback to check GC threshold
-        wrapped_usage_callback = self._wrap_usage_callback_with_gc_check(on_usage_update)
+            # Store output callback for this turn so enrichment can use it directly
+            # This avoids the race condition where concurrent sessions overwrite
+            # the shared registry callback
+            self._current_output_callback = on_output
 
-        # Set output callback on registry BEFORE prompt enrichment
-        # so enrichment notifications are visible to the user
-        if self._runtime.registry and on_output:
-            self._runtime.registry.set_output_callback(on_output, self._terminal_width)
+            # Wrap usage callback to check GC threshold
+            wrapped_usage_callback = self._wrap_usage_callback_with_gc_check(on_usage_update)
 
-        # Run prompt enrichment if registry is available
-        processed_message = self._enrich_and_clean_prompt(message)
+            # Set output callback on registry BEFORE prompt enrichment
+            # so enrichment notifications are visible to the user
+            if self._runtime.registry and on_output:
+                self._runtime.registry.set_output_callback(on_output, self._terminal_width)
 
-        response = self._run_chat_loop(processed_message, on_output, wrapped_usage_callback)
+            # Run prompt enrichment if registry is available
+            processed_message = self._enrich_and_clean_prompt(message)
 
-        # Proactive GC: if threshold was crossed during streaming, trigger GC now
-        if self._gc_threshold_crossed and self._gc_plugin and self._gc_config:
-            self._trace("PROACTIVE_GC: Threshold crossed during streaming, triggering post-turn GC")
-            self._maybe_collect_after_turn()
+            try:
+                response = self._run_chat_loop(processed_message, on_output, wrapped_usage_callback)
+                turn_span.set_status_ok()
+            except Exception as e:
+                turn_span.record_exception(e)
+                turn_span.set_status_error(str(e))
+                raise
 
-        # Notify session plugin
-        self._notify_session_turn_complete()
+            # Record turn completion attributes
+            turn_span.set_attribute("jaato.cancelled", self._is_cancelled())
+            turn_span.set_attribute("jaato.streaming", self._use_streaming)
 
-        return response
+            # Proactive GC: if threshold was crossed during streaming, trigger GC now
+            if self._gc_threshold_crossed and self._gc_plugin and self._gc_config:
+                self._trace("PROACTIVE_GC: Threshold crossed during streaming, triggering post-turn GC")
+                self._maybe_collect_after_turn()
+
+            # Notify session plugin
+            self._notify_session_turn_complete()
+
+            return response
 
     def _wrap_usage_callback_with_gc_check(
         self,
@@ -1190,6 +1384,7 @@ class JaatoSession:
         self._cancel_token = CancelToken()
         self._is_running = True
         cancellation_notified = False  # Track if we've already shown cancellation message
+        terminal_event_sent = False  # Track if abnormal termination (CANCELLED/ERROR) occurred
 
         # Track tokens and timing
         turn_start = datetime.now()
@@ -1331,7 +1526,7 @@ class JaatoSession:
                     "Do NOT describe or re-read files. Execute the tool call you just mentioned directly. "
                     "Your next response MUST start with the function call, not text.</hidden>"
                 )
-                self._injection_queue.put(nudge_prompt)
+                self._message_queue.put(nudge_prompt, "system", SourceType.SYSTEM)
                 # Process the injected prompt to get a new response
                 nudge_response = self._check_and_handle_mid_turn_prompt(
                     use_streaming, on_output, wrapped_usage_callback, turn_data
@@ -1466,27 +1661,44 @@ class JaatoSession:
                     # (otherwise we'd break the tool_use -> tool_result sequence)
                     response_has_fc = any(p.function_call for p in response.parts)
 
-                    # Handle edge case: TOOL_USE without function calls after tool results in main loop
+                    # Handle edge case: TOOL_USE without function calls, or UNKNOWN with empty response
+                    # Both indicate the model didn't properly continue after tool results
+                    response_is_empty = not response.parts or all(
+                        not p.text and not p.function_call for p in response.parts
+                    )
+                    needs_nudge = (
+                        (not response_has_fc and response.finish_reason == FinishReason.TOOL_USE) or
+                        (response.finish_reason == FinishReason.UNKNOWN and response_is_empty)
+                    )
                     main_loop_nudge_attempts = 0
-                    while (not response_has_fc and response.finish_reason == FinishReason.TOOL_USE
-                           and main_loop_nudge_attempts < max_tool_use_nudge_attempts):
+                    while needs_nudge and main_loop_nudge_attempts < max_tool_use_nudge_attempts:
                         main_loop_nudge_attempts += 1
-                        self._trace(f"TOOL_USE_WITHOUT_CALL: In main loop after tool results, no function call (attempt {main_loop_nudge_attempts}/{max_tool_use_nudge_attempts})")
+                        nudge_reason = "TOOL_USE without function call" if response.finish_reason == FinishReason.TOOL_USE else "UNKNOWN with empty response"
+                        self._trace(f"NUDGE_REQUIRED: {nudge_reason} (attempt {main_loop_nudge_attempts}/{max_tool_use_nudge_attempts})")
                         nudge_prompt = (
-                            "<hidden>Your response indicated TOOL_USE but contained no function call. "
-                            "Do NOT describe or re-read files. Execute the tool call you just mentioned directly. "
-                            "Your next response MUST start with the function call, not text.</hidden>"
+                            "<hidden>Your previous response was incomplete or empty. "
+                            "You were in the middle of a task. Continue executing your plan. "
+                            "Do NOT describe or re-read files. Execute the next tool call directly. "
+                            "Your next response MUST continue the task, not restart or summarize.</hidden>"
                         )
-                        self._injection_queue.put(nudge_prompt)
+                        self._message_queue.put(nudge_prompt, "system", SourceType.SYSTEM)
                         nudge_response = self._check_and_handle_mid_turn_prompt(
                             use_streaming, on_output, wrapped_usage_callback, turn_data
                         )
                         if nudge_response:
                             response = nudge_response
                             response_has_fc = any(p.function_call for p in response.parts)
-                            self._trace(f"TOOL_USE_NUDGE_RESULT: Got response, has_fc={response_has_fc}")
+                            # Recalculate whether we still need to nudge
+                            response_is_empty = not response.parts or all(
+                                not p.text and not p.function_call for p in response.parts
+                            )
+                            needs_nudge = (
+                                (not response_has_fc and response.finish_reason == FinishReason.TOOL_USE) or
+                                (response.finish_reason == FinishReason.UNKNOWN and response_is_empty)
+                            )
+                            self._trace(f"NUDGE_RESULT: Got response, has_fc={response_has_fc}, still_needs_nudge={needs_nudge}")
                         else:
-                            self._trace("TOOL_USE_NUDGE_NO_RESPONSE: Nudge did not produce a response")
+                            self._trace("NUDGE_NO_RESPONSE: Nudge did not produce a response")
                             break
 
                     if not response_has_fc:
@@ -1519,7 +1731,7 @@ class JaatoSession:
 
             # Final check for mid-turn prompts before completing the turn
             # This handles prompts that arrived while the model was generating its final response
-            self._trace(f"FINAL_MID_TURN_CHECK: Starting drain loop, queue_size={self._injection_queue.qsize()}")
+            self._trace(f"FINAL_MID_TURN_CHECK: Starting drain loop, queue_size={len(self._message_queue)}")
             while True:
                 mid_turn_response = self._check_and_handle_mid_turn_prompt(
                     use_streaming, on_output, wrapped_usage_callback, turn_data
@@ -1579,7 +1791,7 @@ class JaatoSession:
                             "Do NOT describe or re-read files. Execute the tool call you just mentioned directly. "
                             "Your next response MUST start with the function call, not text.</hidden>"
                         )
-                        self._injection_queue.put(nudge_prompt)
+                        self._message_queue.put(nudge_prompt, "system", SourceType.SYSTEM)
                         nudge_response = self._check_and_handle_mid_turn_prompt(
                             use_streaming, on_output, wrapped_usage_callback, turn_data
                         )
@@ -1633,7 +1845,7 @@ class JaatoSession:
                                 "Do NOT describe or re-read files. Execute the tool call you just mentioned directly. "
                                 "Your next response MUST start with the function call, not text.</hidden>"
                             )
-                            self._injection_queue.put(nudge_prompt)
+                            self._message_queue.put(nudge_prompt, "system", SourceType.SYSTEM)
                             nudge_response = self._check_and_handle_mid_turn_prompt(
                                 use_streaming, on_output, wrapped_usage_callback, turn_data
                             )
@@ -1661,7 +1873,7 @@ class JaatoSession:
 
             # Safety check: process any prompts that might have been added during the final iteration
             # This handles the race condition where prompts arrive just as the drain loop exits
-            final_queue_size = self._injection_queue.qsize()
+            final_queue_size = len(self._message_queue)
             if final_queue_size > 0:
                 self._trace(f"FINAL_MID_TURN_CHECK: Queue not empty after drain loop! size={final_queue_size}, processing remaining")
                 # Process remaining prompts (with a limit to prevent infinite loops)
@@ -1690,6 +1902,8 @@ class JaatoSession:
             # Forward completion to parent
             final_response = ''.join(accumulated_text) if accumulated_text else ''
             self._forward_to_parent("COMPLETED", final_response)
+            # Note: Do NOT set terminal_event_sent here - COMPLETED is a normal completion
+            # and should be followed by IDLE to signal the subagent is ready for more work
 
             return final_response
 
@@ -1697,6 +1911,7 @@ class JaatoSession:
             # Handle explicit cancellation exception
             # Note: Don't send on_output here - the explicit checks above already do
             self._forward_to_parent("CANCELLED", "Generation cancelled")
+            terminal_event_sent = True
             return "[Generation cancelled]"
 
         except Exception as exc:
@@ -1727,6 +1942,7 @@ class JaatoSession:
 
             # Forward error to parent for visibility
             self._forward_to_parent("ERROR", f"{exc_name}: {str(exc)}")
+            terminal_event_sent = True
 
             # Re-raise so caller can also handle if needed
             raise
@@ -1746,11 +1962,16 @@ class JaatoSession:
             self._set_activity_phase(ActivityPhase.IDLE)
 
             # Notify parent that this subagent is now idle
-            # This is a hidden status update so the parent knows we're ready for input
-            self._forward_to_parent(
-                "STATUS",
-                f"<hidden>Subagent {self._agent_id} is now idle and ready for input.</hidden>"
-            )
+            # IDLE should be sent after COMPLETED (subagent ready for more work/cleanup),
+            # but NOT after CANCELLED or ERROR (abnormal termination states).
+            # The terminal_event_sent flag is True for CANCELLED/ERROR, False for COMPLETED.
+            if not terminal_event_sent:
+                self._forward_to_parent("IDLE", f"Subagent {self._agent_id} is now idle and ready for input.")
+
+            # Self-drain: Process any pending child messages now that we're idle
+            # Child messages are status updates from subagents that were queued
+            # while we were busy. Process them before truly becoming idle.
+            self._drain_child_messages(on_output)
 
     def _execute_function_call_group(
         self,
@@ -1792,38 +2013,62 @@ class JaatoSession:
                 )
 
             fc_start = datetime.now()
-            if self._executor:
-                # Set up tool output callback for streaming output during execution
-                # Captures _name for use in the closure
-                def tool_output_callback(chunk: str, _call_id=fc.id, _name=name) -> None:
-                    if self._ui_hooks and _call_id:
-                        self._ui_hooks.on_tool_output(
-                            agent_id=self._agent_id,
-                            call_id=_call_id,
-                            chunk=chunk
-                        )
-                    # Forward tool output to parent for visibility
-                    self._forward_to_parent("TOOL_OUTPUT", f"[{_name}] {chunk}")
-                self._executor.set_tool_output_callback(tool_output_callback)
 
-                executor_result = self._executor.execute(name, args)
+            # Determine plugin type for telemetry
+            plugin_type = "unknown"
+            if self._runtime.registry:
+                plugin = self._runtime.registry.get_plugin_for_tool(name)
+                if plugin:
+                    plugin_type = getattr(plugin, 'plugin_type', type(plugin).__name__)
 
-                # Clear the callback after execution
-                self._executor.set_tool_output_callback(None)
-            else:
-                executor_result = (False, {"error": f"No executor registered for {name}"})
-            fc_end = datetime.now()
+            # Wrap tool execution with telemetry span
+            with self._telemetry.tool_span(
+                tool_name=name,
+                call_id=fc.id or "",
+                plugin_type=plugin_type,
+            ) as tool_span:
+                if self._executor:
+                    # Set up tool output callback for streaming output during execution
+                    # Captures _name for use in the closure
+                    def tool_output_callback(chunk: str, _call_id=fc.id, _name=name) -> None:
+                        if self._ui_hooks and _call_id:
+                            self._ui_hooks.on_tool_output(
+                                agent_id=self._agent_id,
+                                call_id=_call_id,
+                                chunk=chunk
+                            )
+                        # Forward tool output to parent for visibility
+                        self._forward_to_parent("TOOL_OUTPUT", f"[{_name}] {chunk}")
+                    self._executor.set_tool_output_callback(tool_output_callback)
 
-            # Determine success and error message from executor result
-            fc_success = True
-            fc_error_message = None
-            if isinstance(executor_result, tuple) and len(executor_result) == 2:
-                fc_success = executor_result[0]
-                if not fc_success and isinstance(executor_result[1], dict):
-                    fc_error_message = executor_result[1].get('error')
+                    executor_result = self._executor.execute(name, args)
+
+                    # Clear the callback after execution
+                    self._executor.set_tool_output_callback(None)
+                else:
+                    executor_result = (False, {"error": f"No executor registered for {name}"})
+
+                fc_end = datetime.now()
+
+                # Determine success and error message from executor result
+                fc_success = True
+                fc_error_message = None
+                if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                    fc_success = executor_result[0]
+                    if not fc_success and isinstance(executor_result[1], dict):
+                        fc_error_message = executor_result[1].get('error')
+
+                # Record tool execution attributes in telemetry
+                fc_duration = (fc_end - fc_start).total_seconds()
+                tool_span.set_attribute("jaato.tool.success", fc_success)
+                tool_span.set_attribute("jaato.tool.duration_seconds", fc_duration)
+                if fc_error_message:
+                    tool_span.set_attribute("jaato.tool.error", fc_error_message)
+                    tool_span.set_status_error(fc_error_message)
+                else:
+                    tool_span.set_status_ok()
 
             # Emit hook: tool ended
-            fc_duration = (fc_end - fc_start).total_seconds()
             if self._ui_hooks:
                 self._ui_hooks.on_tool_call_end(
                     agent_id=self._agent_id,
@@ -1980,12 +2225,16 @@ class JaatoSession:
         This is called at natural pause points during message processing
         (e.g., after tool execution, after receiving model response).
 
-        Prompts can come from:
-        - User input (via inject_prompt from server)
-        - Parent agent (via inject_prompt for guidance)
-        - Child agents (via inject_prompt for results/output)
+        Mid-turn processing only handles HIGH PRIORITY messages:
+        - User input (SourceType.USER)
+        - Parent agent guidance (SourceType.PARENT)
+        - System messages (SourceType.SYSTEM)
 
-        If a mid-turn prompt is pending, this method:
+        Child messages (SourceType.CHILD) - subagent status updates - are
+        left in the queue and processed when the agent becomes idle via
+        _drain_child_messages().
+
+        If a high-priority prompt is pending, this method:
         1. Emits the prompt as user output
         2. Sends it to the model as a new user message
         3. Returns the model's response
@@ -1999,42 +2248,28 @@ class JaatoSession:
         Returns:
             The model's response if a prompt was handled, None otherwise.
         """
-        # Process queue items, skipping subagent messages until we find a real prompt
-        # or the queue is empty. Subagent messages are for logging/visibility only.
-        while True:
-            # Check internal injection queue
-            try:
-                prompt = self._injection_queue.get_nowait()
-            except queue.Empty:
-                self._trace("MID_TURN_PROMPT: Queue empty, returning None")
-                return None
+        # Only process high-priority messages mid-turn (parent/user/system)
+        # Child messages (subagent status updates) wait until we're idle
+        msg = self._message_queue.pop_first_parent_message()
+        if msg is None:
+            self._trace("MID_TURN_PROMPT: No high-priority messages, returning None")
+            return None
 
-            self._trace(f"MID_TURN_PROMPT: Handling injected prompt: {prompt[:100]}...")
+        prompt = msg.text
+        self._trace(
+            f"MID_TURN_PROMPT: Handling prompt from {msg.source_type.value}:{msg.source_id}: "
+            f"{prompt[:100]}..."
+        )
 
-            # Notify that prompt is being injected (for UI to remove from pending bar)
-            if self._on_prompt_injected:
-                self._on_prompt_injected(prompt)
-
-            # Check if this is a subagent message (for logging/visibility, not model prompts)
-            # Subagent messages are forwarded for tracing but the model shouldn't respond to them
-            # The parent model gets subagent results via spawn_subagent tool response
-            is_subagent_message = prompt.startswith("<subagent_event ") or prompt.startswith("[SUBAGENT ")
-            self._trace(f"MID_TURN_PROMPT: is_subagent_message={is_subagent_message}, on_output={on_output is not None}, _parent_session={self._parent_session is not None}")
-
-            if is_subagent_message:
-                # Subagent messages are for logging/visibility only - don't send to model
-                # This prevents duplicate model responses to each forwarded MODEL_OUTPUT chunk
-                self._trace(f"MID_TURN_PROMPT: Skipping model call for subagent message (logged only)")
-                continue  # Check for more messages in the queue
-
-            # Found a real prompt to process - break out of skip loop
-            break
+        # Notify that prompt is being injected (for UI to remove from pending bar)
+        if self._on_prompt_injected:
+            self._on_prompt_injected(prompt)
 
         # Emit the prompt as user/parent output so UI shows it
         if on_output:
-            # Use "parent" source if this is a subagent (has parent session),
-            # otherwise "user" for main agent receiving user input
-            source = "parent" if self._parent_session else "user"
+            # Use "parent" source if message came from parent agent,
+            # otherwise "user" for user input
+            source = "parent" if msg.source_type == SourceType.PARENT else "user"
             self._trace(f"MID_TURN_PROMPT: Emitting with source={source}")
             on_output(source, prompt, "write")
 
