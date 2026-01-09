@@ -469,7 +469,11 @@ def extract_finish_reason_from_response(response) -> FinishReason:
 
 
 def extract_usage_from_response(response) -> TokenUsage:
-    """Extract token usage from SDK response."""
+    """Extract token usage from SDK response.
+
+    Extracts standard token counts plus cached content token count
+    when context caching is used.
+    """
     usage = TokenUsage()
 
     if not response:
@@ -480,6 +484,11 @@ def extract_usage_from_response(response) -> TokenUsage:
         usage.prompt_tokens = getattr(metadata, 'prompt_token_count', 0) or 0
         usage.output_tokens = getattr(metadata, 'candidates_token_count', 0) or 0
         usage.total_tokens = getattr(metadata, 'total_token_count', 0) or 0
+
+        # Extract cached content token count (context caching)
+        cached_tokens = getattr(metadata, 'cached_content_token_count', None)
+        if cached_tokens is not None and cached_tokens > 0:
+            usage.cache_read_tokens = cached_tokens
 
     return usage
 

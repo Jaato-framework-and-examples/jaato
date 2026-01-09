@@ -1488,6 +1488,12 @@ class JaatoSession:
                 if response.usage:
                     llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
                     llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+                    if response.usage.cache_read_tokens is not None:
+                        llm_telemetry.set_attribute("gen_ai.usage.cache_read_tokens", response.usage.cache_read_tokens)
+                    if response.usage.cache_creation_tokens is not None:
+                        llm_telemetry.set_attribute("gen_ai.usage.cache_creation_tokens", response.usage.cache_creation_tokens)
+                    if response.usage.reasoning_tokens is not None:
+                        llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
             self._trace(f"SESSION_STREAMING_COMPLETE parts_count={len(response.parts)} finish={response.finish_reason}")
 
             # Check for cancellation after initial message (including parent)
@@ -2228,6 +2234,12 @@ class JaatoSession:
             if response.usage:
                 llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
                 llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+                if response.usage.cache_read_tokens is not None:
+                    llm_telemetry.set_attribute("gen_ai.usage.cache_read_tokens", response.usage.cache_read_tokens)
+                if response.usage.cache_creation_tokens is not None:
+                    llm_telemetry.set_attribute("gen_ai.usage.cache_creation_tokens", response.usage.cache_creation_tokens)
+                if response.usage.reasoning_tokens is not None:
+                    llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
 
             return response
 
@@ -2339,6 +2351,12 @@ class JaatoSession:
             if response.usage:
                 llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
                 llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+                if response.usage.cache_read_tokens is not None:
+                    llm_telemetry.set_attribute("gen_ai.usage.cache_read_tokens", response.usage.cache_read_tokens)
+                if response.usage.cache_creation_tokens is not None:
+                    llm_telemetry.set_attribute("gen_ai.usage.cache_creation_tokens", response.usage.cache_creation_tokens)
+                if response.usage.reasoning_tokens is not None:
+                    llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
 
             return response
 
@@ -2780,6 +2798,12 @@ class JaatoSession:
                 if response.usage:
                     llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
                     llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+                    if response.usage.cache_read_tokens is not None:
+                        llm_telemetry.set_attribute("gen_ai.usage.cache_read_tokens", response.usage.cache_read_tokens)
+                    if response.usage.cache_creation_tokens is not None:
+                        llm_telemetry.set_attribute("gen_ai.usage.cache_creation_tokens", response.usage.cache_creation_tokens)
+                    if response.usage.reasoning_tokens is not None:
+                        llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
 
             from .plugins.model_provider.types import FinishReason
             if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE):
@@ -2879,6 +2903,12 @@ class JaatoSession:
                     if response.usage:
                         llm_telemetry.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
                         llm_telemetry.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+                        if response.usage.cache_read_tokens is not None:
+                            llm_telemetry.set_attribute("gen_ai.usage.cache_read_tokens", response.usage.cache_read_tokens)
+                        if response.usage.cache_creation_tokens is not None:
+                            llm_telemetry.set_attribute("gen_ai.usage.cache_creation_tokens", response.usage.cache_creation_tokens)
+                        if response.usage.reasoning_tokens is not None:
+                            llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
                 function_calls = list(response.function_calls) if response.function_calls else []
 
             if response.text and on_output:

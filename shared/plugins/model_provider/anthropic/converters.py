@@ -455,7 +455,11 @@ def extract_finish_reason_from_response(response: Any) -> FinishReason:
 
 
 def extract_usage_from_response(response: Any) -> TokenUsage:
-    """Extract token usage from Anthropic response."""
+    """Extract token usage from Anthropic response.
+
+    Extracts standard token counts plus cache token information
+    when prompt caching is enabled.
+    """
     usage = TokenUsage()
 
     if not response or not hasattr(response, "usage"):
@@ -465,6 +469,14 @@ def extract_usage_from_response(response: Any) -> TokenUsage:
     usage.prompt_tokens = getattr(resp_usage, "input_tokens", 0)
     usage.output_tokens = getattr(resp_usage, "output_tokens", 0)
     usage.total_tokens = usage.prompt_tokens + usage.output_tokens
+
+    # Extract cache token information (prompt caching)
+    cache_creation = getattr(resp_usage, "cache_creation_input_tokens", None)
+    cache_read = getattr(resp_usage, "cache_read_input_tokens", None)
+    if cache_creation is not None and cache_creation > 0:
+        usage.cache_creation_tokens = cache_creation
+    if cache_read is not None and cache_read > 0:
+        usage.cache_read_tokens = cache_read
 
     return usage
 
@@ -623,8 +635,11 @@ def extract_message_delta(event: Any) -> Optional[Dict[str, Any]]:
 def extract_message_start(event: Any) -> Optional[TokenUsage]:
     """Extract initial usage from message_start event.
 
+    Extracts standard token counts plus cache token information
+    when prompt caching is enabled.
+
     Returns:
-        TokenUsage with input tokens, or None.
+        TokenUsage with input tokens and cache info, or None.
     """
     if not event:
         return None
@@ -638,11 +653,23 @@ def extract_message_start(event: Any) -> Optional[TokenUsage]:
             if usage:
                 input_tokens = getattr(usage, "input_tokens", 0)
                 output_tokens = getattr(usage, "output_tokens", 0)
-                return TokenUsage(
+
+                # Extract cache token information
+                cache_creation = getattr(usage, "cache_creation_input_tokens", None)
+                cache_read = getattr(usage, "cache_read_input_tokens", None)
+
+                token_usage = TokenUsage(
                     prompt_tokens=input_tokens,
                     output_tokens=output_tokens,
                     total_tokens=input_tokens + output_tokens,
                 )
+
+                if cache_creation is not None and cache_creation > 0:
+                    token_usage.cache_creation_tokens = cache_creation
+                if cache_read is not None and cache_read > 0:
+                    token_usage.cache_read_tokens = cache_read
+
+                return token_usage
 
     return None
 
