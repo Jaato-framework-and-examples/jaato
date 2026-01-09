@@ -22,6 +22,7 @@ from .config import (
 from ..base import UserCommand, CommandCompletion
 from ..model_provider.types import ToolSchema
 from ..gc import load_gc_plugin, GCConfig
+from ...message_queue import SourceType
 
 if TYPE_CHECKING:
     from ...jaato_runtime import JaatoRuntime
@@ -201,9 +202,19 @@ class SubagentPlugin:
                     'Spawn a subagent to handle a specialized task. Returns immediately with '
                     'the agent_id while the subagent runs asynchronously in the background.\n\n'
                     'ASYNC BEHAVIOR: The subagent executes independently. Its output appears in '
-                    'its own tab in the UI. Use list_active_subagents to check status (running/idle). '
-                    'If you need results from a subagent before proceeding, check its status and '
-                    'wait until it shows "idle" before spawning dependent tasks.\n\n'
+                    'its own tab in the UI.\n\n'
+                    'EVENT-DRIVEN PATTERN (RECOMMENDED):\n'
+                    '1. Spawn the subagent with the task\n'
+                    '2. Finish your turn - inform the user you delegated the task\n'
+                    '3. When the subagent completes, you will receive a COMPLETED event\n'
+                    '4. THEN process the results or spawn follow-up tasks\n\n'
+                    'DO NOT continuously poll list_active_subagents in a loop. This wastes tokens '
+                    'and prevents you from receiving completion events. Trust that the subagent '
+                    'will notify you when done.\n\n'
+                    'ONLY use list_active_subagents when:\n'
+                    '- User asks about subagent status\n'
+                    '- You need to check before sending a message via send_to_subagent\n'
+                    '- You suspect a subagent might be stuck (after several minutes)\n\n'
                     'IMPORTANT: Always provide EITHER a profile name (for preconfigured agents) '
                     'OR a descriptive name (for inline agents). This helps identify agents in the UI.'
                 ),
@@ -354,11 +365,16 @@ class SubagentPlugin:
             ToolSchema(
                 name='close_subagent',
                 description=(
-                    'Close an active subagent session when the task is complete. '
-                    'IMPORTANT: Use this IMMEDIATELY after a subagent reports task completion '
-                    'to free resources and prevent wasting turns. While sessions auto-close '
-                    'after max_turns, explicit closure is the preferred pattern to ensure '
-                    'efficient resource usage.'
+                    'Close an active subagent session when the task is complete.\n\n'
+                    'WHEN TO USE:\n'
+                    '- After a subagent reports task completion (COMPLETED event)\n'
+                    '- When activity_phase is "idle" and you no longer need the subagent\n\n'
+                    'WHEN NOT TO USE:\n'
+                    '- If activity_phase is "waiting_for_llm", "streaming", or "executing_tool" - '
+                    'the subagent is still working! Use cancel_subagent if you need to stop it.\n'
+                    '- If you want to send more messages to the subagent later\n\n'
+                    'While sessions auto-close after max_turns, explicit closure is preferred '
+                    'to free resources immediately.'
                 ),
                 parameters={
                     "type": "object",
@@ -374,10 +390,17 @@ class SubagentPlugin:
             ToolSchema(
                 name='cancel_subagent',
                 description=(
-                    'Cancel a running subagent, stopping its current operation immediately. '
-                    'Use this when you need to interrupt a subagent that is taking too long '
-                    'or when you no longer need its result. The subagent will stop at the '
-                    'next cancellation checkpoint and return partial results if available. '
+                    'Cancel a running subagent, stopping its current operation immediately.\n\n'
+                    'WHEN TO USE:\n'
+                    '- When you no longer need the result and want to stop wasting resources\n'
+                    '- When activity_phase is "executing_tool" and a local tool appears stuck\n'
+                    '- After user explicitly requests cancellation\n\n'
+                    'WHEN NOT TO USE:\n'
+                    '- If activity_phase is "waiting_for_llm" - this is NORMAL! LLM calls can take '
+                    '60-120+ seconds for reasoning models. The cloud will always respond eventually.\n'
+                    '- If activity_phase is "streaming" - the subagent is actively receiving '
+                    'its response and will finish soon.\n'
+                    '- If activity_phase is "idle" - nothing to cancel, use close_subagent instead.\n\n'
                     'After cancellation, the session remains active for follow-up messages.'
                 ),
                 parameters={
@@ -395,6 +418,12 @@ class SubagentPlugin:
                 name='list_active_subagents',
                 description=(
                     'List currently active subagent sessions with detailed status information.\n\n'
+                    'WHEN TO USE:\n'
+                    '- When user asks about subagent status\n'
+                    '- Before sending a message via send_to_subagent\n'
+                    '- If you suspect a subagent might be stuck (after several minutes)\n\n'
+                    'DO NOT use this in a polling loop to wait for completion. Instead, finish '
+                    'your turn and wait for the COMPLETED event from the subagent.\n\n'
                     'RESPONSE FIELDS:\n'
                     '- agent_id: Unique identifier for the subagent\n'
                     '- profile: The subagent profile name\n'
@@ -403,14 +432,11 @@ class SubagentPlugin:
                     '- turn_count / max_turns: Progress tracking\n\n'
                     'ACTIVITY PHASES:\n'
                     '- "idle": Waiting for input, ready to receive messages\n'
-                    '- "waiting_for_llm": Request sent, awaiting cloud response\n'
+                    '- "waiting_for_llm": Request sent, awaiting cloud response (can take 60-120+ sec)\n'
                     '- "streaming": Receiving tokens from LLM\n'
                     '- "executing_tool": Running a tool\n\n'
-                    'IMPORTANT: A subagent in "waiting_for_llm" phase is NOT stuck - it is '
-                    'actively waiting for the cloud model to respond. Thinking/reasoning models '
-                    'can take 60-120+ seconds before producing tokens. This is normal.\n\n'
-                    'Only "executing_tool" can potentially hang (if a local tool is unresponsive). '
-                    'LLM cloud calls will always eventually return a response or error.'
+                    'IMPORTANT: "waiting_for_llm" is NOT stuck - reasoning models can take minutes. '
+                    'Only "executing_tool" can potentially hang if a local tool is unresponsive.'
                 ),
                 parameters={
                     "type": "object",
@@ -454,31 +480,47 @@ class SubagentPlugin:
             "tasks to specialized subagents.\n\n"
             "ASYNC EXECUTION: spawn_subagent returns immediately with an agent_id. "
             "The subagent runs asynchronously in the background.\n\n"
-            "RECEIVING SUBAGENT OUTPUT: You will receive subagent output as "
-            "[SUBAGENT agent_id=X event=Y] messages injected into your conversation. "
-            "Events include:\n"
-            "- MODEL_OUTPUT: Text the subagent is generating\n"
-            "- TOOL_CALL: Tool the subagent is calling\n"
-            "- TOOL_OUTPUT: Output from subagent's tool execution\n"
-            "- COMPLETED: Subagent finished its turn (includes final response)\n"
-            "- STATUS: Subagent status changed (e.g., now idle)\n"
+            "CRITICAL - END YOUR TURN AFTER SPAWNING: After calling spawn_subagent, you MUST "
+            "end your turn immediately. Do NOT continue generating text. Do NOT write what you "
+            "think the subagent response might be. Just end your turn and WAIT for real events.\n\n"
+            "NEVER FABRICATE EVENTS: You must NEVER write '[SUBAGENT agent_id=... event=...]' "
+            "text yourself. These messages are ONLY sent TO you by the system when subagents "
+            "have status updates. If you generate this text yourself, you are hallucinating "
+            "a fake response that hasn't actually happened. The real events will arrive "
+            "automatically - just wait.\n\n"
+            "SUBAGENT EVENTS: You will receive status events as "
+            "[SUBAGENT agent_id=X event=Y] messages when subagents complete or need input. "
+            "Events you may receive:\n"
+            "- COMPLETED: Subagent finished its task (includes final response)\n"
+            "- IDLE: Subagent is ready for more work or cleanup\n"
             "- ERROR: Subagent encountered an error\n"
+            "- CANCELLED: Subagent was cancelled\n"
             "- CLARIFICATION_REQUESTED: Subagent needs clarification (you must respond)\n"
             "- PERMISSION_REQUESTED: Subagent needs permission approval (you must respond)\n\n"
-            "SUBAGENT TURN LIFECYCLE - HOW NOTIFICATIONS WORK:\n"
-            "When a subagent completes a turn, you receive events in this order:\n"
+            "Note: You do NOT receive progress events (MODEL_OUTPUT, TOOL_CALL, TOOL_OUTPUT) - "
+            "those are shown directly to the user in the subagent panel.\n\n"
+            "SUBAGENT TURN LIFECYCLE:\n"
+            "When a subagent completes a turn SUCCESSFULLY, you receive events in this order:\n"
             "1. COMPLETED event - contains the subagent's final response for that turn\n"
-            "2. STATUS event - '<hidden>Subagent X is now idle...</hidden>'\n\n"
-            "The STATUS event confirms the subagent is now IDLE and ready for:\n"
+            "2. IDLE event - 'Subagent X is now idle and ready for input'\n\n"
+            "The IDLE event confirms the subagent is ready for:\n"
             "- More instructions via send_to_subagent, OR\n"
             "- Cleanup via close_subagent\n\n"
+            "HANDLING ABNORMAL TERMINATION (ERROR or CANCELLED):\n"
+            "If a subagent fails or is cancelled, you receive ERROR or CANCELLED instead of COMPLETED+IDLE.\n"
+            "When this happens, you have options:\n"
+            "- Send a message via send_to_subagent to help it recover or retry the failed operation\n"
+            "- Close the subagent via close_subagent if recovery is not feasible\n"
+            "- Spawn a new subagent to retry the task from scratch\n"
+            "- Report the failure to the user if intervention is needed\n"
+            "Note: IDLE is NOT sent after ERROR or CANCELLED, but the subagent may still be responsive.\n\n"
             "IMPORTANT: You do NOT need to call list_active_subagents to check if a subagent "
-            "finished. Just WAIT for the COMPLETED and STATUS events - they will arrive "
+            "finished. Just WAIT for the COMPLETED+IDLE or ERROR/CANCELLED events - they will arrive "
             "automatically. Only use list_active_subagents if you need to check activity_phase "
             "for a subagent that seems to be taking unusually long.\n\n"
             "UNDERSTANDING ACTIVITY PHASES (from list_active_subagents):\n"
             "- 'idle': Subagent finished its turn, waiting for input. You will have received "
-            "COMPLETED + STATUS events already.\n"
+            "COMPLETED + IDLE events already.\n"
             "- 'waiting_for_llm': Subagent sent request to cloud, awaiting response. "
             "This is NORMAL and can take 60-120+ seconds for thinking models. NOT stuck.\n"
             "- 'streaming': Subagent is receiving tokens from the model. Definitely alive.\n"
@@ -513,8 +555,9 @@ class SubagentPlugin:
             "- Subagents can share back to you using their native share_context tool\n"
             "- Multiple subagents can run concurrently\n\n"
             "LIFECYCLE MANAGEMENT:\n"
-            "- When you receive COMPLETED + STATUS events, the subagent is idle\n"
-            "- Use close_subagent to free resources after receiving these events\n"
+            "- When you receive COMPLETED + IDLE events, the subagent is ready for more work or cleanup\n"
+            "- When you receive ERROR or CANCELLED, assess whether recovery is possible before closing\n"
+            "- Use close_subagent to free resources when done with a subagent\n"
             "- Sessions auto-close after max_turns, but explicit closure is preferred\n\n"
             "GC CONFIGURATION:\n"
             "Subagents can have their own garbage collection (GC) settings independent of the parent. "
@@ -774,8 +817,13 @@ class SubagentPlugin:
             # Check if subagent is currently processing
             if session.is_running:
                 # Subagent is busy - queue for mid-turn processing
+                # Use PARENT source type for priority processing
                 logger.info(f"SEND_TO_SUBAGENT: {subagent_id} is busy, queuing message")
-                session.inject_prompt(message)
+                session.inject_prompt(
+                    message,
+                    source_id=self._parent_session._agent_id if self._parent_session else "main",
+                    source_type=SourceType.PARENT
+                )
                 return {
                     'success': True,
                     'status': 'queued',
@@ -830,10 +878,12 @@ class SubagentPlugin:
                     percent_used=usage.get('percent_used', 0)
                 )
 
-            # Forward response to parent
+            # Forward response to parent (CHILD source - status update)
             if self._parent_session:
                 self._parent_session.inject_prompt(
-                    f"[SUBAGENT agent_id={agent_id} event=MODEL_OUTPUT]\n{response}"
+                    f"[SUBAGENT agent_id={agent_id} event=MODEL_OUTPUT]\n{response}",
+                    source_id=agent_id,
+                    source_type=SourceType.CHILD
                 )
 
             return {
@@ -1243,7 +1293,7 @@ class SubagentPlugin:
             'success': True,
             'agent_id': agent_id,
             'status': 'spawned',
-            'message': f'Subagent {agent_id} spawned. You will receive [SUBAGENT agent_id={agent_id} event=...] messages as it executes. Wait for COMPLETED event before using results.'
+            'message': f'Subagent {agent_id} spawned and running in background. END YOUR TURN NOW. Do NOT continue generating text. Do NOT write fake completion events. Real events will be sent to you automatically.'
         }
 
     def _run_subagent_async(
@@ -1272,7 +1322,9 @@ class SubagentPlugin:
             if self._parent_session:
                 self._parent_session.inject_prompt(
                     f"[SUBAGENT agent_id={agent_id} event=ERROR]\n"
-                    f"Cannot change to workspace directory {parent_cwd}: {e}"
+                    f"Cannot change to workspace directory {parent_cwd}: {e}",
+                    source_id=agent_id,
+                    source_type=SourceType.CHILD
                 )
             return
 
@@ -1291,7 +1343,9 @@ class SubagentPlugin:
             if self._parent_session:
                 self._parent_session.inject_prompt(
                     f"[SUBAGENT agent_id={agent_id} event=ERROR]\n"
-                    f"Cannot spawn subagent: no runtime available"
+                    f"Cannot spawn subagent: no runtime available",
+                    source_id=agent_id,
+                    source_type=SourceType.CHILD
                 )
             return
 
@@ -1519,11 +1573,13 @@ class SubagentPlugin:
 
         except Exception as e:
             logger.exception(f"Error in async subagent {agent_id}")
-            # Forward error to parent
+            # Forward error to parent (CHILD source - status update)
             if self._parent_session:
                 self._parent_session.inject_prompt(
                     f"[SUBAGENT agent_id={agent_id} event=ERROR]\n"
-                    f"Subagent execution failed: {str(e)}"
+                    f"Subagent execution failed: {str(e)}",
+                    source_id=agent_id,
+                    source_type=SourceType.CHILD
                 )
             # Clean up session on error
             with self._sessions_lock:
