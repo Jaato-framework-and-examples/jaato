@@ -170,10 +170,21 @@ class TokenUsage:
         prompt_tokens: Tokens used in the prompt/input.
         output_tokens: Tokens generated in the response.
         total_tokens: Total tokens used.
+        cache_read_tokens: Tokens read from cache (reduced cost).
+            Supported by: Anthropic, OpenAI, Google Gemini.
+        cache_creation_tokens: Tokens written to cache (Anthropic-specific).
+            Anthropic charges 1.25x for 5-min cache, 2x for 1-hour cache.
+        reasoning_tokens: Tokens used for reasoning/thinking (OpenAI o-series).
+            For Anthropic/Gemini, thinking tokens are included in output_tokens.
     """
     prompt_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    # Cache tokens (prompt caching)
+    cache_read_tokens: Optional[int] = None
+    cache_creation_tokens: Optional[int] = None
+    # Reasoning tokens (OpenAI o-series models)
+    reasoning_tokens: Optional[int] = None
 
 
 class FinishReason(str, Enum):
