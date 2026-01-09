@@ -16,6 +16,30 @@ from shared.retry_utils import (
 class TestClassifyError(unittest.TestCase):
     """Tests for error classification."""
 
+    def test_anthropic_rate_limit_class_detection(self):
+        """Detects Anthropic RateLimitError class directly."""
+        try:
+            from shared.plugins.model_provider.anthropic.errors import RateLimitError
+            exc = RateLimitError(retry_after=30, original_error="test error")
+            result = classify_error(exc)
+            self.assertTrue(result["transient"])
+            self.assertTrue(result["rate_limit"])
+            self.assertFalse(result["infra"])
+        except ImportError:
+            self.skipTest("Anthropic provider not available")
+
+    def test_anthropic_overloaded_class_detection(self):
+        """Detects Anthropic OverloadedError class as transient infra error."""
+        try:
+            from shared.plugins.model_provider.anthropic.errors import OverloadedError
+            exc = OverloadedError(original_error="API overloaded")
+            result = classify_error(exc)
+            self.assertTrue(result["transient"])
+            self.assertFalse(result["rate_limit"])
+            self.assertTrue(result["infra"])
+        except ImportError:
+            self.skipTest("Anthropic provider not available")
+
     def test_rate_limit_string_detection(self):
         """Detects rate limit from error message."""
         exc = Exception("429 Too Many Requests")
