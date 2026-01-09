@@ -274,7 +274,48 @@ class TemplatePlugin:
 manually writing code. Templates ensure consistency, reduce errors, and follow established
 patterns. Manual coding when a template exists is NOT acceptable.
 
+### MANDATORY WORKFLOW - Follow These Steps In Order:
+
+**Step 1: ALWAYS call listTemplateVariables(template_path) FIRST**
+  - This tells you the EXACT variable names the template expects
+  - Do NOT guess or assume variable names - they must match exactly
+  - Using wrong variable names will cause undefined variable errors
+
+**Step 2: THEN call renderTemplateToFile with the correct variables**
+  - Use ONLY the variable names returned by listTemplateVariables
+  - Do NOT invent new variable names or use different casing
+
+**Example - CORRECT workflow:**
+```
+# Step 1: Get the exact variable names
+listTemplateVariables(template_path=".jaato/templates/Entity.java.tpl")
+# Returns: {"variables": ["entity_name", "package", "fields"], "syntax": "jinja2"}
+
+# Step 2: Use those EXACT variable names
+renderTemplateToFile(
+    output_path="src/main/java/com/example/Customer.java",
+    template_path=".jaato/templates/Entity.java.tpl",
+    variables={"entity_name": "Customer", "package": "com.example", "fields": [...]}
+)
+```
+
+**Example - WRONG (will fail with undefined variable):**
+```
+# WRONG: Skipping listTemplateVariables and guessing variable names
+renderTemplateToFile(
+    template_path=".jaato/templates/Entity.java.tpl",
+    variables={"name": "Customer", "pkg": "com.example"}  # WRONG names!
+)
+# Error: Undefined variable 'entity_name' - template expects 'entity_name' not 'name'
+```
+
 ### TEMPLATE TOOLS:
+
+**listTemplateVariables(template_path)** - CALL THIS FIRST before rendering
+  - Returns the EXACT variable names required by the template
+  - Prevents undefined variable errors from wrong/guessed names
+  - Auto-approved (no permission required)
+  - Returns: {"variables": ["var1", "var2", ...], "syntax": "jinja2|mustache", "count": N}
 
 **renderTemplateToFile(output_path, template_path, variables)** - PREFERRED tool for file generation
   - Automatically creates parent directories - NO mkdir needed!
@@ -288,12 +329,6 @@ patterns. Manual coding when a template exists is NOT acceptable.
 
 **listExtractedTemplates()** - List templates extracted from documentation
   - Shows all templates extracted in this session
-  - Auto-approved (no permission required)
-
-**listTemplateVariables(template_path)** - List variables required by a template
-  - Call BEFORE renderTemplateToFile to know exactly what variables to provide
-  - Returns list of variable names that need to be substituted
-  - Supports both Jinja2 and Mustache templates (auto-detected)
   - Auto-approved (no permission required)
 
 ### CRITICAL: Directory Creation Rules
