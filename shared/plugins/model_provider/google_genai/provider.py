@@ -999,12 +999,17 @@ class GoogleGenAIProvider:
 
                 # Extract usage if available
                 if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
+                    metadata = chunk.usage_metadata
                     usage = TokenUsage(
-                        prompt_tokens=getattr(chunk.usage_metadata, 'prompt_token_count', 0) or 0,
-                        output_tokens=getattr(chunk.usage_metadata, 'candidates_token_count', 0) or 0,
-                        total_tokens=getattr(chunk.usage_metadata, 'total_token_count', 0) or 0
+                        prompt_tokens=getattr(metadata, 'prompt_token_count', 0) or 0,
+                        output_tokens=getattr(metadata, 'candidates_token_count', 0) or 0,
+                        total_tokens=getattr(metadata, 'total_token_count', 0) or 0
                     )
-                    self._trace(f"STREAM_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
+                    # Extract cached content token count (context caching)
+                    cached_tokens = getattr(metadata, 'cached_content_token_count', None)
+                    if cached_tokens is not None and cached_tokens > 0:
+                        usage.cache_read_tokens = cached_tokens
+                    self._trace(f"STREAM_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens} cached={usage.cache_read_tokens}")
                     # Notify about usage update for real-time accounting
                     will_call = on_usage_update is not None and usage.total_tokens > 0
                     self._trace(f"STREAM_USAGE_CHECK callback_set={on_usage_update is not None} total={usage.total_tokens} will_call={will_call}")
@@ -1185,12 +1190,17 @@ class GoogleGenAIProvider:
 
                 # Extract usage if available
                 if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
+                    metadata = chunk.usage_metadata
                     usage = TokenUsage(
-                        prompt_tokens=getattr(chunk.usage_metadata, 'prompt_token_count', 0) or 0,
-                        output_tokens=getattr(chunk.usage_metadata, 'candidates_token_count', 0) or 0,
-                        total_tokens=getattr(chunk.usage_metadata, 'total_token_count', 0) or 0
+                        prompt_tokens=getattr(metadata, 'prompt_token_count', 0) or 0,
+                        output_tokens=getattr(metadata, 'candidates_token_count', 0) or 0,
+                        total_tokens=getattr(metadata, 'total_token_count', 0) or 0
                     )
-                    self._trace(f"STREAM_TOOL_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
+                    # Extract cached content token count (context caching)
+                    cached_tokens = getattr(metadata, 'cached_content_token_count', None)
+                    if cached_tokens is not None and cached_tokens > 0:
+                        usage.cache_read_tokens = cached_tokens
+                    self._trace(f"STREAM_TOOL_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens} cached={usage.cache_read_tokens}")
                     # Notify about usage update for real-time accounting
                     will_call = on_usage_update is not None and usage.total_tokens > 0
                     self._trace(f"STREAM_TOOL_USAGE_CHECK callback_set={on_usage_update is not None} total={usage.total_tokens} will_call={will_call}")
