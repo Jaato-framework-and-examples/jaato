@@ -181,6 +181,11 @@ class JaatoSession:
         # Used by server to emit MidTurnPromptInjectedEvent
         self._on_prompt_injected: Optional[Callable[[str], None]] = None
 
+        # Callback when continuation is needed (child messages received while idle)
+        # Used by server to trigger a new turn when subagent sends messages
+        # Callback receives the collected child message text as argument
+        self._on_continuation_needed: Optional[Callable[[str], None]] = None
+
         # Current output callback for this turn (used by enrichment to route notifications)
         # Stored here so _enrich_tool_result_dict can pass it to registry.enrich_tool_result()
         # This ensures enrichment notifications go to the correct agent panel even when
@@ -349,6 +354,18 @@ class JaatoSession:
         """
         self._on_prompt_injected = callback
 
+    def set_continuation_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Set callback for when continuation is needed after child messages.
+
+        This callback is invoked when child messages are drained while the
+        session is idle. The server uses this to trigger a new turn so the
+        model can react to subagent completion/error events.
+
+        Args:
+            callback: Function called with collected child message text.
+        """
+        self._on_continuation_needed = callback
+
     def inject_prompt(
         self,
         text: str,
@@ -397,25 +414,34 @@ class JaatoSession:
             f"source_id={actual_source_id}, source_type={actual_source_type.value}, "
             f"text={text[:50]}..."
         )
-        self._message_queue.put(text, actual_source_id, actual_source_type)
-        self._trace(f"INJECT_PROMPT: queue_size_after={len(self._message_queue)}")
-
-        # If this session is IDLE and we just received a CHILD message,
-        # drain it immediately rather than waiting for the next turn.
-        # This ensures status updates (COMPLETED, IDLE) are processed promptly.
+        # If this session is IDLE and we have a continuation callback, trigger it
+        # directly instead of queuing. This applies to:
+        # - CHILD messages: subagent status updates (COMPLETED, IDLE, etc.)
+        # - PARENT messages: instructions from parent agent (send_to_subagent)
+        # - USER messages: direct user input while idle
         if (
-            actual_source_type == SourceType.CHILD
-            and self._activity_phase == ActivityPhase.IDLE
+            self._activity_phase == ActivityPhase.IDLE
             and not self._is_running
+            and self._on_continuation_needed
         ):
-            self._trace(f"INJECT_PROMPT: Session is idle, draining child messages immediately")
-            self._drain_child_messages()
+            self._trace(f"INJECT_PROMPT: Session is idle, triggering continuation for {actual_source_type.value} message")
+            # Notify for tracing (UI visibility)
+            if self._on_prompt_injected:
+                self._on_prompt_injected(text)
+            self._on_continuation_needed(text)
+        else:
+            # Session is busy - queue the message for later processing
+            # High-priority (PARENT/USER/SYSTEM) → processed mid-turn
+            # Low-priority (CHILD) → processed when becoming idle
+            self._message_queue.put(text, actual_source_id, actual_source_type)
+            self._trace(f"INJECT_PROMPT: queue_size_after={len(self._message_queue)}")
 
     def _forward_to_parent(self, event_type: str, content: str) -> None:
         """Forward an event to the parent session.
 
-        Forwards all event types so the parent model can monitor subagent progress
-        and react in real-time (e.g., provide guidance via send_to_subagent).
+        Only forwards essential events that require parent action. Progress events
+        (MODEL_OUTPUT, TOOL_CALL, TOOL_OUTPUT) are NOT forwarded to avoid cluttering
+        the parent's context and causing the model to echo them.
 
         These messages are queued with CHILD priority, meaning they will be
         processed when the parent becomes idle (not mid-turn). This prevents
@@ -423,9 +449,9 @@ class JaatoSession:
 
         Args:
             event_type: Type of event:
-                - MODEL_OUTPUT: Text the subagent is generating
-                - TOOL_CALL: Tool the subagent is calling
-                - TOOL_OUTPUT: Output from subagent's tool execution
+                - MODEL_OUTPUT: (NOT forwarded) Text the subagent is generating
+                - TOOL_CALL: (NOT forwarded) Tool the subagent is calling
+                - TOOL_OUTPUT: (NOT forwarded) Output from subagent's tool execution
                 - COMPLETED: Subagent finished its task
                 - IDLE: Subagent is idle and ready for input
                 - ERROR: Subagent encountered an error
@@ -434,47 +460,98 @@ class JaatoSession:
                 - PERMISSION_REQUESTED: Subagent needs permission approval from parent
             content: Event content/payload.
         """
-        if self._parent_session:
-            message = f"[SUBAGENT agent_id={self._agent_id} event={event_type}]\n{content}"
-            self._parent_session.inject_prompt(
-                message,
-                source_id=self._agent_id,
-                source_type=SourceType.CHILD
-            )
+        if not self._parent_session:
+            return
 
-    def _drain_child_messages(self, on_output: Optional[OutputCallback] = None) -> None:
-        """Process all pending child messages when becoming idle.
+        # Skip verbose progress events - parent doesn't need to see these
+        # and forwarding them causes the model to echo them in its output
+        if event_type in ("MODEL_OUTPUT", "TOOL_CALL", "TOOL_OUTPUT"):
+            return
 
-        Child messages are status updates from subagents (COMPLETED, IDLE, etc.)
-        that were queued while this agent was busy. They are logged for visibility
-        but don't trigger new model calls - the model gets subagent results via
-        the spawn_subagent tool response.
+        message = f"[SUBAGENT agent_id={self._agent_id} event={event_type}]\n{content}"
+        self._parent_session.inject_prompt(
+            message,
+            source_id=self._agent_id,
+            source_type=SourceType.CHILD
+        )
 
-        This method is called in the finally block of send_message() to ensure
-        child status updates are acknowledged before the agent truly becomes idle.
+    def _drain_child_messages(self, on_output: Optional[OutputCallback] = None) -> str:
+        """Process all pending messages when becoming idle.
+
+        This drains both:
+        - Child messages: Status updates from subagents (COMPLETED, IDLE, etc.)
+        - High-priority messages: USER, PARENT, SYSTEM messages queued while busy
+
+        All queued messages are collected and returned so the caller can
+        send them to the model as the next prompt.
+
+        This method is called:
+        - In the finally block of send_message() before going idle
+        - In inject_prompt() when messages arrive while already idle
 
         Args:
             on_output: Optional callback for logging/tracing.
+
+        Returns:
+            Collected message text (empty string if no messages).
         """
         drained_count = 0
+        collected_messages: List[str] = []
+
+        # First drain high-priority messages (USER, PARENT, SYSTEM)
+        # These take precedence - if the user/parent sends a message, it should
+        # be processed before subagent status updates
+        while True:
+            msg = self._message_queue.pop_first_parent_message()
+            if msg is None:
+                break
+
+            drained_count += 1
+            collected_messages.append(msg.text)
+            self._trace(
+                f"DRAIN_PRIORITY_MESSAGE: agent_id={self._agent_id}, "
+                f"source_type={msg.source_type.value}, source_id={msg.source_id}, "
+                f"text={msg.text[:100]}..."
+            )
+
+            # Log the message for tracing (UI visibility)
+            if self._on_prompt_injected:
+                self._on_prompt_injected(msg.text)
+
+        # Then drain child messages (subagent status updates)
+        # These are lower priority and processed after user/parent messages
         while True:
             msg = self._message_queue.pop_first_child_message()
             if msg is None:
                 break
 
             drained_count += 1
+            collected_messages.append(msg.text)
             self._trace(
                 f"DRAIN_CHILD_MESSAGE: agent_id={self._agent_id}, "
                 f"source_id={msg.source_id}, text={msg.text[:100]}..."
             )
 
             # Log the child message for tracing (UI visibility)
-            # These are subagent status updates, not prompts for the model
             if self._on_prompt_injected:
                 self._on_prompt_injected(msg.text)
 
+        collected_text = "\n\n".join(collected_messages)
+
         if drained_count > 0:
-            self._trace(f"DRAIN_CHILD_MESSAGE: Processed {drained_count} child messages")
+            self._trace(f"DRAIN_MESSAGES: Processed {drained_count} messages total")
+
+            # If we're idle and drained messages, the model needs to react
+            # Trigger continuation callback so server can start a new turn
+            if (
+                self._activity_phase == ActivityPhase.IDLE
+                and not self._is_running
+                and self._on_continuation_needed
+            ):
+                self._trace(f"DRAIN_MESSAGES: Triggering continuation callback with {len(collected_text)} chars")
+                self._on_continuation_needed(collected_text)
+
+        return collected_text
 
     # ==================== Cancellation Support ====================
 
