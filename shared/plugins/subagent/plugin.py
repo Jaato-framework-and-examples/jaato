@@ -804,8 +804,28 @@ class SubagentPlugin:
                         mode=mode
                     )
 
+            # Create usage callback for real-time context updates during streaming
+            # This ensures the status bar reflects actual token usage from the provider
+            def usage_callback(usage) -> None:
+                if self._ui_hooks and usage.total_tokens > 0:
+                    context_limit = session.get_context_limit()
+                    percent_used = (usage.total_tokens / context_limit * 100) if context_limit > 0 else 0
+                    turn_accounting = session.get_turn_accounting()
+                    self._ui_hooks.on_agent_context_updated(
+                        agent_id=agent_id,
+                        total_tokens=usage.total_tokens,
+                        prompt_tokens=usage.prompt_tokens,
+                        output_tokens=usage.output_tokens,
+                        turns=len(turn_accounting),
+                        percent_used=percent_used
+                    )
+
             # Process the message
-            response = session.send_message(message, on_output=output_callback)
+            response = session.send_message(
+                message,
+                on_output=output_callback,
+                on_usage_update=usage_callback
+            )
 
             # Update context after processing (match main agent behavior)
             if self._ui_hooks:
@@ -1447,6 +1467,22 @@ class SubagentPlugin:
                         mode=mode
                     )
 
+            # Create usage callback for real-time context updates during streaming
+            # This ensures the status bar reflects actual token usage from the provider
+            def subagent_usage_callback(usage) -> None:
+                if self._ui_hooks and usage.total_tokens > 0:
+                    context_limit = session.get_context_limit()
+                    percent_used = (usage.total_tokens / context_limit * 100) if context_limit > 0 else 0
+                    turn_accounting = session.get_turn_accounting()
+                    self._ui_hooks.on_agent_context_updated(
+                        agent_id=agent_id,
+                        total_tokens=usage.total_tokens,
+                        prompt_tokens=usage.prompt_tokens,
+                        output_tokens=usage.output_tokens,
+                        turns=len(turn_accounting),
+                        percent_used=percent_used
+                    )
+
             # Emit the initial prompt to UI
             if self._ui_hooks:
                 self._ui_hooks.on_agent_output(
@@ -1457,7 +1493,11 @@ class SubagentPlugin:
                 )
 
             # Run the initial conversation (output is automatically forwarded to parent)
-            response = session.send_message(prompt, on_output=subagent_output_callback)
+            response = session.send_message(
+                prompt,
+                on_output=subagent_output_callback,
+                on_usage_update=subagent_usage_callback
+            )
 
             # Note: Additional messages from parent via send_to_subagent are now
             # processed directly by _execute_send_to_subagent when the session is idle,
