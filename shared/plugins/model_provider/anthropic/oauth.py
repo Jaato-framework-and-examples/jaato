@@ -542,3 +542,126 @@ def login(
     tokens = exchange_code_for_tokens(code, verifier, state)
     save_tokens(tokens)
     return tokens, auth_url
+
+
+# ==================== Pending Auth State ====================
+# For two-step login flow where user must manually copy the auth code
+
+def _get_pending_auth_path() -> Path:
+    """Get path to pending auth state file."""
+    if os.name == "nt":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    elif os.name == "posix" and os.uname().sysname == "Darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+
+    return base / "jaato" / "anthropic_pending_auth.json"
+
+
+def save_pending_auth(code_verifier: str, state: str) -> None:
+    """Save pending auth state for two-step login flow."""
+    path = _get_pending_auth_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(path, "w") as f:
+        json.dump({"code_verifier": code_verifier, "state": state}, f)
+
+    if os.name == "posix":
+        os.chmod(path, 0o600)
+
+
+def load_pending_auth() -> Tuple[Optional[str], Optional[str]]:
+    """Load pending auth state.
+
+    Returns:
+        Tuple of (code_verifier, state), or (None, None) if not found.
+    """
+    path = _get_pending_auth_path()
+    if not path.exists():
+        return None, None
+
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data.get("code_verifier"), data.get("state")
+    except Exception:
+        return None, None
+
+
+def clear_pending_auth() -> None:
+    """Clear pending auth state."""
+    path = _get_pending_auth_path()
+    if path.exists():
+        try:
+            path.unlink()
+        except Exception:
+            pass
+
+
+def start_interactive_login(
+    on_message: Optional[Callable[[str], None]] = None
+) -> str:
+    """Start two-step interactive login flow.
+
+    Builds auth URL, saves pending state, emits messages, and opens browser.
+    User must complete login by calling complete_interactive_login() with
+    the authorization code.
+
+    Args:
+        on_message: Optional callback for status messages.
+
+    Returns:
+        The authorization URL.
+    """
+    auth_url, code_verifier, state = build_auth_url()
+
+    # Save state for step 2
+    save_pending_auth(code_verifier, state)
+
+    if on_message:
+        on_message("Opening browser for authentication...")
+        on_message(f"If browser doesn't open, visit:\n{auth_url}")
+        on_message("")
+        on_message("After authenticating, copy the authorization code and run:")
+        on_message("  anthropic-auth code <paste_code_here>")
+
+    # Open browser in background
+    threading.Thread(target=webbrowser.open, args=(auth_url,), daemon=True).start()
+
+    return auth_url
+
+
+def complete_interactive_login(
+    auth_code: str,
+    on_message: Optional[Callable[[str], None]] = None
+) -> Optional[OAuthTokens]:
+    """Complete two-step interactive login with authorization code.
+
+    Args:
+        auth_code: Authorization code from browser callback.
+        on_message: Optional callback for status messages.
+
+    Returns:
+        OAuthTokens if successful, None if no pending auth or exchange failed.
+    """
+    code_verifier, state = load_pending_auth()
+
+    if not code_verifier or not state:
+        if on_message:
+            on_message("No pending login found. Run 'anthropic-auth login' first.")
+        return None
+
+    # Strip URL fragment if present (callback shows code#state)
+    if "#" in auth_code:
+        auth_code = auth_code.split("#")[0]
+
+    try:
+        tokens = exchange_code_for_tokens(auth_code, code_verifier, state)
+        save_tokens(tokens)
+        clear_pending_auth()
+        return tokens
+    except Exception as e:
+        if on_message:
+            on_message(f"Token exchange failed: {e}")
+        return None

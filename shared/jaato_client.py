@@ -385,6 +385,35 @@ class JaatoClient:
         if self._ui_hooks:
             self._session.set_ui_hooks(self._ui_hooks, self._agent_id)
 
+    def configure_plugins_only(
+        self,
+        registry: 'PluginRegistry',
+        permission_plugin: Optional['PermissionPlugin'] = None,
+        ledger: Optional[TokenLedger] = None
+    ) -> None:
+        """Configure plugins without creating a provider session.
+
+        Use this when authentication is pending and we need user commands
+        to be available but can't connect to the model yet.
+
+        Args:
+            registry: PluginRegistry with exposed plugins.
+            permission_plugin: Optional permission plugin for access control.
+            ledger: Optional token ledger for accounting.
+        """
+        if not self._runtime:
+            raise RuntimeError("Client not connected. Call connect() first.")
+
+        # Configure runtime with plugins (no session creation)
+        self._runtime.configure_plugins(registry, permission_plugin, ledger)
+
+        # Create a minimal session with user commands but no provider
+        self._session = self._runtime.create_session_without_provider(model=self._model_name)
+
+        # Pass UI hooks to session if they were set
+        if self._ui_hooks:
+            self._session.set_ui_hooks(self._ui_hooks, self._agent_id)
+
     def configure_custom_tools(
         self,
         tools: List[ToolSchema],
