@@ -10,6 +10,7 @@ execution with support for:
 import json
 import os
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
@@ -20,6 +21,22 @@ from shared.plugins.base import OutputCallback
 # Callback for streaming tool output during execution
 # (chunk: str) -> None - simplified since call_id is known at call site
 ToolOutputCallback = Callable[[str], None]
+
+# Thread-local storage for tool output callbacks
+# Used for parallel tool execution where each thread needs its own callback
+_thread_local = threading.local()
+
+
+def get_current_tool_output_callback() -> Optional[ToolOutputCallback]:
+    """Get the tool output callback for the current thread.
+
+    For use by plugins during parallel tool execution. Returns the callback
+    set for this thread, or None if not in a parallel execution context.
+
+    Returns:
+        The current thread's ToolOutputCallback, or None.
+    """
+    return getattr(_thread_local, 'tool_output_callback', None)
 
 if TYPE_CHECKING:
     from shared.plugins.registry import PluginRegistry
@@ -159,9 +176,17 @@ class ToolExecutor:
     def get_tool_output_callback(self) -> Optional[ToolOutputCallback]:
         """Get the current tool output callback.
 
+        For parallel tool execution, checks thread-local storage first,
+        then falls back to the instance-level callback.
+
         Returns:
             The current ToolOutputCallback, or None if not set.
         """
+        # Check thread-local first (for parallel execution)
+        thread_callback = getattr(_thread_local, 'tool_output_callback', None)
+        if thread_callback is not None:
+            return thread_callback
+        # Fall back to instance-level callback (for sequential execution)
         return self._tool_output_callback
 
     def _get_auto_background_pool(self) -> ThreadPoolExecutor:
@@ -312,13 +337,50 @@ class ToolExecutor:
             except Exception as inner_e:
                 return False, {'error': f'Background start failed: {e}, sync fallback failed: {inner_e}'}
 
-    def execute(self, name: str, args: Dict[str, Any]) -> Tuple[bool, Any]:
+    def execute(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        tool_output_callback: Optional[ToolOutputCallback] = None
+    ) -> Tuple[bool, Any]:
+        """Execute a tool by name with the given arguments.
+
+        Args:
+            name: Tool name to execute.
+            args: Arguments dict to pass to the tool.
+            tool_output_callback: Optional callback for streaming output during execution.
+                If provided, overrides the instance-level callback for this call only.
+                This enables thread-safe parallel execution where each tool has its own callback.
+
+        Returns:
+            Tuple of (success: bool, result: Any).
+        """
         debug = False
         try:
             debug = os.environ.get('AI_TOOL_RUNNER_DEBUG', '').lower() in ('1', 'true', 'yes')
         except Exception:
             debug = False
 
+        # Set thread-local callback for parallel execution support
+        # This allows plugins reading from get_tool_output_callback() to get the correct
+        # callback even when multiple tools execute concurrently in different threads
+        if tool_output_callback is not None:
+            _thread_local.tool_output_callback = tool_output_callback
+
+        try:
+            return self._execute_impl(name, args, debug)
+        finally:
+            # Clean up thread-local callback
+            if tool_output_callback is not None:
+                _thread_local.tool_output_callback = None
+
+    def _execute_impl(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        debug: bool
+    ) -> Tuple[bool, Any]:
+        """Internal implementation of execute(), separated for try/finally wrapping."""
         # Track permission metadata for injection into result
         permission_meta = None
 

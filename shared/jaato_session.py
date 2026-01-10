@@ -8,9 +8,12 @@ import json
 import os
 import re
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .message_queue import MessageQueue, QueuedMessage, SourceType
 
@@ -60,6 +63,18 @@ class ActivityPhase(Enum):
     WAITING_FOR_LLM = "waiting_for_llm"  # Request sent, awaiting cloud response
     STREAMING = "streaming"              # Receiving tokens from LLM
     EXECUTING_TOOL = "executing_tool"    # Running a tool
+
+
+@dataclass
+class _ToolExecutionResult:
+    """Result of executing a single tool, used for parallel execution."""
+    fc: FunctionCall
+    executor_result: Tuple[bool, Any]
+    start_time: datetime
+    end_time: datetime
+    success: bool
+    error_message: Optional[str]
+    plugin_type: str
 
 
 class JaatoSession:
@@ -1995,10 +2010,40 @@ class JaatoSession:
         on_output: Optional[OutputCallback],
         cancellation_notified: bool
     ) -> List[ToolResult]:
-        """Execute a group of function calls and return their results."""
+        """Execute a group of function calls and return their results.
+
+        When multiple independent function calls are requested, they are executed
+        in parallel using a thread pool. This significantly reduces latency when
+        the model requests multiple tools in a single turn.
+
+        Parallel execution is enabled by default but can be disabled via the
+        JAATO_PARALLEL_TOOLS environment variable (set to 'false' or '0').
+        """
         # Set activity phase: we're executing tools
         self._set_activity_phase(ActivityPhase.EXECUTING_TOOL)
 
+        # Check if parallel execution is enabled
+        parallel_enabled = os.environ.get(
+            'JAATO_PARALLEL_TOOLS', 'true'
+        ).lower() not in ('false', '0', 'no')
+
+        # Use parallel execution for multiple calls, sequential for single call
+        if parallel_enabled and len(function_calls) > 1:
+            return self._execute_function_calls_parallel(
+                function_calls, turn_data, on_output
+            )
+        else:
+            return self._execute_function_calls_sequential(
+                function_calls, turn_data, on_output
+            )
+
+    def _execute_function_calls_sequential(
+        self,
+        function_calls: List[FunctionCall],
+        turn_data: Dict[str, Any],
+        on_output: Optional[OutputCallback]
+    ) -> List[ToolResult]:
+        """Execute function calls sequentially (original behavior)."""
         tool_results: List[ToolResult] = []
 
         for fc in function_calls:
@@ -2006,107 +2051,289 @@ class JaatoSession:
             if self._is_cancelled():
                 break
 
-            name = fc.name
-            args = fc.args
+            result = self._execute_single_tool(fc, on_output)
 
-            # Forward tool call to parent for visibility
-            self._forward_to_parent("TOOL_CALL", f"{name}({json.dumps(args)})")
-
-            # Emit hook: tool starting
-            if self._ui_hooks:
-                # Signal UI to flush any pending output before displaying tool tree
-                # This ensures text appears before tool trees in async/buffered UIs
-                if on_output:
-                    self._trace(f"SESSION_OUTPUT_FLUSH before tool {name}")
-                    on_output("system", "", "flush")
-                self._trace(f"SESSION_TOOL_START name={name} call_id={fc.id}")
-                self._ui_hooks.on_tool_call_start(
-                    agent_id=self._agent_id,
-                    tool_name=name,
-                    tool_args=args,
-                    call_id=fc.id
-                )
-
-            fc_start = datetime.now()
-
-            # Determine plugin type for telemetry
-            plugin_type = "unknown"
-            if self._runtime.registry:
-                plugin = self._runtime.registry.get_plugin_for_tool(name)
-                if plugin:
-                    plugin_type = getattr(plugin, 'plugin_type', type(plugin).__name__)
-
-            # Wrap tool execution with telemetry span
-            with self._telemetry.tool_span(
-                tool_name=name,
-                call_id=fc.id or "",
-                plugin_type=plugin_type,
-            ) as tool_span:
-                if self._executor:
-                    # Set up tool output callback for streaming output during execution
-                    # Captures _name for use in the closure
-                    def tool_output_callback(chunk: str, _call_id=fc.id, _name=name) -> None:
-                        if self._ui_hooks and _call_id:
-                            self._ui_hooks.on_tool_output(
-                                agent_id=self._agent_id,
-                                call_id=_call_id,
-                                chunk=chunk
-                            )
-                        # Forward tool output to parent for visibility
-                        self._forward_to_parent("TOOL_OUTPUT", f"[{_name}] {chunk}")
-                    self._executor.set_tool_output_callback(tool_output_callback)
-
-                    executor_result = self._executor.execute(name, args)
-
-                    # Clear the callback after execution
-                    self._executor.set_tool_output_callback(None)
-                else:
-                    executor_result = (False, {"error": f"No executor registered for {name}"})
-
-                fc_end = datetime.now()
-
-                # Determine success and error message from executor result
-                fc_success = True
-                fc_error_message = None
-                if isinstance(executor_result, tuple) and len(executor_result) == 2:
-                    fc_success = executor_result[0]
-                    if not fc_success and isinstance(executor_result[1], dict):
-                        fc_error_message = executor_result[1].get('error')
-
-                # Record tool execution attributes in telemetry
-                fc_duration = (fc_end - fc_start).total_seconds()
-                tool_span.set_attribute("jaato.tool.success", fc_success)
-                tool_span.set_attribute("jaato.tool.duration_seconds", fc_duration)
-                if fc_error_message:
-                    tool_span.set_attribute("jaato.tool.error", fc_error_message)
-                    tool_span.set_status_error(fc_error_message)
-                else:
-                    tool_span.set_status_ok()
-
-            # Emit hook: tool ended
-            if self._ui_hooks:
-                self._ui_hooks.on_tool_call_end(
-                    agent_id=self._agent_id,
-                    tool_name=name,
-                    success=fc_success,
-                    duration_seconds=fc_duration,
-                    error_message=fc_error_message,
-                    call_id=fc.id
-                )
-
-            # Record function call timing
+            # Record timing in turn_data
+            fc_duration = (result.end_time - result.start_time).total_seconds()
             turn_data['function_calls'].append({
-                'name': name,
-                'start_time': fc_start.isoformat(),
-                'end_time': fc_end.isoformat(),
+                'name': fc.name,
+                'start_time': result.start_time.isoformat(),
+                'end_time': result.end_time.isoformat(),
                 'duration_seconds': fc_duration,
             })
 
             # Build ToolResult
-            tool_result = self._build_tool_result(fc, executor_result)
+            tool_result = self._build_tool_result(fc, result.executor_result)
             tool_results.append(tool_result)
 
         return tool_results
+
+    def _execute_function_calls_parallel(
+        self,
+        function_calls: List[FunctionCall],
+        turn_data: Dict[str, Any],
+        on_output: Optional[OutputCallback]
+    ) -> List[ToolResult]:
+        """Execute function calls in parallel using a thread pool.
+
+        All function calls are started concurrently. Results are collected
+        and returned in the original order.
+        """
+        # Signal UI to flush before starting parallel tools
+        if self._ui_hooks and on_output:
+            on_output("system", "", "flush")
+
+        # Emit tool start hooks for all tools before execution
+        # This allows UI to show all pending tools at once
+        for fc in function_calls:
+            self._forward_to_parent("TOOL_CALL", f"{fc.name}({json.dumps(fc.args)})")
+            if self._ui_hooks:
+                self._trace(f"SESSION_TOOL_START name={fc.name} call_id={fc.id}")
+                self._ui_hooks.on_tool_call_start(
+                    agent_id=self._agent_id,
+                    tool_name=fc.name,
+                    tool_args=fc.args,
+                    call_id=fc.id
+                )
+
+        # Execute all tools in parallel
+        results: Dict[str, _ToolExecutionResult] = {}
+        max_workers = min(len(function_calls), 8)  # Cap at 8 concurrent tools
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_fc = {
+                executor.submit(self._execute_single_tool_for_parallel, fc): fc
+                for fc in function_calls
+            }
+
+            # Collect results as they complete
+            for future in as_completed(future_to_fc):
+                fc = future_to_fc[future]
+                try:
+                    result = future.result()
+                    results[fc.id or fc.name] = result
+                except Exception as e:
+                    # Handle unexpected errors
+                    results[fc.id or fc.name] = _ToolExecutionResult(
+                        fc=fc,
+                        executor_result=(False, {"error": f"Parallel execution error: {e}"}),
+                        start_time=datetime.now(),
+                        end_time=datetime.now(),
+                        success=False,
+                        error_message=str(e),
+                        plugin_type="unknown"
+                    )
+
+                # Emit tool end hook as each completes
+                result = results[fc.id or fc.name]
+                fc_duration = (result.end_time - result.start_time).total_seconds()
+                if self._ui_hooks:
+                    self._ui_hooks.on_tool_call_end(
+                        agent_id=self._agent_id,
+                        tool_name=fc.name,
+                        success=result.success,
+                        duration_seconds=fc_duration,
+                        error_message=result.error_message,
+                        call_id=fc.id
+                    )
+
+        # Build results in original order
+        tool_results: List[ToolResult] = []
+        for fc in function_calls:
+            result = results.get(fc.id or fc.name)
+            if result:
+                fc_duration = (result.end_time - result.start_time).total_seconds()
+                turn_data['function_calls'].append({
+                    'name': fc.name,
+                    'start_time': result.start_time.isoformat(),
+                    'end_time': result.end_time.isoformat(),
+                    'duration_seconds': fc_duration,
+                })
+                tool_result = self._build_tool_result(fc, result.executor_result)
+                tool_results.append(tool_result)
+
+        return tool_results
+
+    def _execute_single_tool(
+        self,
+        fc: FunctionCall,
+        on_output: Optional[OutputCallback]
+    ) -> _ToolExecutionResult:
+        """Execute a single tool call with full UI hooks and telemetry.
+
+        Used for sequential execution where we want tool-by-tool UI updates.
+        """
+        name = fc.name
+        args = fc.args
+
+        # Forward tool call to parent for visibility
+        self._forward_to_parent("TOOL_CALL", f"{name}({json.dumps(args)})")
+
+        # Emit hook: tool starting
+        if self._ui_hooks:
+            if on_output:
+                self._trace(f"SESSION_OUTPUT_FLUSH before tool {name}")
+                on_output("system", "", "flush")
+            self._trace(f"SESSION_TOOL_START name={name} call_id={fc.id}")
+            self._ui_hooks.on_tool_call_start(
+                agent_id=self._agent_id,
+                tool_name=name,
+                tool_args=args,
+                call_id=fc.id
+            )
+
+        fc_start = datetime.now()
+
+        # Determine plugin type for telemetry
+        plugin_type = "unknown"
+        if self._runtime.registry:
+            plugin = self._runtime.registry.get_plugin_for_tool(name)
+            if plugin:
+                plugin_type = getattr(plugin, 'plugin_type', type(plugin).__name__)
+
+        # Wrap tool execution with telemetry span
+        with self._telemetry.tool_span(
+            tool_name=name,
+            call_id=fc.id or "",
+            plugin_type=plugin_type,
+        ) as tool_span:
+            if self._executor:
+                # Set up tool output callback for streaming output during execution
+                def tool_output_callback(chunk: str, _call_id=fc.id, _name=name) -> None:
+                    if self._ui_hooks and _call_id:
+                        self._ui_hooks.on_tool_output(
+                            agent_id=self._agent_id,
+                            call_id=_call_id,
+                            chunk=chunk
+                        )
+                    self._forward_to_parent("TOOL_OUTPUT", f"[{_name}] {chunk}")
+                self._executor.set_tool_output_callback(tool_output_callback)
+
+                executor_result = self._executor.execute(name, args)
+
+                self._executor.set_tool_output_callback(None)
+            else:
+                executor_result = (False, {"error": f"No executor registered for {name}"})
+
+            fc_end = datetime.now()
+
+            # Determine success and error message
+            fc_success = True
+            fc_error_message = None
+            if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                fc_success = executor_result[0]
+                if not fc_success and isinstance(executor_result[1], dict):
+                    fc_error_message = executor_result[1].get('error')
+
+            # Record telemetry
+            fc_duration = (fc_end - fc_start).total_seconds()
+            tool_span.set_attribute("jaato.tool.success", fc_success)
+            tool_span.set_attribute("jaato.tool.duration_seconds", fc_duration)
+            if fc_error_message:
+                tool_span.set_attribute("jaato.tool.error", fc_error_message)
+                tool_span.set_status_error(fc_error_message)
+            else:
+                tool_span.set_status_ok()
+
+        # Emit hook: tool ended
+        if self._ui_hooks:
+            self._ui_hooks.on_tool_call_end(
+                agent_id=self._agent_id,
+                tool_name=name,
+                success=fc_success,
+                duration_seconds=fc_duration,
+                error_message=fc_error_message,
+                call_id=fc.id
+            )
+
+        return _ToolExecutionResult(
+            fc=fc,
+            executor_result=executor_result,
+            start_time=fc_start,
+            end_time=fc_end,
+            success=fc_success,
+            error_message=fc_error_message,
+            plugin_type=plugin_type
+        )
+
+    def _execute_single_tool_for_parallel(
+        self,
+        fc: FunctionCall
+    ) -> _ToolExecutionResult:
+        """Execute a single tool for parallel execution.
+
+        Similar to _execute_single_tool but:
+        - Uses thread-local callback (not instance-level)
+        - Does not emit start/end hooks (handled by caller)
+        - Includes telemetry for this thread
+        """
+        name = fc.name
+        args = fc.args
+
+        fc_start = datetime.now()
+
+        # Determine plugin type for telemetry
+        plugin_type = "unknown"
+        if self._runtime.registry:
+            plugin = self._runtime.registry.get_plugin_for_tool(name)
+            if plugin:
+                plugin_type = getattr(plugin, 'plugin_type', type(plugin).__name__)
+
+        # Wrap tool execution with telemetry span
+        with self._telemetry.tool_span(
+            tool_name=name,
+            call_id=fc.id or "",
+            plugin_type=plugin_type,
+        ) as tool_span:
+            if self._executor:
+                # Create callback that captures this tool's call_id
+                def tool_output_callback(chunk: str, _call_id=fc.id, _name=name) -> None:
+                    if self._ui_hooks and _call_id:
+                        self._ui_hooks.on_tool_output(
+                            agent_id=self._agent_id,
+                            call_id=_call_id,
+                            chunk=chunk
+                        )
+                    self._forward_to_parent("TOOL_OUTPUT", f"[{_name}] {chunk}")
+
+                # Pass callback directly - executor will set it in thread-local
+                executor_result = self._executor.execute(
+                    name, args, tool_output_callback=tool_output_callback
+                )
+            else:
+                executor_result = (False, {"error": f"No executor registered for {name}"})
+
+            fc_end = datetime.now()
+
+            # Determine success and error message
+            fc_success = True
+            fc_error_message = None
+            if isinstance(executor_result, tuple) and len(executor_result) == 2:
+                fc_success = executor_result[0]
+                if not fc_success and isinstance(executor_result[1], dict):
+                    fc_error_message = executor_result[1].get('error')
+
+            # Record telemetry
+            fc_duration = (fc_end - fc_start).total_seconds()
+            tool_span.set_attribute("jaato.tool.success", fc_success)
+            tool_span.set_attribute("jaato.tool.duration_seconds", fc_duration)
+            tool_span.set_attribute("jaato.tool.parallel", True)
+            if fc_error_message:
+                tool_span.set_attribute("jaato.tool.error", fc_error_message)
+                tool_span.set_status_error(fc_error_message)
+            else:
+                tool_span.set_status_ok()
+
+        return _ToolExecutionResult(
+            fc=fc,
+            executor_result=executor_result,
+            start_time=fc_start,
+            end_time=fc_end,
+            success=fc_success,
+            error_message=fc_error_message,
+            plugin_type=plugin_type
+        )
 
     def _send_tool_results_and_continue(
         self,
