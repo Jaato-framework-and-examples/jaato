@@ -479,6 +479,45 @@ class JaatoRuntime:
 
         return session
 
+    def create_session_without_provider(
+        self,
+        model: str,
+        tools: Optional[List[str]] = None,
+        system_instructions: Optional[str] = None,
+        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None
+    ) -> 'JaatoSession':
+        """Create a session without provider (for auth-pending mode).
+
+        This creates a session with user commands available but no model
+        connection. Used when authentication is pending and the user needs
+        to complete auth before the model can be used.
+
+        Args:
+            model: Model name (stored for later use after auth completes).
+            tools: Optional list of plugin names to expose.
+            system_instructions: Optional additional system instructions.
+            plugin_configs: Optional per-plugin configuration overrides.
+
+        Returns:
+            JaatoSession configured without a provider.
+        """
+        if not self._connected:
+            raise RuntimeError("Runtime not connected. Call connect() first.")
+        if not self._registry:
+            raise RuntimeError("Plugins not configured. Call configure_plugins() first.")
+
+        from .jaato_session import JaatoSession
+
+        session = JaatoSession(self, model)
+        session.configure(
+            tools=tools,
+            system_instructions=system_instructions,
+            plugin_configs=plugin_configs,
+            skip_provider=True  # Don't create provider
+        )
+
+        return session
+
     def create_provider(
         self,
         model: str,
