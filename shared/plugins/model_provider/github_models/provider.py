@@ -303,6 +303,43 @@ class GitHubModelsProvider:
         # Verification happens on first actual API call
         pass
 
+    def verify_auth(
+        self,
+        allow_interactive: bool = False,
+        on_message=None
+    ) -> bool:
+        """Verify that authentication is configured.
+
+        For GitHub Models, this checks for GITHUB_TOKEN.
+        Interactive login is not supported.
+
+        Args:
+            allow_interactive: Ignored (no interactive login available).
+            on_message: Optional callback for status messages.
+
+        Returns:
+            True if authentication is configured.
+            False if no credentials found.
+
+        Raises:
+            TokenNotFoundError: If allow_interactive=False and no token found.
+        """
+        token = resolve_token()
+        if token:
+            if on_message:
+                on_message("Found GitHub token")
+            return True
+
+        # No token found
+        if not allow_interactive:
+            raise TokenNotFoundError(
+                checked_locations=get_checked_credential_locations()
+            )
+
+        if on_message:
+            on_message("No GitHub token found. Please set GITHUB_TOKEN environment variable.")
+        return False
+
     def shutdown(self) -> None:
         """Clean up resources."""
         if self._client:
