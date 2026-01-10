@@ -626,9 +626,9 @@ antigravity-auth accounts   # List all authenticated accounts
 ### Session Commands
 
 ```
-/reset                      # Reset conversation history
-/model <name>               # Switch to a different model
-/keybindings reload         # Reload keybindings from config
+reset                       # Reset conversation history
+model <name>                # Switch to a different model
+keybindings reload          # Reload keybindings from config
 ```
 
 ## Rich Client Keybindings
@@ -675,9 +675,9 @@ Priority: Environment variables > Project config > User config > Defaults
 
 ### Reloading Keybindings
 
-Use the `/keybindings reload` command to reload keybindings without restarting:
+Use the `keybindings reload` command to reload keybindings without restarting:
 ```
-/keybindings reload
+keybindings reload
 ```
 
 ## Testing
