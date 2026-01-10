@@ -600,6 +600,37 @@ Configuration options via `ProviderConfig.extra`:
 | `JAATO_COPY_MECHANISM` | Clipboard provider: `osc52` (default) |
 | `JAATO_COPY_SOURCES` | Sources to include: `model` (default), or `model&user&tool` |
 
+## Rich Client Commands
+
+### Authentication Commands
+
+The TUI client provides commands for managing provider authentication:
+
+**Anthropic Claude:**
+```
+anthropic-auth login        # Open browser for OAuth authentication
+anthropic-auth code <code>  # Complete login with authorization code
+anthropic-auth logout       # Clear stored OAuth tokens
+anthropic-auth status       # Show current authentication status
+```
+
+**Antigravity (Google IDE Backend):**
+```
+antigravity-auth login      # Open browser for Google OAuth
+antigravity-auth code <code> # Complete login with authorization code
+antigravity-auth logout     # Clear stored accounts
+antigravity-auth status     # Show current authentication status
+antigravity-auth accounts   # List all authenticated accounts
+```
+
+### Session Commands
+
+```
+/reset                      # Reset conversation history
+/model <name>               # Switch to a different model
+/keybindings reload         # Reload keybindings from config
+```
+
 ## Rich Client Keybindings
 
 The rich client supports customizable keybindings via:
