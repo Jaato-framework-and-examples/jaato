@@ -303,14 +303,89 @@ class AnthropicProvider:
         pass
 
     @staticmethod
-    def login() -> None:
+    def login(on_message=None) -> None:
         """Run interactive OAuth login flow.
 
         Opens browser to authenticate with Claude Pro/Max subscription.
         Stores tokens for future use.
+
+        Args:
+            on_message: Optional callback for status messages.
         """
-        oauth_login()
-        print("Successfully authenticated with Claude Pro/Max subscription.")
+        oauth_login(on_message=on_message)
+        msg = "Successfully authenticated with Claude Pro/Max subscription."
+        if on_message:
+            on_message(msg)
+        else:
+            print(msg)
+
+    def verify_auth(
+        self,
+        allow_interactive: bool = False,
+        on_message=None
+    ) -> bool:
+        """Verify that authentication is configured and optionally trigger interactive login.
+
+        This can be called BEFORE initialize() to ensure credentials are available.
+        For Anthropic, this checks for PKCE OAuth tokens, OAuth env tokens, or API keys.
+
+        Args:
+            allow_interactive: If True and auth is not configured, attempt
+                interactive OAuth login (opens browser).
+            on_message: Optional callback for status messages during login.
+
+        Returns:
+            True if authentication is configured and valid.
+            False if authentication failed or was cancelled.
+
+        Raises:
+            APIKeyNotFoundError: If allow_interactive=False and no credentials found.
+        """
+        from typing import Callable
+
+        # Check existing credentials in priority order
+        # 1. PKCE OAuth tokens (from interactive login)
+        try:
+            pkce_token = get_valid_access_token()
+            if pkce_token:
+                if on_message:
+                    on_message("Found valid PKCE OAuth token")
+                return True
+        except Exception:
+            # Token refresh failed, will try other methods
+            pass
+
+        # 2. OAuth token from env var
+        oauth_token = resolve_oauth_token()
+        if oauth_token:
+            if on_message:
+                on_message("Found OAuth token from environment")
+            return True
+
+        # 3. API key
+        api_key = resolve_api_key()
+        if api_key:
+            if on_message:
+                on_message("Found API key")
+            return True
+
+        # No credentials found
+        if not allow_interactive:
+            raise APIKeyNotFoundError(
+                checked_locations=get_checked_credential_locations()
+            )
+
+        # Attempt interactive login
+        if on_message:
+            on_message("No credentials found. Starting interactive OAuth login...")
+
+        try:
+            self.login(on_message=on_message)
+            return True
+        except Exception as e:
+            if on_message:
+                on_message(f"OAuth login failed: {e}")
+            return False
 
     def shutdown(self) -> None:
         """Clean up resources."""

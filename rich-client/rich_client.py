@@ -451,7 +451,22 @@ class RichClient:
             }
         })
 
-        # Configure tools
+        # Verify authentication before loading tools
+        # For providers that support interactive login (like Anthropic OAuth),
+        # this will trigger the login flow if credentials are not found
+        def auth_message(msg: str) -> None:
+            self.log(f"[auth] {msg}")
+            print(msg)  # Also print to console during init
+
+        try:
+            if not self._backend.verify_auth(allow_interactive=True, on_message=auth_message):
+                print("Error: Authentication failed or was cancelled")
+                return False
+        except Exception as e:
+            print(f"Error: Authentication failed: {e}")
+            return False
+
+        # Configure tools (only after auth is verified)
         self._backend.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
         # Load GC configuration from .jaato/gc.json if present

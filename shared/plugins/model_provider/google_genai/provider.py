@@ -514,6 +514,63 @@ class GoogleGenAIProvider:
             # For other errors, let them propagate
             raise
 
+    def verify_auth(
+        self,
+        allow_interactive: bool = False,
+        on_message=None
+    ) -> bool:
+        """Verify that authentication is configured.
+
+        For Google GenAI, this checks for API key (AI Studio) or GCP credentials
+        (Vertex AI). Interactive login is not supported.
+
+        Args:
+            allow_interactive: Ignored (no interactive login available).
+            on_message: Optional callback for status messages.
+
+        Returns:
+            True if authentication is configured.
+            False if no credentials found.
+
+        Raises:
+            CredentialsNotFoundError: If allow_interactive=False and no credentials found.
+        """
+        # Check for API key (AI Studio mode)
+        api_key = resolve_api_key()
+        if api_key:
+            if on_message:
+                on_message("Found Google API key")
+            return True
+
+        # Check for service account file
+        creds_path = resolve_credentials_path()
+        if creds_path:
+            if on_message:
+                on_message(f"Found service account credentials: {creds_path}")
+            return True
+
+        # Check for ADC (Application Default Credentials)
+        # Try to import and check if ADC is available
+        try:
+            import google.auth
+            credentials, project = google.auth.default()
+            if credentials:
+                if on_message:
+                    on_message("Found Application Default Credentials")
+                return True
+        except Exception:
+            pass
+
+        # No credentials found
+        if not allow_interactive:
+            raise CredentialsNotFoundError(
+                checked_locations=get_checked_credential_locations()
+            )
+
+        if on_message:
+            on_message("No Google credentials found. Please configure API key or GCP credentials.")
+        return False
+
     def shutdown(self) -> None:
         """Clean up resources."""
         self._chat = None

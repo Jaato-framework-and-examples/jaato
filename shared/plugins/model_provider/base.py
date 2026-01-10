@@ -143,6 +143,33 @@ class ModelProviderPlugin(Protocol):
         """
         ...
 
+    def verify_auth(
+        self,
+        allow_interactive: bool = False,
+        on_message: Optional[Callable[[str], None]] = None
+    ) -> bool:
+        """Verify that authentication is configured and optionally trigger interactive login.
+
+        This should be called BEFORE configure_tools/create_session to ensure
+        credentials are available. For providers that support interactive login
+        (like Anthropic OAuth), this can trigger the login flow.
+
+        Args:
+            allow_interactive: If True and auth is not configured, attempt
+                interactive login (e.g., browser-based OAuth). If False,
+                only check if credentials exist without prompting.
+            on_message: Optional callback for status messages during interactive
+                login (e.g., "Opening browser...", "Waiting for auth...").
+
+        Returns:
+            True if authentication is configured and valid.
+            False if authentication failed or was not completed.
+
+        Raises:
+            APIKeyNotFoundError: If allow_interactive=False and no credentials found.
+        """
+        ...
+
     def shutdown(self) -> None:
         """Clean up any resources held by the provider."""
         ...
