@@ -507,6 +507,22 @@ Configuration options via `ProviderConfig.extra`:
 | `enable_caching` | bool | False | Enable prompt caching (90% cost reduction) |
 | `enable_thinking` | bool | False | Enable extended thinking (reasoning traces) |
 | `thinking_budget` | int | 10000 | Max thinking tokens when enabled |
+| `cache_history` | bool | True | Cache historical messages (when caching enabled) |
+| `cache_exclude_recent_turns` | int | 2 | Number of recent turns to exclude from history caching |
+| `cache_min_tokens` | bool | True | Enforce minimum token threshold for caching |
+
+**Cache Optimization Strategy:**
+
+When `enable_caching` is True, the provider uses up to 3 cache breakpoints:
+1. **System instruction** - Most stable, cached first
+2. **Tool definitions** - Sorted alphabetically for consistent ordering
+3. **Historical messages** - Older turns cached, recent turns excluded
+
+Cache behavior notes:
+- Tools are sorted by name to ensure consistent ordering (prevents cache invalidation)
+- Content smaller than the minimum threshold (1024-2048 tokens) won't be cached
+- The `cache_exclude_recent_turns` setting controls how many recent turns remain uncached
+- Set `cache_history: false` to disable history caching while keeping system/tools cached
 
 ### General
 | Variable | Purpose |
