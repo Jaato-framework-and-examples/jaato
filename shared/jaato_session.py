@@ -695,7 +695,8 @@ class JaatoSession:
         self,
         tools: Optional[List[str]] = None,
         system_instructions: Optional[str] = None,
-        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None
+        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+        skip_provider: bool = False
     ) -> None:
         """Configure the session with tools and instructions.
 
@@ -705,6 +706,8 @@ class JaatoSession:
             system_instructions: Optional additional system instructions.
             plugin_configs: Optional per-plugin configuration overrides.
                            Plugins will be re-initialized with these configs.
+            skip_provider: If True, skip provider creation (for auth-pending mode).
+                          User commands will be available but model calls won't work.
         """
         # Store tool plugin names
         self._tool_plugins = tools
@@ -723,18 +726,20 @@ class JaatoSession:
                         print(f"Warning: Failed to configure plugin '{plugin_name}': {e}")
 
         # Create provider for this session (with optional provider override)
-        self._provider = self._runtime.create_provider(
-            self._model_name,
-            provider_name=self._provider_name_override
-        )
-
-        # Propagate agent context to provider for trace identification
-        if hasattr(self._provider, 'set_agent_context'):
-            self._provider.set_agent_context(
-                agent_type=self._agent_type,
-                agent_name=self._agent_name,
-                agent_id=self._agent_id
+        # Skip if in auth-pending mode
+        if not skip_provider:
+            self._provider = self._runtime.create_provider(
+                self._model_name,
+                provider_name=self._provider_name_override
             )
+
+            # Propagate agent context to provider for trace identification
+            if hasattr(self._provider, 'set_agent_context'):
+                self._provider.set_agent_context(
+                    agent_type=self._agent_type,
+                    agent_name=self._agent_name,
+                    agent_id=self._agent_id
+                )
 
         # Create executor
         self._executor = ToolExecutor(ledger=self._runtime.ledger)
@@ -785,8 +790,9 @@ class JaatoSession:
         # Register built-in telepathy tool (share_context)
         self._register_telepathy_tool()
 
-        # Create provider session
-        self._create_provider_session()
+        # Create provider session (skip if in auth-pending mode)
+        if not skip_provider:
+            self._create_provider_session()
 
     def _create_provider_session(
         self,

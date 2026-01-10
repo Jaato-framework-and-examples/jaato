@@ -370,22 +370,17 @@ class AnthropicProvider:
             return True
 
         # No credentials found
+        if on_message:
+            on_message("No credentials found.")
+
         if not allow_interactive:
             raise APIKeyNotFoundError(
                 checked_locations=get_checked_credential_locations()
             )
 
-        # Attempt interactive login
-        if on_message:
-            on_message("No credentials found. Starting interactive OAuth login...")
-
-        try:
-            self.login(on_message=on_message)
-            return True
-        except Exception as e:
-            if on_message:
-                on_message(f"OAuth login failed: {e}")
-            return False
+        # Return False to signal interactive login is needed
+        # The caller (e.g., server) should use the anthropic_auth plugin for login
+        return False
 
     def shutdown(self) -> None:
         """Clean up resources."""

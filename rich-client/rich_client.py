@@ -454,17 +454,21 @@ class RichClient:
         # Verify authentication before loading tools
         # For providers that support interactive login (like Anthropic OAuth),
         # this will trigger the login flow if credentials are not found
+        self._trace(f"[auth] Starting verify_auth for provider: {self._model_provider}")
+
         def auth_message(msg: str) -> None:
-            self.log(f"[auth] {msg}")
-            print(msg)  # Also print to console during init
+            self._trace(f"[auth] {msg}")
+            print(msg, flush=True)
 
         try:
             if not self._backend.verify_auth(allow_interactive=True, on_message=auth_message):
-                print("Error: Authentication failed or was cancelled")
+                print("Error: Authentication failed or was cancelled", flush=True)
                 return False
         except Exception as e:
-            print(f"Error: Authentication failed: {e}")
+            print(f"Error: Authentication failed: {e}", flush=True)
             return False
+
+        self._trace("[auth] verify_auth completed successfully")
 
         # Configure tools (only after auth is verified)
         self._backend.configure_tools(self.registry, self.permission_plugin, self.ledger)
@@ -2502,6 +2506,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         display.update_last_system_message(f"   {padded_name} {msg}", style="dim red")
                     else:
                         display.add_system_message(f"   {padded_name} {msg}", style="dim red")
+                    init_current_step = None
+                elif status == "pending":
+                    # Show pending status (e.g., waiting for auth)
+                    # Always add new line - don't update in place because other messages
+                    # may have been added between "running" and "pending" (e.g., auth instructions)
+                    msg = event.message or "PENDING"
+                    display.add_system_message(f"   {padded_name} {msg}", style="dim yellow")
                     init_current_step = None
 
             elif isinstance(event, AgentOutputEvent):
