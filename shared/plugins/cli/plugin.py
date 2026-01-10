@@ -13,6 +13,7 @@ from typing import Dict, List, Any, Callable, Optional
 from ..base import UserCommand
 from ..background import BackgroundCapableMixin
 from ..model_provider.types import ToolSchema
+from shared.ai_tool_runner import get_current_tool_output_callback
 
 
 DEFAULT_MAX_OUTPUT_CHARS = 50000  # ~12k tokens at 4 chars/token
@@ -198,6 +199,22 @@ class CLIToolPlugin(BackgroundCapableMixin):
         """
         self._tool_output_callback = callback
         self._trace(f"set_tool_output_callback: callback={'SET' if callback else 'CLEARED'}")
+
+    def _get_effective_output_callback(self) -> Optional[Callable[[str], None]]:
+        """Get the effective output callback for the current execution.
+
+        Checks thread-local storage first (for parallel execution),
+        then falls back to the instance-level callback.
+
+        Returns:
+            The callback to use, or None if not set.
+        """
+        # Thread-local takes priority (parallel execution)
+        thread_callback = get_current_tool_output_callback()
+        if thread_callback is not None:
+            return thread_callback
+        # Fall back to instance-level (sequential execution)
+        return self._tool_output_callback
 
     def set_workspace_path(self, path: Optional[str]) -> None:
         """Update the workspace root path.
@@ -862,8 +879,10 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                     }
 
             # Use streaming execution if callback is set
-            self._trace(f"execute: streaming={'YES' if self._tool_output_callback else 'NO'}")
-            if self._tool_output_callback:
+            # Check thread-local first for parallel execution support
+            effective_callback = self._get_effective_output_callback()
+            self._trace(f"execute: streaming={'YES' if effective_callback else 'NO'}")
+            if effective_callback:
                 # Streaming mode with Popen for live output
                 cmd = command if use_shell else argv
                 proc = subprocess.Popen(
@@ -887,7 +906,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                     for line in proc.stdout:
                         stdout_lines.append(line)
                         # Call the callback with the line (strip newline for display)
-                        self._tool_output_callback(line.rstrip('\n\r'))
+                        effective_callback(line.rstrip('\n\r'))
 
                 # Read remaining stderr (non-streaming for simplicity)
                 if proc.stderr:

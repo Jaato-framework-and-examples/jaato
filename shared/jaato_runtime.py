@@ -26,6 +26,21 @@ _TASK_COMPLETION_INSTRUCTION = (
     "Pause only for permissions or clarifications—never from uncertainty."
 )
 
+# Parallel tool execution guidance - encourages model to batch independent operations
+_PARALLEL_TOOL_GUIDANCE = (
+    "When you need to perform multiple independent operations (e.g., reading several files, "
+    "searching multiple patterns, fetching multiple URLs), issue all tool calls in a single "
+    "response rather than one at a time. Independent operations will execute in parallel, "
+    "significantly reducing latency."
+)
+
+
+def _is_parallel_tools_enabled() -> bool:
+    """Check if parallel tool execution is enabled."""
+    return os.environ.get(
+        'JAATO_PARALLEL_TOOLS', 'true'
+    ).lower() not in ('false', '0', 'no')
+
 
 class JaatoRuntime:
     """Shared runtime environment for jaato agents.
@@ -594,6 +609,10 @@ class JaatoRuntime:
 
         # 4. Framework-level task completion instruction (always included)
         result_parts.append(_TASK_COMPLETION_INSTRUCTION)
+
+        # 5. Parallel tool guidance (when parallel execution is enabled)
+        if _is_parallel_tools_enabled():
+            result_parts.append(_PARALLEL_TOOL_GUIDANCE)
 
         return "\n\n".join(result_parts)
 
