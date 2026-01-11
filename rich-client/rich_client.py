@@ -46,6 +46,14 @@ from shared.plugins.session import create_plugin as create_session_plugin, load_
 from shared.plugins.base import parse_command_args
 from shared.plugins.gc import load_gc_from_file
 from shared.plugins.code_validation_formatter import create_plugin as create_code_validation_formatter
+from shared.plugins.vision_capture import (
+    VisionCapture,
+    VisionCaptureFormatter,
+    CaptureConfig,
+    CaptureContext,
+    CaptureFormat,
+    create_formatter as create_vision_formatter,
+)
 
 # Reuse input handling from simple-client
 from input_handler import InputHandler
@@ -133,6 +141,10 @@ class RichClient:
 
         # UI hooks reference for signaling agent status changes
         self._ui_hooks: Optional[Any] = None
+
+        # Vision capture for TUI screenshots
+        self._vision_capture: Optional[VisionCapture] = None
+        self._vision_formatter: Optional[VisionCaptureFormatter] = None
 
     def log(self, msg: str) -> None:
         """Log message to output panel."""
@@ -1500,6 +1512,10 @@ class RichClient:
             self._export_session(filename)
             return
 
+        if user_input.lower().startswith('screenshot'):
+            self._handle_screenshot_command(user_input)
+            return
+
         # Check for plugin commands
         plugin_result = self._try_execute_plugin_command(user_input)
         if plugin_result is not None:
@@ -1689,6 +1705,217 @@ class RichClient:
         """
         from shared.ui_utils import handle_keybindings_command
         handle_keybindings_command(user_input, self._display)
+
+    def _init_vision_capture(self) -> None:
+        """Initialize vision capture plugin and register formatter with pipeline.
+
+        Sets up:
+        - VisionCapture: Core capture utility for rendering panels to images
+        - VisionCaptureFormatter: Pipeline plugin for observing output and auto-capture
+        """
+        if self._vision_capture:
+            return  # Already initialized
+
+        # Get configuration from environment
+        output_dir = os.environ.get('JAATO_VISION_DIR', '/tmp/jaato_vision')
+        format_str = os.environ.get('JAATO_VISION_FORMAT', 'svg').lower()
+
+        format_map = {
+            'svg': CaptureFormat.SVG,
+            'png': CaptureFormat.PNG,
+            'html': CaptureFormat.HTML,
+        }
+        capture_format = format_map.get(format_str, CaptureFormat.SVG)
+
+        config = CaptureConfig(
+            output_dir=output_dir,
+            format=capture_format,
+            width=self._display._width if self._display else 120,
+        )
+
+        # Initialize core capture utility
+        self._vision_capture = VisionCapture()
+        self._vision_capture.initialize(config)
+
+        # Create formatter and register with pipeline
+        self._vision_formatter = create_vision_formatter(
+            capture_callback=self._on_vision_capture_triggered,
+            auto_capture_on_turn_end=False,  # Manual only by default
+        )
+
+        # Register formatter with display's pipeline
+        if self._display:
+            self._display.register_formatter(self._vision_formatter)
+
+    def _on_vision_capture_triggered(self, context: CaptureContext, turn_index: int) -> None:
+        """Callback for formatter-triggered captures (e.g., auto-capture on turn end).
+
+        Args:
+            context: What triggered the capture.
+            turn_index: Current turn index from the formatter.
+        """
+        result = self._do_vision_capture(context, send_to_model=False)
+        if result and result.success:
+            self._display.add_system_message(
+                f"Auto-captured: {result.path}",
+                style="dim"
+            )
+
+    def _do_vision_capture(
+        self,
+        context: CaptureContext,
+        send_to_model: bool = True
+    ):
+        """Perform a vision capture of the current TUI state.
+
+        Args:
+            context: What triggered the capture.
+            send_to_model: If True, send the capture to the model immediately.
+
+        Returns:
+            CaptureResult on success, None on failure.
+        """
+        if not self._display:
+            return None
+
+        # Initialize if needed
+        self._init_vision_capture()
+
+        # Get the selected agent's output buffer
+        buffer = self._agent_registry.get_selected_buffer()
+        if not buffer:
+            buffer = self._display._output_buffer
+
+        try:
+            panel = buffer.render_panel(
+                height=50,
+                width=self._display._width
+            )
+            result = self._vision_capture.capture(
+                panel,
+                context=context,
+                turn_index=len(self._original_inputs),
+                agent_id=self._agent_registry._selected_agent_id,
+            )
+
+            if result.success and send_to_model:
+                self._display.add_system_message(
+                    f"Screenshot captured: {result.path}",
+                    style="green"
+                )
+
+                # Show in output as user action
+                self._display.append_output("user", "[screenshot]", "write")
+
+                # Signal agent is active
+                if self._ui_hooks:
+                    self._ui_hooks.on_agent_status_changed(
+                        agent_id="main",
+                        status="active"
+                    )
+
+                # Send to model
+                self._start_model_thread(result.to_system_message())
+
+            return result
+
+        except Exception as e:
+            self._display.show_lines([
+                ("[Screenshot failed]", "red"),
+                (f"  Error: {e}", "dim"),
+            ])
+            return None
+
+    def _handle_screenshot_command(self, user_input: str) -> None:
+        """Handle the screenshot command for TUI vision capture.
+
+        Captures the current TUI state as an image and sends it to the model.
+
+        Usage:
+            screenshot           - Capture and send to AI immediately
+            screenshot nosend    - Capture and display path only (don't send)
+            screenshot auto      - Toggle auto-capture on turn end
+            screenshot help      - Show help
+
+        Args:
+            user_input: The full user input string starting with 'screenshot'.
+        """
+        parts = user_input.lower().split()
+        subcommand = parts[1] if len(parts) > 1 else ""
+
+        if subcommand == 'help':
+            self._display.show_lines([
+                ("Screenshot - Capture TUI for AI vision", "bold"),
+                ("", ""),
+                ("Usage:", ""),
+                ("  screenshot              Capture and send to AI immediately", "dim"),
+                ("  screenshot nosend       Capture and show path only (don't send)", "dim"),
+                ("  screenshot auto         Toggle auto-capture on turn end", "dim"),
+                ("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim"),
+                ("  screenshot help         Show this help", "dim"),
+                ("", ""),
+                ("The AI receives the screenshot path and reads the image.", "dim"),
+            ])
+            return
+
+        if subcommand == 'auto':
+            # Toggle auto-capture mode
+            self._init_vision_capture()
+            if self._vision_formatter:
+                current = self._vision_formatter._auto_capture_on_turn_end
+                self._vision_formatter.set_auto_capture(not current)
+                state = "enabled" if not current else "disabled"
+                self._display.show_lines([
+                    (f"Auto-capture on turn end: {state}", "cyan"),
+                ])
+            return
+
+        if subcommand == 'interval':
+            # Set periodic capture interval
+            self._init_vision_capture()
+            interval_str = parts[2] if len(parts) > 2 else ""
+            try:
+                interval_ms = int(interval_str) if interval_str else 0
+                if self._vision_formatter:
+                    self._vision_formatter.set_capture_interval(interval_ms)
+                    if interval_ms > 0:
+                        self._display.show_lines([
+                            (f"Periodic capture: every {interval_ms}ms during streaming", "cyan"),
+                        ])
+                    else:
+                        self._display.show_lines([
+                            ("Periodic capture: disabled", "cyan"),
+                        ])
+            except ValueError:
+                self._display.show_lines([
+                    (f"[Invalid interval: {interval_str}]", "red"),
+                    ("  Usage: screenshot interval <milliseconds>", "dim"),
+                ])
+            return
+
+        if subcommand == 'nosend':
+            # Capture without sending to model
+            result = self._do_vision_capture(
+                CaptureContext.USER_REQUESTED,
+                send_to_model=False
+            )
+            if result and result.success:
+                self._display.show_lines([
+                    ("Screenshot captured:", "green"),
+                    (f"  {result.path}", "cyan"),
+                ])
+            return
+
+        # Default: capture and send to model
+        result = self._do_vision_capture(
+            CaptureContext.USER_REQUESTED,
+            send_to_model=True
+        )
+        if result and not result.success:
+            self._display.show_lines([
+                ("[Screenshot failed]", "red"),
+                (f"  Error: {result.error}", "dim"),
+            ])
 
     def _get_tool_status(self) -> list:
         """Get status of all tools including enabled/disabled state."""
@@ -2244,6 +2471,7 @@ class RichClient:
             ("  history           - Show full conversation history", "dim"),
             ("  context           - Show context window usage", "dim"),
             ("  export [file]     - Export session to YAML (default: session_export.yaml)", "dim"),
+            ("  screenshot        - Capture TUI and send to AI for vision analysis", "dim"),
             ("  clear             - Clear output panel", "dim"),
             ("  quit              - Exit the client", "dim"),
             ("", "dim"),
