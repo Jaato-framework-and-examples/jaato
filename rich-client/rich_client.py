@@ -1432,26 +1432,24 @@ class RichClient:
                     client = self._backend.get_client()
                     if client and hasattr(client, 'stop'):
                         client.stop()
-                self._display.show_lines([("Task cancelled.", "yellow")])
+                self._display.add_system_message("Task cancelled.", style="yellow")
                 self._display.add_system_message("Goodbye!", style="bold")
                 self._display.stop()
                 return
             else:
                 # Return to session (includes 'r' and any other input)
-                self._display.show_lines([("Returning to session.", "dim")])
+                self._display.add_system_message("Returning to session.", style="dim")
                 return
 
         if user_input.lower() in ('quit', 'exit', 'q'):
             # Check if a task is running
             if self._model_running:
                 # Show confirmation dialog (direct mode - no detach option)
-                self._display.show_lines([
-                    ("", ""),
-                    ("Task in progress. Exiting will cancel the task.", "yellow bold"),
-                    ("  [c] Cancel task and exit", "dim"),
-                    ("  [r] Return to session", "dim"),
-                    ("", ""),
-                ])
+                self._display.add_system_message("", style="dim")
+                self._display.add_system_message("Task in progress. Exiting will cancel the task.", style="yellow bold")
+                self._display.add_system_message("  [c] Cancel task and exit", style="dim")
+                self._display.add_system_message("  [r] Return to session", style="dim")
+                self._display.add_system_message("", style="dim")
                 self._display.set_prompt("Choice [c/r]: ")
                 self._pending_exit_confirmation = True
                 return
@@ -3213,15 +3211,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 if text_lower in ("exit", "quit", "q"):
                     # Check if a task is running
                     if model_running:
-                        # Show confirmation dialog
-                        display.show_lines([
-                            ("", ""),
-                            ("Task in progress. What would you like to do?", "yellow bold"),
-                            ("  [c] Cancel task and exit", "dim"),
-                            ("  [d] Detach (task continues in background)", "dim"),
-                            ("  [r] Return to session", "dim"),
-                            ("", ""),
-                        ])
+                        # Show confirmation dialog (using add_system_message to avoid pager)
+                        display.add_system_message("", style="dim")
+                        display.add_system_message("Task in progress. What would you like to do?", style="yellow bold")
+                        display.add_system_message("  [c] Cancel task and exit", style="dim")
+                        display.add_system_message("  [d] Detach (task continues in background)", style="dim")
+                        display.add_system_message("  [r] Return to session", style="dim")
+                        display.add_system_message("", style="dim")
                         display.set_prompt("Choice [c/d/r]: ")
 
                         # Wait for user choice
@@ -3236,7 +3232,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         if choice == "c":
                             # Cancel task and exit
                             await client.stop()
-                            display.show_lines([("Task cancelled.", "yellow")])
+                            display.add_system_message("Task cancelled.", style="yellow")
                             should_exit = True
                             display.stop()
                             break
@@ -3244,22 +3240,20 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                             # Detach - show reconnection info and exit
                             session_id = client.session_id or "unknown"
                             socket_path = client.socket_path
-                            display.show_lines([
-                                ("", ""),
-                                ("Task will continue running on the server.", "green"),
-                                ("", ""),
-                                ("To reconnect:", "bold"),
-                                (f"  python rich_client.py --connect {socket_path}", "cyan"),
-                                ("", ""),
-                                (f"Session ID: {session_id}", "dim"),
-                                ("", ""),
-                            ])
+                            display.add_system_message("", style="dim")
+                            display.add_system_message("Task will continue running on the server.", style="green")
+                            display.add_system_message("", style="dim")
+                            display.add_system_message("To reconnect:", style="bold")
+                            display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="cyan")
+                            display.add_system_message("", style="dim")
+                            display.add_system_message(f"Session ID: {session_id}", style="dim")
+                            display.add_system_message("", style="dim")
                             should_exit = True
                             display.stop()
                             break
                         else:
                             # Return to session (includes 'r' and any other input)
-                            display.show_lines([("Returning to session.", "dim")])
+                            display.add_system_message("Returning to session.", style="dim")
                             continue
                     else:
                         # No task running, exit immediately
