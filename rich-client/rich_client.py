@@ -3117,6 +3117,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
         nonlocal pending_workspace_mismatch_request
         nonlocal model_running, should_exit
+        pending_exit_confirmation = False
 
         # Yield control to let handle_events() start listening before we trigger session init
         await asyncio.sleep(0)
@@ -3207,37 +3208,15 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 cmd = cmd_parts[0].lower() if cmd_parts else ""
                 args = cmd_parts[1:] if len(cmd_parts) > 1 else []
 
-                # Client-only commands
-                if text_lower in ("exit", "quit", "q"):
-                    # Always show confirmation dialog for session lifecycle
+                # Handle exit confirmation response
+                if pending_exit_confirmation:
+                    choice = text_lower
+                    pending_exit_confirmation = False
+                    display.set_prompt(None)  # Restore default prompt
+                    display.set_waiting_for_channel_input(False)
+
                     session_id = client.session_id or "unknown"
                     socket_path = client.socket_path
-
-                    display.add_system_message("", style="dim")
-                    if model_running:
-                        display.add_system_message("Task in progress. What would you like to do?", style="yellow bold")
-                        display.add_system_message("  [c] Cancel task and exit (session preserved)", style="dim")
-                        display.add_system_message("  [d] Detach (task continues in background)", style="dim")
-                        display.add_system_message("  [e] End session (cancel task and delete session)", style="dim")
-                        display.add_system_message("  [r] Return to session", style="dim")
-                        display.add_system_message("", style="dim")
-                        display.set_prompt("Choice [c/d/e/r]: ")
-                    else:
-                        display.add_system_message("Exit options:", style="bold")
-                        display.add_system_message("  [d] Detach (keep session, can reconnect later)", style="dim")
-                        display.add_system_message("  [e] End session (delete session from server)", style="dim")
-                        display.add_system_message("  [r] Return to session", style="dim")
-                        display.add_system_message("", style="dim")
-                        display.set_prompt("Choice [d/e/r]: ")
-
-                    # Wait for user choice
-                    try:
-                        choice = await asyncio.wait_for(input_queue.get(), timeout=60.0)
-                        choice = choice.strip().lower()
-                    except asyncio.TimeoutError:
-                        choice = "r"  # Default to return on timeout
-
-                    display.set_prompt(None)  # Restore default prompt
 
                     if choice == "c" and model_running:
                         # Cancel task but keep session
@@ -3279,6 +3258,42 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         # Return to session (includes 'r' and any other input)
                         display.add_system_message("Returning to session.", style="dim")
                         continue
+
+                # Client-only commands
+                if text_lower in ("exit", "quit", "q"):
+                    # Show confirmation dialog for session lifecycle
+                    pending_exit_confirmation = True
+
+                    display.add_system_message("", style="dim")
+                    if model_running:
+                        display.add_system_message("Task in progress. What would you like to do?", style="yellow bold")
+                        display.add_system_message("  [c] Cancel task and exit (session preserved)", style="dim")
+                        display.add_system_message("  [d] Detach (task continues in background)", style="dim")
+                        display.add_system_message("  [e] End session (cancel task and delete session)", style="dim")
+                        display.add_system_message("  [r] Return to session", style="dim")
+                        display.add_system_message("", style="dim")
+                        display.set_prompt("Choice [c/d/e/r]: ")
+                        # Create simple response options for input filtering
+                        exit_options = [
+                            type('Option', (), {'short': 'c', 'full': 'cancel', 'description': 'Cancel task'})(),
+                            type('Option', (), {'short': 'd', 'full': 'detach', 'description': 'Detach'})(),
+                            type('Option', (), {'short': 'e', 'full': 'end', 'description': 'End session'})(),
+                            type('Option', (), {'short': 'r', 'full': 'return', 'description': 'Return'})(),
+                        ]
+                    else:
+                        display.add_system_message("Exit options:", style="bold")
+                        display.add_system_message("  [d] Detach (keep session, can reconnect later)", style="dim")
+                        display.add_system_message("  [e] End session (delete session from server)", style="dim")
+                        display.add_system_message("  [r] Return to session", style="dim")
+                        display.add_system_message("", style="dim")
+                        display.set_prompt("Choice [d/e/r]: ")
+                        exit_options = [
+                            type('Option', (), {'short': 'd', 'full': 'detach', 'description': 'Detach'})(),
+                            type('Option', (), {'short': 'e', 'full': 'end', 'description': 'End session'})(),
+                            type('Option', (), {'short': 'r', 'full': 'return', 'description': 'Return'})(),
+                        ]
+                    display.set_waiting_for_channel_input(True, exit_options)
+                    continue
                 elif text_lower == "stop":
                     await client.stop()
                     continue
