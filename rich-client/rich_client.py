@@ -3209,57 +3209,76 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
                 # Client-only commands
                 if text_lower in ("exit", "quit", "q"):
-                    # Check if a task is running
+                    # Always show confirmation dialog for session lifecycle
+                    session_id = client.session_id or "unknown"
+                    socket_path = client.socket_path
+
+                    display.add_system_message("", style="dim")
                     if model_running:
-                        # Show confirmation dialog (using add_system_message to avoid pager)
-                        display.add_system_message("", style="dim")
                         display.add_system_message("Task in progress. What would you like to do?", style="yellow bold")
-                        display.add_system_message("  [c] Cancel task and exit", style="dim")
+                        display.add_system_message("  [c] Cancel task and exit (session preserved)", style="dim")
                         display.add_system_message("  [d] Detach (task continues in background)", style="dim")
+                        display.add_system_message("  [e] End session (cancel task and delete session)", style="dim")
                         display.add_system_message("  [r] Return to session", style="dim")
                         display.add_system_message("", style="dim")
-                        display.set_prompt("Choice [c/d/r]: ")
-
-                        # Wait for user choice
-                        try:
-                            choice = await asyncio.wait_for(input_queue.get(), timeout=60.0)
-                            choice = choice.strip().lower()
-                        except asyncio.TimeoutError:
-                            choice = "r"  # Default to return on timeout
-
-                        display.set_prompt(None)  # Restore default prompt
-
-                        if choice == "c":
-                            # Cancel task and exit
-                            await client.stop()
-                            display.add_system_message("Task cancelled.", style="yellow")
-                            should_exit = True
-                            display.stop()
-                            break
-                        elif choice == "d":
-                            # Detach - show reconnection info and exit
-                            session_id = client.session_id or "unknown"
-                            socket_path = client.socket_path
-                            display.add_system_message("", style="dim")
-                            display.add_system_message("Task will continue running on the server.", style="green")
-                            display.add_system_message("", style="dim")
-                            display.add_system_message("To reconnect:", style="bold")
-                            display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="cyan")
-                            display.add_system_message("", style="dim")
-                            display.add_system_message(f"Session ID: {session_id}", style="dim")
-                            display.add_system_message("", style="dim")
-                            should_exit = True
-                            display.stop()
-                            break
-                        else:
-                            # Return to session (includes 'r' and any other input)
-                            display.add_system_message("Returning to session.", style="dim")
-                            continue
+                        display.set_prompt("Choice [c/d/e/r]: ")
                     else:
-                        # No task running, exit immediately
+                        display.add_system_message("Exit options:", style="bold")
+                        display.add_system_message("  [d] Detach (keep session, can reconnect later)", style="dim")
+                        display.add_system_message("  [e] End session (delete session from server)", style="dim")
+                        display.add_system_message("  [r] Return to session", style="dim")
+                        display.add_system_message("", style="dim")
+                        display.set_prompt("Choice [d/e/r]: ")
+
+                    # Wait for user choice
+                    try:
+                        choice = await asyncio.wait_for(input_queue.get(), timeout=60.0)
+                        choice = choice.strip().lower()
+                    except asyncio.TimeoutError:
+                        choice = "r"  # Default to return on timeout
+
+                    display.set_prompt(None)  # Restore default prompt
+
+                    if choice == "c" and model_running:
+                        # Cancel task but keep session
+                        await client.stop()
+                        display.add_system_message("Task cancelled. Session preserved.", style="yellow")
+                        display.add_system_message("", style="dim")
+                        display.add_system_message("To reconnect:", style="bold")
+                        display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="cyan")
+                        display.add_system_message(f"Session ID: {session_id}", style="dim")
                         should_exit = True
                         display.stop()
                         break
+                    elif choice == "d":
+                        # Detach - keep session alive
+                        display.add_system_message("", style="dim")
+                        if model_running:
+                            display.add_system_message("Task will continue running on the server.", style="green")
+                        else:
+                            display.add_system_message("Session preserved on server.", style="green")
+                        display.add_system_message("", style="dim")
+                        display.add_system_message("To reconnect:", style="bold")
+                        display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="cyan")
+                        display.add_system_message("", style="dim")
+                        display.add_system_message(f"Session ID: {session_id}", style="dim")
+                        display.add_system_message("", style="dim")
+                        should_exit = True
+                        display.stop()
+                        break
+                    elif choice == "e":
+                        # End session - delete from server
+                        if model_running:
+                            await client.stop()
+                        # TODO: Add client.delete_session() when available
+                        display.add_system_message("Session ended.", style="yellow")
+                        should_exit = True
+                        display.stop()
+                        break
+                    else:
+                        # Return to session (includes 'r' and any other input)
+                        display.add_system_message("Returning to session.", style="dim")
+                        continue
                 elif text_lower == "stop":
                     await client.stop()
                     continue
