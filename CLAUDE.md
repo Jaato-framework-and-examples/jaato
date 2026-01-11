@@ -186,6 +186,7 @@ async for event in client.events():
   - `google_genai/`: Google GenAI/Vertex AI implementation
   - `github_models/`: GitHub Models API implementation (uses `azure-ai-inference` SDK)
   - `anthropic/`: Anthropic Claude implementation (uses `anthropic` SDK)
+  - `antigravity/`: Google Antigravity IDE backend (Gemini 3, Claude via Google OAuth)
 
 - **mcp_context_manager.py**: Multi-server MCP client manager
   - `MCPClientManager`: Manages persistent connections to multiple MCP servers
@@ -524,6 +525,73 @@ Cache behavior notes:
 - The `cache_exclude_recent_turns` setting controls how many recent turns remain uncached
 - Set `cache_history: false` to disable history caching while keeping system/tools cached
 
+### Antigravity (Google IDE Backend)
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_ANTIGRAVITY_PROJECT_ID` | Override Antigravity project ID |
+| `JAATO_ANTIGRAVITY_ENDPOINT` | Override API endpoint URL |
+| `JAATO_ANTIGRAVITY_QUOTA` | Preferred quota: `antigravity` (default) or `gemini-cli` |
+| `JAATO_ANTIGRAVITY_THINKING_LEVEL` | Gemini 3 thinking level (`minimal`/`low`/`medium`/`high`) |
+| `JAATO_ANTIGRAVITY_THINKING_BUDGET` | Claude thinking budget in tokens (default: 8192) |
+| `JAATO_ANTIGRAVITY_AUTO_ROTATE` | Enable multi-account rotation (default: `true`) |
+
+**Authentication: Google OAuth with PKCE**
+
+Antigravity uses Google OAuth to access models through Google's IDE backend.
+This provides access to Gemini 3 and Claude models via your Google account.
+
+```python
+from shared.plugins.model_provider.antigravity import oauth_login
+
+# Run once - opens browser for Google authentication
+oauth_login()
+
+# Tokens are stored in ~/.config/jaato/antigravity_accounts.json
+# Provider will automatically use stored tokens
+```
+
+**Available Models:**
+
+| Quota | Model | Features |
+|-------|-------|----------|
+| Antigravity | `antigravity-gemini-3-pro` | 1M context, thinking levels |
+| Antigravity | `antigravity-gemini-3-flash` | 1M context, thinking levels |
+| Antigravity | `antigravity-claude-sonnet-4-5` | 200K context |
+| Antigravity | `antigravity-claude-sonnet-4-5-thinking` | Extended thinking |
+| Antigravity | `antigravity-claude-opus-4-5-thinking` | Extended thinking |
+| Gemini CLI | `gemini-2.5-flash` | 1M context |
+| Gemini CLI | `gemini-2.5-pro` | 1M context |
+| Gemini CLI | `gemini-3-flash-preview` | Preview model |
+| Gemini CLI | `gemini-3-pro-preview` | Preview model |
+
+**Usage Example:**
+```python
+from shared.plugins.model_provider.antigravity import AntigravityProvider
+
+provider = AntigravityProvider()
+provider.initialize()  # Uses stored OAuth tokens
+provider.connect('antigravity-gemini-3-flash')
+provider.create_session(system_instruction="You are a helpful assistant.")
+response = provider.send_message("Hello!")
+print(response.get_text())
+```
+
+**Multi-Account Support:**
+
+Antigravity supports multiple Google accounts for load balancing.
+Run `oauth_login()` multiple times to add accounts. The provider
+automatically rotates between accounts when rate limits are hit.
+
+Configuration options via `ProviderConfig.extra`:
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `endpoint` | str | None | Override API endpoint |
+| `quota_type` | str | `antigravity` | Quota pool to use |
+| `project_id` | str | None | Override project ID |
+| `auto_rotate` | bool | True | Enable account rotation on rate limit |
+| `thinking_level` | str | None | Gemini 3 thinking level |
+| `thinking_budget` | int | 8192 | Claude thinking token budget |
+
 ### General
 | Variable | Purpose |
 |----------|---------|
@@ -547,6 +615,37 @@ Cache behavior notes:
 |----------|---------|
 | `JAATO_COPY_MECHANISM` | Clipboard provider: `osc52` (default) |
 | `JAATO_COPY_SOURCES` | Sources to include: `model` (default), or `model&user&tool` |
+
+## Rich Client Commands
+
+### Authentication Commands
+
+The TUI client provides commands for managing provider authentication:
+
+**Anthropic Claude:**
+```
+anthropic-auth login        # Open browser for OAuth authentication
+anthropic-auth code <code>  # Complete login with authorization code
+anthropic-auth logout       # Clear stored OAuth tokens
+anthropic-auth status       # Show current authentication status
+```
+
+**Antigravity (Google IDE Backend):**
+```
+antigravity-auth login      # Open browser for Google OAuth
+antigravity-auth code <code> # Complete login with authorization code
+antigravity-auth logout     # Clear stored accounts
+antigravity-auth status     # Show current authentication status
+antigravity-auth accounts   # List all authenticated accounts
+```
+
+### Session Commands
+
+```
+reset                       # Reset conversation history
+model <name>                # Switch to a different model
+keybindings reload          # Reload keybindings from config
+```
 
 ## Rich Client Keybindings
 
@@ -592,9 +691,9 @@ Priority: Environment variables > Project config > User config > Defaults
 
 ### Reloading Keybindings
 
-Use the `/keybindings reload` command to reload keybindings without restarting:
+Use the `keybindings reload` command to reload keybindings without restarting:
 ```
-/keybindings reload
+keybindings reload
 ```
 
 ## Testing
