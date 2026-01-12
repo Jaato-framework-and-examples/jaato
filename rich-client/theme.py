@@ -667,11 +667,6 @@ BUILTIN_THEMES: Dict[str, ThemeConfig] = {
 }
 
 
-def _get_preferences_path() -> Path:
-    """Get the path to the user preferences file."""
-    return Path.home() / ".jaato" / "preferences.json"
-
-
 def save_theme_preference(theme_name: str) -> bool:
     """Save the selected theme to user preferences.
 
@@ -682,32 +677,8 @@ def save_theme_preference(theme_name: str) -> bool:
     Returns:
         True if saved successfully, False otherwise.
     """
-    prefs_path = _get_preferences_path()
-    try:
-        # Load existing preferences or start fresh
-        prefs = {}
-        if prefs_path.exists():
-            try:
-                with open(prefs_path, "r") as f:
-                    prefs = json.load(f)
-            except (json.JSONDecodeError, IOError):
-                pass  # Start fresh if file is corrupted
-
-        # Update theme preference
-        prefs["theme"] = theme_name
-
-        # Ensure directory exists
-        prefs_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Save preferences
-        with open(prefs_path, "w") as f:
-            json.dump(prefs, f, indent=2)
-
-        logger.info(f"Saved theme preference: {theme_name}")
-        return True
-    except Exception as e:
-        logger.warning(f"Failed to save theme preference: {e}")
-        return False
+    from preferences import save_preference
+    return save_preference("theme", theme_name)
 
 
 def load_theme_preference() -> Optional[str]:
@@ -716,18 +687,8 @@ def load_theme_preference() -> Optional[str]:
     Returns:
         Theme name if found, None otherwise.
     """
-    prefs_path = _get_preferences_path()
-    try:
-        if prefs_path.exists():
-            with open(prefs_path, "r") as f:
-                prefs = json.load(f)
-                theme = prefs.get("theme")
-                if theme:
-                    logger.debug(f"Loaded theme preference: {theme}")
-                    return theme
-    except Exception as e:
-        logger.warning(f"Failed to load theme preference: {e}")
-    return None
+    from preferences import load_preference
+    return load_preference("theme")
 
 
 def load_theme(
