@@ -296,7 +296,7 @@ class RichClient:
 
         except Exception as e:
             if self._display:
-                self._display.show_lines([(f"Error: {e}", "red")])
+                self._display.show_lines([(f"Error: {e}", "system_error")])
             return {"error": str(e)}
 
         finally:
@@ -725,7 +725,7 @@ class RichClient:
                 # Show feedback in output panel as a system message
                 self._display.add_system_message(
                     f"[Code Validation] Issues detected in output code blocks",
-                    style="yellow"
+                    style="system_warning"
                 )
                 self._trace(f"Code validation feedback: {len(feedback)} chars")
 
@@ -1303,7 +1303,7 @@ class RichClient:
             if self._display:
                 self._display.add_system_message(
                     f"⚠ Context usage ({percent_used:.1f}%) exceeds threshold ({threshold}%). GC will run after this turn.",
-                    style="yellow"
+                    style="system_warning"
                 )
 
         def model_thread():
@@ -1413,9 +1413,9 @@ class RichClient:
                                 continue
                             # Color diff lines
                             if line.startswith('+') and not line.startswith('+++'):
-                                lines.append((line, "green"))
+                                lines.append((line, "system_success"))
                             elif line.startswith('-') and not line.startswith('---'):
-                                lines.append((line, "red"))
+                                lines.append((line, "system_error"))
                             elif line.startswith('@@'):
                                 lines.append((line, "cyan"))
                             else:
@@ -1448,30 +1448,30 @@ class RichClient:
                     client = self._backend.get_client()
                     if client and hasattr(client, 'stop'):
                         client.stop()
-                self._display.add_system_message("Task cancelled.", style="yellow")
-                self._display.add_system_message("Goodbye!", style="bold")
+                self._display.add_system_message("Task cancelled.", style="system_warning")
+                self._display.add_system_message("Goodbye!", style="system_info")
                 self._display.stop()
                 return
             else:
                 # Return to session (includes 'r' and any other input)
-                self._display.add_system_message("Returning to session.", style="dim")
+                self._display.add_system_message("Returning to session.", style="hint")
                 return
 
         if user_input.lower() in ('quit', 'exit', 'q'):
             # Check if a task is running
             if self._model_running:
                 # Show confirmation dialog (direct mode - no detach option)
-                self._display.add_system_message("", style="dim")
-                self._display.add_system_message("Task in progress. Exiting will cancel the task.", style="yellow bold")
-                self._display.add_system_message("  [c] Cancel task and exit", style="dim")
-                self._display.add_system_message("  [r] Return to session", style="dim")
-                self._display.add_system_message("", style="dim")
+                self._display.add_system_message("", style="hint")
+                self._display.add_system_message("Task in progress. Exiting will cancel the task.", style="system_warning")
+                self._display.add_system_message("  [c] Cancel task and exit", style="hint")
+                self._display.add_system_message("  [r] Return to session", style="hint")
+                self._display.add_system_message("", style="hint")
                 self._display.set_prompt("Choice [c/r]: ")
                 self._pending_exit_confirmation = True
                 return
             else:
                 # No task running, exit immediately
-                self._display.add_system_message("Goodbye!", style="bold")
+                self._display.add_system_message("Goodbye!", style="system_info")
                 self._display.stop()
                 return
 
@@ -1683,7 +1683,7 @@ class RichClient:
         if subcommand == "enable":
             if not args:
                 self._display.show_lines([
-                    ("[Error: Specify a tool name or 'all']", "red"),
+                    ("[Error: Specify a tool name or 'all']", "system_error"),
                     ("  Usage: tools enable <tool_name>", "dim"),
                     ("         tools enable all", "dim"),
                 ])
@@ -1694,7 +1694,7 @@ class RichClient:
         if subcommand == "disable":
             if not args:
                 self._display.show_lines([
-                    ("[Error: Specify a tool name or 'all']", "red"),
+                    ("[Error: Specify a tool name or 'all']", "system_error"),
                     ("  Usage: tools disable <tool_name>", "dim"),
                     ("         tools disable all", "dim"),
                 ])
@@ -1786,7 +1786,7 @@ class RichClient:
         if result and result.success:
             self._display.add_system_message(
                 f"Auto-captured: {result.path}",
-                style="dim"
+                style="hint"
             )
 
     def _do_vision_capture(self, context: CaptureContext):
@@ -1827,7 +1827,7 @@ class RichClient:
 
         except Exception as e:
             self._display.show_lines([
-                ("[Screenshot failed]", "red"),
+                ("[Screenshot failed]", "system_error"),
                 (f"  Error: {e}", "dim"),
             ])
             return None
@@ -1883,7 +1883,7 @@ class RichClient:
             }
 
             if format_str not in format_map:
-                self._display.add_system_message(f"[Invalid format: {format_str}]", "red")
+                self._display.add_system_message(f"[Invalid format: {format_str}]", "system_error")
                 self._display.add_system_message("  Available: svg, png, html", "dim")
                 return
 
@@ -1933,7 +1933,7 @@ class RichClient:
                     else:
                         self._display.add_system_message("Periodic capture: disabled", "cyan")
             except ValueError:
-                self._display.add_system_message(f"[Invalid interval: {interval_str}]", "red")
+                self._display.add_system_message(f"[Invalid interval: {interval_str}]", "system_error")
                 self._display.add_system_message("  Usage: screenshot interval <milliseconds>", "dim")
             return
 
@@ -1941,24 +1941,24 @@ class RichClient:
             # Capture without sending hint to model
             result = self._do_vision_capture(CaptureContext.USER_REQUESTED)
             if result and result.success:
-                self._display.add_system_message("Screenshot captured:", "green")
+                self._display.add_system_message("Screenshot captured:", "system_success")
                 self._display.add_system_message(f"  {result.path}", "cyan")
             elif result and not result.success:
-                self._display.add_system_message("[Screenshot failed]", "red")
+                self._display.add_system_message("[Screenshot failed]", "system_error")
                 self._display.add_system_message(f"  Error: {result.error}", "dim")
             return
 
         # Default: capture and send hint to model
         result = self._do_vision_capture(CaptureContext.USER_REQUESTED)
         if result and result.success:
-            self._display.add_system_message("Screenshot captured:", "green")
+            self._display.add_system_message("Screenshot captured:", "system_success")
             self._display.add_system_message(f"  {result.path}", "cyan")
             # Send hint to model as normal user message (queued if model is busy)
             # Use cwd as workspace root for relative paths
             hint = result.to_user_message(workspace_root=os.getcwd())
             self._start_model_thread(hint)
         elif result and not result.success:
-            self._display.add_system_message("[Screenshot failed]", "red")
+            self._display.add_system_message("[Screenshot failed]", "system_error")
             self._display.add_system_message(f"  Error: {result.error}", "dim")
 
     def _handle_theme_command(self, user_input: str) -> None:
@@ -1980,45 +1980,36 @@ class RichClient:
         if not subcommand:
             # Show current theme info
             theme = self._display.theme
-            lines = [
-                (f"Current theme: {theme.name}", "bold"),
-                (f"Source: {theme.source_path}", "dim"),
-                ("", ""),
-                ("Base colors:", "bold cyan"),
-            ]
+            self._display.add_system_message(f"Current theme: {theme.name}", "system_info")
+            self._display.add_system_message(f"Source: {theme.source_path}", "hint")
+            self._display.add_system_message("")
+            self._display.add_system_message("Base colors:", "system_info")
             for name in ["primary", "secondary", "success", "warning", "error", "muted"]:
                 color = theme.get_color(name)
-                lines.append((f"  {name}: {color}", color))
-            lines.append(("", ""))
-            lines.append(("Commands:", "bold cyan"))
-            lines.append(("  theme reload           - Reload from config files", ""))
-            lines.append(("  theme <preset>         - Switch preset (dark, light, high-contrast)", ""))
-            self._display.show_lines(lines)
+                self._display.add_system_message(f"  {name}: {color}", "hint")
+            self._display.add_system_message("")
+            self._display.add_system_message("Commands:", "system_info")
+            self._display.add_system_message("  theme reload           - Reload from config files", "hint")
+            self._display.add_system_message("  theme <preset>         - Switch preset (dark, light, high-contrast)", "hint")
             return
 
         if subcommand == "reload":
             new_theme = load_theme()
             self._display.set_theme(new_theme)
-            self._display.show_lines([
-                (f"Theme reloaded: {new_theme.name}", "green"),
-                (f"Source: {new_theme.source_path}", "dim"),
-            ])
+            self._display.add_system_message(f"Theme reloaded: {new_theme.name}", "system_success")
+            self._display.add_system_message(f"Source: {new_theme.source_path}", "hint")
             return
 
         if subcommand in BUILTIN_THEMES:
             new_theme = BUILTIN_THEMES[subcommand].copy()
             self._display.set_theme(new_theme)
             save_theme_preference(subcommand)  # Persist the selection
-            self._display.show_lines([
-                (f"Switched to '{subcommand}' theme", "green"),
-            ])
+            self._display.add_system_message(f"Switched to '{subcommand}' theme", "system_success")
             return
 
         # Unknown subcommand
-        self._display.show_lines([
-            (f"Unknown theme command: {subcommand}", "yellow"),
-            ("Available: reload, dark, light, high-contrast", "dim"),
-        ])
+        self._display.add_system_message(f"Unknown theme command: {subcommand}", "system_warning")
+        self._display.add_system_message("Available: reload, dark, light, high-contrast", "hint")
 
     def _get_tool_status(self) -> list:
         """Get status of all tools including enabled/disabled state."""
@@ -2115,20 +2106,20 @@ class RichClient:
             return
 
         if not self.registry:
-            self._display.show_lines([("[Error: Registry not available]", "red")])
+            self._display.show_lines([("[Error: Registry not available]", "system_error")])
             return
 
         if name.lower() == "all":
             count = self.registry.enable_all_tools()
             self._refresh_session_tools()
-            self._display.show_lines([(f"[Enabled all {count} tools]", "green")])
+            self._display.show_lines([(f"[Enabled all {count} tools]", "system_success")])
             return
 
         if self.registry.enable_tool(name):
             self._refresh_session_tools()
-            self._display.show_lines([(f"[Enabled tool: {name}]", "green")])
+            self._display.show_lines([(f"[Enabled tool: {name}]", "system_success")])
         else:
-            lines = [(f"[Error: Tool '{name}' not found]", "red")]
+            lines = [(f"[Error: Tool '{name}' not found]", "system_error")]
             available = self.registry.get_all_tool_names()
             if available:
                 preview = ', '.join(sorted(available)[:10])
@@ -2147,7 +2138,7 @@ class RichClient:
             return
 
         if not self.registry:
-            self._display.show_lines([("[Error: Registry not available]", "red")])
+            self._display.show_lines([("[Error: Registry not available]", "system_error")])
             return
 
         if name.lower() == "all":
@@ -2163,7 +2154,7 @@ class RichClient:
             self._refresh_session_tools()
             self._display.show_lines([(f"[Disabled tool: {name}]", "yellow")])
         else:
-            lines = [(f"[Error: Tool '{name}' not found]", "red")]
+            lines = [(f"[Error: Tool '{name}' not found]", "system_error")]
             available = self.registry.get_all_tool_names()
             if available:
                 preview = ', '.join(sorted(available)[:10])
@@ -2448,7 +2439,7 @@ class RichClient:
             resp_str = str(display_response)
             if len(resp_str) > 300:
                 resp_str = resp_str[:300] + "..."
-            lines.append((f"  📥 RESULT: {name} → {resp_str}", "green"))
+            lines.append((f"  📥 RESULT: {name} → {resp_str}", "system_success"))
 
         # Inline data (images, etc.)
         elif hasattr(part, 'inline_data') and part.inline_data:
@@ -2476,7 +2467,7 @@ class RichClient:
             output = part.code_execution_result
             if len(output) > 300:
                 output = output[:300] + "..."
-            lines.append((f"  📋 EXEC RESULT: {output}", "green"))
+            lines.append((f"  📋 EXEC RESULT: {output}", "system_success"))
 
         else:
             # Unknown part type - show diagnostic info like simple client
@@ -2528,11 +2519,11 @@ class RichClient:
 
             if result.get('success'):
                 self._display.show_lines([
-                    (f"Session exported to: {result['filename']}", "green")
+                    (f"Session exported to: {result['filename']}", "system_success")
                 ])
             else:
                 self._display.show_lines([
-                    (f"Export failed: {result.get('error', 'Unknown error')}", "red")
+                    (f"Export failed: {result.get('error', 'Unknown error')}", "system_error")
                 ])
         except ImportError:
             self._display.show_lines([
@@ -2540,7 +2531,7 @@ class RichClient:
             ])
         except Exception as e:
             self._display.show_lines([
-                (f"Export error: {e}", "red")
+                (f"Export error: {e}", "system_error")
             ])
 
     def _show_help(self) -> None:
@@ -2748,7 +2739,7 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
         }
 
         if format_str not in format_map:
-            display.add_system_message(f"[Invalid format: {format_str}]", "red")
+            display.add_system_message(f"[Invalid format: {format_str}]", "system_error")
             display.add_system_message("  Available: svg, png, html", "dim")
             return
 
@@ -2809,7 +2800,7 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
             else:
                 display.add_system_message("Periodic capture: disabled", "cyan")
         except ValueError:
-            display.add_system_message(f"[Invalid interval: {interval_str}]", "red")
+            display.add_system_message(f"[Invalid interval: {interval_str}]", "system_error")
             display.add_system_message("  Usage: screenshot interval <milliseconds>", "dim")
         return
 
@@ -2817,24 +2808,24 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
         # Capture without sending hint to model
         result = _do_vision_capture_ipc(display, agent_registry, CaptureContext.USER_REQUESTED)
         if result and result.success:
-            display.add_system_message("Screenshot captured:", "green")
+            display.add_system_message("Screenshot captured:", "system_success")
             display.add_system_message(f"  {result.path}", "cyan")
         elif result and not result.success:
-            display.add_system_message("[Screenshot failed]", "red")
+            display.add_system_message("[Screenshot failed]", "system_error")
             display.add_system_message(f"  Error: {result.error}", "dim")
         return
 
     # Default: capture and send hint to model
     result = _do_vision_capture_ipc(display, agent_registry, CaptureContext.USER_REQUESTED)
     if result and result.success:
-        display.add_system_message("Screenshot captured:", "green")
+        display.add_system_message("Screenshot captured:", "system_success")
         display.add_system_message(f"  {result.path}", "cyan")
         # Send hint to model as normal user message (queued if model is busy)
         # Use cwd as workspace root for relative paths
         hint = result.to_user_message(workspace_root=os.getcwd())
         await ipc_client.send_message(hint)
     elif result and not result.success:
-        display.add_system_message("[Screenshot failed]", "red")
+        display.add_system_message("[Screenshot failed]", "system_error")
         display.add_system_message(f"  Error: {result.error}", "dim")
 
 
@@ -2849,7 +2840,7 @@ def _do_vision_capture_ipc(display, agent_registry, context):
         buffer = agent_registry.get_selected_buffer()
         if not buffer:
             display.show_lines([
-                ("[Screenshot failed]", "red"),
+                ("[Screenshot failed]", "system_error"),
                 ("  No output buffer available", "dim"),
             ])
             return None
@@ -2872,13 +2863,13 @@ def _do_vision_capture_ipc(display, agent_registry, context):
 
         # For auto/periodic captures, just show a brief message
         if context in (CaptureContext.TURN_END, CaptureContext.PERIODIC) and result.success:
-            display.add_system_message(f"Auto-captured: {result.path}", style="dim")
+            display.add_system_message(f"Auto-captured: {result.path}", style="hint")
 
         return result
 
     except Exception as e:
         display.show_lines([
-            ("[Screenshot failed]", "red"),
+            ("[Screenshot failed]", "system_error"),
             (f"  Error: {e}", "dim"),
         ])
         return None
@@ -3127,7 +3118,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     # Always add new line - don't update in place because other messages
                     # may have been added between "running" and "pending" (e.g., auth instructions)
                     msg = event.message or "PENDING"
-                    display.add_system_message(f"   {padded_name} {msg}", style="dim yellow")
+                    display.add_system_message(f"   {padded_name} {msg}", style="system_warning")
                     init_current_step = None
 
             elif isinstance(event, AgentOutputEvent):
@@ -3615,7 +3606,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
                     # Show result message if present
                     if event.message:
-                        lines.insert(0, (event.message, "green"))
+                        lines.insert(0, (event.message, "system_success"))
                         lines.insert(1, ("", ""))
 
                     for plugin_name in sorted(by_plugin.keys()):
@@ -3802,27 +3793,27 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     if choice == "c" and model_running:
                         # Cancel task but keep session
                         await client.stop()
-                        display.add_system_message("Task cancelled. Session preserved.", style="yellow")
-                        display.add_system_message("", style="dim")
-                        display.add_system_message("To reconnect:", style="bold")
-                        display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="cyan")
-                        display.add_system_message(f"Session ID: {session_id}", style="dim")
+                        display.add_system_message("Task cancelled. Session preserved.", style="system_warning")
+                        display.add_system_message("", style="hint")
+                        display.add_system_message("To reconnect:", style="system_info")
+                        display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="system_info")
+                        display.add_system_message(f"Session ID: {session_id}", style="hint")
                         should_exit = True
                         display.stop()
                         break
                     elif choice == "d":
                         # Detach - keep session alive
-                        display.add_system_message("", style="dim")
+                        display.add_system_message("", style="hint")
                         if model_running:
-                            display.add_system_message("Task will continue running on the server.", style="green")
+                            display.add_system_message("Task will continue running on the server.", style="system_success")
                         else:
-                            display.add_system_message("Session preserved on server.", style="green")
-                        display.add_system_message("", style="dim")
-                        display.add_system_message("To reconnect:", style="bold")
-                        display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="cyan")
-                        display.add_system_message("", style="dim")
-                        display.add_system_message(f"Session ID: {session_id}", style="dim")
-                        display.add_system_message("", style="dim")
+                            display.add_system_message("Session preserved on server.", style="system_success")
+                        display.add_system_message("", style="hint")
+                        display.add_system_message("To reconnect:", style="system_info")
+                        display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="system_info")
+                        display.add_system_message("", style="hint")
+                        display.add_system_message(f"Session ID: {session_id}", style="hint")
+                        display.add_system_message("", style="hint")
                         should_exit = True
                         display.stop()
                         break
@@ -3831,13 +3822,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         if model_running:
                             await client.stop()
                         # TODO: Add client.delete_session() when available
-                        display.add_system_message("Session ended.", style="yellow")
+                        display.add_system_message("Session ended.", style="system_warning")
                         should_exit = True
                         display.stop()
                         break
                     else:
                         # Return to session (includes 'r' and any other input)
-                        display.add_system_message("Returning to session.", style="dim")
+                        display.add_system_message("Returning to session.", style="hint")
                         continue
 
                 # Client-only commands
@@ -3845,14 +3836,14 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     # Show confirmation dialog for session lifecycle
                     pending_exit_confirmation = True
 
-                    display.add_system_message("", style="dim")
+                    display.add_system_message("", style="hint")
                     if model_running:
-                        display.add_system_message("Task in progress. What would you like to do?", style="yellow bold")
-                        display.add_system_message("  [c] Cancel task and exit (session preserved)", style="dim")
-                        display.add_system_message("  [d] Detach (task continues in background)", style="dim")
-                        display.add_system_message("  [e] End session (cancel task and delete session)", style="dim")
-                        display.add_system_message("  [r] Return to session", style="dim")
-                        display.add_system_message("", style="dim")
+                        display.add_system_message("Task in progress. What would you like to do?", style="system_warning")
+                        display.add_system_message("  [c] Cancel task and exit (session preserved)", style="hint")
+                        display.add_system_message("  [d] Detach (task continues in background)", style="hint")
+                        display.add_system_message("  [e] End session (cancel task and delete session)", style="hint")
+                        display.add_system_message("  [r] Return to session", style="hint")
+                        display.add_system_message("", style="hint")
                         display.set_prompt("Choice [c/d/e/r]: ")
                         # Create simple response options for input filtering
                         exit_options = [
@@ -3862,11 +3853,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                             type('Option', (), {'short': 'r', 'full': 'return', 'description': 'Return'})(),
                         ]
                     else:
-                        display.add_system_message("Exit options:", style="bold")
-                        display.add_system_message("  [d] Detach (keep session, can reconnect later)", style="dim")
-                        display.add_system_message("  [e] End session (delete session from server)", style="dim")
-                        display.add_system_message("  [r] Return to session", style="dim")
-                        display.add_system_message("", style="dim")
+                        display.add_system_message("Exit options:", style="system_info")
+                        display.add_system_message("  [d] Detach (keep session, can reconnect later)", style="hint")
+                        display.add_system_message("  [e] End session (delete session from server)", style="hint")
+                        display.add_system_message("  [r] Return to session", style="hint")
+                        display.add_system_message("", style="hint")
                         display.set_prompt("Choice [d/e/r]: ")
                         exit_options = [
                             type('Option', (), {'short': 'd', 'full': 'detach', 'description': 'Detach'})(),
@@ -3946,39 +3937,30 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     if not subcmd:
                         # Show current theme info
                         theme = display.theme
-                        lines = [
-                            (f"Current theme: {theme.name}", "bold"),
-                            (f"Source: {theme.source_path}", "dim"),
-                            ("", ""),
-                            ("Base colors:", "bold cyan"),
-                        ]
+                        display.add_system_message(f"Current theme: {theme.name}", "system_info")
+                        display.add_system_message(f"Source: {theme.source_path}", "hint")
+                        display.add_system_message("")
+                        display.add_system_message("Base colors:", "system_info")
                         for name in ["primary", "secondary", "success", "warning", "error", "muted"]:
                             color = theme.get_color(name)
-                            lines.append((f"  {name}: {color}", color))
-                        lines.append(("", ""))
-                        lines.append(("Commands:", "bold cyan"))
-                        lines.append(("  theme reload           - Reload from config files", ""))
-                        lines.append(("  theme <preset>         - Switch preset (dark, light, high-contrast)", ""))
-                        display.show_lines(lines)
+                            display.add_system_message(f"  {name}: {color}", "hint")
+                        display.add_system_message("")
+                        display.add_system_message("Commands:", "system_info")
+                        display.add_system_message("  theme reload           - Reload from config files", "hint")
+                        display.add_system_message("  theme <preset>         - Switch preset (dark, light, high-contrast)", "hint")
                     elif subcmd == "reload":
                         new_theme = load_theme()
                         display.set_theme(new_theme)
-                        display.show_lines([
-                            (f"Theme reloaded: {new_theme.name}", "green"),
-                            (f"Source: {new_theme.source_path}", "dim"),
-                        ])
+                        display.add_system_message(f"Theme reloaded: {new_theme.name}", "system_success")
+                        display.add_system_message(f"Source: {new_theme.source_path}", "hint")
                     elif subcmd in BUILTIN_THEMES:
                         new_theme = BUILTIN_THEMES[subcmd].copy()
                         display.set_theme(new_theme)
                         save_theme_preference(subcmd)  # Persist the selection
-                        display.show_lines([
-                            (f"Switched to '{subcmd}' theme", "green"),
-                        ])
+                        display.add_system_message(f"Switched to '{subcmd}' theme", "system_success")
                     else:
-                        display.show_lines([
-                            (f"Unknown theme command: {subcmd}", "yellow"),
-                            ("Available: reload, dark, light, high-contrast", "dim"),
-                        ])
+                        display.add_system_message(f"Unknown theme command: {subcmd}", "system_warning")
+                        display.add_system_message("Available: reload, dark, light, high-contrast", "hint")
                     continue
 
                 # Other server commands (reset, plugin commands) - forward directly

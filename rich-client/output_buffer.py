@@ -285,16 +285,31 @@ class OutputBuffer:
         # Invalidate render caches so content re-renders with new theme colors
         self._invalidate_line_caches()
 
+    # Known Rich style primitives that should be passed through without semantic lookup
+    _RICH_STYLE_PRIMITIVES = frozenset({
+        "bold", "dim", "italic", "underline", "blink", "reverse", "strike",
+        "red", "green", "yellow", "blue", "magenta", "cyan", "white", "black",
+        "bright_red", "bright_green", "bright_yellow", "bright_blue",
+        "bright_magenta", "bright_cyan", "bright_white",
+    })
+
     def _style(self, semantic_name: str, fallback: str = "") -> str:
         """Get a Rich style string from the theme.
 
         Args:
-            semantic_name: Semantic style name (e.g., "tool_output", "user_header").
+            semantic_name: Semantic style name (e.g., "tool_output", "user_header"),
+                          or a raw Rich style string (e.g., "bold", "dim cyan").
             fallback: Fallback style if theme is not set or name not found.
 
         Returns:
             Rich style string.
         """
+        # Check if this is a raw Rich style (primitive or compound like "bold cyan")
+        # If any word is a Rich primitive, treat the whole thing as a raw style
+        words = semantic_name.split()
+        if any(word in self._RICH_STYLE_PRIMITIVES for word in words):
+            return semantic_name
+
         if self._theme:
             style = self._theme.get_rich_style(semantic_name)
             if style:
