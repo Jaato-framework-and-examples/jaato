@@ -127,6 +127,9 @@ class RichClient:
         # Pending response options from permission plugin (single source of truth)
         self._pending_response_options: Optional[list] = None
 
+        # Pending system hints to inject into next user message (e.g., screenshot paths)
+        self._pending_system_hints: list[str] = []
+
         # Background model thread tracking
         self._model_thread: Optional[threading.Thread] = None
         self._model_running: bool = False
@@ -1544,6 +1547,12 @@ class RichClient:
         # Expand file references
         expanded_prompt = self._input_handler.expand_file_references(user_input)
 
+        # Inject any pending system hints (e.g., screenshot paths) - hidden from user
+        if self._pending_system_hints:
+            hints = "\n".join(self._pending_system_hints)
+            expanded_prompt = f"{hints}\n\n{expanded_prompt}"
+            self._pending_system_hints.clear()
+
         # Start model in background thread (non-blocking)
         # This allows the event loop to continue running for permission prompts
         self._start_model_thread(expanded_prompt)
@@ -1812,16 +1821,9 @@ class RichClient:
                 agent_id=self._agent_registry._selected_agent_id,
             )
 
-            # Send hint to model if requested
+            # Queue hint for injection into next user message (hidden from display)
             if result.success and send_hint:
-                # Signal agent is active
-                if self._ui_hooks:
-                    self._ui_hooks.on_agent_status_changed(
-                        agent_id="main",
-                        status="active"
-                    )
-                # Send system hint to model
-                self._start_model_thread(result.to_system_message())
+                self._pending_system_hints.append(result.to_system_message())
 
             return result
 
@@ -2672,6 +2674,29 @@ def _get_ipc_vision_state(display):
     return display._vision_capture, display._vision_formatter
 
 
+def _queue_ipc_system_hint(display, hint: str) -> None:
+    """Queue a system hint for injection into the next user message (IPC mode).
+
+    Hints are stored on the display object to persist across calls.
+    """
+    if not hasattr(display, '_pending_system_hints'):
+        display._pending_system_hints = []
+    display._pending_system_hints.append(hint)
+
+
+def _pop_ipc_system_hints(display) -> list:
+    """Get and clear pending system hints (IPC mode).
+
+    Returns:
+        List of pending hint strings, or empty list if none.
+    """
+    if not hasattr(display, '_pending_system_hints'):
+        return []
+    hints = display._pending_system_hints
+    display._pending_system_hints = []
+    return hints
+
+
 async def handle_screenshot_command_ipc(user_input: str, display, agent_registry, ipc_client) -> None:
     """Handle the screenshot command in IPC mode (client-side only).
 
@@ -2794,13 +2819,13 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
             display.add_system_message(f"  Error: {result.error}", "dim")
         return
 
-    # Default: capture and send hint to model
+    # Default: capture and queue hint for next message (hidden from display)
     result = _do_vision_capture_ipc(display, agent_registry, CaptureContext.USER_REQUESTED)
     if result and result.success:
         display.add_system_message("Screenshot captured:", "green")
         display.add_system_message(f"  {result.path}", "cyan")
-        # Send hint to model via IPC
-        await ipc_client.send_message(result.to_system_message())
+        # Queue hint for injection into next user message
+        _queue_ipc_system_hint(display, result.to_system_message())
     elif result and not result.success:
         display.add_system_message("[Screenshot failed]", "red")
         display.add_system_message(f"  Error: {result.error}", "dim")
@@ -3987,6 +4012,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 # Send message to model
                 model_running = True
                 display.add_to_history(text)
+
+                # Inject any pending system hints (hidden from display)
+                pending_hints = _pop_ipc_system_hints(display)
+                if pending_hints:
+                    hints_text = "\n".join(pending_hints)
+                    text = f"{hints_text}\n\n{text}"
+
                 await client.send_message(text)
 
             except asyncio.CancelledError:
