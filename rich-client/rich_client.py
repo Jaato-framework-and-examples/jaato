@@ -1730,12 +1730,13 @@ class RichClient:
         - VisionCaptureFormatter: Pipeline plugin for observing output and auto-capture
 
         Format priority: Environment variable > Saved preference > Default (svg)
+        Output directory: {cwd}/.jaato/vision
         """
         if self._vision_capture:
             return  # Already initialized
 
-        # Get output directory from environment
-        output_dir = os.environ.get('JAATO_VISION_DIR', '/tmp/jaato_vision')
+        # Use current working directory as workspace
+        output_dir = os.path.join(os.getcwd(), '.jaato', 'vision')
 
         # Determine format: env var takes priority, then saved preference, then default
         format_map = {
@@ -1788,12 +1789,11 @@ class RichClient:
                 style="dim"
             )
 
-    def _do_vision_capture(self, context: CaptureContext, send_hint: bool = False):
+    def _do_vision_capture(self, context: CaptureContext):
         """Perform a vision capture of the current TUI state.
 
         Args:
             context: What triggered the capture.
-            send_hint: If True, inject a system hint to the model about the capture path.
 
         Returns:
             CaptureResult on success, None on failure.
@@ -1814,17 +1814,15 @@ class RichClient:
                 height=50,
                 width=self._display._width
             )
+            # Get terminal theme from display's theme config for consistent export styling
+            terminal_theme = self._display._theme.to_terminal_theme()
             result = self._vision_capture.capture(
                 panel,
                 context=context,
                 turn_index=len(self._original_inputs),
                 agent_id=self._agent_registry._selected_agent_id,
+                terminal_theme=terminal_theme,
             )
-
-            # Queue hint for injection into next user message (hidden from display)
-            if result.success and send_hint:
-                self._pending_system_hints.append(result.to_system_message())
-
             return result
 
         except Exception as e:
@@ -1841,8 +1839,7 @@ class RichClient:
         is injected to inform the model about the capture path.
 
         Usage:
-            screenshot           - Capture and send hint to model
-            screenshot nosend    - Capture only, no hint to model
+            screenshot           - Capture TUI state (hint sent via plugin)
             screenshot format F  - Set output format (svg, png, html)
             screenshot auto      - Toggle auto-capture on turn end
             screenshot interval N - Set periodic capture interval (ms)
@@ -1942,7 +1939,7 @@ class RichClient:
 
         if subcommand == 'nosend':
             # Capture without sending hint to model
-            result = self._do_vision_capture(CaptureContext.USER_REQUESTED, send_hint=False)
+            result = self._do_vision_capture(CaptureContext.USER_REQUESTED)
             if result and result.success:
                 self._display.add_system_message("Screenshot captured:", "green")
                 self._display.add_system_message(f"  {result.path}", "cyan")
@@ -1952,10 +1949,14 @@ class RichClient:
             return
 
         # Default: capture and send hint to model
-        result = self._do_vision_capture(CaptureContext.USER_REQUESTED, send_hint=True)
+        result = self._do_vision_capture(CaptureContext.USER_REQUESTED)
         if result and result.success:
             self._display.add_system_message("Screenshot captured:", "green")
             self._display.add_system_message(f"  {result.path}", "cyan")
+            # Send hint to model as normal user message (queued if model is busy)
+            # Use cwd as workspace root for relative paths
+            hint = result.to_user_message(workspace_root=os.getcwd())
+            self._start_model_thread(hint)
         elif result and not result.success:
             self._display.add_system_message("[Screenshot failed]", "red")
             self._display.add_system_message(f"  Error: {result.error}", "dim")
@@ -2640,12 +2641,16 @@ def _get_ipc_vision_state(display):
 
     State is stored on the display object to persist across calls.
     Format priority: Environment variable > Saved preference > Default (svg)
+    Output directory: {cwd}/.jaato/vision
     """
     import os
     from shared.plugins.vision_capture import VisionCapture, VisionCaptureFormatter
     from shared.plugins.vision_capture.protocol import CaptureConfig, CaptureFormat
 
     if not hasattr(display, '_vision_capture'):
+        # Use current working directory as workspace (same as what client sends to server)
+        output_dir = os.path.join(os.getcwd(), '.jaato', 'vision')
+
         # Determine format: env var takes priority, then saved preference, then default
         format_map = {
             'svg': CaptureFormat.SVG,
@@ -2663,7 +2668,7 @@ def _get_ipc_vision_state(display):
 
         capture_format = format_map.get(format_str, CaptureFormat.SVG)
 
-        config = CaptureConfig(format=capture_format)
+        config = CaptureConfig(output_dir=output_dir, format=capture_format)
         display._vision_capture = VisionCapture()
         display._vision_capture.initialize(config)
 
@@ -2819,13 +2824,15 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
             display.add_system_message(f"  Error: {result.error}", "dim")
         return
 
-    # Default: capture and queue hint for next message (hidden from display)
+    # Default: capture and send hint to model
     result = _do_vision_capture_ipc(display, agent_registry, CaptureContext.USER_REQUESTED)
     if result and result.success:
         display.add_system_message("Screenshot captured:", "green")
         display.add_system_message(f"  {result.path}", "cyan")
-        # Queue hint for injection into next user message
-        _queue_ipc_system_hint(display, result.to_system_message())
+        # Send hint to model as normal user message (queued if model is busy)
+        # Use cwd as workspace root for relative paths
+        hint = result.to_user_message(workspace_root=os.getcwd())
+        await ipc_client.send_message(hint)
     elif result and not result.success:
         display.add_system_message("[Screenshot failed]", "red")
         display.add_system_message(f"  Error: {result.error}", "dim")
@@ -2851,11 +2858,16 @@ def _do_vision_capture_ipc(display, agent_registry, context):
             height=50,
             width=getattr(display, '_width', 120)
         )
+        # Get terminal theme from display's theme config for consistent export styling
+        terminal_theme = None
+        if hasattr(display, '_theme') and display._theme:
+            terminal_theme = display._theme.to_terminal_theme()
         result = vision_capture.capture(
             panel,
             context=context,
             turn_index=0,
             agent_id=agent_registry.get_selected_agent_id(),
+            terminal_theme=terminal_theme,
         )
 
         # For auto/periodic captures, just show a brief message

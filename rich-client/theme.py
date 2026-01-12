@@ -34,6 +34,23 @@ def is_hex_color(value: str) -> bool:
     return bool(HEX_COLOR_PATTERN.match(value))
 
 
+def hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
+    """Convert hex color string to RGB tuple.
+
+    Args:
+        hex_color: Hex color string like "#FF5500".
+
+    Returns:
+        Tuple of (R, G, B) integers 0-255.
+    """
+    hex_color = hex_color.lstrip('#')
+    return (
+        int(hex_color[0:2], 16),
+        int(hex_color[2:4], 16),
+        int(hex_color[4:6], 16),
+    )
+
+
 @dataclass
 class StyleSpec:
     """Specification for a single style.
@@ -436,6 +453,49 @@ class ThemeConfig:
             Hex color string.
         """
         return self.colors.get(name, "#ffffff")
+
+    def to_terminal_theme(self) -> "TerminalTheme":
+        """Convert theme to Rich TerminalTheme for SVG/HTML export.
+
+        Maps the theme's palette colors to a TerminalTheme suitable for
+        Rich Console's save_svg() and save_html() methods.
+
+        Returns:
+            TerminalTheme instance with colors from this theme's palette.
+        """
+        from rich.terminal_theme import TerminalTheme
+
+        bg = hex_to_rgb(self.colors.get("background", "#1a1a1a"))
+        fg = hex_to_rgb(self.colors.get("text", "#ffffff"))
+
+        # Build ANSI color palette (16 colors: 8 normal + 8 bright)
+        # Standard ANSI: black, red, green, yellow, blue, magenta, cyan, white
+        ansi_colors = [
+            hex_to_rgb(self.colors.get("background", "#1a1a1a")),  # 0: black
+            hex_to_rgb(self.colors.get("error", "#ff5f5f")),       # 1: red
+            hex_to_rgb(self.colors.get("success", "#5fd75f")),     # 2: green
+            hex_to_rgb(self.colors.get("warning", "#ffff5f")),     # 3: yellow
+            hex_to_rgb(self.colors.get("primary", "#5fd7ff")),     # 4: blue
+            hex_to_rgb(self.colors.get("accent", "#d7af87")),      # 5: magenta
+            hex_to_rgb(self.colors.get("secondary", "#87d787")),   # 6: cyan
+            hex_to_rgb(self.colors.get("text", "#ffffff")),        # 7: white
+            # Bright variants (same colors for simplicity)
+            hex_to_rgb(self.colors.get("muted", "#808080")),       # 8: bright black
+            hex_to_rgb(self.colors.get("error", "#ff5f5f")),       # 9: bright red
+            hex_to_rgb(self.colors.get("success", "#5fd75f")),     # 10: bright green
+            hex_to_rgb(self.colors.get("warning", "#ffff5f")),     # 11: bright yellow
+            hex_to_rgb(self.colors.get("primary", "#5fd7ff")),     # 12: bright blue
+            hex_to_rgb(self.colors.get("accent", "#d7af87")),      # 13: bright magenta
+            hex_to_rgb(self.colors.get("secondary", "#87d787")),   # 14: bright cyan
+            hex_to_rgb(self.colors.get("text", "#ffffff")),        # 15: bright white
+        ]
+
+        return TerminalTheme(
+            background=bg,
+            foreground=fg,
+            normal=ansi_colors[:8],
+            bright=ansi_colors[8:],
+        )
 
     def set_color(self, name: str, hex_value: str) -> bool:
         """Set a palette color.
