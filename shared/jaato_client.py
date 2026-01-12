@@ -315,6 +315,50 @@ class JaatoClient:
         self._project = project
         self._location = location
 
+    def verify_auth(
+        self,
+        allow_interactive: bool = False,
+        on_message: Optional[Callable[[str], None]] = None
+    ) -> bool:
+        """Verify authentication before loading tools.
+
+        This should be called AFTER connect() but BEFORE configure_tools()
+        to ensure credentials are available. For providers that support
+        interactive login (like Anthropic OAuth), this can trigger the login flow.
+
+        Args:
+            allow_interactive: If True and auth is not configured, attempt
+                interactive login (e.g., browser-based OAuth).
+            on_message: Optional callback for status messages during login.
+
+        Returns:
+            True if authentication is configured and valid.
+            False if authentication failed or was not completed.
+
+        Raises:
+            RuntimeError: If client not connected.
+            Various auth errors if allow_interactive=False and no credentials found.
+
+        Example:
+            jaato = JaatoClient(provider_name='anthropic')
+            jaato.connect(project, location, model)
+
+            # Verify auth with interactive login allowed
+            if not jaato.verify_auth(allow_interactive=True, on_message=print):
+                print("Authentication failed")
+                return
+
+            # Now safe to configure tools
+            jaato.configure_tools(registry, permission_plugin, ledger)
+        """
+        if not self._runtime:
+            raise RuntimeError("Client not connected. Call connect() first.")
+
+        return self._runtime.verify_auth(
+            allow_interactive=allow_interactive,
+            on_message=on_message
+        )
+
     def configure_tools(
         self,
         registry: 'PluginRegistry',
@@ -338,6 +382,35 @@ class JaatoClient:
         self._session = self._runtime.create_session(model=self._model_name)
 
         # Pass UI hooks to session if they were set before configure_tools
+        if self._ui_hooks:
+            self._session.set_ui_hooks(self._ui_hooks, self._agent_id)
+
+    def configure_plugins_only(
+        self,
+        registry: 'PluginRegistry',
+        permission_plugin: Optional['PermissionPlugin'] = None,
+        ledger: Optional[TokenLedger] = None
+    ) -> None:
+        """Configure plugins without creating a provider session.
+
+        Use this when authentication is pending and we need user commands
+        to be available but can't connect to the model yet.
+
+        Args:
+            registry: PluginRegistry with exposed plugins.
+            permission_plugin: Optional permission plugin for access control.
+            ledger: Optional token ledger for accounting.
+        """
+        if not self._runtime:
+            raise RuntimeError("Client not connected. Call connect() first.")
+
+        # Configure runtime with plugins (no session creation)
+        self._runtime.configure_plugins(registry, permission_plugin, ledger)
+
+        # Create a minimal session with user commands but no provider
+        self._session = self._runtime.create_session_without_provider(model=self._model_name)
+
+        # Pass UI hooks to session if they were set
         if self._ui_hooks:
             self._session.set_ui_hooks(self._ui_hooks, self._agent_id)
 

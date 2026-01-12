@@ -122,6 +122,7 @@ class RichClient:
         # Background model thread tracking
         self._model_thread: Optional[threading.Thread] = None
         self._model_running: bool = False
+        self._pending_exit_confirmation: bool = False
 
         # Model info for status bar
         self._model_provider: str = ""
@@ -452,7 +453,26 @@ class RichClient:
             }
         })
 
-        # Configure tools
+        # Verify authentication before loading tools
+        # For providers that support interactive login (like Anthropic OAuth),
+        # this will trigger the login flow if credentials are not found
+        self._trace(f"[auth] Starting verify_auth for provider: {self._model_provider}")
+
+        def auth_message(msg: str) -> None:
+            self._trace(f"[auth] {msg}")
+            print(msg, flush=True)
+
+        try:
+            if not self._backend.verify_auth(allow_interactive=True, on_message=auth_message):
+                print("Error: Authentication failed or was cancelled", flush=True)
+                return False
+        except Exception as e:
+            print(f"Error: Authentication failed: {e}", flush=True)
+            return False
+
+        self._trace("[auth] verify_auth completed successfully")
+
+        # Configure tools (only after auth is verified)
         self._backend.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
         # Load GC configuration from .jaato/gc.json if present
@@ -1402,10 +1422,43 @@ class RichClient:
         if not user_input:
             return
 
+        # Handle exit confirmation response
+        if self._pending_exit_confirmation:
+            self._pending_exit_confirmation = False
+            self._display.set_prompt(None)  # Restore default prompt
+            choice = user_input.strip().lower()
+            if choice == "c":
+                # Cancel task and exit
+                if self._backend:
+                    client = self._backend.get_client()
+                    if client and hasattr(client, 'stop'):
+                        client.stop()
+                self._display.add_system_message("Task cancelled.", style="yellow")
+                self._display.add_system_message("Goodbye!", style="bold")
+                self._display.stop()
+                return
+            else:
+                # Return to session (includes 'r' and any other input)
+                self._display.add_system_message("Returning to session.", style="dim")
+                return
+
         if user_input.lower() in ('quit', 'exit', 'q'):
-            self._display.add_system_message("Goodbye!", style="system_emphasis")
-            self._display.stop()
-            return
+            # Check if a task is running
+            if self._model_running:
+                # Show confirmation dialog (direct mode - no detach option)
+                self._display.add_system_message("", style="dim")
+                self._display.add_system_message("Task in progress. Exiting will cancel the task.", style="yellow bold")
+                self._display.add_system_message("  [c] Cancel task and exit", style="dim")
+                self._display.add_system_message("  [r] Return to session", style="dim")
+                self._display.add_system_message("", style="dim")
+                self._display.set_prompt("Choice [c/r]: ")
+                self._pending_exit_confirmation = True
+                return
+            else:
+                # No task running, exit immediately
+                self._display.add_system_message("Goodbye!", style="bold")
+                self._display.stop()
+                return
 
         if user_input.lower() == 'help':
             self._show_help()
@@ -2556,6 +2609,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     else:
                         display.add_system_message(f"   {padded_name} {msg}", style="system_init_error")
                     init_current_step = None
+                elif status == "pending":
+                    # Show pending status (e.g., waiting for auth)
+                    # Always add new line - don't update in place because other messages
+                    # may have been added between "running" and "pending" (e.g., auth instructions)
+                    msg = event.message or "PENDING"
+                    display.add_system_message(f"   {padded_name} {msg}", style="dim yellow")
+                    init_current_step = None
 
             elif isinstance(event, AgentOutputEvent):
                 # Route output to the correct agent's buffer
@@ -3125,6 +3185,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         nonlocal pending_permission_request, pending_clarification_request, pending_reference_selection_request
         nonlocal pending_workspace_mismatch_request
         nonlocal model_running, should_exit
+        pending_exit_confirmation = False
 
         # Yield control to let handle_events() start listening before we trigger session init
         await asyncio.sleep(0)
@@ -3215,11 +3276,92 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 cmd = cmd_parts[0].lower() if cmd_parts else ""
                 args = cmd_parts[1:] if len(cmd_parts) > 1 else []
 
+                # Handle exit confirmation response
+                if pending_exit_confirmation:
+                    choice = text_lower
+                    pending_exit_confirmation = False
+                    display.set_prompt(None)  # Restore default prompt
+                    display.set_waiting_for_channel_input(False)
+
+                    session_id = client.session_id or "unknown"
+                    socket_path = client.socket_path
+
+                    if choice == "c" and model_running:
+                        # Cancel task but keep session
+                        await client.stop()
+                        display.add_system_message("Task cancelled. Session preserved.", style="yellow")
+                        display.add_system_message("", style="dim")
+                        display.add_system_message("To reconnect:", style="bold")
+                        display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="cyan")
+                        display.add_system_message(f"Session ID: {session_id}", style="dim")
+                        should_exit = True
+                        display.stop()
+                        break
+                    elif choice == "d":
+                        # Detach - keep session alive
+                        display.add_system_message("", style="dim")
+                        if model_running:
+                            display.add_system_message("Task will continue running on the server.", style="green")
+                        else:
+                            display.add_system_message("Session preserved on server.", style="green")
+                        display.add_system_message("", style="dim")
+                        display.add_system_message("To reconnect:", style="bold")
+                        display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="cyan")
+                        display.add_system_message("", style="dim")
+                        display.add_system_message(f"Session ID: {session_id}", style="dim")
+                        display.add_system_message("", style="dim")
+                        should_exit = True
+                        display.stop()
+                        break
+                    elif choice == "e":
+                        # End session - delete from server
+                        if model_running:
+                            await client.stop()
+                        # TODO: Add client.delete_session() when available
+                        display.add_system_message("Session ended.", style="yellow")
+                        should_exit = True
+                        display.stop()
+                        break
+                    else:
+                        # Return to session (includes 'r' and any other input)
+                        display.add_system_message("Returning to session.", style="dim")
+                        continue
+
                 # Client-only commands
                 if text_lower in ("exit", "quit", "q"):
-                    should_exit = True
-                    display.stop()
-                    break
+                    # Show confirmation dialog for session lifecycle
+                    pending_exit_confirmation = True
+
+                    display.add_system_message("", style="dim")
+                    if model_running:
+                        display.add_system_message("Task in progress. What would you like to do?", style="yellow bold")
+                        display.add_system_message("  [c] Cancel task and exit (session preserved)", style="dim")
+                        display.add_system_message("  [d] Detach (task continues in background)", style="dim")
+                        display.add_system_message("  [e] End session (cancel task and delete session)", style="dim")
+                        display.add_system_message("  [r] Return to session", style="dim")
+                        display.add_system_message("", style="dim")
+                        display.set_prompt("Choice [c/d/e/r]: ")
+                        # Create simple response options for input filtering
+                        exit_options = [
+                            type('Option', (), {'short': 'c', 'full': 'cancel', 'description': 'Cancel task'})(),
+                            type('Option', (), {'short': 'd', 'full': 'detach', 'description': 'Detach'})(),
+                            type('Option', (), {'short': 'e', 'full': 'end', 'description': 'End session'})(),
+                            type('Option', (), {'short': 'r', 'full': 'return', 'description': 'Return'})(),
+                        ]
+                    else:
+                        display.add_system_message("Exit options:", style="bold")
+                        display.add_system_message("  [d] Detach (keep session, can reconnect later)", style="dim")
+                        display.add_system_message("  [e] End session (delete session from server)", style="dim")
+                        display.add_system_message("  [r] Return to session", style="dim")
+                        display.add_system_message("", style="dim")
+                        display.set_prompt("Choice [d/e/r]: ")
+                        exit_options = [
+                            type('Option', (), {'short': 'd', 'full': 'detach', 'description': 'Detach'})(),
+                            type('Option', (), {'short': 'e', 'full': 'end', 'description': 'End session'})(),
+                            type('Option', (), {'short': 'r', 'full': 'return', 'description': 'Return'})(),
+                        ]
+                    display.set_waiting_for_channel_input(True, exit_options)
+                    continue
                 elif text_lower == "stop":
                     await client.stop()
                     continue

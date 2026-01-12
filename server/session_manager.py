@@ -333,6 +333,15 @@ class SessionManager:
             workspace_path=workspace_path,
         )
 
+        # Register callback for when auth completes (if it was pending)
+        def on_auth_complete():
+            self._emit_to_session(session_id, self._build_session_info_event(session))
+            self._emit_to_session(session_id, SystemMessageEvent(
+                message=f"Session created: {name} ({session_id})",
+                style="info",
+            ))
+        server.set_auth_complete_callback(on_auth_complete)
+
         with self._lock:
             self._sessions[session_id] = session
             session.attached_clients.add(client_id)
@@ -346,13 +355,14 @@ class SessionManager:
         # Note: We don't call emit_current_state() here because the client
         # already received all events during initialize() via direct emission.
 
-        # Send complete SessionInfoEvent with state snapshot
-        self._emit_to_client(client_id, self._build_session_info_event(session))
+        # Send complete SessionInfoEvent with state snapshot (unless auth pending)
+        if not server.auth_pending:
+            self._emit_to_client(client_id, self._build_session_info_event(session))
 
-        self._emit_to_client(client_id, SystemMessageEvent(
-            message=f"Session created: {name} ({session_id})",
-            style="info",
-        ))
+            self._emit_to_client(client_id, SystemMessageEvent(
+                message=f"Session created: {name} ({session_id})",
+                style="info",
+            ))
 
         return session_id
 

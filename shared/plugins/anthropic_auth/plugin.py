@@ -154,18 +154,18 @@ class AnthropicAuthPlugin:
 
     def _cmd_login(self) -> str:
         """Handle the login command - step 1: open browser."""
-        from ..model_provider.anthropic.oauth import build_auth_url
+        from ..model_provider.anthropic.oauth import build_auth_url, save_pending_auth
 
-        # Build auth URL and store code_verifier and state for step 2
+        # Build auth URL and store state for step 2 (both in-memory and file-based)
         auth_url, code_verifier, state = build_auth_url()
         self._pending_code_verifier = code_verifier
         self._pending_state = state
+        save_pending_auth(code_verifier, state)  # Also save to file for cross-process access
 
         # Emit to output panel
         self._emit("Opening browser for authentication...\n\n")
         self._emit(f"If browser doesn't open, visit:\n{auth_url}\n\n")
-        self._emit("After authenticating, copy the authorization code and run:\n")
-        self._emit("  anthropic-auth code <paste_code_here>\n")
+        self._emit("After authenticating, copy the authorization code and run:\n  anthropic-auth code <paste_code_here>\n")
 
         # Open browser in background thread (fire and forget)
         threading.Thread(target=webbrowser.open, args=(auth_url,), daemon=True).start()
@@ -175,31 +175,34 @@ class AnthropicAuthPlugin:
     def _cmd_code(self, auth_code: str) -> str:
         """Handle the code command - step 2: exchange code for tokens."""
         from ..model_provider.anthropic.oauth import (
-            exchange_code_for_tokens,
-            save_tokens,
+            load_pending_auth,
+            complete_interactive_login,
         )
 
-        if not self._pending_code_verifier or not self._pending_state:
+        # Try in-memory state first, then fall back to file-based state
+        code_verifier = self._pending_code_verifier
+        state = self._pending_state
+
+        if not code_verifier or not state:
+            code_verifier, state = load_pending_auth()
+
+        if not code_verifier or not state:
             self._emit(
                 "✗ No pending login found.\n\n"
                 "Please run 'anthropic-auth login' first to start the OAuth flow.\n"
             )
             return ""
 
-        # Strip URL fragment if user copied the whole callback URL or code with fragment
-        # The callback page shows: code#state, but we only need the code part
-        if "#" in auth_code:
-            auth_code = auth_code.split("#")[0]
-
         self._emit("Exchanging authorization code for tokens...\n")
 
-        try:
-            tokens = exchange_code_for_tokens(
-                auth_code, self._pending_code_verifier, self._pending_state
-            )
-            save_tokens(tokens)
+        # Use shared function for token exchange
+        def on_error(msg: str) -> None:
+            self._emit(f"✗ {msg}\n")
 
-            # Clear pending state
+        tokens = complete_interactive_login(auth_code, on_message=on_error)
+
+        if tokens:
+            # Clear in-memory state
             self._pending_code_verifier = None
             self._pending_state = None
 
@@ -209,10 +212,7 @@ class AnthropicAuthPlugin:
                 f"Access token expires: {expires_at.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 "Note: You may need to restart the session for the new tokens to take effect.\n"
             )
-            return ""
-        except Exception as e:
-            self._emit(f"✗ Authentication failed: {e}\n")
-            return ""
+        return ""
 
     def _cmd_logout(self) -> str:
         """Handle the logout command."""

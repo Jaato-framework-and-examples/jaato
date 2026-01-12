@@ -30,7 +30,7 @@ jaato is a future-proof framework for building agentic AI applications, featurin
 - **Plugin System** - 14+ built-in plugins for file ops, memory, web search, and more
 - **Token Accounting** - Detailed tracking of prompt/output tokens with retry logic
 
-> **Note**: This project is currently experimental, but is being developed with the intention of becoming a production-ready orchestration framework. It follows best engineering practices and patterns, with AI-assisted development applied judiciously rather than relying on "vibe coding."
+> **Note**: This project follows best engineering practices and patterns, with AI-assisted development applied judiciously rather than relying on "vibe coding."
 
 ## Features
 

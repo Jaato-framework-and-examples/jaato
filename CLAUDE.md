@@ -4,12 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**jaato** ("just another agentic tool orchestrator") is an experimental project for exploring:
+**jaato** ("just another agentic tool orchestrator") is a framework for:
 - Multi-provider AI SDK integration (Google GenAI, Anthropic, etc.)
 - Function calling patterns with LLMs
 - Tool orchestration (CLI tools and MCP servers)
-
-This is not intended to be a production tool, but a sandbox for experimentation.
 
 ## Commands
 
@@ -186,6 +184,7 @@ async for event in client.events():
   - `google_genai/`: Google GenAI/Vertex AI implementation
   - `github_models/`: GitHub Models API implementation (uses `azure-ai-inference` SDK)
   - `anthropic/`: Anthropic Claude implementation (uses `anthropic` SDK)
+  - `antigravity/`: Google Antigravity IDE backend (Gemini 3, Claude via Google OAuth)
 
 - **mcp_context_manager.py**: Multi-server MCP client manager
   - `MCPClientManager`: Manages persistent connections to multiple MCP servers
@@ -215,6 +214,41 @@ async for event in client.events():
    - Loop continues until model returns text without function calls
 5. Access history when needed: `history = jaato.get_history()`
 6. Reset session: `jaato.reset_session()` or `jaato.reset_session(modified_history)`
+
+### Parallel Tool Execution
+
+When a model returns multiple function calls in a single response, jaato executes them
+in parallel using a thread pool. This significantly reduces latency for turns with
+multiple independent tool calls.
+
+```
+Model Response: [read_file(a.py), read_file(b.py), grep(pattern)]
+                              │
+              ┌───────────────┼───────────────┐
+              ▼               ▼               ▼
+        ┌─────────┐     ┌─────────┐     ┌─────────┐
+        │Thread 1 │     │Thread 2 │     │Thread 3 │
+        │read a.py│     │read b.py│     │  grep   │
+        └────┬────┘     └────┬────┘     └────┬────┘
+              │               │               │
+              └───────────────┴───────────────┘
+                              │
+                      [All results]
+                              │
+                              ▼
+                    Send to model together
+```
+
+**Configuration:**
+- Enabled by default (`JAATO_PARALLEL_TOOLS=true`)
+- Set `JAATO_PARALLEL_TOOLS=false` to disable
+- Single tool calls always execute sequentially (no thread pool overhead)
+- Maximum 8 concurrent tools per turn
+
+**Thread-safe callbacks:**
+- Each parallel tool gets its own output callback via thread-local storage
+- UI hooks (`on_tool_call_start`, `on_tool_output`, `on_tool_call_end`) are thread-safe
+- Telemetry spans are created per-tool with `jaato.tool.parallel=True` attribute
 
 ### Subagent Architecture
 
@@ -424,13 +458,13 @@ Key types in `shared/plugins/model_provider/types.py`:
 | Variable | Purpose |
 |----------|---------|
 | `ANTHROPIC_API_KEY` | Anthropic API key (uses API credits) |
-| `ANTHROPIC_AUTH_TOKEN` | OAuth token for Claude Pro/Max subscription (experimental) |
+| `ANTHROPIC_AUTH_TOKEN` | OAuth token for Claude Pro/Max subscription |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Alternative OAuth token env var (Claude Code CLI) |
 
 **Authentication Options (in priority order):**
 
 1. **PKCE OAuth Login** (recommended for subscription): Interactive browser-based OAuth
-2. **OAuth Token** (`sk-ant-oat01-...`): From `claude setup-token` (experimental)
+2. **OAuth Token** (`sk-ant-oat01-...`): From `claude setup-token`
 3. **API Key** (`sk-ant-api03-...`): Uses API credits from console.anthropic.com
 
 **Option 1: PKCE OAuth Login (Interactive)**
@@ -444,7 +478,7 @@ oauth_login()
 # Provider will automatically use stored tokens
 ```
 
-**Option 2: OAuth Token from claude setup-token (Experimental)**
+**Option 2: OAuth Token from claude setup-token**
 ```bash
 # Install Claude Code CLI
 npm install -g @anthropic/claude-code
@@ -472,6 +506,89 @@ Configuration options via `ProviderConfig.extra`:
 | `enable_caching` | bool | False | Enable prompt caching (90% cost reduction) |
 | `enable_thinking` | bool | False | Enable extended thinking (reasoning traces) |
 | `thinking_budget` | int | 10000 | Max thinking tokens when enabled |
+| `cache_history` | bool | True | Cache historical messages (when caching enabled) |
+| `cache_exclude_recent_turns` | int | 2 | Number of recent turns to exclude from history caching |
+| `cache_min_tokens` | bool | True | Enforce minimum token threshold for caching |
+
+**Cache Optimization Strategy:**
+
+When `enable_caching` is True, the provider uses up to 3 cache breakpoints:
+1. **System instruction** - Most stable, cached first
+2. **Tool definitions** - Sorted alphabetically for consistent ordering
+3. **Historical messages** - Older turns cached, recent turns excluded
+
+Cache behavior notes:
+- Tools are sorted by name to ensure consistent ordering (prevents cache invalidation)
+- Content smaller than the minimum threshold (1024-2048 tokens) won't be cached
+- The `cache_exclude_recent_turns` setting controls how many recent turns remain uncached
+- Set `cache_history: false` to disable history caching while keeping system/tools cached
+
+### Antigravity (Google IDE Backend)
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_ANTIGRAVITY_PROJECT_ID` | Override Antigravity project ID |
+| `JAATO_ANTIGRAVITY_ENDPOINT` | Override API endpoint URL |
+| `JAATO_ANTIGRAVITY_QUOTA` | Preferred quota: `antigravity` (default) or `gemini-cli` |
+| `JAATO_ANTIGRAVITY_THINKING_LEVEL` | Gemini 3 thinking level (`minimal`/`low`/`medium`/`high`) |
+| `JAATO_ANTIGRAVITY_THINKING_BUDGET` | Claude thinking budget in tokens (default: 8192) |
+| `JAATO_ANTIGRAVITY_AUTO_ROTATE` | Enable multi-account rotation (default: `true`) |
+
+**Authentication: Google OAuth with PKCE**
+
+Antigravity uses Google OAuth to access models through Google's IDE backend.
+This provides access to Gemini 3 and Claude models via your Google account.
+
+```python
+from shared.plugins.model_provider.antigravity import oauth_login
+
+# Run once - opens browser for Google authentication
+oauth_login()
+
+# Tokens are stored in ~/.config/jaato/antigravity_accounts.json
+# Provider will automatically use stored tokens
+```
+
+**Available Models:**
+
+| Quota | Model | Features |
+|-------|-------|----------|
+| Antigravity | `antigravity-gemini-3-pro` | 1M context, thinking levels |
+| Antigravity | `antigravity-gemini-3-flash` | 1M context, thinking levels |
+| Antigravity | `antigravity-claude-sonnet-4-5` | 200K context |
+| Antigravity | `antigravity-claude-sonnet-4-5-thinking` | Extended thinking |
+| Antigravity | `antigravity-claude-opus-4-5-thinking` | Extended thinking |
+| Gemini CLI | `gemini-2.5-flash` | 1M context |
+| Gemini CLI | `gemini-2.5-pro` | 1M context |
+| Gemini CLI | `gemini-3-flash-preview` | Preview model |
+| Gemini CLI | `gemini-3-pro-preview` | Preview model |
+
+**Usage Example:**
+```python
+from shared.plugins.model_provider.antigravity import AntigravityProvider
+
+provider = AntigravityProvider()
+provider.initialize()  # Uses stored OAuth tokens
+provider.connect('antigravity-gemini-3-flash')
+provider.create_session(system_instruction="You are a helpful assistant.")
+response = provider.send_message("Hello!")
+print(response.get_text())
+```
+
+**Multi-Account Support:**
+
+Antigravity supports multiple Google accounts for load balancing.
+Run `oauth_login()` multiple times to add accounts. The provider
+automatically rotates between accounts when rate limits are hit.
+
+Configuration options via `ProviderConfig.extra`:
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `endpoint` | str | None | Override API endpoint |
+| `quota_type` | str | `antigravity` | Quota pool to use |
+| `project_id` | str | None | Override project ID |
+| `auto_rotate` | bool | True | Enable account rotation on rate limit |
+| `thinking_level` | str | None | Gemini 3 thinking level |
+| `thinking_budget` | int | 8192 | Claude thinking token budget |
 
 ### General
 | Variable | Purpose |
@@ -480,6 +597,7 @@ Configuration options via `ProviderConfig.extra`:
 | `AI_EXECUTE_TOOLS` | Allow generic tool execution (`1`/`true`) |
 | `LEDGER_PATH` | Output path for token accounting JSONL |
 | `JAATO_GC_THRESHOLD` | GC trigger threshold percentage (default: 80.0) |
+| `JAATO_PARALLEL_TOOLS` | Enable parallel tool execution (default: `true`) |
 
 ### Rate Limiting
 | Variable | Purpose |
@@ -495,6 +613,37 @@ Configuration options via `ProviderConfig.extra`:
 |----------|---------|
 | `JAATO_COPY_MECHANISM` | Clipboard provider: `osc52` (default) |
 | `JAATO_COPY_SOURCES` | Sources to include: `model` (default), or `model&user&tool` |
+
+## Rich Client Commands
+
+### Authentication Commands
+
+The TUI client provides commands for managing provider authentication:
+
+**Anthropic Claude:**
+```
+anthropic-auth login        # Open browser for OAuth authentication
+anthropic-auth code <code>  # Complete login with authorization code
+anthropic-auth logout       # Clear stored OAuth tokens
+anthropic-auth status       # Show current authentication status
+```
+
+**Antigravity (Google IDE Backend):**
+```
+antigravity-auth login      # Open browser for Google OAuth
+antigravity-auth code <code> # Complete login with authorization code
+antigravity-auth logout     # Clear stored accounts
+antigravity-auth status     # Show current authentication status
+antigravity-auth accounts   # List all authenticated accounts
+```
+
+### Session Commands
+
+```
+reset                       # Reset conversation history
+model <name>                # Switch to a different model
+keybindings reload          # Reload keybindings from config
+```
 
 ## Rich Client Keybindings
 
@@ -540,9 +689,9 @@ Priority: Environment variables > Project config > User config > Defaults
 
 ### Reloading Keybindings
 
-Use the `/keybindings reload` command to reload keybindings without restarting:
+Use the `keybindings reload` command to reload keybindings without restarting:
 ```
-/keybindings reload
+keybindings reload
 ```
 
 ## Rich Client Theming

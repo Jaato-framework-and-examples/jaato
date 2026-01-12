@@ -169,6 +169,7 @@ class JaatoServer:
         self.env_file = env_file
         self._provider = provider
         self._on_event = on_event or (lambda e: None)
+        self._on_auth_complete: Optional[Callable[[], None]] = None
         self._workspace_path = workspace_path
         self._session_id = session_id
 
@@ -209,6 +210,9 @@ class JaatoServer:
         # Model info
         self._model_provider: str = ""
         self._model_name: str = ""
+
+        # Auth state
+        self._auth_pending: bool = False
 
         # Terminal width for formatting (default 80)
         self._terminal_width: int = 80
@@ -253,6 +257,11 @@ class JaatoServer:
         # Propagate to formatter pipeline if initialized
         if self._formatter_pipeline:
             self._formatter_pipeline.set_console_width(width)
+
+    @property
+    def auth_pending(self) -> bool:
+        """Check if authentication is pending."""
+        return self._auth_pending
 
     @contextlib.contextmanager
     def _in_workspace(self):
@@ -319,6 +328,14 @@ class JaatoServer:
     def set_event_callback(self, callback: EventCallback) -> None:
         """Set the event callback for clients."""
         self._on_event = callback
+
+    def set_auth_complete_callback(self, callback: Callable[[], None]) -> None:
+        """Set callback to be called when authentication completes.
+
+        This is called when a session that was in auth-pending state
+        successfully completes authentication.
+        """
+        self._on_auth_complete = callback
 
     def emit_current_state(
         self,
@@ -393,7 +410,7 @@ class JaatoServer:
         Returns:
             True if initialization succeeded, False otherwise.
         """
-        total_steps = 5
+        total_steps = 6
 
         # Step 1: Load configuration
         self._emit_init_progress("Loading configuration", "running", 1, total_steps)
@@ -538,8 +555,71 @@ class JaatoServer:
         # Set up formatter pipeline for server-side output formatting
         self._setup_formatter_pipeline()
 
-        # Step 4: Configure tools
-        self._emit_init_progress("Configuring tools", "running", 4, total_steps)
+        # Step 4: Verify authentication (may trigger interactive login via plugin)
+        self._emit_init_progress("Verifying authentication", "running", 4, total_steps)
+        self._trace(f"[auth] Starting verify_auth for provider: {self._model_provider}")
+
+        self._auth_pending = False  # Track if auth is still needed
+
+        def auth_message(msg: str) -> None:
+            """Send auth status messages to the client."""
+            self._trace(f"[auth] {msg}")
+            self.emit(SystemMessageEvent(message=msg, style="info"))
+
+        try:
+            auth_ok = self._jaato.verify_auth(allow_interactive=True, on_message=auth_message)
+
+            if not auth_ok:
+                # Credentials not found - try to use provider-specific auth plugin
+                auth_plugin = self._get_auth_plugin_for_provider(self._model_provider)
+
+                if auth_plugin:
+                    self._trace(f"[auth] Using {auth_plugin.name} plugin for interactive login")
+                    self._auth_pending = True
+
+                    # Set up output callback for plugin messages
+                    def plugin_output(source: str, text: str, mode: str) -> None:
+                        self._trace(f"[auth][{source}] {text.rstrip()}")
+                        self.emit(SystemMessageEvent(message=text.rstrip(), style="info"))
+
+                    auth_plugin.set_output_callback(plugin_output)
+
+                    # Run the login command to show URL and instructions
+                    auth_plugin.execute_user_command(auth_plugin.get_user_commands()[0].name, {"action": "login"})
+
+                    self._emit_init_progress("Verifying authentication", "pending", 4, total_steps,
+                                             "Waiting for authentication")
+                else:
+                    self._emit_init_progress("Verifying authentication", "error", 4, total_steps,
+                                             "No credentials found")
+                    self.emit(ErrorEvent(
+                        error="Authentication failed: no credentials found and no auth plugin available",
+                        error_type="AuthenticationError",
+                        recoverable=False,
+                    ))
+                    return False
+
+        except Exception as e:
+            self._emit_init_progress("Verifying authentication", "error", 4, total_steps, str(e))
+            self.emit(ErrorEvent(
+                error=f"Authentication failed: {e}",
+                error_type=type(e).__name__,
+                recoverable=False,
+            ))
+            return False
+
+        if not self._auth_pending:
+            self._trace("[auth] verify_auth completed successfully")
+            self._emit_init_progress("Verifying authentication", "done", 4, total_steps)
+        else:
+            # Auth pending - only configure plugins for user commands (no provider session)
+            # Skip remaining steps until auth completes
+            self._trace("[auth] Configuring plugins only (auth pending, skipping provider session)")
+            self._jaato.configure_plugins_only(self.registry, self.permission_plugin, self.ledger)
+            return True
+
+        # Step 5: Configure tools (only if auth is complete)
+        self._emit_init_progress("Configuring tools", "running", 5, total_steps)
         self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
         gc_result = load_gc_from_file()
@@ -552,10 +632,10 @@ class JaatoServer:
             gc_strategy = getattr(gc_plugin, 'name', 'gc')
             if gc_strategy.startswith('gc_'):
                 gc_strategy = gc_strategy[3:]  # Remove 'gc_' prefix
-        self._emit_init_progress("Configuring tools", "done", 4, total_steps)
+        self._emit_init_progress("Configuring tools", "done", 5, total_steps)
 
-        # Step 5: Set up session
-        self._emit_init_progress("Setting up session", "running", 5, total_steps)
+        # Step 6: Set up session
+        self._emit_init_progress("Setting up session", "running", 6, total_steps)
         self._setup_session_plugin()
         self._setup_agent_hooks()
         self._setup_permission_hooks()
@@ -568,7 +648,7 @@ class JaatoServer:
         if "main" in self._agents and gc_threshold is not None:
             self._agents["main"].gc_threshold = gc_threshold
             self._agents["main"].gc_strategy = gc_strategy
-        self._emit_init_progress("Setting up session", "done", 5, total_steps)
+        self._emit_init_progress("Setting up session", "done", 6, total_steps)
 
         self.emit(SystemMessageEvent(
             message=f"Connected to {self._model_provider}/{self._model_name}",
@@ -1576,6 +1656,10 @@ class JaatoServer:
                         style="info",
                     ))
 
+            # Handle auth completion - if auth was pending and user ran auth command
+            if self._auth_pending and command.lower() == "anthropic-auth":
+                self._check_auth_completion()
+
             return result if isinstance(result, dict) else {"result": str(result)}
 
         except Exception as e:
@@ -1698,3 +1782,89 @@ class JaatoServer:
     def _trace(self, msg: str) -> None:
         """Write trace message for debugging (goes to daemon log)."""
         logger.debug(msg)
+
+    def _get_auth_plugin_for_provider(self, provider_name: str):
+        """Get the authentication plugin for a provider, if available.
+
+        Args:
+            provider_name: Provider name (e.g., 'anthropic', 'google_genai')
+
+        Returns:
+            The auth plugin instance, or None if not available.
+        """
+        # Map provider names to their auth plugin names
+        auth_plugin_map = {
+            "anthropic": "anthropic_auth",
+            # Add other providers here as they implement auth plugins
+        }
+
+        plugin_name = auth_plugin_map.get(provider_name)
+        if not plugin_name:
+            return None
+
+        return self.registry.get_plugin(plugin_name)
+
+    def _check_auth_completion(self) -> None:
+        """Check if auth has been completed and finish initialization if so."""
+        if not self._auth_pending:
+            return
+
+        self._trace("[auth] Checking if auth is now complete...")
+
+        # Try to verify auth again
+        try:
+            auth_ok = self._jaato.verify_auth(allow_interactive=False)
+            if auth_ok:
+                self._trace("[auth] Auth completed successfully, finishing initialization...")
+                self._auth_pending = False
+
+                # Complete the remaining initialization steps that were skipped
+                self._emit_init_progress("Verifying authentication", "done", 4, 6)
+
+                # Step 5: Configure tools
+                self._emit_init_progress("Configuring tools", "running", 5, 6)
+                self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
+
+                gc_result = load_gc_from_file()
+                gc_threshold = None
+                gc_strategy = None
+                if gc_result:
+                    gc_plugin, gc_config = gc_result
+                    self._jaato.set_gc_plugin(gc_plugin, gc_config)
+                    gc_threshold = gc_config.threshold_percent
+                    gc_strategy = getattr(gc_plugin, 'name', 'gc')
+                    if gc_strategy.startswith('gc_'):
+                        gc_strategy = gc_strategy[3:]
+                self._emit_init_progress("Configuring tools", "done", 5, 6)
+
+                # Step 6: Set up session
+                self._emit_init_progress("Setting up session", "running", 6, 6)
+                self._setup_session_plugin()
+                self._setup_agent_hooks()
+                self._setup_permission_hooks()
+                self._setup_clarification_hooks()
+                self._setup_reference_selection_hooks()
+                self._setup_plan_hooks()
+                self._setup_queue_channels()
+                self._create_main_agent()
+                if "main" in self._agents and gc_threshold is not None:
+                    self._agents["main"].gc_threshold = gc_threshold
+                    self._agents["main"].gc_strategy = gc_strategy
+                self._emit_init_progress("Setting up session", "done", 6, 6)
+
+                self.emit(SystemMessageEvent(
+                    message="Authentication successful. Session is now ready.",
+                    style="success",
+                ))
+                self.emit(SystemMessageEvent(
+                    message=f"Connected to {self._model_provider}/{self._model_name}",
+                    style="info",
+                ))
+
+                # Notify session_manager to emit session info
+                if self._on_auth_complete:
+                    self._on_auth_complete()
+            else:
+                self._trace("[auth] Auth still pending")
+        except Exception as e:
+            self._trace(f"[auth] Auth check failed: {e}")

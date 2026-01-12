@@ -229,6 +229,9 @@ class PTDisplay:
         self._refresh_pending: bool = False
         self._refresh_interval: float = 0.05  # 50ms debounce window
 
+        # Custom prompt override (for exit confirmation, etc.)
+        self._custom_prompt: Optional[str] = None
+
         # Build prompt_toolkit application
         self._app: Optional[Application] = None
         self._build_app()
@@ -990,6 +993,9 @@ class PTDisplay:
 
         # Input prompt label - changes based on mode (pager, waiting for channel, normal)
         def get_prompt_text():
+            # Custom prompt override (for exit confirmation, etc.)
+            if getattr(self, '_custom_prompt', None):
+                return [("class:prompt.permission", self._custom_prompt)]
             if getattr(self, '_pager_active', False):
                 return [("class:prompt.pager", "── Enter: next, q: quit ──")]
             if getattr(self, '_waiting_for_channel_input', False):
@@ -1291,6 +1297,15 @@ class PTDisplay:
         """
         self._stop_callback = stop_callback
         self._is_running_callback = is_running_callback
+
+    def set_prompt(self, prompt: Optional[str]) -> None:
+        """Set a custom prompt override.
+
+        Args:
+            prompt: Custom prompt text, or None to restore default prompt.
+        """
+        self._custom_prompt = prompt
+        self.refresh()
 
     def update_context_usage(self, usage: Dict[str, Any]) -> None:
         """Update context usage display in status bar.
