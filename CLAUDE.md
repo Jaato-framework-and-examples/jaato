@@ -4,12 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**jaato** ("just another agentic tool orchestrator") is an experimental project for exploring:
+**jaato** ("just another agentic tool orchestrator") is a framework for:
 - Multi-provider AI SDK integration (Google GenAI, Anthropic, etc.)
 - Function calling patterns with LLMs
 - Tool orchestration (CLI tools and MCP servers)
-
-This is not intended to be a production tool, but a sandbox for experimentation.
 
 ## Commands
 
@@ -460,13 +458,13 @@ Key types in `shared/plugins/model_provider/types.py`:
 | Variable | Purpose |
 |----------|---------|
 | `ANTHROPIC_API_KEY` | Anthropic API key (uses API credits) |
-| `ANTHROPIC_AUTH_TOKEN` | OAuth token for Claude Pro/Max subscription (experimental) |
+| `ANTHROPIC_AUTH_TOKEN` | OAuth token for Claude Pro/Max subscription |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Alternative OAuth token env var (Claude Code CLI) |
 
 **Authentication Options (in priority order):**
 
 1. **PKCE OAuth Login** (recommended for subscription): Interactive browser-based OAuth
-2. **OAuth Token** (`sk-ant-oat01-...`): From `claude setup-token` (experimental)
+2. **OAuth Token** (`sk-ant-oat01-...`): From `claude setup-token`
 3. **API Key** (`sk-ant-api03-...`): Uses API credits from console.anthropic.com
 
 **Option 1: PKCE OAuth Login (Interactive)**
@@ -480,7 +478,7 @@ oauth_login()
 # Provider will automatically use stored tokens
 ```
 
-**Option 2: OAuth Token from claude setup-token (Experimental)**
+**Option 2: OAuth Token from claude setup-token**
 ```bash
 # Install Claude Code CLI
 npm install -g @anthropic/claude-code
