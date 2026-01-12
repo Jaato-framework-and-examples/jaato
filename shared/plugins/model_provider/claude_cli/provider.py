@@ -629,11 +629,14 @@ class ClaudeCLIProvider:
                     if isinstance(block, TextBlock):
                         accumulated_text += block.text
                     elif isinstance(block, ToolUseBlock):
-                        function_calls.append(FunctionCall(
-                            id=block.id,
-                            name=block.name,
-                            args=block.input,
-                        ))
+                        # Only return function calls in passthrough mode
+                        # In delegated mode, CLI handles tool execution internally
+                        if self._mode == CLIMode.PASSTHROUGH:
+                            function_calls.append(FunctionCall(
+                                id=block.id,
+                                name=block.name,
+                                args=block.input,
+                            ))
 
             elif isinstance(msg, ResultMessage):
                 self._last_result = msg
@@ -705,17 +708,19 @@ class ClaudeCLIProvider:
                                 accumulated_text += block.text
                                 on_chunk(block.text)
 
-                    # Always process tool use blocks
-                    for block in msg.content_blocks:
-                        if isinstance(block, ToolUseBlock):
-                            fc = FunctionCall(
-                                id=block.id,
-                                name=block.name,
-                                args=block.input,
-                            )
-                            function_calls.append(fc)
-                            if on_function_call:
-                                on_function_call(fc)
+                    # Process tool use blocks only in passthrough mode
+                    # In delegated mode, CLI handles tool execution internally
+                    if self._mode == CLIMode.PASSTHROUGH:
+                        for block in msg.content_blocks:
+                            if isinstance(block, ToolUseBlock):
+                                fc = FunctionCall(
+                                    id=block.id,
+                                    name=block.name,
+                                    args=block.input,
+                                )
+                                function_calls.append(fc)
+                                if on_function_call:
+                                    on_function_call(fc)
 
                 elif isinstance(msg, ResultMessage):
                     self._last_result = msg
