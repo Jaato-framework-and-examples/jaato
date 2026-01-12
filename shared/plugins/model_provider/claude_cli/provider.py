@@ -383,7 +383,7 @@ class ClaudeCLIProvider:
                 "send_tool_results called in delegated mode - CLI handles tools"
             )
             return ProviderResponse(
-                text="",
+                parts=[],
                 finish_reason=FinishReason.STOP,
             )
 
@@ -455,7 +455,7 @@ class ClaudeCLIProvider:
                 "send_tool_results_streaming called in delegated mode - "
                 "CLI handles tools"
             )
-            return ProviderResponse(text="", finish_reason=FinishReason.STOP)
+            return ProviderResponse(parts=[], finish_reason=FinishReason.STOP)
 
         # Format tool results for the model
         result_text = self._format_tool_results_as_message(results)
@@ -651,9 +651,15 @@ class ClaudeCLIProvider:
         # Add to history
         self._add_to_history(prompt, accumulated_text, function_calls)
 
+        # Build parts list
+        parts: List[Part] = []
+        if accumulated_text:
+            parts.append(Part.from_text(accumulated_text))
+        for fc in function_calls:
+            parts.append(Part.from_function_call(fc))
+
         return ProviderResponse(
-            text=accumulated_text,
-            function_calls=function_calls if function_calls else None,
+            parts=parts,
             finish_reason=finish_reason,
         )
 
@@ -722,9 +728,15 @@ class ClaudeCLIProvider:
         if not cancelled:
             self._add_to_history(prompt, accumulated_text, function_calls)
 
+        # Build parts list
+        parts: List[Part] = []
+        if accumulated_text:
+            parts.append(Part.from_text(accumulated_text))
+        for fc in function_calls:
+            parts.append(Part.from_function_call(fc))
+
         return ProviderResponse(
-            text=accumulated_text,
-            function_calls=function_calls if function_calls else None,
+            parts=parts,
             finish_reason=finish_reason,
         )
 
