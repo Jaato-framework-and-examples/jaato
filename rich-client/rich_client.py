@@ -1754,23 +1754,19 @@ class RichClient:
             context: What triggered the capture.
             turn_index: Current turn index from the formatter.
         """
-        result = self._do_vision_capture(context, send_to_model=False)
+        result = self._do_vision_capture(context)
         if result and result.success:
             self._display.add_system_message(
                 f"Auto-captured: {result.path}",
                 style="dim"
             )
 
-    def _do_vision_capture(
-        self,
-        context: CaptureContext,
-        send_to_model: bool = True
-    ):
+    def _do_vision_capture(self, context: CaptureContext, send_hint: bool = False):
         """Perform a vision capture of the current TUI state.
 
         Args:
             context: What triggered the capture.
-            send_to_model: If True, send the capture to the model immediately.
+            send_hint: If True, inject a system hint to the model about the capture path.
 
         Returns:
             CaptureResult on success, None on failure.
@@ -1798,23 +1794,15 @@ class RichClient:
                 agent_id=self._agent_registry._selected_agent_id,
             )
 
-            if result.success and send_to_model:
-                self._display.add_system_message(
-                    f"Screenshot captured: {result.path}",
-                    style="green"
-                )
-
-                # Show in output as user action
-                self._display.append_output("user", "[screenshot]", "write")
-
+            # Send hint to model if requested
+            if result.success and send_hint:
                 # Signal agent is active
                 if self._ui_hooks:
                     self._ui_hooks.on_agent_status_changed(
                         agent_id="main",
                         status="active"
                     )
-
-                # Send to model
+                # Send system hint to model
                 self._start_model_thread(result.to_system_message())
 
             return result
@@ -1829,12 +1817,15 @@ class RichClient:
     def _handle_screenshot_command(self, user_input: str) -> None:
         """Handle the screenshot command for TUI vision capture.
 
-        Captures the current TUI state as an image and sends it to the model.
+        The command itself is intercepted client-side. By default, a system hint
+        is injected to inform the model about the capture path.
 
         Usage:
-            screenshot           - Capture and send to AI immediately
-            screenshot nosend    - Capture and display path only (don't send)
+            screenshot           - Capture and send hint to model
+            screenshot nosend    - Capture only, no hint to model
+            screenshot format F  - Set output format (svg, png, html)
             screenshot auto      - Toggle auto-capture on turn end
+            screenshot interval N - Set periodic capture interval (ms)
             screenshot help      - Show help
 
         Args:
@@ -1845,17 +1836,68 @@ class RichClient:
 
         if subcommand == 'help':
             self._display.show_lines([
-                ("Screenshot - Capture TUI for AI vision", "bold"),
+                ("Screenshot - Capture TUI state", "bold"),
                 ("", ""),
                 ("Usage:", ""),
-                ("  screenshot              Capture and send to AI immediately", "dim"),
-                ("  screenshot nosend       Capture and show path only (don't send)", "dim"),
+                ("  screenshot              Capture and send hint to model", "dim"),
+                ("  screenshot nosend       Capture only, no hint to model", "dim"),
+                ("  screenshot format F     Set output format (svg, png, html)", "dim"),
                 ("  screenshot auto         Toggle auto-capture on turn end", "dim"),
                 ("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim"),
                 ("  screenshot help         Show this help", "dim"),
-                ("", ""),
-                ("The AI receives the screenshot path and reads the image.", "dim"),
             ])
+            return
+
+        if subcommand == 'format':
+            # Set output format
+            self._init_vision_capture()
+            format_str = parts[2] if len(parts) > 2 else ""
+
+            if not format_str:
+                # Show current format
+                current = self._vision_capture._config.format.value if self._vision_capture else "svg"
+                self._display.show_lines([
+                    (f"Current format: {current}", "cyan"),
+                    ("  Available: svg, png, html", "dim"),
+                ])
+                return
+
+            from shared.plugins.vision_capture.protocol import CaptureFormat
+            format_map = {
+                'svg': CaptureFormat.SVG,
+                'png': CaptureFormat.PNG,
+                'html': CaptureFormat.HTML,
+            }
+
+            if format_str not in format_map:
+                self._display.show_lines([
+                    (f"[Invalid format: {format_str}]", "red"),
+                    ("  Available: svg, png, html", "dim"),
+                ])
+                return
+
+            new_format = format_map[format_str]
+
+            # Warn if PNG selected but cairosvg not available
+            if new_format == CaptureFormat.PNG:
+                try:
+                    import cairosvg  # noqa: F401
+                except ImportError:
+                    self._display.show_lines([
+                        ("[Warning: cairosvg not installed]", "yellow"),
+                        ("  PNG format requires cairosvg for SVG to PNG conversion.", "dim"),
+                        ("  Install with: pip install cairosvg", "dim"),
+                        ("  (also requires system libcairo2-dev)", "dim"),
+                        ("", ""),
+                        ("  Falling back to SVG format.", "dim"),
+                    ])
+                    new_format = CaptureFormat.SVG
+
+            if self._vision_capture:
+                self._vision_capture._config.format = new_format
+                self._display.show_lines([
+                    (f"Screenshot format set to: {new_format.value}", "cyan"),
+                ])
             return
 
         if subcommand == 'auto':
@@ -1894,24 +1936,28 @@ class RichClient:
             return
 
         if subcommand == 'nosend':
-            # Capture without sending to model
-            result = self._do_vision_capture(
-                CaptureContext.USER_REQUESTED,
-                send_to_model=False
-            )
+            # Capture without sending hint to model
+            result = self._do_vision_capture(CaptureContext.USER_REQUESTED, send_hint=False)
             if result and result.success:
                 self._display.show_lines([
                     ("Screenshot captured:", "green"),
                     (f"  {result.path}", "cyan"),
                 ])
+            elif result and not result.success:
+                self._display.show_lines([
+                    ("[Screenshot failed]", "red"),
+                    (f"  Error: {result.error}", "dim"),
+                ])
             return
 
-        # Default: capture and send to model
-        result = self._do_vision_capture(
-            CaptureContext.USER_REQUESTED,
-            send_to_model=True
-        )
-        if result and not result.success:
+        # Default: capture and send hint to model
+        result = self._do_vision_capture(CaptureContext.USER_REQUESTED, send_hint=True)
+        if result and result.success:
+            self._display.show_lines([
+                ("Screenshot captured:", "green"),
+                (f"  {result.path}", "cyan"),
+            ])
+        elif result and not result.success:
             self._display.show_lines([
                 ("[Screenshot failed]", "red"),
                 (f"  Error: {result.error}", "dim"),
@@ -2471,7 +2517,7 @@ class RichClient:
             ("  history           - Show full conversation history", "dim"),
             ("  context           - Show context window usage", "dim"),
             ("  export [file]     - Export session to YAML (default: session_export.yaml)", "dim"),
-            ("  screenshot        - Capture TUI and send to AI for vision analysis", "dim"),
+            ("  screenshot        - Capture TUI and send hint to model (nosend to skip)", "dim"),
             ("  clear             - Clear output panel", "dim"),
             ("  quit              - Exit the client", "dim"),
             ("", "dim"),
@@ -2532,6 +2578,221 @@ class RichClient:
 # =============================================================================
 # IPC Client Mode
 # =============================================================================
+
+def _get_ipc_vision_state(display):
+    """Get or create vision capture state for IPC mode.
+
+    State is stored on the display object to persist across calls.
+    """
+    from shared.plugins.vision_capture import VisionCapture, VisionCaptureFormatter
+
+    if not hasattr(display, '_vision_capture'):
+        display._vision_capture = VisionCapture()
+        display._vision_capture.initialize()
+    if not hasattr(display, '_vision_formatter'):
+        display._vision_formatter = VisionCaptureFormatter()
+        display.register_formatter(display._vision_formatter)
+
+    return display._vision_capture, display._vision_formatter
+
+
+async def handle_screenshot_command_ipc(user_input: str, display, agent_registry, ipc_client) -> None:
+    """Handle the screenshot command in IPC mode (client-side only).
+
+    Args:
+        user_input: The full user input string starting with 'screenshot'.
+        display: The PTDisplay instance.
+        agent_registry: The AgentRegistry for getting output buffer.
+        ipc_client: The IPCClient for sending hints to model.
+    """
+    from shared.plugins.vision_capture.protocol import CaptureContext
+
+    parts = user_input.lower().split()
+    subcommand = parts[1] if len(parts) > 1 else ""
+
+    if subcommand == 'help':
+        display.show_lines([
+            ("Screenshot - Capture TUI state", "bold"),
+            ("", ""),
+            ("Usage:", ""),
+            ("  screenshot              Capture and send hint to model", "dim"),
+            ("  screenshot nosend       Capture only, no hint to model", "dim"),
+            ("  screenshot format F     Set output format (svg, png, html)", "dim"),
+            ("  screenshot auto         Toggle auto-capture on turn end", "dim"),
+            ("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim"),
+            ("  screenshot help         Show this help", "dim"),
+        ])
+        return
+
+    if subcommand == 'format':
+        # Set output format
+        vision_capture, _ = _get_ipc_vision_state(display)
+        format_str = parts[2] if len(parts) > 2 else ""
+
+        if not format_str:
+            # Show current format
+            current = vision_capture._config.format.value
+            display.show_lines([
+                (f"Current format: {current}", "cyan"),
+                ("  Available: svg, png, html", "dim"),
+            ])
+            return
+
+        from shared.plugins.vision_capture.protocol import CaptureFormat
+        format_map = {
+            'svg': CaptureFormat.SVG,
+            'png': CaptureFormat.PNG,
+            'html': CaptureFormat.HTML,
+        }
+
+        if format_str not in format_map:
+            display.show_lines([
+                (f"[Invalid format: {format_str}]", "red"),
+                ("  Available: svg, png, html", "dim"),
+            ])
+            return
+
+        new_format = format_map[format_str]
+
+        # Warn if PNG selected but cairosvg not available
+        if new_format == CaptureFormat.PNG:
+            try:
+                import cairosvg  # noqa: F401
+            except ImportError:
+                display.show_lines([
+                    ("[Warning: cairosvg not installed]", "yellow"),
+                    ("  PNG format requires cairosvg for SVG to PNG conversion.", "dim"),
+                    ("  Install with: pip install cairosvg", "dim"),
+                    ("  (also requires system libcairo2-dev)", "dim"),
+                    ("", ""),
+                    ("  Falling back to SVG format.", "dim"),
+                ])
+                new_format = CaptureFormat.SVG
+
+        vision_capture._config.format = new_format
+        display.show_lines([
+            (f"Screenshot format set to: {new_format.value}", "cyan"),
+        ])
+        return
+
+    if subcommand == 'auto':
+        # Toggle auto-capture mode
+        _, formatter = _get_ipc_vision_state(display)
+        current = formatter._auto_capture_on_turn_end
+        formatter.set_auto_capture(not current)
+
+        # Set up capture callback if not already done
+        if not formatter._capture_callback:
+            def on_capture(context, turn_index):
+                _do_vision_capture_ipc(display, agent_registry, context)
+            formatter.set_capture_callback(on_capture)
+
+        state = "enabled" if not current else "disabled"
+        display.show_lines([
+            (f"Auto-capture on turn end: {state}", "cyan"),
+        ])
+        return
+
+    if subcommand == 'interval':
+        # Set periodic capture interval
+        _, formatter = _get_ipc_vision_state(display)
+        interval_str = parts[2] if len(parts) > 2 else ""
+        try:
+            interval_ms = int(interval_str) if interval_str else 0
+            formatter.set_capture_interval(interval_ms)
+
+            # Set up capture callback if not already done
+            if not formatter._capture_callback:
+                def on_capture(context, turn_index):
+                    _do_vision_capture_ipc(display, agent_registry, context)
+                formatter.set_capture_callback(on_capture)
+
+            if interval_ms > 0:
+                display.show_lines([
+                    (f"Periodic capture: every {interval_ms}ms during streaming", "cyan"),
+                ])
+            else:
+                display.show_lines([
+                    ("Periodic capture: disabled", "cyan"),
+                ])
+        except ValueError:
+            display.show_lines([
+                (f"[Invalid interval: {interval_str}]", "red"),
+                ("  Usage: screenshot interval <milliseconds>", "dim"),
+            ])
+        return
+
+    if subcommand == 'nosend':
+        # Capture without sending hint to model
+        result = _do_vision_capture_ipc(display, agent_registry, CaptureContext.USER_REQUESTED)
+        if result and result.success:
+            display.show_lines([
+                ("Screenshot captured:", "green"),
+                (f"  {result.path}", "cyan"),
+            ])
+        elif result and not result.success:
+            display.show_lines([
+                ("[Screenshot failed]", "red"),
+                (f"  Error: {result.error}", "dim"),
+            ])
+        return
+
+    # Default: capture and send hint to model
+    result = _do_vision_capture_ipc(display, agent_registry, CaptureContext.USER_REQUESTED)
+    if result and result.success:
+        display.show_lines([
+            ("Screenshot captured:", "green"),
+            (f"  {result.path}", "cyan"),
+        ])
+        # Send hint to model via IPC
+        await ipc_client.send_message(result.to_system_message())
+    elif result and not result.success:
+        display.show_lines([
+            ("[Screenshot failed]", "red"),
+            (f"  Error: {result.error}", "dim"),
+        ])
+
+
+def _do_vision_capture_ipc(display, agent_registry, context):
+    """Perform a vision capture in IPC mode."""
+    from shared.plugins.vision_capture.protocol import CaptureContext
+
+    try:
+        vision_capture, _ = _get_ipc_vision_state(display)
+
+        # Get the selected agent's output buffer
+        buffer = agent_registry.get_selected_buffer()
+        if not buffer:
+            display.show_lines([
+                ("[Screenshot failed]", "red"),
+                ("  No output buffer available", "dim"),
+            ])
+            return None
+
+        panel = buffer.render_panel(
+            height=50,
+            width=getattr(display, '_width', 120)
+        )
+        result = vision_capture.capture(
+            panel,
+            context=context,
+            turn_index=0,
+            agent_id=agent_registry.get_selected_agent_id(),
+        )
+
+        # For auto/periodic captures, just show a brief message
+        if context in (CaptureContext.TURN_END, CaptureContext.PERIODIC) and result.success:
+            display.add_system_message(f"Auto-captured: {result.path}", style="dim")
+
+        return result
+
+    except Exception as e:
+        display.show_lines([
+            ("[Screenshot failed]", "red"),
+            (f"  Error: {e}", "dim"),
+        ])
+        return None
+
 
 async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str = ".env",
                        initial_prompt: Optional[str] = None, single_prompt: Optional[str] = None,
@@ -3578,6 +3839,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 elif cmd == "keybindings":
                     from shared.ui_utils import handle_keybindings_command
                     handle_keybindings_command(text, display)
+                    continue
+
+                # Screenshot command - handle locally (client-side only)
+                elif cmd == "screenshot":
+                    await handle_screenshot_command_ipc(text, display, agent_registry, client)
                     continue
 
                 # Other server commands (reset, plugin commands) - forward directly

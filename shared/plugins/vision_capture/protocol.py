@@ -60,7 +60,7 @@ class CaptureResult:
 class CaptureConfig:
     """Configuration for vision capture."""
     output_dir: str = "/tmp/jaato_vision"
-    format: CaptureFormat = CaptureFormat.PNG
+    format: CaptureFormat = CaptureFormat.SVG  # SVG is default (no dependencies)
     width: int = 120
     height: int = 50
     title: str = "Jaato TUI"
