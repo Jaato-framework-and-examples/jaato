@@ -26,6 +26,21 @@ _TASK_COMPLETION_INSTRUCTION = (
     "Pause only for permissions or clarifications—never from uncertainty."
 )
 
+# Parallel tool execution guidance - encourages model to batch independent operations
+_PARALLEL_TOOL_GUIDANCE = (
+    "When you need to perform multiple independent operations (e.g., reading several files, "
+    "searching multiple patterns, fetching multiple URLs), issue all tool calls in a single "
+    "response rather than one at a time. Independent operations will execute in parallel, "
+    "significantly reducing latency."
+)
+
+
+def _is_parallel_tools_enabled() -> bool:
+    """Check if parallel tool execution is enabled."""
+    return os.environ.get(
+        'JAATO_PARALLEL_TOOLS', 'true'
+    ).lower() not in ('false', '0', 'no')
+
 
 class JaatoRuntime:
     """Shared runtime environment for jaato agents.
@@ -196,6 +211,57 @@ class JaatoRuntime:
         # Register the primary provider config for multi-provider support
         self._provider_configs[self._provider_name] = self._provider_config
         self._connected = True
+
+    def verify_auth(
+        self,
+        allow_interactive: bool = False,
+        on_message: Optional[Callable[[str], None]] = None,
+        provider_name: Optional[str] = None
+    ) -> bool:
+        """Verify authentication before loading tools.
+
+        This should be called BEFORE configure_plugins() or create_session()
+        to ensure credentials are available. For providers that support
+        interactive login (like Anthropic OAuth), this can trigger the login flow.
+
+        Args:
+            allow_interactive: If True and auth is not configured, attempt
+                interactive login (e.g., browser-based OAuth).
+            on_message: Optional callback for status messages during login.
+            provider_name: Optional provider name to verify. If None, uses
+                the runtime's default provider.
+
+        Returns:
+            True if authentication is configured and valid.
+            False if authentication failed or was not completed.
+
+        Raises:
+            Various auth errors if allow_interactive=False and no credentials found.
+
+        Example:
+            runtime = JaatoRuntime(provider_name='anthropic')
+            runtime.connect(project, location)
+
+            # Verify auth with interactive login allowed
+            if not runtime.verify_auth(allow_interactive=True, on_message=print):
+                print("Authentication failed")
+                return
+
+            # Now safe to configure tools
+            runtime.configure_plugins(registry, permission_plugin, ledger)
+        """
+        effective_provider = provider_name or self._provider_name
+
+        # Create a temporary provider instance just for auth verification
+        # We don't call initialize() yet - verify_auth is designed to work
+        # before full initialization
+        provider = load_provider(effective_provider, config=None)
+
+        # Call verify_auth on the provider
+        return provider.verify_auth(
+            allow_interactive=allow_interactive,
+            on_message=on_message
+        )
 
     def register_provider(
         self,
@@ -413,6 +479,45 @@ class JaatoRuntime:
 
         return session
 
+    def create_session_without_provider(
+        self,
+        model: str,
+        tools: Optional[List[str]] = None,
+        system_instructions: Optional[str] = None,
+        plugin_configs: Optional[Dict[str, Dict[str, Any]]] = None
+    ) -> 'JaatoSession':
+        """Create a session without provider (for auth-pending mode).
+
+        This creates a session with user commands available but no model
+        connection. Used when authentication is pending and the user needs
+        to complete auth before the model can be used.
+
+        Args:
+            model: Model name (stored for later use after auth completes).
+            tools: Optional list of plugin names to expose.
+            system_instructions: Optional additional system instructions.
+            plugin_configs: Optional per-plugin configuration overrides.
+
+        Returns:
+            JaatoSession configured without a provider.
+        """
+        if not self._connected:
+            raise RuntimeError("Runtime not connected. Call connect() first.")
+        if not self._registry:
+            raise RuntimeError("Plugins not configured. Call configure_plugins() first.")
+
+        from .jaato_session import JaatoSession
+
+        session = JaatoSession(self, model)
+        session.configure(
+            tools=tools,
+            system_instructions=system_instructions,
+            plugin_configs=plugin_configs,
+            skip_provider=True  # Don't create provider
+        )
+
+        return session
+
     def create_provider(
         self,
         model: str,
@@ -594,6 +699,10 @@ class JaatoRuntime:
 
         # 4. Framework-level task completion instruction (always included)
         result_parts.append(_TASK_COMPLETION_INSTRUCTION)
+
+        # 5. Parallel tool guidance (when parallel execution is enabled)
+        if _is_parallel_tools_enabled():
+            result_parts.append(_PARALLEL_TOOL_GUIDANCE)
 
         return "\n\n".join(result_parts)
 

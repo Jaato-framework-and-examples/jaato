@@ -111,6 +111,20 @@ EXTENDED_MAX_TOKENS = 16000  # When thinking is enabled
 # Claude Code identity - required for OAuth tokens (server-side validation)
 CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
+# Cache configuration
+# Anthropic requires minimum token thresholds for caching to be effective
+# Claude 3.5 Sonnet: 1024 tokens minimum
+# Other models (Haiku, Opus): 2048 tokens minimum
+CACHE_MIN_TOKENS_SONNET = 1024
+CACHE_MIN_TOKENS_OTHER = 2048
+
+# Maximum cache breakpoints allowed per request
+MAX_CACHE_BREAKPOINTS = 4
+
+# Default number of recent turns to exclude from history caching
+# (newer messages are less stable and may not benefit from caching)
+DEFAULT_CACHE_EXCLUDE_RECENT_TURNS = 2
+
 
 class AnthropicProvider:
     """Anthropic Claude provider.
@@ -150,6 +164,11 @@ class AnthropicProvider:
         self._enable_thinking: bool = False
         self._thinking_budget: int = 10000
         self._cache_ttl: str = "5m"  # "5m" or "1h"
+
+        # Cache optimization settings
+        self._cache_history: bool = True  # Cache historical messages
+        self._cache_exclude_recent_turns: int = DEFAULT_CACHE_EXCLUDE_RECENT_TURNS
+        self._cache_min_tokens: bool = True  # Enforce minimum token threshold
 
         # Session state
         self._system_instruction: Optional[str] = None
@@ -230,6 +249,18 @@ class AnthropicProvider:
         )
         self._cache_ttl = config.extra.get("cache_ttl", "5m")
 
+        # Cache optimization settings
+        # cache_history: Whether to add a cache breakpoint in message history
+        self._cache_history = config.extra.get("cache_history", True)
+        # cache_exclude_recent_turns: Number of recent turns to exclude from caching
+        # (these are less stable and may reduce cache hit rate)
+        self._cache_exclude_recent_turns = config.extra.get(
+            "cache_exclude_recent_turns", DEFAULT_CACHE_EXCLUDE_RECENT_TURNS
+        )
+        # cache_min_tokens: Whether to enforce minimum token threshold for caching
+        # (Anthropic ignores cache markers on content smaller than threshold)
+        self._cache_min_tokens = config.extra.get("cache_min_tokens", True)
+
         # Create the client based on auth method
         # Priority: PKCE OAuth > env var OAuth > API key
         self._client = self._create_client()
@@ -303,14 +334,84 @@ class AnthropicProvider:
         pass
 
     @staticmethod
-    def login() -> None:
+    def login(on_message=None) -> None:
         """Run interactive OAuth login flow.
 
         Opens browser to authenticate with Claude Pro/Max subscription.
         Stores tokens for future use.
+
+        Args:
+            on_message: Optional callback for status messages.
         """
-        oauth_login()
-        print("Successfully authenticated with Claude Pro/Max subscription.")
+        oauth_login(on_message=on_message)
+        msg = "Successfully authenticated with Claude Pro/Max subscription."
+        if on_message:
+            on_message(msg)
+        else:
+            print(msg)
+
+    def verify_auth(
+        self,
+        allow_interactive: bool = False,
+        on_message=None
+    ) -> bool:
+        """Verify that authentication is configured and optionally trigger interactive login.
+
+        This can be called BEFORE initialize() to ensure credentials are available.
+        For Anthropic, this checks for PKCE OAuth tokens, OAuth env tokens, or API keys.
+
+        Args:
+            allow_interactive: If True and auth is not configured, attempt
+                interactive OAuth login (opens browser).
+            on_message: Optional callback for status messages during login.
+
+        Returns:
+            True if authentication is configured and valid.
+            False if authentication failed or was cancelled.
+
+        Raises:
+            APIKeyNotFoundError: If allow_interactive=False and no credentials found.
+        """
+        from typing import Callable
+
+        # Check existing credentials in priority order
+        # 1. PKCE OAuth tokens (from interactive login)
+        try:
+            pkce_token = get_valid_access_token()
+            if pkce_token:
+                if on_message:
+                    on_message("Found valid PKCE OAuth token")
+                return True
+        except Exception:
+            # Token refresh failed, will try other methods
+            pass
+
+        # 2. OAuth token from env var
+        oauth_token = resolve_oauth_token()
+        if oauth_token:
+            if on_message:
+                on_message("Found OAuth token from environment")
+            return True
+
+        # 3. API key
+        api_key = resolve_api_key()
+        if api_key:
+            if on_message:
+                on_message("Found API key")
+            return True
+
+        # No credentials found
+        if on_message:
+            on_message("No credentials found.")
+
+        if not allow_interactive:
+            raise APIKeyNotFoundError(
+                checked_locations=get_checked_credential_locations()
+            )
+
+        # Return False to signal interactive login is needed
+        # The caller (e.g., server) should use the anthropic_auth plugin for login
+        return False
 
     def shutdown(self) -> None:
         """Clean up resources."""
@@ -456,8 +557,11 @@ class AnthropicProvider:
         # Validate and repair history (in case of prior cancellation/errors)
         self._history = validate_tool_use_pairing(self._history)
 
-        # Build messages for API
-        messages = messages_to_anthropic(self._history)
+        # Compute history cache breakpoint (Cache breakpoint #3)
+        history_breakpoint = self._compute_history_cache_breakpoint()
+
+        # Build messages for API with optional cache breakpoint
+        messages = messages_to_anthropic(self._history, cache_breakpoint_index=history_breakpoint)
 
         # Build API kwargs
         kwargs = self._build_api_kwargs(response_schema)
@@ -513,8 +617,11 @@ class AnthropicProvider:
         # Validate and repair history (in case of prior cancellation/errors)
         self._history = validate_tool_use_pairing(self._history)
 
-        # Build messages for API
-        messages = messages_to_anthropic(self._history)
+        # Compute history cache breakpoint (Cache breakpoint #3)
+        history_breakpoint = self._compute_history_cache_breakpoint()
+
+        # Build messages for API with optional cache breakpoint
+        messages = messages_to_anthropic(self._history, cache_breakpoint_index=history_breakpoint)
 
         # Build API kwargs
         kwargs = self._build_api_kwargs(response_schema)
@@ -562,8 +669,11 @@ class AnthropicProvider:
         # Validate and repair history (in case of prior cancellation/errors)
         self._history = validate_tool_use_pairing(self._history)
 
-        # Build messages for API
-        messages = messages_to_anthropic(self._history)
+        # Compute history cache breakpoint (Cache breakpoint #3)
+        history_breakpoint = self._compute_history_cache_breakpoint()
+
+        # Build messages for API with optional cache breakpoint
+        messages = messages_to_anthropic(self._history, cache_breakpoint_index=history_breakpoint)
 
         # Build API kwargs
         kwargs = self._build_api_kwargs(response_schema)
@@ -593,7 +703,18 @@ class AnthropicProvider:
         return self._use_pkce or bool(self._oauth_token)
 
     def _build_api_kwargs(self, response_schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Build kwargs for the messages.create() call."""
+        """Build kwargs for the messages.create() call.
+
+        Cache optimization strategy (up to 4 breakpoints):
+        1. System instruction (most stable)
+        2. Tool definitions (stable within session, sorted for consistency)
+        3. Historical messages (computed breakpoint in older turns)
+        4. Reserved for future use (large document injection, etc.)
+
+        Note: Breakpoint 3 (history) is applied in send_message() via
+        messages_to_anthropic(cache_breakpoint_index=...) since it needs
+        access to the converted message list.
+        """
         kwargs: Dict[str, Any] = {}
 
         # Max tokens (higher if thinking is enabled)
@@ -602,44 +723,48 @@ class AnthropicProvider:
         else:
             kwargs["max_tokens"] = DEFAULT_MAX_TOKENS
 
-        # System instruction
+        # System instruction (Cache breakpoint #1)
         # When using OAuth tokens, prepend Claude Code identity (server-side validation)
         if self._is_using_oauth():
-            # OAuth requires Claude Code identity + cache control format
-            system_parts = [
-                {
-                    "type": "text",
-                    "text": CLAUDE_CODE_IDENTITY,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ]
+            # OAuth requires Claude Code identity
+            # Combine identity + instruction into single block for better caching
+            combined_system = CLAUDE_CODE_IDENTITY
             if self._system_instruction:
-                system_parts.append({
-                    "type": "text",
-                    "text": self._system_instruction,
-                    "cache_control": {"type": "ephemeral"},
-                })
-            kwargs["system"] = system_parts
-        elif self._system_instruction:
-            if self._enable_caching:
-                # Use cache control on system instruction
-                kwargs["system"] = [
-                    {
-                        "type": "text",
-                        "text": self._system_instruction,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ]
-            else:
-                kwargs["system"] = self._system_instruction
+                combined_system = f"{CLAUDE_CODE_IDENTITY}\n\n{self._system_instruction}"
 
-        # Tools
+            # Only add cache_control if content meets threshold
+            system_block: Dict[str, Any] = {
+                "type": "text",
+                "text": combined_system,
+            }
+            if self._enable_caching and self._should_cache_content(combined_system):
+                system_block["cache_control"] = {"type": "ephemeral"}
+            kwargs["system"] = [system_block]
+
+        elif self._system_instruction:
+            system_block = {
+                "type": "text",
+                "text": self._system_instruction,
+            }
+            # Only add cache_control if caching enabled and meets threshold
+            if self._enable_caching and self._should_cache_content(self._system_instruction):
+                system_block["cache_control"] = {"type": "ephemeral"}
+            kwargs["system"] = [system_block]
+
+        # Tools (Cache breakpoint #2)
         if self._tools:
             anthropic_tools = tool_schemas_to_anthropic(self._tools)
             if anthropic_tools:
+                # Sort tools by name for consistent ordering (improves cache hits)
+                # Tool order changes would otherwise invalidate the cache
+                anthropic_tools = sorted(anthropic_tools, key=lambda t: t["name"])
+
                 # Add cache control to last tool if caching enabled
                 if self._enable_caching and len(anthropic_tools) > 0:
-                    anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
+                    # Estimate combined size of all tools for threshold check
+                    tools_json = json.dumps(anthropic_tools)
+                    if self._should_cache_content(tools_json):
+                        anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
                 kwargs["tools"] = anthropic_tools
 
         # Extended thinking
@@ -659,6 +784,82 @@ class AnthropicProvider:
             if self._model_name.startswith(prefix):
                 return True
         return False
+
+    def _get_cache_min_tokens(self) -> int:
+        """Get minimum token threshold for caching based on model.
+
+        Anthropic requires minimum token thresholds:
+        - Claude 3.5 Sonnet: 1024 tokens
+        - Other models: 2048 tokens
+        """
+        if not self._model_name:
+            return CACHE_MIN_TOKENS_OTHER
+        if "sonnet" in self._model_name.lower() and "3-5" in self._model_name:
+            return CACHE_MIN_TOKENS_SONNET
+        return CACHE_MIN_TOKENS_OTHER
+
+    def _estimate_tokens(self, content: str) -> int:
+        """Estimate token count for content.
+
+        Uses a rough heuristic of ~4 characters per token.
+        For accurate counts, use count_tokens() but that requires an API call.
+        """
+        return len(content) // 4
+
+    def _should_cache_content(self, content: str) -> bool:
+        """Check if content meets minimum token threshold for caching.
+
+        Args:
+            content: Text content to check.
+
+        Returns:
+            True if content is large enough to benefit from caching.
+        """
+        if not self._cache_min_tokens:
+            return True  # Skip threshold check if disabled
+        min_tokens = self._get_cache_min_tokens()
+        estimated = self._estimate_tokens(content)
+        return estimated >= min_tokens
+
+    def _compute_history_cache_breakpoint(self) -> int:
+        """Compute the optimal history index for a cache breakpoint.
+
+        Returns the index of the message that should receive cache_control,
+        or -1 if history caching should be disabled.
+
+        Strategy:
+        - Skip if caching disabled or history too short
+        - Find the last assistant message before the "exclude recent" window
+        - This creates a stable cache key for older conversation context
+        """
+        if not self._enable_caching or not self._cache_history:
+            return -1
+
+        if not self._history:
+            return -1
+
+        # Count turns (user-assistant pairs)
+        # We want to cache up to but not including the last N turns
+        exclude_count = self._cache_exclude_recent_turns
+        if exclude_count <= 0:
+            # Cache everything except the very last message (current turn)
+            exclude_count = 1
+
+        # Find candidate: last assistant message before the exclusion window
+        # Walk backward to find the Nth user message from the end
+        user_count = 0
+        for i in range(len(self._history) - 1, -1, -1):
+            if self._history[i].role == Role.USER:
+                user_count += 1
+                if user_count >= exclude_count:
+                    # Found the boundary - cache everything before this user message
+                    # Find the last assistant message before this point
+                    for j in range(i - 1, -1, -1):
+                        if self._history[j].role == Role.MODEL:
+                            return j
+                    # No assistant message found before this point
+                    return -1
+        return -1
 
     def _add_response_to_history(self, response: ProviderResponse) -> None:
         """Add the model's response to history.
@@ -866,8 +1067,11 @@ class AnthropicProvider:
         # Validate and repair history (in case of prior cancellation/errors)
         self._history = validate_tool_use_pairing(self._history)
 
-        # Build messages for API
-        messages = messages_to_anthropic(self._history)
+        # Compute history cache breakpoint (Cache breakpoint #3)
+        history_breakpoint = self._compute_history_cache_breakpoint()
+
+        # Build messages for API with optional cache breakpoint
+        messages = messages_to_anthropic(self._history, cache_breakpoint_index=history_breakpoint)
 
         # Build API kwargs
         kwargs = self._build_api_kwargs(response_schema)
@@ -935,8 +1139,11 @@ class AnthropicProvider:
         # Validate and repair history (in case of prior cancellation/errors)
         self._history = validate_tool_use_pairing(self._history)
 
-        # Build messages for API
-        messages = messages_to_anthropic(self._history)
+        # Compute history cache breakpoint (Cache breakpoint #3)
+        history_breakpoint = self._compute_history_cache_breakpoint()
+
+        # Build messages for API with optional cache breakpoint
+        messages = messages_to_anthropic(self._history, cache_breakpoint_index=history_breakpoint)
 
         # Build API kwargs
         kwargs = self._build_api_kwargs(response_schema)

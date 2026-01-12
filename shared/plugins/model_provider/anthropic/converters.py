@@ -160,10 +160,29 @@ def message_to_anthropic(message: Message) -> Dict[str, Any]:
     }
 
 
-def messages_to_anthropic(messages: List[Message]) -> List[Dict[str, Any]]:
+def messages_to_anthropic(
+    messages: List[Message],
+    cache_breakpoint_index: int = -1,
+) -> List[Dict[str, Any]]:
     """Convert internal message list to Anthropic format.
 
     Handles merging consecutive same-role messages (Anthropic requirement).
+
+    Args:
+        messages: List of internal Message objects.
+        cache_breakpoint_index: If >= 0, add cache_control to the last content
+            block of the message at this index. This marks a cache boundary
+            for Anthropic's prompt caching. Set to -1 to disable (default).
+
+    Returns:
+        List of Anthropic-formatted message dicts.
+
+    Note on caching strategy:
+        Anthropic caches everything UP TO AND INCLUDING a cache_control marker.
+        For optimal cache hits:
+        - Place breakpoint after stable historical messages
+        - Content after the breakpoint is not cached
+        - Up to 4 cache breakpoints are allowed per request
     """
     if not messages:
         return []
@@ -171,6 +190,9 @@ def messages_to_anthropic(messages: List[Message]) -> List[Dict[str, Any]]:
     result = []
     current_role = None
     current_content: List[Dict[str, Any]] = []
+    # Track which original message index maps to which result index
+    msg_idx_to_result_idx: Dict[int, int] = {}
+    original_msg_idx = 0
 
     for msg in messages:
         anthropic_msg = message_to_anthropic(msg)
@@ -189,6 +211,9 @@ def messages_to_anthropic(messages: List[Message]) -> List[Dict[str, Any]]:
             # Start new message
             current_role = role
             current_content = anthropic_msg["content"]
+            msg_idx_to_result_idx[original_msg_idx] = len(result)
+
+        original_msg_idx += 1
 
     # Flush last message
     if current_content:
@@ -196,6 +221,16 @@ def messages_to_anthropic(messages: List[Message]) -> List[Dict[str, Any]]:
             "role": current_role,
             "content": current_content,
         })
+
+    # Apply cache breakpoint if specified
+    if cache_breakpoint_index >= 0 and cache_breakpoint_index < len(messages):
+        # Find the result index for this message
+        result_idx = msg_idx_to_result_idx.get(cache_breakpoint_index)
+        if result_idx is not None and result_idx < len(result):
+            content = result[result_idx].get("content", [])
+            if content and isinstance(content, list) and len(content) > 0:
+                # Add cache_control to the last content block
+                content[-1]["cache_control"] = {"type": "ephemeral"}
 
     return result
 

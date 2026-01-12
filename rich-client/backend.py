@@ -390,6 +390,24 @@ class DirectBackend(Backend):
         if self._jaato:
             self._jaato.set_ui_hooks(hooks)
 
+    def verify_auth(
+        self,
+        allow_interactive: bool = False,
+        on_message: Optional[Callable[[str], None]] = None
+    ) -> bool:
+        """Verify authentication before loading tools.
+
+        Args:
+            allow_interactive: If True, allow interactive login if needed.
+            on_message: Optional callback for status messages.
+
+        Returns:
+            True if authentication is configured.
+        """
+        if self._jaato:
+            return self._jaato.verify_auth(allow_interactive, on_message)
+        return False
+
     def configure_tools(
         self,
         registry: Any,
