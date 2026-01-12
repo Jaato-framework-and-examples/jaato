@@ -179,6 +179,10 @@ class ClaudeCLIProvider:
         This checks if the claude CLI is installed and can be executed.
         The CLI handles its own authentication state.
 
+        Note: This method can be called before initialize() to check if
+        the CLI is available. In that case, it will attempt to find the
+        CLI in PATH.
+
         Args:
             allow_interactive: Not used (CLI handles interactive auth).
             on_message: Optional callback for status messages.
@@ -186,13 +190,20 @@ class ClaudeCLIProvider:
         Returns:
             True if CLI is available and presumably authenticated.
         """
-        if not self._cli_path:
-            return False
+        # Get CLI path - use cached value if available, otherwise try to find it
+        cli_path = self._cli_path
+        if not cli_path:
+            try:
+                cli_path = resolve_cli_path(None)
+            except FileNotFoundError:
+                if on_message:
+                    on_message("Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code")
+                return False
 
         try:
             # Check CLI version to verify it's working
             result = subprocess.run(
-                [self._cli_path, "--version"],
+                [cli_path, "--version"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -204,6 +215,8 @@ class ClaudeCLIProvider:
                 return True
             else:
                 logger.warning(f"CLI version check failed: {result.stderr}")
+                if on_message:
+                    on_message(f"Claude CLI check failed: {result.stderr}")
                 return False
         except subprocess.TimeoutExpired:
             logger.warning("CLI version check timed out")
