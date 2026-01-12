@@ -1719,19 +1719,30 @@ class RichClient:
         Sets up:
         - VisionCapture: Core capture utility for rendering panels to images
         - VisionCaptureFormatter: Pipeline plugin for observing output and auto-capture
+
+        Format priority: Environment variable > Saved preference > Default (svg)
         """
         if self._vision_capture:
             return  # Already initialized
 
-        # Get configuration from environment
+        # Get output directory from environment
         output_dir = os.environ.get('JAATO_VISION_DIR', '/tmp/jaato_vision')
-        format_str = os.environ.get('JAATO_VISION_FORMAT', 'svg').lower()
 
+        # Determine format: env var takes priority, then saved preference, then default
         format_map = {
             'svg': CaptureFormat.SVG,
             'png': CaptureFormat.PNG,
             'html': CaptureFormat.HTML,
         }
+
+        env_format = os.environ.get('JAATO_VISION_FORMAT', '').lower()
+        if env_format and env_format in format_map:
+            format_str = env_format
+        else:
+            # Load saved preference
+            from preferences import load_preference
+            format_str = load_preference('vision_format', 'svg')
+
         capture_format = format_map.get(format_str, CaptureFormat.SVG)
 
         config = CaptureConfig(
@@ -1902,6 +1913,9 @@ class RichClient:
 
             if self._vision_capture:
                 self._vision_capture._config.format = new_format
+                # Save preference for future sessions
+                from preferences import save_preference
+                save_preference('vision_format', new_format.value)
                 self._display.show_lines([
                     (f"Screenshot format set to: {new_format.value}", "cyan"),
                 ])
@@ -2649,12 +2663,34 @@ def _get_ipc_vision_state(display):
     """Get or create vision capture state for IPC mode.
 
     State is stored on the display object to persist across calls.
+    Format priority: Environment variable > Saved preference > Default (svg)
     """
+    import os
     from shared.plugins.vision_capture import VisionCapture, VisionCaptureFormatter
+    from shared.plugins.vision_capture.protocol import CaptureConfig, CaptureFormat
 
     if not hasattr(display, '_vision_capture'):
+        # Determine format: env var takes priority, then saved preference, then default
+        format_map = {
+            'svg': CaptureFormat.SVG,
+            'png': CaptureFormat.PNG,
+            'html': CaptureFormat.HTML,
+        }
+
+        env_format = os.environ.get('JAATO_VISION_FORMAT', '').lower()
+        if env_format and env_format in format_map:
+            format_str = env_format
+        else:
+            # Load saved preference
+            from preferences import load_preference
+            format_str = load_preference('vision_format', 'svg')
+
+        capture_format = format_map.get(format_str, CaptureFormat.SVG)
+
+        config = CaptureConfig(format=capture_format)
         display._vision_capture = VisionCapture()
-        display._vision_capture.initialize()
+        display._vision_capture.initialize(config)
+
     if not hasattr(display, '_vision_formatter'):
         display._vision_formatter = VisionCaptureFormatter()
         display.register_formatter(display._vision_formatter)
@@ -2736,6 +2772,9 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
                 new_format = CaptureFormat.SVG
 
         vision_capture._config.format = new_format
+        # Save preference for future sessions
+        from preferences import save_preference
+        save_preference('vision_format', new_format.value)
         display.show_lines([
             (f"Screenshot format set to: {new_format.value}", "cyan"),
         ])
