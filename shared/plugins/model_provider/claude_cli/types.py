@@ -36,6 +36,9 @@ class MessageType(str, Enum):
     RESULT = "result"
     """Final result of a query."""
 
+    STREAM_EVENT = "stream_event"
+    """Streaming event (with --include-partial-messages)."""
+
 
 class ContentBlockType(str, Enum):
     """Types of content blocks within messages."""
@@ -443,8 +446,46 @@ class ResultMessage:
         )
 
 
+@dataclass
+class StreamEvent:
+    """Streaming event for incremental output (with --include-partial-messages)."""
+
+    event_type: str  # message_start, content_block_start, content_block_delta, etc.
+    session_id: str
+    delta_text: Optional[str] = None  # Text delta from content_block_delta
+    raw_event: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def type(self) -> MessageType:
+        return MessageType.STREAM_EVENT
+
+    @property
+    def is_text_delta(self) -> bool:
+        """Check if this is a text delta event with content."""
+        return self.event_type == "content_block_delta" and self.delta_text is not None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "StreamEvent":
+        event = data.get("event", {})
+        event_type = event.get("type", "")
+
+        # Extract text delta if present
+        delta_text = None
+        if event_type == "content_block_delta":
+            delta = event.get("delta", {})
+            if delta.get("type") == "text_delta":
+                delta_text = delta.get("text", "")
+
+        return cls(
+            event_type=event_type,
+            session_id=data.get("session_id", ""),
+            delta_text=delta_text,
+            raw_event=event,
+        )
+
+
 # Union type for all messages
-CLIMessage = Union[SystemMessage, AssistantMessage, UserMessage, ResultMessage]
+CLIMessage = Union[SystemMessage, AssistantMessage, UserMessage, ResultMessage, StreamEvent]
 
 
 def parse_message(data: Dict[str, Any]) -> CLIMessage:
@@ -459,6 +500,8 @@ def parse_message(data: Dict[str, Any]) -> CLIMessage:
         return UserMessage.from_dict(data)
     elif msg_type == "result":
         return ResultMessage.from_dict(data)
+    elif msg_type == "stream_event":
+        return StreamEvent.from_dict(data)
     else:
         raise ValueError(f"Unknown message type: {msg_type}")
 
