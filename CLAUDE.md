@@ -649,12 +649,13 @@ keybindings reload          # Reload keybindings from config
 
 ### Vision Capture (TUI Screenshots)
 
-The rich client supports capturing TUI screenshots for AI vision analysis.
-This allows the AI to "see" the current state of the interface.
+The rich client supports capturing TUI screenshots. The command itself is intercepted
+client-side, but by default a system hint is sent to the model about the capture path.
 
 ```
-screenshot              # Capture and send to AI immediately
-screenshot nosend       # Capture and display path only (don't send)
+screenshot              # Capture and send hint to model
+screenshot nosend       # Capture only, no hint to model
+screenshot format F     # Set output format (svg, png, html)
 screenshot auto         # Toggle auto-capture on turn end
 screenshot interval N   # Capture every N ms during streaming (0=off)
 screenshot help         # Show help
@@ -663,11 +664,8 @@ screenshot help         # Show help
 **How it works:**
 1. User runs `screenshot` command
 2. TUI is captured as SVG (or PNG with cairosvg) to `/tmp/jaato_vision/`
-3. Screenshot path is sent to the AI immediately as:
-   ```xml
-   <tui-screenshot path="/tmp/jaato_vision/capture_xxx.svg" .../>
-   ```
-4. AI reads the image file and analyzes the TUI state
+3. A system hint is sent to the model with the capture path (unless `nosend`)
+4. Model can read the image file to analyze the TUI state
 
 **Pipeline Integration:**
 
