@@ -276,18 +276,28 @@ class ClaudeCLIProvider:
 
         Args:
             system_instruction: System prompt for Claude.
-            tools: List of available tools (used in passthrough mode).
+            tools: List of available tools (used in passthrough mode only).
             history: Previous conversation history to restore.
         """
         # Terminate any existing process
         self._terminate_process()
 
         self._system_instruction = system_instruction
-        self._tools = tools or []
         self._history = list(history) if history else []
         self._session_id = str(uuid.uuid4())[:8]
         self._last_usage = None
         self._last_result = None
+
+        # In delegated mode, CLI uses its own built-in tools - ignore external tools
+        if self._mode == CLIMode.DELEGATED:
+            if tools:
+                logger.debug(
+                    f"Ignoring {len(tools)} external tools in delegated mode - "
+                    "CLI handles tool execution with its own tools"
+                )
+            self._tools = []
+        else:
+            self._tools = tools or []
 
         logger.debug(
             f"Created session {self._session_id} with "
@@ -547,6 +557,21 @@ class ClaudeCLIProvider:
     def supports_structured_output(self) -> bool:
         """Check if structured output is supported."""
         return False  # CLI doesn't support response_schema
+
+    def uses_external_tools(self) -> bool:
+        """Check if this provider uses external tool plugins.
+
+        In delegated mode, the CLI manages its own built-in tools (Read, Write,
+        Bash, etc.) and any MCP servers it discovers. External tool plugins
+        from jaato should NOT be configured.
+
+        In passthrough mode, the CLI is used only for model access and jaato
+        handles tool execution, so external tools ARE needed.
+
+        Returns:
+            True if external tools should be configured, False otherwise.
+        """
+        return self._mode == CLIMode.PASSTHROUGH
 
     # ==================== Agent Context ====================
 
