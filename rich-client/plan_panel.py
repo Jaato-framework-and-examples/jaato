@@ -4,13 +4,16 @@ Provides compact plan progress display in the status bar (symbols only)
 with a detailed popup overlay accessible via the configured toggle key.
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
 from rich.panel import Panel
 from rich.text import Text
 from rich.console import Group
 
 from keybindings import KeyBinding, format_key_for_display
+
+if TYPE_CHECKING:
+    from theme import ThemeConfig
 
 
 class PlanPanel:
@@ -31,6 +34,33 @@ class PlanPanel:
         self._popup_scroll_offset: int = 0  # Scroll position in popup
         self._popup_max_visible_steps: int = 10  # Max steps visible at once
         self._toggle_key = toggle_key or "c-p"
+        self._theme: Optional["ThemeConfig"] = None
+
+    def set_theme(self, theme: "ThemeConfig") -> None:
+        """Set the theme configuration for styling.
+
+        Args:
+            theme: ThemeConfig instance for Rich style lookups.
+        """
+        self._theme = theme
+
+    def _get_status_style(self, status: str) -> str:
+        """Get style for a plan status from theme or fallback.
+
+        Args:
+            status: Status name (pending, in_progress, completed, failed, skipped).
+
+        Returns:
+            Rich style string.
+        """
+        if self._theme:
+            semantic_name = f"plan_{status}"
+            style = self._theme.get_rich_style(semantic_name)
+            if style:
+                return style
+        # Fallback to STATUS_SYMBOLS
+        _, fallback = self.STATUS_SYMBOLS.get(status, ("?", ""))
+        return fallback
 
     def update_plan(self, plan_data: Dict[str, Any]) -> None:
         """Update the plan data to render.
@@ -220,7 +250,8 @@ class PlanPanel:
                 result = step.get("result", "")
                 error = step.get("error", "")
 
-                symbol, color = self.STATUS_SYMBOLS.get(step_status, ("○", "dim"))
+                symbol, _ = self.STATUS_SYMBOLS.get(step_status, ("○", "dim"))
+                color = self._get_status_style(step_status)
 
                 # Step line
                 line = Text()
