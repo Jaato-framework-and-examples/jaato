@@ -34,6 +34,23 @@ def is_hex_color(value: str) -> bool:
     return bool(HEX_COLOR_PATTERN.match(value))
 
 
+def hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
+    """Convert hex color string to RGB tuple.
+
+    Args:
+        hex_color: Hex color string like "#FF5500".
+
+    Returns:
+        Tuple of (R, G, B) integers 0-255.
+    """
+    hex_color = hex_color.lstrip('#')
+    return (
+        int(hex_color[0:2], 16),
+        int(hex_color[2:4], 16),
+        int(hex_color[4:6], 16),
+    )
+
+
 @dataclass
 class StyleSpec:
     """Specification for a single style.
@@ -437,6 +454,49 @@ class ThemeConfig:
         """
         return self.colors.get(name, "#ffffff")
 
+    def to_terminal_theme(self) -> "TerminalTheme":
+        """Convert theme to Rich TerminalTheme for SVG/HTML export.
+
+        Maps the theme's palette colors to a TerminalTheme suitable for
+        Rich Console's save_svg() and save_html() methods.
+
+        Returns:
+            TerminalTheme instance with colors from this theme's palette.
+        """
+        from rich.terminal_theme import TerminalTheme
+
+        bg = hex_to_rgb(self.colors.get("background", "#1a1a1a"))
+        fg = hex_to_rgb(self.colors.get("text", "#ffffff"))
+
+        # Build ANSI color palette (16 colors: 8 normal + 8 bright)
+        # Standard ANSI: black, red, green, yellow, blue, magenta, cyan, white
+        ansi_colors = [
+            hex_to_rgb(self.colors.get("background", "#1a1a1a")),  # 0: black
+            hex_to_rgb(self.colors.get("error", "#ff5f5f")),       # 1: red
+            hex_to_rgb(self.colors.get("success", "#5fd75f")),     # 2: green
+            hex_to_rgb(self.colors.get("warning", "#ffff5f")),     # 3: yellow
+            hex_to_rgb(self.colors.get("primary", "#5fd7ff")),     # 4: blue
+            hex_to_rgb(self.colors.get("accent", "#d7af87")),      # 5: magenta
+            hex_to_rgb(self.colors.get("secondary", "#87d787")),   # 6: cyan
+            hex_to_rgb(self.colors.get("text", "#ffffff")),        # 7: white
+            # Bright variants (same colors for simplicity)
+            hex_to_rgb(self.colors.get("muted", "#808080")),       # 8: bright black
+            hex_to_rgb(self.colors.get("error", "#ff5f5f")),       # 9: bright red
+            hex_to_rgb(self.colors.get("success", "#5fd75f")),     # 10: bright green
+            hex_to_rgb(self.colors.get("warning", "#ffff5f")),     # 11: bright yellow
+            hex_to_rgb(self.colors.get("primary", "#5fd7ff")),     # 12: bright blue
+            hex_to_rgb(self.colors.get("accent", "#d7af87")),      # 13: bright magenta
+            hex_to_rgb(self.colors.get("secondary", "#87d787")),   # 14: bright cyan
+            hex_to_rgb(self.colors.get("text", "#ffffff")),        # 15: bright white
+        ]
+
+        return TerminalTheme(
+            background=bg,
+            foreground=fg,
+            normal=ansi_colors[:8],
+            bright=ansi_colors[8:],
+        )
+
     def set_color(self, name: str, hex_value: str) -> bool:
         """Set a palette color.
 
@@ -667,11 +727,6 @@ BUILTIN_THEMES: Dict[str, ThemeConfig] = {
 }
 
 
-def _get_preferences_path() -> Path:
-    """Get the path to the user preferences file."""
-    return Path.home() / ".jaato" / "preferences.json"
-
-
 def save_theme_preference(theme_name: str) -> bool:
     """Save the selected theme to user preferences.
 
@@ -682,32 +737,8 @@ def save_theme_preference(theme_name: str) -> bool:
     Returns:
         True if saved successfully, False otherwise.
     """
-    prefs_path = _get_preferences_path()
-    try:
-        # Load existing preferences or start fresh
-        prefs = {}
-        if prefs_path.exists():
-            try:
-                with open(prefs_path, "r") as f:
-                    prefs = json.load(f)
-            except (json.JSONDecodeError, IOError):
-                pass  # Start fresh if file is corrupted
-
-        # Update theme preference
-        prefs["theme"] = theme_name
-
-        # Ensure directory exists
-        prefs_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Save preferences
-        with open(prefs_path, "w") as f:
-            json.dump(prefs, f, indent=2)
-
-        logger.info(f"Saved theme preference: {theme_name}")
-        return True
-    except Exception as e:
-        logger.warning(f"Failed to save theme preference: {e}")
-        return False
+    from preferences import save_preference
+    return save_preference("theme", theme_name)
 
 
 def load_theme_preference() -> Optional[str]:
@@ -716,18 +747,8 @@ def load_theme_preference() -> Optional[str]:
     Returns:
         Theme name if found, None otherwise.
     """
-    prefs_path = _get_preferences_path()
-    try:
-        if prefs_path.exists():
-            with open(prefs_path, "r") as f:
-                prefs = json.load(f)
-                theme = prefs.get("theme")
-                if theme:
-                    logger.debug(f"Loaded theme preference: {theme}")
-                    return theme
-    except Exception as e:
-        logger.warning(f"Failed to load theme preference: {e}")
-    return None
+    from preferences import load_preference
+    return load_preference("theme")
 
 
 def load_theme(
