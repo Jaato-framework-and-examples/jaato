@@ -41,6 +41,7 @@ from .types import (
     CLIMode,
     ContentBlock,
     ResultMessage,
+    StreamEvent,
     SystemMessage,
     TextBlock,
     ToolResultBlock,
@@ -585,6 +586,7 @@ class ClaudeCLIProvider:
             "--print",  # Non-interactive mode
             "--output-format", "stream-json",  # NDJSON output
             "--verbose",  # Required for stream-json
+            "--include-partial-messages",  # Enable token-level streaming
         ]
 
         # Model selection
@@ -678,6 +680,8 @@ class ClaudeCLIProvider:
         finish_reason = FinishReason.STOP
         cancelled = False
 
+        got_stream_events = False  # Track if we got streaming deltas
+
         try:
             for msg in self._stream_cli_messages(prompt, cancel_token):
                 # Check cancellation
@@ -685,12 +689,25 @@ class ClaudeCLIProvider:
                     cancelled = True
                     break
 
-                if isinstance(msg, AssistantMessage):
+                if isinstance(msg, StreamEvent):
+                    # Handle streaming text deltas
+                    if msg.is_text_delta and msg.delta_text:
+                        got_stream_events = True
+                        accumulated_text += msg.delta_text
+                        on_chunk(msg.delta_text)
+
+                elif isinstance(msg, AssistantMessage):
+                    # If we got stream events, don't double-count text
+                    # Only process tool use blocks from the final message
+                    if not got_stream_events:
+                        for block in msg.content_blocks:
+                            if isinstance(block, TextBlock):
+                                accumulated_text += block.text
+                                on_chunk(block.text)
+
+                    # Always process tool use blocks
                     for block in msg.content_blocks:
-                        if isinstance(block, TextBlock):
-                            accumulated_text += block.text
-                            on_chunk(block.text)
-                        elif isinstance(block, ToolUseBlock):
+                        if isinstance(block, ToolUseBlock):
                             fc = FunctionCall(
                                 id=block.id,
                                 name=block.name,
