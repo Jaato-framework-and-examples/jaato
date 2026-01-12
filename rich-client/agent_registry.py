@@ -249,6 +249,18 @@ class AgentRegistry:
         """Deprecated: Use set_formatter_pipeline_all instead."""
         self.set_formatter_pipeline_all(formatter)
 
+    def set_theme_all(self, theme: Any) -> None:
+        """Set theme on all agent output buffers.
+
+        Args:
+            theme: ThemeConfig instance for styling.
+        """
+        self._theme = theme
+        with self._lock:
+            for agent in self._agents.values():
+                if agent.output_buffer:
+                    agent.output_buffer.set_theme(theme)
+
     def format_text(self, text: str, format_hint: Optional[str] = None) -> str:
         """Format text through the formatter pipeline.
 

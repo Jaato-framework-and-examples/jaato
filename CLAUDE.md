@@ -4,12 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**jaato** ("just another agentic tool orchestrator") is an experimental project for exploring:
+**jaato** ("just another agentic tool orchestrator") is a framework for:
 - Multi-provider AI SDK integration (Google GenAI, Anthropic, etc.)
 - Function calling patterns with LLMs
 - Tool orchestration (CLI tools and MCP servers)
-
-This is not intended to be a production tool, but a sandbox for experimentation.
 
 ## Commands
 
@@ -460,13 +458,13 @@ Key types in `shared/plugins/model_provider/types.py`:
 | Variable | Purpose |
 |----------|---------|
 | `ANTHROPIC_API_KEY` | Anthropic API key (uses API credits) |
-| `ANTHROPIC_AUTH_TOKEN` | OAuth token for Claude Pro/Max subscription (experimental) |
+| `ANTHROPIC_AUTH_TOKEN` | OAuth token for Claude Pro/Max subscription |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Alternative OAuth token env var (Claude Code CLI) |
 
 **Authentication Options (in priority order):**
 
 1. **PKCE OAuth Login** (recommended for subscription): Interactive browser-based OAuth
-2. **OAuth Token** (`sk-ant-oat01-...`): From `claude setup-token` (experimental)
+2. **OAuth Token** (`sk-ant-oat01-...`): From `claude setup-token`
 3. **API Key** (`sk-ant-api03-...`): Uses API credits from console.anthropic.com
 
 **Option 1: PKCE OAuth Login (Interactive)**
@@ -480,7 +478,7 @@ oauth_login()
 # Provider will automatically use stored tokens
 ```
 
-**Option 2: OAuth Token from claude setup-token (Experimental)**
+**Option 2: OAuth Token from claude setup-token**
 ```bash
 # Install Claude Code CLI
 npm install -g @anthropic/claude-code
@@ -728,6 +726,60 @@ Priority: Environment variables > Project config > User config > Defaults
 Use the `keybindings reload` command to reload keybindings without restarting:
 ```
 keybindings reload
+```
+
+## Rich Client Theming
+
+The rich client supports theme customization with three built-in presets and automatic persistence.
+
+### Built-in Themes
+
+- `dark` (default) - Dark background with cyan/green accents
+- `light` - Light background for bright terminals
+- `high-contrast` - High contrast for accessibility
+
+### Switching Themes
+
+Use the `/theme` command:
+```
+/theme              # Show current theme info
+/theme dark         # Switch to dark theme
+/theme light        # Switch to light theme
+/theme high-contrast # Switch to high-contrast theme
+/theme reload       # Reload from config files
+```
+
+Theme selection is automatically persisted to `~/.jaato/preferences.json` and restored on next startup.
+
+### Theme Priority
+
+1. `JAATO_THEME` environment variable (temporary override)
+2. Saved user preference (`~/.jaato/preferences.json`)
+3. Project-level custom theme (`.jaato/theme.json`)
+4. User-level custom theme (`~/.jaato/theme.json`)
+5. Default "dark" theme
+
+### Custom Themes
+
+Create a custom theme by placing a `theme.json` file in `.jaato/` (project) or `~/.jaato/` (user):
+
+```json
+{
+  "name": "my-theme",
+  "version": "1.0",
+  "colors": {
+    "primary": "#5fd7ff",
+    "secondary": "#87d787",
+    "success": "#5fd75f",
+    "warning": "#ffff5f",
+    "error": "#ff5f5f",
+    "muted": "#808080",
+    "background": "#1a1a1a",
+    "surface": "#333333",
+    "text": "#ffffff",
+    "text_muted": "#aaaaaa"
+  }
+}
 ```
 
 ## Testing

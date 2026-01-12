@@ -63,6 +63,7 @@ from pt_display import PTDisplay
 from plan_reporter import create_live_reporter
 from agent_registry import AgentRegistry
 from keybindings import load_keybindings, detect_terminal, list_available_profiles
+from theme import load_theme
 
 # Backend abstraction for mode-agnostic operation
 from backend import Backend, DirectBackend, IPCBackend
@@ -149,7 +150,7 @@ class RichClient:
     def log(self, msg: str) -> None:
         """Log message to output panel."""
         if self.verbose and self._display:
-            self._display.add_system_message(msg, style="cyan")
+            self._display.add_system_message(msg, style="system_highlight")
 
     def _run_async(self, coro):
         """Run an async coroutine from sync context.
@@ -1174,12 +1175,12 @@ class RichClient:
         """
         if not self._backend:
             if self._display:
-                self._display.add_system_message("Error: Client not initialized", style="red")
+                self._display.add_system_message("Error: Client not initialized", style="system_error")
             return
 
         if self._model_running:
             if self._display:
-                self._display.add_system_message("Model is already running", style="yellow")
+                self._display.add_system_message("Model is already running", style="system_warning")
             return
 
         self._trace("_start_model_thread starting")
@@ -1340,17 +1341,17 @@ class RichClient:
                 # Add separator after model finishes
                 # (response content is already shown via the callback)
                 if self._display:
-                    self._display.add_system_message("─" * 40, style="dim")
-                    self._display.add_system_message("", style="dim")
+                    self._display.add_system_message("─" * 40, style="separator")
+                    self._display.add_system_message("", style="system_info")
 
             except KeyboardInterrupt:
                 self._trace("[model_thread] KeyboardInterrupt")
                 if self._display:
-                    self._display.add_system_message("[Interrupted]", style="yellow")
+                    self._display.add_system_message("[Interrupted]", style="system_warning")
             except Exception as e:
                 self._trace(f"[model_thread] Exception: {e}")
                 if self._display:
-                    self._display.add_system_message(f"Error: {e}", style="red")
+                    self._display.add_system_message(f"Error: {e}", style="system_error")
             finally:
                 self._model_running = False
                 self._model_thread = None
@@ -1496,6 +1497,10 @@ class RichClient:
             self._handle_keybindings_command(user_input)
             return
 
+        if user_input.lower().startswith('theme'):
+            self._handle_theme_command(user_input)
+            return
+
         if user_input.lower() == 'history':
             self._show_history()
             return
@@ -1549,12 +1554,14 @@ class RichClient:
         Args:
             initial_prompt: Optional prompt to run before entering interactive mode.
         """
-        # Create the display with input handler, agent registry, and keybindings
+        # Create the display with input handler, agent registry, keybindings, and theme
         keybinding_config = load_keybindings()
+        theme_config = load_theme()
         self._display = PTDisplay(
             input_handler=self._input_handler,
             agent_registry=self._agent_registry,
-            keybinding_config=keybinding_config
+            keybinding_config=keybinding_config,
+            theme_config=theme_config
         )
 
         # Set model info in status bar
@@ -1603,18 +1610,18 @@ class RichClient:
         # Add welcome messages
         self._display.add_system_message(
             release_name,
-            style="bold cyan"
+            style="system_version"
         )
         if self._input_handler.has_completion:
             self._display.add_system_message(
                 "Tab completion enabled. Use @file to reference files, /command for slash commands.",
-                style="dim"
+                style="system_info"
             )
         self._display.add_system_message(
             "Type 'help' for commands, 'quit' to exit, Esc+Esc to clear input",
-            style="dim"
+            style="system_info"
         )
-        self._display.add_system_message("", style="dim")
+        self._display.add_system_message("", style="system_info")
 
         # Validate TTY and start display
         self._display.start()
@@ -1962,6 +1969,65 @@ class RichClient:
                 ("[Screenshot failed]", "red"),
                 (f"  Error: {result.error}", "dim"),
             ])
+
+    def _handle_theme_command(self, user_input: str) -> None:
+        """Handle the theme command with subcommands.
+
+        Subcommands:
+            theme           - Show current theme info
+            theme reload    - Reload theme from config files
+            theme <preset>  - Switch to a preset (dark, light, high-contrast)
+
+        Args:
+            user_input: The full user input string starting with 'theme'.
+        """
+        from theme import load_theme, BUILTIN_THEMES, save_theme_preference
+
+        parts = user_input.strip().split(maxsplit=1)
+        subcommand = parts[1].lower() if len(parts) > 1 else ""
+
+        if not subcommand:
+            # Show current theme info
+            theme = self._display.theme
+            lines = [
+                (f"Current theme: {theme.name}", "bold"),
+                (f"Source: {theme.source_path}", "dim"),
+                ("", ""),
+                ("Base colors:", "bold cyan"),
+            ]
+            for name in ["primary", "secondary", "success", "warning", "error", "muted"]:
+                color = theme.get_color(name)
+                lines.append((f"  {name}: {color}", color))
+            lines.append(("", ""))
+            lines.append(("Commands:", "bold cyan"))
+            lines.append(("  theme reload           - Reload from config files", ""))
+            lines.append(("  theme <preset>         - Switch preset (dark, light, high-contrast)", ""))
+            self._display.show_lines(lines)
+            return
+
+        if subcommand == "reload":
+            new_theme = load_theme()
+            self._display.set_theme(new_theme)
+            self._display.show_lines([
+                (f"Theme reloaded: {new_theme.name}", "green"),
+                (f"Source: {new_theme.source_path}", "dim"),
+            ])
+            return
+
+        if subcommand in BUILTIN_THEMES:
+            new_theme = BUILTIN_THEMES[subcommand].copy()
+            self._display.set_theme(new_theme)
+            save_theme_preference(subcommand)  # Persist the selection
+            self._display.show_lines([
+                (f"Switched to '{subcommand}' theme", "green"),
+            ])
+            return
+
+        # Unknown subcommand
+        self._display.show_lines([
+            (f"Unknown theme command: {subcommand}", "yellow"),
+            ("Available: reload, dark, light, high-contrast", "dim"),
+        ])
 
     def _get_tool_status(self) -> list:
         """Get status of all tools including enabled/disabled state."""
@@ -2848,8 +2914,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         MidTurnPromptInjectedEvent,
     )
 
-    # Load keybindings
+    # Load keybindings and theme
     keybindings = load_keybindings()
+    theme_config = load_theme()
 
     # Create agent registry for multi-agent support
     agent_registry = AgentRegistry()
@@ -2864,6 +2931,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     # server_formatted=True because server handles syntax highlighting and code validation
     display = PTDisplay(
         keybinding_config=keybindings,
+        theme_config=theme_config,
         agent_registry=agent_registry,
         input_handler=input_handler,
         server_formatted=True,
@@ -3003,7 +3071,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
                 # Show header once
                 if not init_shown_header:
-                    display.add_system_message("Initializing session:", style="dim")
+                    display.add_system_message("Initializing session:", style="system_info")
                     init_shown_header = True
 
                 # Format step name with fixed width
@@ -3011,24 +3079,24 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
                 if status == "running":
                     # Show step in progress
-                    display.add_system_message(f"   {padded_name} ...", style="dim italic")
+                    display.add_system_message(f"   {padded_name} ...", style="system_progress")
                     init_current_step = step_name
                 elif status == "done":
                     # Update the same line to show completion
                     if init_current_step == step_name:
                         # Update in place
-                        display.update_last_system_message(f"   {padded_name} OK", style="dim")
+                        display.update_last_system_message(f"   {padded_name} OK", style="system_info")
                     else:
                         # Step mismatch (shouldn't happen), add new line
-                        display.add_system_message(f"   {padded_name} OK", style="dim")
+                        display.add_system_message(f"   {padded_name} OK", style="system_info")
                     init_current_step = None
                 elif status == "error":
                     # Show error
                     msg = event.message or "ERROR"
                     if init_current_step == step_name:
-                        display.update_last_system_message(f"   {padded_name} {msg}", style="dim red")
+                        display.update_last_system_message(f"   {padded_name} {msg}", style="system_init_error")
                     else:
-                        display.add_system_message(f"   {padded_name} {msg}", style="dim red")
+                        display.add_system_message(f"   {padded_name} {msg}", style="system_init_error")
                     init_current_step = None
                 elif status == "pending":
                     # Show pending status (e.g., waiting for auth)
@@ -3063,15 +3131,15 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 )
                 # Show welcome messages when main agent is created (now in correct buffer)
                 if event.agent_id == "main":
-                    display.add_system_message(release_name, style="bold cyan")
+                    display.add_system_message(release_name, style="system_version")
                     if input_handler.has_completion:
                         display.add_system_message(
                             "Tab completion enabled. Use @file to reference files, /command for slash commands.",
-                            style="dim"
+                            style="system_info"
                         )
                     display.add_system_message(
                         "Type 'help' for commands, 'quit' to exit",
-                        style="dim"
+                        style="system_info"
                     )
                 display.refresh()
 
@@ -3334,22 +3402,22 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.refresh()
 
             elif isinstance(event, SystemMessageEvent):
-                # Map style to actual prompt_toolkit style
-                style = event.style if event.style else ""
+                # Map style to semantic style names
+                style = event.style if event.style else "system_info"
                 if style == "error":
-                    style = "bold red"
+                    style = "system_error_bold"
                 elif style == "warning":
-                    style = "yellow"
+                    style = "system_warning"
                 elif style == "success":
-                    style = "green"
+                    style = "system_success"
                 elif style == "info":
-                    style = "cyan"
+                    style = "system_highlight"
                 display.add_system_message(event.message, style=style)
 
             elif isinstance(event, ErrorEvent):
                 display.add_system_message(
                     f"Error: {event.error_type}: {event.error}",
-                    style="bold red"
+                    style="system_error_bold"
                 )
 
             elif isinstance(event, MidTurnPromptQueuedEvent):
@@ -3846,6 +3914,49 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     await handle_screenshot_command_ipc(text, display, agent_registry, client)
                     continue
 
+                # Theme command - handle locally
+                elif cmd == "theme":
+                    from theme import load_theme, BUILTIN_THEMES, save_theme_preference
+                    subcmd = args[0].lower() if args else ""
+
+                    if not subcmd:
+                        # Show current theme info
+                        theme = display.theme
+                        lines = [
+                            (f"Current theme: {theme.name}", "bold"),
+                            (f"Source: {theme.source_path}", "dim"),
+                            ("", ""),
+                            ("Base colors:", "bold cyan"),
+                        ]
+                        for name in ["primary", "secondary", "success", "warning", "error", "muted"]:
+                            color = theme.get_color(name)
+                            lines.append((f"  {name}: {color}", color))
+                        lines.append(("", ""))
+                        lines.append(("Commands:", "bold cyan"))
+                        lines.append(("  theme reload           - Reload from config files", ""))
+                        lines.append(("  theme <preset>         - Switch preset (dark, light, high-contrast)", ""))
+                        display.show_lines(lines)
+                    elif subcmd == "reload":
+                        new_theme = load_theme()
+                        display.set_theme(new_theme)
+                        display.show_lines([
+                            (f"Theme reloaded: {new_theme.name}", "green"),
+                            (f"Source: {new_theme.source_path}", "dim"),
+                        ])
+                    elif subcmd in BUILTIN_THEMES:
+                        new_theme = BUILTIN_THEMES[subcmd].copy()
+                        display.set_theme(new_theme)
+                        save_theme_preference(subcmd)  # Persist the selection
+                        display.show_lines([
+                            (f"Switched to '{subcmd}' theme", "green"),
+                        ])
+                    else:
+                        display.show_lines([
+                            (f"Unknown theme command: {subcmd}", "yellow"),
+                            ("Available: reload, dark, light, high-contrast", "dim"),
+                        ])
+                    continue
+
                 # Other server commands (reset, plugin commands) - forward directly
                 elif cmd in ("reset",):
                     await client.execute_command(cmd, args)
@@ -3894,7 +4005,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                display.add_system_message(f"Error: {e}", style="bold red")
+                display.add_system_message(f"Error: {e}", style="system_error_bold")
 
     # Run everything concurrently
     try:

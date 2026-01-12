@@ -35,6 +35,11 @@ from rich.text import Text
 from rich.panel import Panel
 from rich.align import Align
 
+# Type checking import for ThemeConfig
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from theme import ThemeConfig
+
 
 # Pattern to strip ANSI escape codes for visible length calculation
 _ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;]*m')
@@ -212,6 +217,8 @@ class OutputBuffer:
         self._pending_enrichments: List[Tuple[str, str, str]] = []  # (source, text, mode)
         # Formatter pipeline for output processing (optional)
         self._formatter_pipeline: Optional[Any] = None
+        # Theme configuration for styling (optional)
+        self._theme: Optional["ThemeConfig"] = None
 
     def set_width(self, width: int) -> None:
         """Set the console width for measuring line wrapping.
@@ -267,6 +274,32 @@ class OutputBuffer:
     def set_output_formatter(self, formatter: Any) -> None:
         """Deprecated: Use set_formatter_pipeline instead."""
         self.set_formatter_pipeline(formatter)
+
+    def set_theme(self, theme: "ThemeConfig") -> None:
+        """Set the theme configuration for styling.
+
+        Args:
+            theme: ThemeConfig instance for Rich style lookups.
+        """
+        self._theme = theme
+        # Invalidate render caches so content re-renders with new theme colors
+        self._invalidate_line_caches()
+
+    def _style(self, semantic_name: str, fallback: str = "") -> str:
+        """Get a Rich style string from the theme.
+
+        Args:
+            semantic_name: Semantic style name (e.g., "tool_output", "user_header").
+            fallback: Fallback style if theme is not set or name not found.
+
+        Returns:
+            Rich style string.
+        """
+        if self._theme:
+            style = self._theme.get_rich_style(semantic_name)
+            if style:
+                return style
+        return fallback
 
     def _format_key_hint(self, action: str) -> str:
         """Format a keybinding for display in UI hints.
@@ -365,7 +398,7 @@ class OutputBuffer:
         elif source not in ("system", "enrichment"):
             if is_turn_start:
                 # Prepend source prefix for non-model sources
-                prefix = Text(f"[{source}] ", style="dim magenta")
+                prefix = Text(f"[{source}] ", style=self._style("tool_source_label", "dim magenta"))
                 rendered = prefix + rendered
 
         # Measure by capturing output
@@ -540,13 +573,13 @@ class OutputBuffer:
             result.append(OutputLine(
                 source=source,
                 text=line_text,
-                style="line",
+                style="system_info",
                 display_lines=display_lines,
                 is_turn_start=is_turn_start_line
             ))
         return result
 
-    def add_system_message(self, message: str, style: str = "dim") -> None:
+    def add_system_message(self, message: str, style: str = "system_info") -> None:
         """Add a system message to the buffer.
 
         Args:
@@ -558,7 +591,7 @@ class OutputBuffer:
         for line in message.split('\n'):
             self._add_line("system", line, style)
 
-    def update_last_system_message(self, message: str, style: str = "dim") -> bool:
+    def update_last_system_message(self, message: str, style: str = "system_info") -> bool:
         """Update the last system message in the buffer.
 
         Used for progressive updates like init progress that show "..." then "OK".
@@ -1564,7 +1597,7 @@ class OutputBuffer:
         tool_count = len(block.tools)
 
         # Separator
-        output.append("  ───", style="dim")
+        output.append("  ───", style=self._style("separator", "dim"))
 
         # Navigation hint if in nav mode and this block is selected
         if self._tool_nav_active and block.selected_index is not None:
@@ -1586,19 +1619,19 @@ class OutputBuffer:
             has_output = selected_tool.output_lines and len(selected_tool.output_lines) > 0
             if selected_tool.expanded and has_output:
                 # When expanded: arrows scroll output, left collapses
-                output.append(f"  {nav_up}/{nav_down} scroll, {collapse_key} collapse, {exit_key} exit [{pos}/{total}]", style="dim")
+                output.append(f"  {nav_up}/{nav_down} scroll, {collapse_key} collapse, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
             elif has_output:
                 # When collapsed but has output: arrows navigate, right expands
-                output.append(f"  {nav_up}/{nav_down} nav, {expand_key} expand, {exit_key} exit [{pos}/{total}]", style="dim")
+                output.append(f"  {nav_up}/{nav_down} nav, {expand_key} expand, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
             else:
                 # No output: just navigation hints
-                output.append(f"  {nav_up}/{nav_down} nav, {exit_key} exit [{pos}/{total}]", style="dim")
+                output.append(f"  {nav_up}/{nav_down} nav, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
 
         output.append("\n")
 
         if block.expanded:
             # Expanded view - each tool on its own line
-            output.append(f"  ▾ {tool_count} tool{'s' if tool_count != 1 else ''}:", style="dim")
+            output.append(f"  ▾ {tool_count} tool{'s' if tool_count != 1 else ''}:", style=self._style("tool_border", "dim"))
 
             for i, tool in enumerate(block.tools):
                 is_last = (i == len(block.tools) - 1)
@@ -1606,7 +1639,7 @@ class OutputBuffer:
                 connector = "└─" if is_last else "├─"
 
                 status_icon = "✓" if tool.success else "✗"
-                status_style = "green" if tool.success else "red"
+                status_style = self._style("tool_success", "green") if tool.success else self._style("tool_error", "red")
 
                 # Expand indicator for tool output (only if tool has output)
                 if tool.output_lines:
@@ -1615,7 +1648,7 @@ class OutputBuffer:
                     expand_icon = " "
 
                 # Selection highlight
-                row_style = "reverse" if is_selected else "dim"
+                row_style = "reverse" if is_selected else self._style("muted", "dim")
 
                 output.append("\n")
                 output.append(f"  {expand_icon} {connector} ", style=row_style)
@@ -1628,11 +1661,11 @@ class OutputBuffer:
                 if tool.permission_state == "granted" and tool.permission_method:
                     indicator = self._get_approval_indicator(tool.permission_method)
                     if indicator:
-                        output.append(f" {indicator}", style="dim cyan")
+                        output.append(f" {indicator}", style=self._style("tool_indicator", "dim cyan"))
 
                 # Duration
                 if tool.duration_seconds is not None:
-                    output.append(f" ({tool.duration_seconds:.1f}s)", style="dim")
+                    output.append(f" ({tool.duration_seconds:.1f}s)", style=self._style("tool_duration", "dim"))
 
                 # Expanded output
                 if tool.expanded and tool.output_lines:
@@ -1649,31 +1682,31 @@ class OutputBuffer:
 
                     if lines_above > 0:
                         output.append("\n")
-                        output.append(f"{prefix}{continuation}   ", style="dim")
+                        output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
                         scroll_up_key = self._format_key_hint("nav_up")
-                        output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''} ({scroll_up_key} to scroll)", style="dim italic")
+                        output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''} ({scroll_up_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
 
                     for output_line in tool.output_lines[start_idx:end_idx]:
                         output.append("\n")
-                        output.append(f"{prefix}{continuation}   ", style="dim")
+                        output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
                         max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
                         if len(output_line) > max_line_width:
                             display_line = output_line[:max_line_width - 3] + "..."
                         else:
                             display_line = output_line
-                        output.append(display_line, style="#87D7D7 italic")
+                        output.append(display_line, style=self._style("tool_output", "#87D7D7 italic"))
 
                     if lines_below > 0:
                         output.append("\n")
-                        output.append(f"{prefix}{continuation}   ", style="dim")
+                        output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
                         scroll_down_key = self._format_key_hint("nav_down")
-                        output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style="dim italic")
+                        output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
 
                 # Error message
                 if not tool.success and tool.error_message:
                     output.append("\n")
                     continuation = "   " if is_last else "│  "
-                    output.append(f"    {continuation}   ⚠ {tool.error_message}", style="red dim")
+                    output.append(f"    {continuation}   ⚠ {tool.error_message}", style=self._style("tool_error", "red dim"))
         else:
             # Collapsed view
             tool_summaries = []
@@ -1686,8 +1719,8 @@ class OutputBuffer:
                         summary += f" {indicator}"
                 tool_summaries.append(summary)
 
-            output.append(f"  ▸ {tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
-            output.append(" ".join(tool_summaries), style="dim")
+            output.append(f"  ▸ {tool_count} tool{'s' if tool_count != 1 else ''}: ", style=self._style("tool_border", "dim"))
+            output.append(" ".join(tool_summaries), style=self._style("tool_border", "dim"))
 
     def _get_cached_line_content(self, line: OutputLine, wrap_width: int) -> Optional[Text]:
         """Get cached rendered content for a line, or None if cache invalid.
@@ -1748,10 +1781,10 @@ class OutputBuffer:
             if self._spinner_active:
                 output = Text()
                 frame = self.SPINNER_FRAMES[self._spinner_index]
-                output.append(f"  {frame} ", style="cyan")
-                output.append("thinking...", style="dim italic")
+                output.append(f"  {frame} ", style=self._style("spinner", "cyan"))
+                output.append("thinking...", style=self._style("hint", "dim italic"))
                 return output
-            return Text("Waiting for output...", style="dim italic")
+            return Text("Waiting for output...", style=self._style("hint", "dim italic"))
 
         # Store visible height for auto-scroll calculations
         if height:
@@ -1846,12 +1879,13 @@ class OutputBuffer:
             # For OutputLine items, render based on source
             line = item
             if line.source == "system":
-                # System messages use their style directly
+                # System messages resolve style through theme (semantic or fallback to raw)
+                resolved_style = self._style(line.style, line.style)
                 wrapped = wrap_text(line.text)
                 for j, wrapped_line in enumerate(wrapped):
                     if j > 0:
                         output.append("\n")
-                    output.append(wrapped_line, style=line.style)
+                    output.append(wrapped_line, style=resolved_style)
             elif line.source in ("user", "parent"):
                 # User/parent input - use header line for turn start
                 if line.is_turn_start:
@@ -1861,8 +1895,8 @@ class OutputBuffer:
                     user_label = "Parent" if line.source == "parent" else "User"
                     header_prefix = f"── {user_label} "
                     remaining = max(0, wrap_width - len(header_prefix))
-                    output.append(header_prefix, style="bold green")
-                    output.append("─" * remaining, style="dim green")
+                    output.append(header_prefix, style=self._style("user_header", "bold green"))
+                    output.append("─" * remaining, style=self._style("user_header_separator", "dim green"))
                     output.append("\n")
                     # Then render the text content
                     wrapped = wrap_text(line.text, 0)
@@ -1886,8 +1920,8 @@ class OutputBuffer:
                     # Note: blank line for visual separation is added at inter-item level above
                     header_prefix = "── Model "
                     remaining = max(0, wrap_width - len(header_prefix))
-                    output.append(header_prefix, style="bold cyan")
-                    output.append("─" * remaining, style="dim cyan")
+                    output.append(header_prefix, style=self._style("model_header", "bold cyan"))
+                    output.append("─" * remaining, style=self._style("model_header_separator", "dim cyan"))
                     output.append("\n")
                     # Then render the text content (no prefix needed)
                     # Use cache for expensive ANSI parsing
@@ -1936,10 +1970,10 @@ class OutputBuffer:
                     if j > 0:
                         output.append("\n")
                     if j == 0 and line.is_turn_start:
-                        output.append(f"[{line.source}] ", style="dim yellow")
+                        output.append(f"[{line.source}] ", style=self._style("tool_source_label", "dim yellow"))
                     elif j > 0 and line.is_turn_start:
                         output.append(" " * (len(f"[{line.source}] ")))  # Indent continuation
-                    output.append(wrapped_line, style="dim")
+                    output.append(wrapped_line, style=self._style("muted", "dim"))
             elif line.source == "permission":
                 # Permission prompts - wrap but preserve ANSI codes
                 text = line.text
@@ -1950,7 +1984,7 @@ class OutputBuffer:
                         if j > 0:
                             output.append("\n                ")  # Indent continuation
                         if j == 0:
-                            output.append("[askPermission] ", style="bold yellow")
+                            output.append("[askPermission] ", style=self._style("permission_prompt", "bold yellow"))
                         output.append_text(Text.from_ansi(wrapped_line))
                 elif "Options:" in text or text.startswith(("===", "─", "=")) or "Enter choice" in text:
                     # Special lines - wrap normally
@@ -1959,11 +1993,11 @@ class OutputBuffer:
                         if j > 0:
                             output.append("\n")
                         if "Options:" in text:
-                            output.append_text(Text.from_ansi(wrapped_line, style="cyan"))
+                            output.append_text(Text.from_ansi(wrapped_line, style=self._style("clarification_label", "cyan")))
                         elif text.startswith(("===", "─", "=")):
-                            output.append(wrapped_line, style="dim")
+                            output.append(wrapped_line, style=self._style("separator", "dim"))
                         else:
-                            output.append_text(Text.from_ansi(wrapped_line, style="cyan"))
+                            output.append_text(Text.from_ansi(wrapped_line, style=self._style("clarification_label", "cyan")))
                 else:
                     # Preserve ANSI codes with wrapping
                     wrapped = wrap_text(text)
@@ -1979,19 +2013,19 @@ class OutputBuffer:
                     if j > 0:
                         output.append("\n")
                     if "Clarification Needed" in wrapped_line:
-                        output.append_text(Text.from_ansi(wrapped_line, style="bold cyan"))
+                        output.append_text(Text.from_ansi(wrapped_line, style=self._style("clarification_label", "bold cyan")))
                     elif wrapped_line.startswith(("===", "─", "=")):
-                        output.append(wrapped_line, style="dim")
+                        output.append(wrapped_line, style=self._style("separator", "dim"))
                     elif "Enter choice" in wrapped_line:
-                        output.append_text(Text.from_ansi(wrapped_line, style="cyan"))
+                        output.append_text(Text.from_ansi(wrapped_line, style=self._style("clarification_label", "cyan")))
                     elif wrapped_line.strip().startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.")):
-                        output.append_text(Text.from_ansi(wrapped_line, style="cyan"))
+                        output.append_text(Text.from_ansi(wrapped_line, style=self._style("clarification_label", "cyan")))
                     elif "Question" in wrapped_line and "/" in wrapped_line:
-                        output.append_text(Text.from_ansi(wrapped_line, style="bold"))
+                        output.append_text(Text.from_ansi(wrapped_line, style=self._style("emphasis", "bold")))
                     elif "[*required]" in wrapped_line:
                         wrapped_line = wrapped_line.replace("[*required]", "")
                         output.append_text(Text.from_ansi(wrapped_line))
-                        output.append("[*required]", style="yellow")
+                        output.append("[*required]", style=self._style("clarification_required", "yellow"))
                     else:
                         output.append_text(Text.from_ansi(wrapped_line))
             elif line.source == "enrichment":
@@ -2001,7 +2035,7 @@ class OutputBuffer:
                 for j, wrapped_line in enumerate(wrapped):
                     if j > 0:
                         output.append("\n")
-                    output.append(wrapped_line, style="dim")
+                    output.append(wrapped_line, style=self._style("muted", "dim"))
             else:
                 # Other plugin output - wrap and preserve ANSI codes
                 # Use cache for expensive ANSI parsing (only for non-turn-start simple cases)
@@ -2017,7 +2051,7 @@ class OutputBuffer:
                             content.append("\n")
                             output.append("\n")
                         if j == 0 and line.is_turn_start:
-                            output.append(f"[{line.source}] ", style="dim magenta")
+                            output.append(f"[{line.source}] ", style=self._style("tool_source_label", "dim magenta"))
                         elif j > 0 and line.is_turn_start:
                             output.append(" " * (len(f"[{line.source}] ")))  # Indent continuation
                         parsed = Text.from_ansi(wrapped_line)
@@ -2046,20 +2080,20 @@ class OutputBuffer:
                     has_output = selected_tool.output_lines and len(selected_tool.output_lines) > 0
                     if selected_tool.expanded and has_output:
                         # When expanded: arrows scroll output, left collapses
-                        output.append(f"  ───  {nav_up}/{nav_down} scroll, {collapse_key} collapse, {exit_key} exit [{pos}/{total}]", style="dim")
+                        output.append(f"  ───  {nav_up}/{nav_down} scroll, {collapse_key} collapse, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
                     elif has_output:
                         # When collapsed but has output: arrows navigate, right expands
-                        output.append(f"  ───  {nav_up}/{nav_down} nav, {expand_key} expand, {exit_key} exit [{pos}/{total}]", style="dim")
+                        output.append(f"  ───  {nav_up}/{nav_down} nav, {expand_key} expand, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
                     else:
                         # No output: just navigation hints
-                        output.append(f"  ───  {nav_up}/{nav_down} nav, {exit_key} exit [{pos}/{total}]", style="dim")
+                        output.append(f"  ───  {nav_up}/{nav_down} nav, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
                 elif self._tools_expanded:
                     toggle_tools = self._format_key_hint("toggle_tools")
                     tool_nav = self._format_key_hint("tool_nav_enter")
-                    output.append(f"  ───  {toggle_tools} to collapse, {tool_nav} to navigate", style="dim")
+                    output.append(f"  ───  {toggle_tools} to collapse, {tool_nav} to navigate", style=self._style("hint", "dim"))
                 else:
                     toggle_tools = self._format_key_hint("toggle_tools")
-                    output.append(f"  ───  {toggle_tools} to expand", style="dim")
+                    output.append(f"  ───  {toggle_tools} to expand", style=self._style("hint", "dim"))
                 output.append("\n")
 
             # Check if waiting for user input (permission or clarification)
@@ -2085,13 +2119,13 @@ class OutputBuffer:
             if self._tools_expanded:
                 # Expanded view - show each tool on its own line
                 if pending_tool:
-                    output.append("  ⏳ ", style="bold yellow")
+                    output.append("  ⏳ ", style=self._style("tool_pending", "bold yellow"))
                 elif show_spinner:
                     frame = self.SPINNER_FRAMES[self._spinner_index]
-                    output.append(f"  {frame} ", style="cyan")
+                    output.append(f"  {frame} ", style=self._style("spinner", "cyan"))
                 else:
-                    output.append("  ▾ ", style="dim")
-                output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}:", style="dim")
+                    output.append("  ▾ ", style=self._style("tool_border", "dim"))
+                output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}:", style=self._style("tool_border", "dim"))
 
                 # Show each tool on its own line
                 for i, tool in enumerate(self._active_tools):
@@ -2101,10 +2135,10 @@ class OutputBuffer:
 
                     if tool.completed:
                         status_icon = "✓" if tool.success else "✗"
-                        status_style = "green" if tool.success else "red"
+                        status_style = self._style("tool_success", "green") if tool.success else self._style("tool_error", "red")
                     else:
                         status_icon = "○"
-                        status_style = "dim"
+                        status_style = self._style("muted", "dim")
 
                     # Determine expand indicator (only in nav mode)
                     if self._tool_nav_active:
@@ -2116,7 +2150,7 @@ class OutputBuffer:
                     if is_selected:
                         row_style = "reverse"
                     else:
-                        row_style = "dim"
+                        row_style = self._style("muted", "dim")
 
                     output.append("\n")
                     if self._tool_nav_active:
@@ -2132,11 +2166,11 @@ class OutputBuffer:
                     if tool.permission_state == "granted" and tool.permission_method:
                         indicator = self._get_approval_indicator(tool.permission_method)
                         if indicator:
-                            output.append(f" {indicator}", style="dim cyan")
+                            output.append(f" {indicator}", style=self._style("tool_indicator", "dim cyan"))
 
                     # Show duration if available
                     if tool.completed and tool.duration_seconds is not None:
-                        output.append(f" ({tool.duration_seconds:.1f}s)", style="dim")
+                        output.append(f" ({tool.duration_seconds:.1f}s)", style=self._style("tool_duration", "dim"))
 
                     # Show output only if:
                     # - In nav mode: tool.expanded is True
@@ -2160,62 +2194,62 @@ class OutputBuffer:
                         # Show "more above" indicator
                         if lines_above > 0:
                             output.append("\n")
-                            output.append(f"{prefix}{continuation}   ", style="dim")
+                            output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
                             scroll_up_key = self._format_key_hint("nav_up")
-                            output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''} ({scroll_up_key} to scroll)", style="dim italic")
+                            output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''} ({scroll_up_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
 
                         # Show visible lines
                         for output_line in tool.output_lines[start_idx:end_idx]:
                             output.append("\n")
-                            output.append(f"{prefix}{continuation}   ", style="dim")
+                            output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
                             # Truncate long lines
                             max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
                             if len(output_line) > max_line_width:
                                 display_line = output_line[:max_line_width - 3] + "..."
                             else:
                                 display_line = output_line
-                            output.append(display_line, style="#87D7D7 italic")
+                            output.append(display_line, style=self._style("tool_output", "#87D7D7 italic"))
 
                         # Show "more below" indicator
                         if lines_below > 0:
                             output.append("\n")
-                            output.append(f"{prefix}{continuation}   ", style="dim")
+                            output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
                             scroll_down_key = self._format_key_hint("nav_down")
-                            output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style="dim italic")
+                            output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
 
                     # Show permission denied info (when permission was denied)
                     if tool.permission_state == "denied" and tool.permission_method:
                         output.append("\n")
                         continuation = "   " if is_last else "│  "
-                        output.append(f"    {continuation} ", style="dim")
-                        output.append(f"  ⊘ Permission denied: User chose: {tool.permission_method}", style="red dim")
+                        output.append(f"    {continuation} ", style=self._style("tree_connector", "dim"))
+                        output.append(f"  ⊘ Permission denied: User chose: {tool.permission_method}", style=self._style("permission_denied", "red dim"))
                     # Show error message if failed (but not for permission denied - already shown above)
                     elif tool.completed and not tool.success and tool.error_message:
                         output.append("\n")
                         continuation = "   " if is_last else "│  "
-                        output.append(f"    {continuation} ", style="dim")
+                        output.append(f"    {continuation} ", style=self._style("tree_connector", "dim"))
                         # Show full error message without truncation
-                        output.append(f"  ⚠ {tool.error_message}", style="red dim")
+                        output.append(f"  ⚠ {tool.error_message}", style=self._style("tool_error", "red dim"))
 
                     # Show clarification summary if available (after resolved)
                     if tool.completed and tool.clarification_summary:
                         continuation = "   " if is_last else "│  "
                         output.append("\n")
-                        output.append(f"    {continuation} ", style="dim")
-                        output.append("📋 ", style="cyan")
-                        output.append(f"Answers ({len(tool.clarification_summary)})", style="dim cyan")
+                        output.append(f"    {continuation} ", style=self._style("tree_connector", "dim"))
+                        output.append("📋 ", style=self._style("clarification_icon", "cyan"))
+                        output.append(f"Answers ({len(tool.clarification_summary)})", style=self._style("tool_indicator", "dim cyan"))
                         for question, answer in tool.clarification_summary:
                             output.append("\n")
-                            output.append(f"    {continuation}   ", style="dim")
+                            output.append(f"    {continuation}   ", style=self._style("tree_connector", "dim"))
                             # Truncate long questions for display
                             max_q_len = 40
                             q_display = question if len(question) <= max_q_len else question[:max_q_len-3] + "..."
-                            output.append(f"Q: {q_display}", style="dim")
-                            output.append(" → ", style="dim")
+                            output.append(f"Q: {q_display}", style=self._style("clarification_question", "dim"))
+                            output.append(" → ", style=self._style("muted", "dim"))
                             # Truncate long answers for display
                             max_a_len = 30
                             a_display = answer if len(answer) <= max_a_len else answer[:max_a_len-3] + "..."
-                            output.append(a_display, style="dim green")
+                            output.append(a_display, style=self._style("clarification_answer", "dim green"))
             else:
                 # Collapsed view - all tools on one line
                 tool_summaries = []
@@ -2233,18 +2267,18 @@ class OutputBuffer:
                     tool_summaries.append(summary)
 
                 if pending_tool:
-                    output.append("  ⏳ ", style="bold yellow")
-                    output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
-                    output.append(" ".join(tool_summaries), style="dim")
+                    output.append("  ⏳ ", style=self._style("tool_pending", "bold yellow"))
+                    output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style=self._style("tool_border", "dim"))
+                    output.append(" ".join(tool_summaries), style=self._style("tool_border", "dim"))
                 elif show_spinner:
                     frame = self.SPINNER_FRAMES[self._spinner_index]
-                    output.append(f"  {frame} ", style="cyan")
-                    output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
-                    output.append(" ".join(tool_summaries), style="dim")
+                    output.append(f"  {frame} ", style=self._style("spinner", "cyan"))
+                    output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style=self._style("tool_border", "dim"))
+                    output.append(" ".join(tool_summaries), style=self._style("tool_border", "dim"))
                 else:
-                    output.append("  ▸ ", style="dim")
-                    output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style="dim")
-                    output.append(" ".join(tool_summaries), style="dim")
+                    output.append("  ▸ ", style=self._style("tool_border", "dim"))
+                    output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style=self._style("tool_border", "dim"))
+                    output.append(" ".join(tool_summaries), style=self._style("tool_border", "dim"))
 
             # Show permission/clarification prompt for pending tool (expanded)
             if pending_tool:
@@ -2255,9 +2289,9 @@ class OutputBuffer:
                     tool = pending_tool
                     # Expanded permission prompt
                     output.append("\n")
-                    output.append(f"  {continuation}     ", style="dim")
-                    output.append("⚠ ", style="yellow")
-                    output.append("Permission required", style="yellow")
+                    output.append(f"  {continuation}     ", style=self._style("tree_connector", "dim"))
+                    output.append("⚠ ", style=self._style("warning_icon", "yellow"))
+                    output.append("Permission required", style=self._style("clarification_required", "yellow"))
 
                     prompt_lines = tool.permission_prompt_lines
 
@@ -2277,12 +2311,12 @@ class OutputBuffer:
                         # Pre-formatted content - render in viewport
                         for prompt_line in prompt_lines:
                             output.append("\n")
-                            output.append(f"  {continuation}     ", style="dim")
+                            output.append(f"  {continuation}     ", style=self._style("tree_connector", "dim"))
 
                             # Check for options line (style cyan) - don't slice these
                             stripped = _ANSI_ESCAPE_PATTERN.sub('', prompt_line)
                             if stripped.strip().startswith('[') and ']' in stripped:
-                                output.append_text(Text.from_ansi(prompt_line, style="cyan"))
+                                output.append_text(Text.from_ansi(prompt_line, style=self._style("clarification_label", "cyan")))
                             else:
                                 # Apply viewport slicing
                                 h_scroll = tool.permission_h_scroll
@@ -2294,16 +2328,16 @@ class OutputBuffer:
 
                                 # Show left overflow indicator
                                 if has_left:
-                                    output.append("◀", style="cyan dim")
+                                    output.append("◀", style=self._style("scroll_arrow", "cyan dim"))
                                 else:
-                                    output.append(" ", style="dim")
+                                    output.append(" ", style=self._style("muted", "dim"))
 
                                 # Render sliced content
                                 output.append_text(Text.from_ansi(sliced))
 
                                 # Show right overflow indicator
                                 if has_right:
-                                    output.append("▶", style="cyan dim")
+                                    output.append("▶", style=self._style("scroll_arrow", "cyan dim"))
 
                         # Store overflow state for potential scroll hint
                         tool.permission_truncated = any_overflow_right or any_overflow_left
@@ -2340,7 +2374,7 @@ class OutputBuffer:
                             tool.permission_truncated = False
 
                         output.append("\n")
-                        output.append(f"  {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
+                        output.append(f"  {continuation}     ┌" + "─" * (box_width - 2) + "┐", style=self._style("tool_border", "dim"))
 
                         # Track rendered lines to enforce truncation
                         rendered_lines = 0
@@ -2367,16 +2401,16 @@ class OutputBuffer:
                                     break
                                 output.append("\n")
                                 padding = box_width - _visible_len(display_line) - 4
-                                output.append(f"  {continuation}     │ ", style="dim")
+                                output.append(f"  {continuation}     │ ", style=self._style("tool_border", "dim"))
                                 # Render line (may contain ANSI codes from formatter pipeline)
                                 # Use Text.from_ansi() to handle any ANSI escape codes
                                 stripped = _ANSI_ESCAPE_PATTERN.sub('', display_line)
                                 if stripped.strip().startswith('[') and ']' in stripped:
                                     # Options line - style cyan
-                                    output.append_text(Text.from_ansi(display_line, style="cyan"))
+                                    output.append_text(Text.from_ansi(display_line, style=self._style("clarification_label", "cyan")))
                                 else:
                                     output.append_text(Text.from_ansi(display_line))
-                                output.append(" " * max(0, padding) + " │", style="dim")
+                                output.append(" " * max(0, padding) + " │", style=self._style("tool_border", "dim"))
                                 rendered_lines += 1
 
                         # Show truncation indicator if needed
@@ -2384,9 +2418,9 @@ class OutputBuffer:
                             output.append("\n")
                             truncation_msg = f"[...{hidden_count} more - 'v' to view...]"
                             padding = box_width - len(truncation_msg) - 4
-                            output.append(f"  {continuation}     │ ", style="dim")
-                            output.append(truncation_msg, style="dim italic cyan")
-                            output.append(" " * max(0, padding) + " │", style="dim")
+                            output.append(f"  {continuation}     │ ", style=self._style("tool_border", "dim"))
+                            output.append(truncation_msg, style=self._style("truncation", "dim italic cyan"))
+                            output.append(" " * max(0, padding) + " │", style=self._style("tool_border", "dim"))
                             # Show last line (usually options) - wrap if needed
                             last_line = prompt_lines[-1]
                             last_visible_len = _visible_len(last_line)
@@ -2398,33 +2432,33 @@ class OutputBuffer:
                             for display_line in last_wrapped:
                                 output.append("\n")
                                 padding = box_width - _visible_len(display_line) - 4
-                                output.append(f"  {continuation}     │ ", style="dim")
-                                output.append_text(Text.from_ansi(display_line, style="cyan"))
-                                output.append(" " * max(0, padding) + " │", style="dim")
+                                output.append(f"  {continuation}     │ ", style=self._style("tool_border", "dim"))
+                                output.append_text(Text.from_ansi(display_line, style=self._style("clarification_label", "cyan")))
+                                output.append(" " * max(0, padding) + " │", style=self._style("tool_border", "dim"))
 
                         output.append("\n")
-                        output.append(f"  {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
+                        output.append(f"  {continuation}     └" + "─" * (box_width - 2) + "┘", style=self._style("tool_border", "dim"))
 
                 # Show clarification info for pending tool
                 if pending_tool.clarification_state == "pending":
                     tool = pending_tool
                     # Show header with progress
                     output.append("\n")
-                    output.append(f"  {continuation}     ", style="dim")
-                    output.append("❓ ", style="cyan")
+                    output.append(f"  {continuation}     ", style=self._style("tree_connector", "dim"))
+                    output.append("❓ ", style=self._style("clarification_icon", "cyan"))
                     if tool.clarification_total_questions > 0:
-                        output.append(f"Clarification ({tool.clarification_current_question}/{tool.clarification_total_questions})", style="cyan")
+                        output.append(f"Clarification ({tool.clarification_current_question}/{tool.clarification_total_questions})", style=self._style("clarification_label", "cyan"))
                     else:
-                        output.append("Clarification needed", style="cyan")
+                        output.append("Clarification needed", style=self._style("clarification_label", "cyan"))
 
                     # Show previously answered questions (collapsed)
                     if tool.clarification_answered:
                         for q_idx, answer_summary in tool.clarification_answered:
                             output.append("\n")
-                            output.append(f"  {continuation}     ", style="dim")
-                            output.append("  ✓ ", style="green")
-                            output.append(f"Q{q_idx}: ", style="dim")
-                            output.append(answer_summary, style="dim green")
+                            output.append(f"  {continuation}     ", style=self._style("tree_connector", "dim"))
+                            output.append("  ✓ ", style=self._style("tool_success", "green"))
+                            output.append(f"Q{q_idx}: ", style=self._style("clarification_question", "dim"))
+                            output.append(answer_summary, style=self._style("clarification_answer", "dim green"))
 
                     # Show current question prompt (if any)
                     if tool.clarification_prompt_lines:
@@ -2458,7 +2492,7 @@ class OutputBuffer:
 
                         # Draw box around current question
                         output.append("\n")
-                        output.append(f"  {continuation}     ┌" + "─" * (box_width - 2) + "┐", style="dim")
+                        output.append(f"  {continuation}     ┌" + "─" * (box_width - 2) + "┐", style=self._style("tool_border", "dim"))
 
                         # Track rendered lines to enforce truncation
                         rendered_lines = 0
@@ -2480,9 +2514,9 @@ class OutputBuffer:
                                     break
                                 output.append("\n")
                                 padding = box_width - len(display_line) - 4
-                                output.append(f"  {continuation}     │ ", style="dim")
+                                output.append(f"  {continuation}     │ ", style=self._style("tool_border", "dim"))
                                 output.append(display_line)
-                                output.append(" " * max(0, padding) + " │", style="dim")
+                                output.append(" " * max(0, padding) + " │", style=self._style("tool_border", "dim"))
                                 rendered_lines += 1
 
                         # Show truncation indicator if needed
@@ -2490,9 +2524,9 @@ class OutputBuffer:
                             output.append("\n")
                             truncation_msg = f"[...{hidden_count} more - 'v' to view...]"
                             padding = box_width - len(truncation_msg) - 4
-                            output.append(f"  {continuation}     │ ", style="dim")
-                            output.append(truncation_msg, style="dim italic cyan")
-                            output.append(" " * max(0, padding) + " │", style="dim")
+                            output.append(f"  {continuation}     │ ", style=self._style("tool_border", "dim"))
+                            output.append(truncation_msg, style=self._style("truncation", "dim italic cyan"))
+                            output.append(" " * max(0, padding) + " │", style=self._style("tool_border", "dim"))
                             last_line = prompt_lines[-1]
                             if len(last_line) > content_width:
                                 last_wrapped = textwrap.wrap(last_line, width=content_width, break_long_words=True)
@@ -2501,12 +2535,12 @@ class OutputBuffer:
                             for display_line in last_wrapped:
                                 output.append("\n")
                                 padding = box_width - len(display_line) - 4
-                                output.append(f"  {continuation}     │ ", style="dim")
-                                output.append(display_line, style="cyan")
-                                output.append(" " * max(0, padding) + " │", style="dim")
+                                output.append(f"  {continuation}     │ ", style=self._style("tool_border", "dim"))
+                                output.append(display_line, style=self._style("clarification_label", "cyan"))
+                                output.append(" " * max(0, padding) + " │", style=self._style("tool_border", "dim"))
 
                         output.append("\n")
-                        output.append(f"  {continuation}     └" + "─" * (box_width - 2) + "┘", style="dim")
+                        output.append(f"  {continuation}     └" + "─" * (box_width - 2) + "┘", style=self._style("tool_border", "dim"))
         elif self._spinner_active:
             # Spinner active but no tools yet - show model header first
             if items_to_show:
@@ -2515,12 +2549,12 @@ class OutputBuffer:
                 if self._last_turn_source != "model":
                     header_prefix = "── Model "
                     remaining = max(0, wrap_width - len(header_prefix))
-                    output.append(header_prefix, style="bold cyan")
-                    output.append("─" * remaining, style="dim cyan")
+                    output.append(header_prefix, style=self._style("model_header", "bold cyan"))
+                    output.append("─" * remaining, style=self._style("model_header_separator", "dim cyan"))
                     output.append("\n")
             frame = self.SPINNER_FRAMES[self._spinner_index]
-            output.append(f"  {frame} ", style="cyan")
-            output.append("thinking...", style="dim italic")
+            output.append(f"  {frame} ", style=self._style("spinner", "cyan"))
+            output.append("thinking...", style=self._style("hint", "dim italic"))
 
         return output
 
@@ -2553,7 +2587,7 @@ class OutputBuffer:
         return Panel(
             aligned_content,
             title=title,
-            border_style="blue",
+            border_style=self._style("panel_border", "blue"),
             height=height,  # Constrain panel to exact height
             width=width,  # Constrain panel to exact width (preserves right border)
         )

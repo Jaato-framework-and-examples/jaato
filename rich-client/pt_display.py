@@ -38,6 +38,7 @@ from agent_panel import AgentPanel
 from agent_tab_bar import AgentTabBar
 from clipboard import ClipboardConfig, ClipboardProvider, create_provider
 from keybindings import KeybindingConfig, load_keybindings
+from theme import ThemeConfig, load_theme
 from shared.plugins.formatter_pipeline import create_pipeline
 from shared.plugins.hidden_content_filter import create_plugin as create_hidden_filter
 from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter
@@ -96,6 +97,7 @@ class PTDisplay:
         agent_registry: Optional["AgentRegistry"] = None,
         clipboard_config: Optional[ClipboardConfig] = None,
         keybinding_config: Optional[KeybindingConfig] = None,
+        theme_config: Optional[ThemeConfig] = None,
         server_formatted: bool = False,
     ):
         """Initialize the display.
@@ -109,6 +111,8 @@ class PTDisplay:
                              If not provided, uses config from environment.
             keybinding_config: Optional KeybindingConfig for custom keybindings.
                               If not provided, loads from config files or uses defaults.
+            theme_config: Optional ThemeConfig for UI theming.
+                         If not provided, loads from config files or uses default dark theme.
             server_formatted: If True, skip client-side formatting (server already formatted).
                              Used in IPC mode where server handles syntax highlighting.
         """
@@ -116,6 +120,9 @@ class PTDisplay:
 
         # Keybinding configuration (needed early for panels)
         self._keybinding_config = keybinding_config or load_keybindings()
+
+        # Theme configuration (needed for styling)
+        self._theme = theme_config or load_theme()
 
         # Agent registry and tab bar (horizontal tabs at top)
         self._agent_registry = agent_registry
@@ -133,9 +140,11 @@ class PTDisplay:
 
         # Rich components
         self._plan_panel = PlanPanel(toggle_key=self._keybinding_config.toggle_plan)
+        self._plan_panel.set_theme(self._theme)
         self._output_buffer = OutputBuffer()
         self._output_buffer.set_width(output_width)
         self._output_buffer.set_keybinding_config(self._keybinding_config)
+        self._output_buffer.set_theme(self._theme)
 
         # Formatter pipeline for output processing (syntax highlighting, diff coloring)
         # Skip in server_formatted mode - server already handles formatting
@@ -151,9 +160,10 @@ class PTDisplay:
             self._formatter_pipeline.set_console_width(output_width)
             self._output_buffer.set_formatter_pipeline(self._formatter_pipeline)
 
-        # Set keybinding config on agent registry buffers too
+        # Set keybinding config and theme on agent registry buffers too
         if self._agent_registry:
             self._agent_registry.set_keybinding_config_all(self._keybinding_config)
+            self._agent_registry.set_theme_all(self._theme)
             # Also set formatter pipeline on agent buffers (only if not server_formatted)
             if self._formatter_pipeline:
                 self._agent_registry.set_formatter_pipeline_all(self._formatter_pipeline)
@@ -978,6 +988,7 @@ class PTDisplay:
             FormattedTextControl(self._get_output_content),
             height=get_output_height,
             wrap_lines=False,
+            style="class:output-panel",
         )
 
         # Input prompt label - changes based on mode (pager, waiting for channel, normal)
@@ -1001,6 +1012,7 @@ class PTDisplay:
             FormattedTextControl(get_prompt_text),
             height=self._get_input_height,
             dont_extend_width=True,
+            style="class:output-panel",
         )
 
         # Input text area - hidden during pager mode (expandable height with word wrap)
@@ -1009,6 +1021,7 @@ class PTDisplay:
                 BufferControl(buffer=self._input_buffer),
                 height=self._get_input_height,
                 wrap_lines=True,
+                style="class:output-panel",
             ),
             filter=Condition(lambda: not getattr(self, '_pager_active', False)),
         )
@@ -1103,51 +1116,16 @@ class PTDisplay:
 
         layout = Layout(root, focused_element=input_window)
 
-        # Get style from input handler if available, merge with default styles
-        from prompt_toolkit.styles import Style, merge_styles
+        # Get style from theme and merge with input handler styles
+        from prompt_toolkit.styles import merge_styles
 
-        # Default styles for agent tab bar and other components
-        default_style = Style.from_dict({
-            # Agent tab bar
-            "agent-tab-bar": "bg:#1a1a1a",
-            "agent-tab.selected": "bold #5fd7ff underline",  # cyan
-            "agent-tab.dim": "#808080",  # dim gray
-            "agent-tab.separator": "#404040",
-            "agent-tab.hint": "#606060 italic",
-            "agent-tab.scroll": "#5fd7ff bold",  # cyan scroll indicators
-            # Status symbol colors (always colored, regardless of selection)
-            "agent-tab.symbol.processing": "#5f87ff",  # blue
-            "agent-tab.symbol.awaiting": "#5fd7ff",    # cyan
-            "agent-tab.symbol.finished": "#808080",    # dim
-            "agent-tab.symbol.error": "#ff5f5f",       # red
-            "agent-tab.symbol.permission": "#ffff5f",  # yellow
-            # Agent popup
-            "agent-popup.border": "#5fd7ff",  # cyan border for visibility
-            "agent-popup.icon": "#5fd7ff",
-            "agent-popup.name": "#ffffff bold",
-            "agent-popup.status.processing": "#5f87ff",
-            "agent-popup.status.awaiting": "#5fd7ff",
-            "agent-popup.status.finished": "#808080",
-            "agent-popup.status.error": "#ff5f5f",
-            # Session bar
-            "session-bar": "bg:#1a1a1a",
-            "session-bar.label": "#808080",
-            "session-bar.id": "#5fd7ff",  # cyan for session ID
-            "session-bar.separator": "#404040",
-            "session-bar.description": "#87d787",  # light green for description
-            "session-bar.workspace": "#d7af87",  # tan/orange for workspace
-            "session-bar.dim": "#606060",
-            # Pending prompts bar
-            "pending-prompts-bar": "bg:#1a1a1a",
-            "pending-prompt": "#5fd7ff",  # cyan
-            "pending-prompt.overflow": "#808080 italic",
-            # Status bar warning (GC threshold)
-            "status-bar.warning": "#ffff5f",  # yellow for warning
-        })
+        # Theme-based styles for all UI components
+        default_style = self._theme.get_prompt_toolkit_style()
 
         input_style = self._input_handler._pt_style if self._input_handler else None
         if input_style:
-            style = merge_styles([default_style, input_style])
+            # Theme styles take precedence over input handler defaults
+            style = merge_styles([input_style, default_style])
         else:
             style = default_style
 
@@ -1411,6 +1389,39 @@ class PTDisplay:
         """Check if there's an active plan for the current agent."""
         return self._current_plan_has_data()
 
+    @property
+    def theme(self) -> ThemeConfig:
+        """Get the current theme configuration."""
+        return self._theme
+
+    def set_theme(self, theme: ThemeConfig) -> None:
+        """Set a new theme and update the application styles.
+
+        Args:
+            theme: New ThemeConfig to apply.
+        """
+        self._theme = theme
+
+        # Propagate theme to all components that use Rich styles
+        self._output_buffer.set_theme(theme)
+        self._plan_panel.set_theme(theme)
+        if self._agent_registry:
+            self._agent_registry.set_theme_all(theme)
+
+        # Update prompt_toolkit styles on the running application
+        if self._app:
+            from prompt_toolkit.styles import merge_styles
+
+            default_style = self._theme.get_prompt_toolkit_style()
+            input_style = self._input_handler._pt_style if self._input_handler else None
+
+            if input_style:
+                self._app.style = merge_styles([input_style, default_style])
+            else:
+                self._app.style = default_style
+
+        self.refresh()
+
     # Output buffer methods
 
     def append_output(self, source: str, text: str, mode: str) -> None:
@@ -1429,7 +1440,7 @@ class PTDisplay:
         # Use debounced refresh during streaming for better performance
         self._schedule_refresh()
 
-    def add_system_message(self, message: str, style: str = "dim") -> None:
+    def add_system_message(self, message: str, style: str = "system_info") -> None:
         """Add a system message to the output."""
         # Use selected agent's buffer if registry present, otherwise use default
         if self._agent_registry:
@@ -1529,7 +1540,7 @@ class PTDisplay:
 
         return result
 
-    def update_last_system_message(self, message: str, style: str = "dim") -> bool:
+    def update_last_system_message(self, message: str, style: str = "system_info") -> bool:
         """Update the last system message in the output.
 
         Returns:
@@ -1712,7 +1723,7 @@ class PTDisplay:
             for text, style in lines[start_line:current]:
                 buffer.add_system_message(text, style)
             # Add a separator to show where new content starts
-            buffer.add_system_message("─" * 40, style="dim")
+            buffer.add_system_message("─" * 40, style="separator")
 
         # Show current page content
         for text, style in lines[current:end_line]:
@@ -1722,19 +1733,19 @@ class PTDisplay:
         if not is_last_page:
             buffer.add_system_message(
                 f"── Page {page_num}/{total_pages} ── Press Enter/Space for more, 'q' to quit ──",
-                style="bold cyan"
+                style="pager_nav"
             )
         else:
             # Last page or single page - show how to exit
             if total_pages > 1:
                 buffer.add_system_message(
                     f"── Page {page_num}/{total_pages} (end) ── Press 'q' to close ──",
-                    style="bold cyan"
+                    style="pager_nav"
                 )
             else:
                 buffer.add_system_message(
                     "── Press 'q' to close ──",
-                    style="bold cyan"
+                    style="pager_nav"
                 )
 
         self.refresh()

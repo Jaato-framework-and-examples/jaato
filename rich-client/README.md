@@ -156,11 +156,42 @@ Priority: Environment variables > Project config > User config > Defaults
 
 ### Themes
 
+The rich client supports customizable themes with automatic persistence.
+
+**Built-in Themes:**
+
+| Theme | Description |
+|-------|-------------|
+| `dark` | Dark background with cyan/green accents (default) |
+| `light` | Light background for bright terminals |
+| `high-contrast` | High contrast for accessibility |
+
 Custom themes can be defined in:
 - Project: `.jaato/theme.json`
 - User: `~/.jaato/theme.json`
 
 Theme selection is persisted to `~/.jaato/preferences.json`.
+
+**Custom Theme Example:**
+
+```json
+{
+  "name": "my-theme",
+  "version": "1.0",
+  "colors": {
+    "primary": "#5fd7ff",
+    "secondary": "#87d787",
+    "success": "#5fd75f",
+    "warning": "#ffff5f",
+    "error": "#ff5f5f",
+    "muted": "#808080",
+    "background": "#1a1a1a",
+    "surface": "#333333",
+    "text": "#ffffff",
+    "text_muted": "#aaaaaa"
+  }
+}
+```
 
 ## Environment Variables
 
