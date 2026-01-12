@@ -1853,17 +1853,15 @@ class RichClient:
         subcommand = parts[1] if len(parts) > 1 else ""
 
         if subcommand == 'help':
-            self._display.show_lines([
-                ("Screenshot - Capture TUI state", "bold"),
-                ("", ""),
-                ("Usage:", ""),
-                ("  screenshot              Capture and send hint to model", "dim"),
-                ("  screenshot nosend       Capture only, no hint to model", "dim"),
-                ("  screenshot format F     Set output format (svg, png, html)", "dim"),
-                ("  screenshot auto         Toggle auto-capture on turn end", "dim"),
-                ("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim"),
-                ("  screenshot help         Show this help", "dim"),
-            ])
+            self._display.add_system_message("Screenshot - Capture TUI state", "bold")
+            self._display.add_system_message("")
+            self._display.add_system_message("Usage:")
+            self._display.add_system_message("  screenshot              Capture and send hint to model", "dim")
+            self._display.add_system_message("  screenshot nosend       Capture only, no hint to model", "dim")
+            self._display.add_system_message("  screenshot format F     Set output format (svg, png, html)", "dim")
+            self._display.add_system_message("  screenshot auto         Toggle auto-capture on turn end", "dim")
+            self._display.add_system_message("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim")
+            self._display.add_system_message("  screenshot help         Show this help", "dim")
             return
 
         if subcommand == 'format':
@@ -1874,10 +1872,8 @@ class RichClient:
             if not format_str:
                 # Show current format
                 current = self._vision_capture._config.format.value if self._vision_capture else "svg"
-                self._display.show_lines([
-                    (f"Current format: {current}", "cyan"),
-                    ("  Available: svg, png, html", "dim"),
-                ])
+                self._display.add_system_message(f"Current format: {current}", "cyan")
+                self._display.add_system_message("  Available: svg, png, html", "dim")
                 return
 
             from shared.plugins.vision_capture.protocol import CaptureFormat
@@ -1888,10 +1884,8 @@ class RichClient:
             }
 
             if format_str not in format_map:
-                self._display.show_lines([
-                    (f"[Invalid format: {format_str}]", "red"),
-                    ("  Available: svg, png, html", "dim"),
-                ])
+                self._display.add_system_message(f"[Invalid format: {format_str}]", "red")
+                self._display.add_system_message("  Available: svg, png, html", "dim")
                 return
 
             new_format = format_map[format_str]
@@ -1901,14 +1895,12 @@ class RichClient:
                 try:
                     import cairosvg  # noqa: F401
                 except ImportError:
-                    self._display.show_lines([
-                        ("[Warning: cairosvg not installed]", "yellow"),
-                        ("  PNG format requires cairosvg for SVG to PNG conversion.", "dim"),
-                        ("  Install with: pip install cairosvg", "dim"),
-                        ("  (also requires system libcairo2-dev)", "dim"),
-                        ("", ""),
-                        ("  Falling back to SVG format.", "dim"),
-                    ])
+                    self._display.add_system_message("[Warning: cairosvg not installed]", "yellow")
+                    self._display.add_system_message("  PNG format requires cairosvg for SVG to PNG conversion.", "dim")
+                    self._display.add_system_message("  Install with: pip install cairosvg", "dim")
+                    self._display.add_system_message("  (also requires system libcairo2-dev)", "dim")
+                    self._display.add_system_message("")
+                    self._display.add_system_message("  Falling back to SVG format.", "dim")
                     new_format = CaptureFormat.SVG
 
             if self._vision_capture:
@@ -1916,9 +1908,7 @@ class RichClient:
                 # Save preference for future sessions
                 from preferences import save_preference
                 save_preference('vision_format', new_format.value)
-                self._display.show_lines([
-                    (f"Screenshot format set to: {new_format.value}", "cyan"),
-                ])
+                self._display.add_system_message(f"Screenshot format set to: {new_format.value}", "cyan")
             return
 
         if subcommand == 'auto':
@@ -1928,9 +1918,7 @@ class RichClient:
                 current = self._vision_formatter._auto_capture_on_turn_end
                 self._vision_formatter.set_auto_capture(not current)
                 state = "enabled" if not current else "disabled"
-                self._display.show_lines([
-                    (f"Auto-capture on turn end: {state}", "cyan"),
-                ])
+                self._display.add_system_message(f"Auto-capture on turn end: {state}", "cyan")
             return
 
         if subcommand == 'interval':
@@ -1942,47 +1930,33 @@ class RichClient:
                 if self._vision_formatter:
                     self._vision_formatter.set_capture_interval(interval_ms)
                     if interval_ms > 0:
-                        self._display.show_lines([
-                            (f"Periodic capture: every {interval_ms}ms during streaming", "cyan"),
-                        ])
+                        self._display.add_system_message(f"Periodic capture: every {interval_ms}ms during streaming", "cyan")
                     else:
-                        self._display.show_lines([
-                            ("Periodic capture: disabled", "cyan"),
-                        ])
+                        self._display.add_system_message("Periodic capture: disabled", "cyan")
             except ValueError:
-                self._display.show_lines([
-                    (f"[Invalid interval: {interval_str}]", "red"),
-                    ("  Usage: screenshot interval <milliseconds>", "dim"),
-                ])
+                self._display.add_system_message(f"[Invalid interval: {interval_str}]", "red")
+                self._display.add_system_message("  Usage: screenshot interval <milliseconds>", "dim")
             return
 
         if subcommand == 'nosend':
             # Capture without sending hint to model
             result = self._do_vision_capture(CaptureContext.USER_REQUESTED, send_hint=False)
             if result and result.success:
-                self._display.show_lines([
-                    ("Screenshot captured:", "green"),
-                    (f"  {result.path}", "cyan"),
-                ])
+                self._display.add_system_message("Screenshot captured:", "green")
+                self._display.add_system_message(f"  {result.path}", "cyan")
             elif result and not result.success:
-                self._display.show_lines([
-                    ("[Screenshot failed]", "red"),
-                    (f"  Error: {result.error}", "dim"),
-                ])
+                self._display.add_system_message("[Screenshot failed]", "red")
+                self._display.add_system_message(f"  Error: {result.error}", "dim")
             return
 
         # Default: capture and send hint to model
         result = self._do_vision_capture(CaptureContext.USER_REQUESTED, send_hint=True)
         if result and result.success:
-            self._display.show_lines([
-                ("Screenshot captured:", "green"),
-                (f"  {result.path}", "cyan"),
-            ])
+            self._display.add_system_message("Screenshot captured:", "green")
+            self._display.add_system_message(f"  {result.path}", "cyan")
         elif result and not result.success:
-            self._display.show_lines([
-                ("[Screenshot failed]", "red"),
-                (f"  Error: {result.error}", "dim"),
-            ])
+            self._display.add_system_message("[Screenshot failed]", "red")
+            self._display.add_system_message(f"  Error: {result.error}", "dim")
 
     def _handle_theme_command(self, user_input: str) -> None:
         """Handle the theme command with subcommands.
@@ -2713,17 +2687,15 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
     subcommand = parts[1] if len(parts) > 1 else ""
 
     if subcommand == 'help':
-        display.show_lines([
-            ("Screenshot - Capture TUI state", "bold"),
-            ("", ""),
-            ("Usage:", ""),
-            ("  screenshot              Capture and send hint to model", "dim"),
-            ("  screenshot nosend       Capture only, no hint to model", "dim"),
-            ("  screenshot format F     Set output format (svg, png, html)", "dim"),
-            ("  screenshot auto         Toggle auto-capture on turn end", "dim"),
-            ("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim"),
-            ("  screenshot help         Show this help", "dim"),
-        ])
+        display.add_system_message("Screenshot - Capture TUI state", "bold")
+        display.add_system_message("")
+        display.add_system_message("Usage:")
+        display.add_system_message("  screenshot              Capture and send hint to model", "dim")
+        display.add_system_message("  screenshot nosend       Capture only, no hint to model", "dim")
+        display.add_system_message("  screenshot format F     Set output format (svg, png, html)", "dim")
+        display.add_system_message("  screenshot auto         Toggle auto-capture on turn end", "dim")
+        display.add_system_message("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim")
+        display.add_system_message("  screenshot help         Show this help", "dim")
         return
 
     if subcommand == 'format':
@@ -2734,10 +2706,8 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
         if not format_str:
             # Show current format
             current = vision_capture._config.format.value
-            display.show_lines([
-                (f"Current format: {current}", "cyan"),
-                ("  Available: svg, png, html", "dim"),
-            ])
+            display.add_system_message(f"Current format: {current}", "cyan")
+            display.add_system_message("  Available: svg, png, html", "dim")
             return
 
         from shared.plugins.vision_capture.protocol import CaptureFormat
@@ -2748,10 +2718,8 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
         }
 
         if format_str not in format_map:
-            display.show_lines([
-                (f"[Invalid format: {format_str}]", "red"),
-                ("  Available: svg, png, html", "dim"),
-            ])
+            display.add_system_message(f"[Invalid format: {format_str}]", "red")
+            display.add_system_message("  Available: svg, png, html", "dim")
             return
 
         new_format = format_map[format_str]
@@ -2761,23 +2729,19 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
             try:
                 import cairosvg  # noqa: F401
             except ImportError:
-                display.show_lines([
-                    ("[Warning: cairosvg not installed]", "yellow"),
-                    ("  PNG format requires cairosvg for SVG to PNG conversion.", "dim"),
-                    ("  Install with: pip install cairosvg", "dim"),
-                    ("  (also requires system libcairo2-dev)", "dim"),
-                    ("", ""),
-                    ("  Falling back to SVG format.", "dim"),
-                ])
+                display.add_system_message("[Warning: cairosvg not installed]", "yellow")
+                display.add_system_message("  PNG format requires cairosvg for SVG to PNG conversion.", "dim")
+                display.add_system_message("  Install with: pip install cairosvg", "dim")
+                display.add_system_message("  (also requires system libcairo2-dev)", "dim")
+                display.add_system_message("")
+                display.add_system_message("  Falling back to SVG format.", "dim")
                 new_format = CaptureFormat.SVG
 
         vision_capture._config.format = new_format
         # Save preference for future sessions
         from preferences import save_preference
         save_preference('vision_format', new_format.value)
-        display.show_lines([
-            (f"Screenshot format set to: {new_format.value}", "cyan"),
-        ])
+        display.add_system_message(f"Screenshot format set to: {new_format.value}", "cyan")
         return
 
     if subcommand == 'auto':
@@ -2793,9 +2757,7 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
             formatter.set_capture_callback(on_capture)
 
         state = "enabled" if not current else "disabled"
-        display.show_lines([
-            (f"Auto-capture on turn end: {state}", "cyan"),
-        ])
+        display.add_system_message(f"Auto-capture on turn end: {state}", "cyan")
         return
 
     if subcommand == 'interval':
@@ -2813,49 +2775,35 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
                 formatter.set_capture_callback(on_capture)
 
             if interval_ms > 0:
-                display.show_lines([
-                    (f"Periodic capture: every {interval_ms}ms during streaming", "cyan"),
-                ])
+                display.add_system_message(f"Periodic capture: every {interval_ms}ms during streaming", "cyan")
             else:
-                display.show_lines([
-                    ("Periodic capture: disabled", "cyan"),
-                ])
+                display.add_system_message("Periodic capture: disabled", "cyan")
         except ValueError:
-            display.show_lines([
-                (f"[Invalid interval: {interval_str}]", "red"),
-                ("  Usage: screenshot interval <milliseconds>", "dim"),
-            ])
+            display.add_system_message(f"[Invalid interval: {interval_str}]", "red")
+            display.add_system_message("  Usage: screenshot interval <milliseconds>", "dim")
         return
 
     if subcommand == 'nosend':
         # Capture without sending hint to model
         result = _do_vision_capture_ipc(display, agent_registry, CaptureContext.USER_REQUESTED)
         if result and result.success:
-            display.show_lines([
-                ("Screenshot captured:", "green"),
-                (f"  {result.path}", "cyan"),
-            ])
+            display.add_system_message("Screenshot captured:", "green")
+            display.add_system_message(f"  {result.path}", "cyan")
         elif result and not result.success:
-            display.show_lines([
-                ("[Screenshot failed]", "red"),
-                (f"  Error: {result.error}", "dim"),
-            ])
+            display.add_system_message("[Screenshot failed]", "red")
+            display.add_system_message(f"  Error: {result.error}", "dim")
         return
 
     # Default: capture and send hint to model
     result = _do_vision_capture_ipc(display, agent_registry, CaptureContext.USER_REQUESTED)
     if result and result.success:
-        display.show_lines([
-            ("Screenshot captured:", "green"),
-            (f"  {result.path}", "cyan"),
-        ])
+        display.add_system_message("Screenshot captured:", "green")
+        display.add_system_message(f"  {result.path}", "cyan")
         # Send hint to model via IPC
         await ipc_client.send_message(result.to_system_message())
     elif result and not result.success:
-        display.show_lines([
-            ("[Screenshot failed]", "red"),
-            (f"  Error: {result.error}", "dim"),
-        ])
+        display.add_system_message("[Screenshot failed]", "red")
+        display.add_system_message(f"  Error: {result.error}", "dim")
 
 
 def _do_vision_capture_ipc(display, agent_registry, context):
