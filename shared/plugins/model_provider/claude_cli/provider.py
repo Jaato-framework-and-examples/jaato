@@ -6,6 +6,7 @@ protocol for programmatic access to Claude's agentic capabilities.
 
 import json
 import logging
+import os
 import subprocess
 import threading
 import uuid
@@ -117,6 +118,9 @@ class ClaudeCLIProvider:
         # Tool executor callback (for passthrough mode)
         self._tool_executor: Optional[Callable[[str, Dict[str, Any]], ToolResult]] = None
 
+        # Workspace root for CLI working directory
+        self._workspace_root: Optional[str] = None
+
     @property
     def name(self) -> str:
         return "claude_cli"
@@ -145,6 +149,7 @@ class ClaudeCLIProvider:
                 - cli_mode: "delegated" or "passthrough"
                 - max_turns: Maximum agentic turns
                 - permission_mode: CLI permission mode
+                - workspace_root: Working directory for CLI (auto-detected if not provided)
 
         Raises:
             CLINotFoundError: If claude CLI is not found.
@@ -165,9 +170,12 @@ class ClaudeCLIProvider:
         if "tool_executor" in extra:
             self._tool_executor = extra["tool_executor"]
 
+        # Detect workspace root for CLI working directory
+        self._workspace_root = self._detect_workspace_root(extra.get("workspace_root"))
+
         logger.info(
             f"Initialized Claude CLI provider: path={self._cli_path}, "
-            f"mode={self._mode.value}"
+            f"mode={self._mode.value}, workspace={self._workspace_root}"
         )
 
     def verify_auth(
@@ -604,6 +612,43 @@ class ClaudeCLIProvider:
 
     # ==================== Internal Methods ====================
 
+    def _detect_workspace_root(self, config_value: Optional[str] = None) -> Optional[str]:
+        """Detect workspace root from config or environment.
+
+        Priority:
+        1. Explicit config value
+        2. JAATO_WORKSPACE_ROOT environment variable
+        3. workspaceRoot environment variable (from .env file)
+
+        Args:
+            config_value: Explicit workspace root from config.
+
+        Returns:
+            Resolved absolute path to workspace root, or None if not found.
+        """
+        # Priority 1: Explicit config value
+        if config_value:
+            resolved = os.path.realpath(os.path.abspath(config_value))
+            logger.debug(f"Using workspace_root from config: {resolved}")
+            return resolved
+
+        # Priority 2: JAATO_WORKSPACE_ROOT environment variable
+        workspace = os.environ.get('JAATO_WORKSPACE_ROOT')
+        if workspace:
+            resolved = os.path.realpath(os.path.abspath(workspace))
+            logger.debug(f"Using JAATO_WORKSPACE_ROOT: {resolved}")
+            return resolved
+
+        # Priority 3: workspaceRoot from .env
+        workspace = os.environ.get('workspaceRoot')
+        if workspace:
+            resolved = os.path.realpath(os.path.abspath(workspace))
+            logger.debug(f"Using workspaceRoot: {resolved}")
+            return resolved
+
+        logger.debug("No workspace root configured, using current directory")
+        return None
+
     def _build_cli_args(self, prompt: str) -> List[str]:
         """Build CLI command arguments."""
         args = [
@@ -796,7 +841,7 @@ class ClaudeCLIProvider:
         """Stream messages from the CLI process."""
         args = self._build_cli_args(prompt)
 
-        logger.debug(f"Spawning CLI: {' '.join(args[:5])}...")
+        logger.debug(f"Spawning CLI: {' '.join(args[:5])}... cwd={self._workspace_root}")
 
         process = subprocess.Popen(
             args,
@@ -804,6 +849,7 @@ class ClaudeCLIProvider:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,  # Line buffered
+            cwd=self._workspace_root,  # Use workspace root as working directory
         )
 
         with self._process_lock:
