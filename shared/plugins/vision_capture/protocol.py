@@ -40,24 +40,20 @@ class CaptureResult:
     def success(self) -> bool:
         return self.error is None
 
-    def to_system_message(self) -> str:
-        """Generate system message for injection.
+    def to_user_message(self, workspace_root: Optional[str] = None) -> str:
+        """Generate a user message informing the model about the screenshot.
 
-        The message is wrapped in <hidden> tags so it's visible to the model
-        but filtered from output if the model echoes it.
+        Args:
+            workspace_root: If provided, the path will be made relative to this root.
         """
-        attrs = [
-            f'path="{self.path}"',
-            f'format="{self.format.value}"',
-            f'context="{self.context.value}"',
-            f'timestamp="{self.timestamp.isoformat()}"',
-        ]
-        if self.turn_index is not None:
-            attrs.append(f'turn="{self.turn_index}"')
-        if self.agent_id:
-            attrs.append(f'agent="{self.agent_id}"')
+        import os
 
-        return f'<hidden><tui-screenshot {" ".join(attrs)}/></hidden>'
+        # Make path relative to workspace if provided
+        display_path = self.path
+        if workspace_root and self.path.startswith(workspace_root):
+            display_path = os.path.relpath(self.path, workspace_root)
+
+        return f"I took a screenshot of the TUI, saved at {display_path}"
 
 
 @dataclass

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Any
 
 from rich.console import Console
+from rich.terminal_theme import TerminalTheme
 from rich.text import Text
 
 from .protocol import (
@@ -47,12 +48,18 @@ class VisionCapture:
         return f"capture_{timestamp}_{self._capture_count:04d}.{ext}"
 
     def _create_console(self) -> Console:
-        """Create a recording console with configured dimensions."""
+        """Create a recording console with configured dimensions.
+
+        Uses a StringIO buffer to prevent output to the actual terminal,
+        which would corrupt the TUI display.
+        """
+        import io
         return Console(
             record=True,
             force_terminal=True,
             width=self._config.width,
             color_system="truecolor",
+            file=io.StringIO(),  # Don't output to terminal
         )
 
     def capture(
@@ -61,8 +68,17 @@ class VisionCapture:
         context: CaptureContext = CaptureContext.USER_REQUESTED,
         turn_index: Optional[int] = None,
         agent_id: Optional[str] = None,
+        terminal_theme: Optional[TerminalTheme] = None,
     ) -> CaptureResult:
-        """Capture a Rich renderable to an image file."""
+        """Capture a Rich renderable to an image file.
+
+        Args:
+            renderable: Rich renderable to capture.
+            context: What triggered the capture.
+            turn_index: Current turn index.
+            agent_id: Agent identifier.
+            terminal_theme: Optional Rich TerminalTheme for export styling.
+        """
         console = self._create_console()
         timestamp = datetime.now()
 
@@ -76,13 +92,13 @@ class VisionCapture:
 
             # Export based on format
             if self._config.format == CaptureFormat.SVG:
-                console.save_svg(path, title=self._config.title)
+                console.save_svg(path, title=self._config.title, theme=terminal_theme)
             elif self._config.format == CaptureFormat.HTML:
                 console.save_html(path)
             elif self._config.format == CaptureFormat.PNG:
                 # PNG requires SVG intermediate + cairosvg
                 svg_path = path.replace(".png", ".svg")
-                console.save_svg(svg_path, title=self._config.title)
+                console.save_svg(svg_path, title=self._config.title, theme=terminal_theme)
                 path = self._convert_svg_to_png(svg_path, path)
 
             result = CaptureResult(
