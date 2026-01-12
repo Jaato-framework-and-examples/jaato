@@ -127,6 +127,28 @@ class VisionCapture:
         """Convert SVG to PNG using cairosvg if available."""
         try:
             import cairosvg
+
+            # Read SVG and fix font-family for better Unicode support
+            with open(svg_path, 'r', encoding='utf-8') as f:
+                svg_content = f.read()
+
+            # Replace the default monospace font with fonts that have better Unicode coverage
+            # Rich's SVG uses "Fira Code" or similar, but we need fallbacks
+            better_fonts = (
+                '"DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", '
+                '"Fira Code", "JetBrains Mono", "Source Code Pro", '
+                '"Cascadia Code", monospace'
+            )
+            # Rich SVG template uses font-family in CSS and inline styles
+            svg_content = svg_content.replace(
+                'font-family: ',
+                f'font-family: {better_fonts}, '
+            )
+
+            # Write fixed SVG
+            with open(svg_path, 'w', encoding='utf-8') as f:
+                f.write(svg_content)
+
             cairosvg.svg2png(url=svg_path, write_to=png_path)
             # Remove intermediate SVG
             os.remove(svg_path)
