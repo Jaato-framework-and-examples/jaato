@@ -46,6 +46,14 @@ from shared.plugins.session import create_plugin as create_session_plugin, load_
 from shared.plugins.base import parse_command_args
 from shared.plugins.gc import load_gc_from_file
 from shared.plugins.code_validation_formatter import create_plugin as create_code_validation_formatter
+from shared.plugins.vision_capture import (
+    VisionCapture,
+    VisionCaptureFormatter,
+    CaptureConfig,
+    CaptureContext,
+    CaptureFormat,
+    create_formatter as create_vision_formatter,
+)
 
 # Reuse input handling from simple-client
 from input_handler import InputHandler
@@ -119,6 +127,9 @@ class RichClient:
         # Pending response options from permission plugin (single source of truth)
         self._pending_response_options: Optional[list] = None
 
+        # Pending system hints to inject into next user message (e.g., screenshot paths)
+        self._pending_system_hints: list[str] = []
+
         # Background model thread tracking
         self._model_thread: Optional[threading.Thread] = None
         self._model_running: bool = False
@@ -134,6 +145,10 @@ class RichClient:
 
         # UI hooks reference for signaling agent status changes
         self._ui_hooks: Optional[Any] = None
+
+        # Vision capture for TUI screenshots
+        self._vision_capture: Optional[VisionCapture] = None
+        self._vision_formatter: Optional[VisionCaptureFormatter] = None
 
     def log(self, msg: str) -> None:
         """Log message to output panel."""
@@ -281,7 +296,7 @@ class RichClient:
 
         except Exception as e:
             if self._display:
-                self._display.show_lines([(f"Error: {e}", "red")])
+                self._display.show_lines([(f"Error: {e}", "system_error")])
             return {"error": str(e)}
 
         finally:
@@ -710,7 +725,7 @@ class RichClient:
                 # Show feedback in output panel as a system message
                 self._display.add_system_message(
                     f"[Code Validation] Issues detected in output code blocks",
-                    style="yellow"
+                    style="system_warning"
                 )
                 self._trace(f"Code validation feedback: {len(feedback)} chars")
 
@@ -1288,7 +1303,7 @@ class RichClient:
             if self._display:
                 self._display.add_system_message(
                     f"⚠ Context usage ({percent_used:.1f}%) exceeds threshold ({threshold}%). GC will run after this turn.",
-                    style="yellow"
+                    style="system_warning"
                 )
 
         def model_thread():
@@ -1398,9 +1413,9 @@ class RichClient:
                                 continue
                             # Color diff lines
                             if line.startswith('+') and not line.startswith('+++'):
-                                lines.append((line, "green"))
+                                lines.append((line, "system_success"))
                             elif line.startswith('-') and not line.startswith('---'):
-                                lines.append((line, "red"))
+                                lines.append((line, "system_error"))
                             elif line.startswith('@@'):
                                 lines.append((line, "cyan"))
                             else:
@@ -1433,30 +1448,30 @@ class RichClient:
                     client = self._backend.get_client()
                     if client and hasattr(client, 'stop'):
                         client.stop()
-                self._display.add_system_message("Task cancelled.", style="yellow")
-                self._display.add_system_message("Goodbye!", style="bold")
+                self._display.add_system_message("Task cancelled.", style="system_warning")
+                self._display.add_system_message("Goodbye!", style="system_info")
                 self._display.stop()
                 return
             else:
                 # Return to session (includes 'r' and any other input)
-                self._display.add_system_message("Returning to session.", style="dim")
+                self._display.add_system_message("Returning to session.", style="hint")
                 return
 
         if user_input.lower() in ('quit', 'exit', 'q'):
             # Check if a task is running
             if self._model_running:
                 # Show confirmation dialog (direct mode - no detach option)
-                self._display.add_system_message("", style="dim")
-                self._display.add_system_message("Task in progress. Exiting will cancel the task.", style="yellow bold")
-                self._display.add_system_message("  [c] Cancel task and exit", style="dim")
-                self._display.add_system_message("  [r] Return to session", style="dim")
-                self._display.add_system_message("", style="dim")
+                self._display.add_system_message("", style="hint")
+                self._display.add_system_message("Task in progress. Exiting will cancel the task.", style="system_warning")
+                self._display.add_system_message("  [c] Cancel task and exit", style="hint")
+                self._display.add_system_message("  [r] Return to session", style="hint")
+                self._display.add_system_message("", style="hint")
                 self._display.set_prompt("Choice [c/r]: ")
                 self._pending_exit_confirmation = True
                 return
             else:
                 # No task running, exit immediately
-                self._display.add_system_message("Goodbye!", style="bold")
+                self._display.add_system_message("Goodbye!", style="system_info")
                 self._display.stop()
                 return
 
@@ -1505,6 +1520,10 @@ class RichClient:
             self._export_session(filename)
             return
 
+        if user_input.lower().startswith('screenshot'):
+            self._handle_screenshot_command(user_input)
+            return
+
         # Check for plugin commands
         plugin_result = self._try_execute_plugin_command(user_input)
         if plugin_result is not None:
@@ -1527,6 +1546,12 @@ class RichClient:
 
         # Expand file references
         expanded_prompt = self._input_handler.expand_file_references(user_input)
+
+        # Inject any pending system hints (e.g., screenshot paths) - hidden from user
+        if self._pending_system_hints:
+            hints = "\n".join(self._pending_system_hints)
+            expanded_prompt = f"{hints}\n\n{expanded_prompt}"
+            self._pending_system_hints.clear()
 
         # Start model in background thread (non-blocking)
         # This allows the event loop to continue running for permission prompts
@@ -1658,7 +1683,7 @@ class RichClient:
         if subcommand == "enable":
             if not args:
                 self._display.show_lines([
-                    ("[Error: Specify a tool name or 'all']", "red"),
+                    ("[Error: Specify a tool name or 'all']", "system_error"),
                     ("  Usage: tools enable <tool_name>", "dim"),
                     ("         tools enable all", "dim"),
                 ])
@@ -1669,7 +1694,7 @@ class RichClient:
         if subcommand == "disable":
             if not args:
                 self._display.show_lines([
-                    ("[Error: Specify a tool name or 'all']", "red"),
+                    ("[Error: Specify a tool name or 'all']", "system_error"),
                     ("  Usage: tools disable <tool_name>", "dim"),
                     ("         tools disable all", "dim"),
                 ])
@@ -1697,6 +1722,245 @@ class RichClient:
         from shared.ui_utils import handle_keybindings_command
         handle_keybindings_command(user_input, self._display)
 
+    def _init_vision_capture(self) -> None:
+        """Initialize vision capture plugin and register formatter with pipeline.
+
+        Sets up:
+        - VisionCapture: Core capture utility for rendering panels to images
+        - VisionCaptureFormatter: Pipeline plugin for observing output and auto-capture
+
+        Format priority: Environment variable > Saved preference > Default (svg)
+        Output directory: {cwd}/.jaato/vision
+        """
+        if self._vision_capture:
+            return  # Already initialized
+
+        # Use current working directory as workspace
+        output_dir = os.path.join(os.getcwd(), '.jaato', 'vision')
+
+        # Determine format: env var takes priority, then saved preference, then default
+        format_map = {
+            'svg': CaptureFormat.SVG,
+            'png': CaptureFormat.PNG,
+            'html': CaptureFormat.HTML,
+        }
+
+        env_format = os.environ.get('JAATO_VISION_FORMAT', '').lower()
+        if env_format and env_format in format_map:
+            format_str = env_format
+        else:
+            # Load saved preference
+            from preferences import load_preference
+            format_str = load_preference('vision_format', 'svg')
+
+        capture_format = format_map.get(format_str, CaptureFormat.SVG)
+
+        config = CaptureConfig(
+            output_dir=output_dir,
+            format=capture_format,
+            width=self._display._width if self._display else 120,
+        )
+
+        # Initialize core capture utility
+        self._vision_capture = VisionCapture()
+        self._vision_capture.initialize(config)
+
+        # Create formatter and register with pipeline
+        self._vision_formatter = create_vision_formatter(
+            capture_callback=self._on_vision_capture_triggered,
+            auto_capture_on_turn_end=False,  # Manual only by default
+        )
+
+        # Register formatter with display's pipeline
+        if self._display:
+            self._display.register_formatter(self._vision_formatter)
+
+    def _on_vision_capture_triggered(self, context: CaptureContext, turn_index: int) -> None:
+        """Callback for formatter-triggered captures (e.g., auto-capture on turn end).
+
+        Args:
+            context: What triggered the capture.
+            turn_index: Current turn index from the formatter.
+        """
+        result = self._do_vision_capture(context)
+        if result and result.success:
+            self._display.add_system_message(
+                f"Auto-captured: {result.path}",
+                style="hint"
+            )
+
+    def _do_vision_capture(self, context: CaptureContext):
+        """Perform a vision capture of the current TUI state.
+
+        Args:
+            context: What triggered the capture.
+
+        Returns:
+            CaptureResult on success, None on failure.
+        """
+        if not self._display:
+            return None
+
+        # Initialize if needed
+        self._init_vision_capture()
+
+        # Get the selected agent's output buffer
+        buffer = self._agent_registry.get_selected_buffer()
+        if not buffer:
+            buffer = self._display._output_buffer
+
+        try:
+            panel = buffer.render_panel(
+                height=50,
+                width=self._display._width
+            )
+            # Get terminal theme from display's theme config for consistent export styling
+            terminal_theme = self._display._theme.to_terminal_theme()
+            result = self._vision_capture.capture(
+                panel,
+                context=context,
+                turn_index=len(self._original_inputs),
+                agent_id=self._agent_registry._selected_agent_id,
+                terminal_theme=terminal_theme,
+            )
+            return result
+
+        except Exception as e:
+            self._display.show_lines([
+                ("[Screenshot failed]", "system_error"),
+                (f"  Error: {e}", "dim"),
+            ])
+            return None
+
+    def _handle_screenshot_command(self, user_input: str) -> None:
+        """Handle the screenshot command for TUI vision capture.
+
+        The command itself is intercepted client-side. By default, a system hint
+        is injected to inform the model about the capture path.
+
+        Usage:
+            screenshot           - Capture TUI state (hint sent via plugin)
+            screenshot format F  - Set output format (svg, png, html)
+            screenshot auto      - Toggle auto-capture on turn end
+            screenshot interval N - Set periodic capture interval (ms)
+            screenshot help      - Show help
+
+        Args:
+            user_input: The full user input string starting with 'screenshot'.
+        """
+        parts = user_input.lower().split()
+        subcommand = parts[1] if len(parts) > 1 else ""
+
+        if subcommand == 'help':
+            self._display.add_system_message("Screenshot - Capture TUI state", "bold")
+            self._display.add_system_message("")
+            self._display.add_system_message("Usage:")
+            self._display.add_system_message("  screenshot              Capture and send hint to model", "dim")
+            self._display.add_system_message("  screenshot nosend       Capture only, no hint to model", "dim")
+            self._display.add_system_message("  screenshot format F     Set output format (svg, png, html)", "dim")
+            self._display.add_system_message("  screenshot auto         Toggle auto-capture on turn end", "dim")
+            self._display.add_system_message("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim")
+            self._display.add_system_message("  screenshot help         Show this help", "dim")
+            return
+
+        if subcommand == 'format':
+            # Set output format
+            self._init_vision_capture()
+            format_str = parts[2] if len(parts) > 2 else ""
+
+            if not format_str:
+                # Show current format
+                current = self._vision_capture._config.format.value if self._vision_capture else "svg"
+                self._display.add_system_message(f"Current format: {current}", "cyan")
+                self._display.add_system_message("  Available: svg, png, html", "dim")
+                return
+
+            from shared.plugins.vision_capture.protocol import CaptureFormat
+            format_map = {
+                'svg': CaptureFormat.SVG,
+                'png': CaptureFormat.PNG,
+                'html': CaptureFormat.HTML,
+            }
+
+            if format_str not in format_map:
+                self._display.add_system_message(f"[Invalid format: {format_str}]", "system_error")
+                self._display.add_system_message("  Available: svg, png, html", "dim")
+                return
+
+            new_format = format_map[format_str]
+
+            # Warn if PNG selected but cairosvg not available
+            if new_format == CaptureFormat.PNG:
+                try:
+                    import cairosvg  # noqa: F401
+                except ImportError:
+                    self._display.add_system_message("[Warning: cairosvg not installed]", "yellow")
+                    self._display.add_system_message("  PNG format requires cairosvg for SVG to PNG conversion.", "dim")
+                    self._display.add_system_message("  Install with: pip install cairosvg", "dim")
+                    self._display.add_system_message("  (also requires system libcairo2-dev)", "dim")
+                    self._display.add_system_message("")
+                    self._display.add_system_message("  Falling back to SVG format.", "dim")
+                    new_format = CaptureFormat.SVG
+
+            if self._vision_capture:
+                self._vision_capture._config.format = new_format
+                # Save preference for future sessions
+                from preferences import save_preference
+                save_preference('vision_format', new_format.value)
+                self._display.add_system_message(f"Screenshot format set to: {new_format.value}", "cyan")
+            return
+
+        if subcommand == 'auto':
+            # Toggle auto-capture mode
+            self._init_vision_capture()
+            if self._vision_formatter:
+                current = self._vision_formatter._auto_capture_on_turn_end
+                self._vision_formatter.set_auto_capture(not current)
+                state = "enabled" if not current else "disabled"
+                self._display.add_system_message(f"Auto-capture on turn end: {state}", "cyan")
+            return
+
+        if subcommand == 'interval':
+            # Set periodic capture interval
+            self._init_vision_capture()
+            interval_str = parts[2] if len(parts) > 2 else ""
+            try:
+                interval_ms = int(interval_str) if interval_str else 0
+                if self._vision_formatter:
+                    self._vision_formatter.set_capture_interval(interval_ms)
+                    if interval_ms > 0:
+                        self._display.add_system_message(f"Periodic capture: every {interval_ms}ms during streaming", "cyan")
+                    else:
+                        self._display.add_system_message("Periodic capture: disabled", "cyan")
+            except ValueError:
+                self._display.add_system_message(f"[Invalid interval: {interval_str}]", "system_error")
+                self._display.add_system_message("  Usage: screenshot interval <milliseconds>", "dim")
+            return
+
+        if subcommand == 'nosend':
+            # Capture without sending hint to model
+            result = self._do_vision_capture(CaptureContext.USER_REQUESTED)
+            if result and result.success:
+                self._display.add_system_message("Screenshot captured:", "system_success")
+                self._display.add_system_message(f"  {result.path}", "cyan")
+            elif result and not result.success:
+                self._display.add_system_message("[Screenshot failed]", "system_error")
+                self._display.add_system_message(f"  Error: {result.error}", "dim")
+            return
+
+        # Default: capture and send hint to model
+        result = self._do_vision_capture(CaptureContext.USER_REQUESTED)
+        if result and result.success:
+            self._display.add_system_message("Screenshot captured:", "system_success")
+            self._display.add_system_message(f"  {result.path}", "cyan")
+            # Send hint to model as normal user message (queued if model is busy)
+            # Use cwd as workspace root for relative paths
+            hint = result.to_user_message(workspace_root=os.getcwd())
+            self._start_model_thread(hint)
+        elif result and not result.success:
+            self._display.add_system_message("[Screenshot failed]", "system_error")
+            self._display.add_system_message(f"  Error: {result.error}", "dim")
+
     def _handle_theme_command(self, user_input: str) -> None:
         """Handle the theme command with subcommands.
 
@@ -1716,45 +1980,36 @@ class RichClient:
         if not subcommand:
             # Show current theme info
             theme = self._display.theme
-            lines = [
-                (f"Current theme: {theme.name}", "bold"),
-                (f"Source: {theme.source_path}", "dim"),
-                ("", ""),
-                ("Base colors:", "bold cyan"),
-            ]
+            self._display.add_system_message(f"Current theme: {theme.name}", "system_info")
+            self._display.add_system_message(f"Source: {theme.source_path}", "hint")
+            self._display.add_system_message("")
+            self._display.add_system_message("Base colors:", "system_info")
             for name in ["primary", "secondary", "success", "warning", "error", "muted"]:
                 color = theme.get_color(name)
-                lines.append((f"  {name}: {color}", color))
-            lines.append(("", ""))
-            lines.append(("Commands:", "bold cyan"))
-            lines.append(("  theme reload           - Reload from config files", ""))
-            lines.append(("  theme <preset>         - Switch preset (dark, light, high-contrast)", ""))
-            self._display.show_lines(lines)
+                self._display.add_system_message(f"  {name}: {color}", "hint")
+            self._display.add_system_message("")
+            self._display.add_system_message("Commands:", "system_info")
+            self._display.add_system_message("  theme reload           - Reload from config files", "hint")
+            self._display.add_system_message("  theme <preset>         - Switch preset (dark, light, high-contrast)", "hint")
             return
 
         if subcommand == "reload":
             new_theme = load_theme()
             self._display.set_theme(new_theme)
-            self._display.show_lines([
-                (f"Theme reloaded: {new_theme.name}", "green"),
-                (f"Source: {new_theme.source_path}", "dim"),
-            ])
+            self._display.add_system_message(f"Theme reloaded: {new_theme.name}", "system_success")
+            self._display.add_system_message(f"Source: {new_theme.source_path}", "hint")
             return
 
         if subcommand in BUILTIN_THEMES:
             new_theme = BUILTIN_THEMES[subcommand].copy()
             self._display.set_theme(new_theme)
             save_theme_preference(subcommand)  # Persist the selection
-            self._display.show_lines([
-                (f"Switched to '{subcommand}' theme", "green"),
-            ])
+            self._display.add_system_message(f"Switched to '{subcommand}' theme", "system_success")
             return
 
         # Unknown subcommand
-        self._display.show_lines([
-            (f"Unknown theme command: {subcommand}", "yellow"),
-            ("Available: reload, dark, light, high-contrast", "dim"),
-        ])
+        self._display.add_system_message(f"Unknown theme command: {subcommand}", "system_warning")
+        self._display.add_system_message("Available: reload, dark, light, high-contrast", "hint")
 
     def _get_tool_status(self) -> list:
         """Get status of all tools including enabled/disabled state."""
@@ -1851,20 +2106,20 @@ class RichClient:
             return
 
         if not self.registry:
-            self._display.show_lines([("[Error: Registry not available]", "red")])
+            self._display.show_lines([("[Error: Registry not available]", "system_error")])
             return
 
         if name.lower() == "all":
             count = self.registry.enable_all_tools()
             self._refresh_session_tools()
-            self._display.show_lines([(f"[Enabled all {count} tools]", "green")])
+            self._display.show_lines([(f"[Enabled all {count} tools]", "system_success")])
             return
 
         if self.registry.enable_tool(name):
             self._refresh_session_tools()
-            self._display.show_lines([(f"[Enabled tool: {name}]", "green")])
+            self._display.show_lines([(f"[Enabled tool: {name}]", "system_success")])
         else:
-            lines = [(f"[Error: Tool '{name}' not found]", "red")]
+            lines = [(f"[Error: Tool '{name}' not found]", "system_error")]
             available = self.registry.get_all_tool_names()
             if available:
                 preview = ', '.join(sorted(available)[:10])
@@ -1883,7 +2138,7 @@ class RichClient:
             return
 
         if not self.registry:
-            self._display.show_lines([("[Error: Registry not available]", "red")])
+            self._display.show_lines([("[Error: Registry not available]", "system_error")])
             return
 
         if name.lower() == "all":
@@ -1899,7 +2154,7 @@ class RichClient:
             self._refresh_session_tools()
             self._display.show_lines([(f"[Disabled tool: {name}]", "yellow")])
         else:
-            lines = [(f"[Error: Tool '{name}' not found]", "red")]
+            lines = [(f"[Error: Tool '{name}' not found]", "system_error")]
             available = self.registry.get_all_tool_names()
             if available:
                 preview = ', '.join(sorted(available)[:10])
@@ -2184,7 +2439,7 @@ class RichClient:
             resp_str = str(display_response)
             if len(resp_str) > 300:
                 resp_str = resp_str[:300] + "..."
-            lines.append((f"  📥 RESULT: {name} → {resp_str}", "green"))
+            lines.append((f"  📥 RESULT: {name} → {resp_str}", "system_success"))
 
         # Inline data (images, etc.)
         elif hasattr(part, 'inline_data') and part.inline_data:
@@ -2212,7 +2467,7 @@ class RichClient:
             output = part.code_execution_result
             if len(output) > 300:
                 output = output[:300] + "..."
-            lines.append((f"  📋 EXEC RESULT: {output}", "green"))
+            lines.append((f"  📋 EXEC RESULT: {output}", "system_success"))
 
         else:
             # Unknown part type - show diagnostic info like simple client
@@ -2264,11 +2519,11 @@ class RichClient:
 
             if result.get('success'):
                 self._display.show_lines([
-                    (f"Session exported to: {result['filename']}", "green")
+                    (f"Session exported to: {result['filename']}", "system_success")
                 ])
             else:
                 self._display.show_lines([
-                    (f"Export failed: {result.get('error', 'Unknown error')}", "red")
+                    (f"Export failed: {result.get('error', 'Unknown error')}", "system_error")
                 ])
         except ImportError:
             self._display.show_lines([
@@ -2276,7 +2531,7 @@ class RichClient:
             ])
         except Exception as e:
             self._display.show_lines([
-                (f"Export error: {e}", "red")
+                (f"Export error: {e}", "system_error")
             ])
 
     def _show_help(self) -> None:
@@ -2310,6 +2565,7 @@ class RichClient:
             ("  history           - Show full conversation history", "dim"),
             ("  context           - Show context window usage", "dim"),
             ("  export [file]     - Export session to YAML (default: session_export.yaml)", "dim"),
+            ("  screenshot        - Capture TUI and send hint to model (nosend to skip)", "dim"),
             ("  clear             - Clear output panel", "dim"),
             ("  quit              - Exit the client", "dim"),
             ("", "dim"),
@@ -2370,6 +2626,254 @@ class RichClient:
 # =============================================================================
 # IPC Client Mode
 # =============================================================================
+
+def _get_ipc_vision_state(display):
+    """Get or create vision capture state for IPC mode.
+
+    State is stored on the display object to persist across calls.
+    Format priority: Environment variable > Saved preference > Default (svg)
+    Output directory: {cwd}/.jaato/vision
+    """
+    import os
+    from shared.plugins.vision_capture import VisionCapture, VisionCaptureFormatter
+    from shared.plugins.vision_capture.protocol import CaptureConfig, CaptureFormat
+
+    if not hasattr(display, '_vision_capture'):
+        # Use current working directory as workspace (same as what client sends to server)
+        output_dir = os.path.join(os.getcwd(), '.jaato', 'vision')
+
+        # Determine format: env var takes priority, then saved preference, then default
+        format_map = {
+            'svg': CaptureFormat.SVG,
+            'png': CaptureFormat.PNG,
+            'html': CaptureFormat.HTML,
+        }
+
+        env_format = os.environ.get('JAATO_VISION_FORMAT', '').lower()
+        if env_format and env_format in format_map:
+            format_str = env_format
+        else:
+            # Load saved preference
+            from preferences import load_preference
+            format_str = load_preference('vision_format', 'svg')
+
+        capture_format = format_map.get(format_str, CaptureFormat.SVG)
+
+        config = CaptureConfig(output_dir=output_dir, format=capture_format)
+        display._vision_capture = VisionCapture()
+        display._vision_capture.initialize(config)
+
+    if not hasattr(display, '_vision_formatter'):
+        display._vision_formatter = VisionCaptureFormatter()
+        display.register_formatter(display._vision_formatter)
+
+    return display._vision_capture, display._vision_formatter
+
+
+def _queue_ipc_system_hint(display, hint: str) -> None:
+    """Queue a system hint for injection into the next user message (IPC mode).
+
+    Hints are stored on the display object to persist across calls.
+    """
+    if not hasattr(display, '_pending_system_hints'):
+        display._pending_system_hints = []
+    display._pending_system_hints.append(hint)
+
+
+def _pop_ipc_system_hints(display) -> list:
+    """Get and clear pending system hints (IPC mode).
+
+    Returns:
+        List of pending hint strings, or empty list if none.
+    """
+    if not hasattr(display, '_pending_system_hints'):
+        return []
+    hints = display._pending_system_hints
+    display._pending_system_hints = []
+    return hints
+
+
+async def handle_screenshot_command_ipc(user_input: str, display, agent_registry, ipc_client) -> None:
+    """Handle the screenshot command in IPC mode (client-side only).
+
+    Args:
+        user_input: The full user input string starting with 'screenshot'.
+        display: The PTDisplay instance.
+        agent_registry: The AgentRegistry for getting output buffer.
+        ipc_client: The IPCClient for sending hints to model.
+    """
+    from shared.plugins.vision_capture.protocol import CaptureContext
+
+    parts = user_input.lower().split()
+    subcommand = parts[1] if len(parts) > 1 else ""
+
+    if subcommand == 'help':
+        display.add_system_message("Screenshot - Capture TUI state", "bold")
+        display.add_system_message("")
+        display.add_system_message("Usage:")
+        display.add_system_message("  screenshot              Capture and send hint to model", "dim")
+        display.add_system_message("  screenshot nosend       Capture only, no hint to model", "dim")
+        display.add_system_message("  screenshot format F     Set output format (svg, png, html)", "dim")
+        display.add_system_message("  screenshot auto         Toggle auto-capture on turn end", "dim")
+        display.add_system_message("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim")
+        display.add_system_message("  screenshot help         Show this help", "dim")
+        return
+
+    if subcommand == 'format':
+        # Set output format
+        vision_capture, _ = _get_ipc_vision_state(display)
+        format_str = parts[2] if len(parts) > 2 else ""
+
+        if not format_str:
+            # Show current format
+            current = vision_capture._config.format.value
+            display.add_system_message(f"Current format: {current}", "cyan")
+            display.add_system_message("  Available: svg, png, html", "dim")
+            return
+
+        from shared.plugins.vision_capture.protocol import CaptureFormat
+        format_map = {
+            'svg': CaptureFormat.SVG,
+            'png': CaptureFormat.PNG,
+            'html': CaptureFormat.HTML,
+        }
+
+        if format_str not in format_map:
+            display.add_system_message(f"[Invalid format: {format_str}]", "system_error")
+            display.add_system_message("  Available: svg, png, html", "dim")
+            return
+
+        new_format = format_map[format_str]
+
+        # Warn if PNG selected but cairosvg not available
+        if new_format == CaptureFormat.PNG:
+            try:
+                import cairosvg  # noqa: F401
+            except ImportError:
+                display.add_system_message("[Warning: cairosvg not installed]", "yellow")
+                display.add_system_message("  PNG format requires cairosvg for SVG to PNG conversion.", "dim")
+                display.add_system_message("  Install with: pip install cairosvg", "dim")
+                display.add_system_message("  (also requires system libcairo2-dev)", "dim")
+                display.add_system_message("")
+                display.add_system_message("  Falling back to SVG format.", "dim")
+                new_format = CaptureFormat.SVG
+
+        vision_capture._config.format = new_format
+        # Save preference for future sessions
+        from preferences import save_preference
+        save_preference('vision_format', new_format.value)
+        display.add_system_message(f"Screenshot format set to: {new_format.value}", "cyan")
+        return
+
+    if subcommand == 'auto':
+        # Toggle auto-capture mode
+        _, formatter = _get_ipc_vision_state(display)
+        current = formatter._auto_capture_on_turn_end
+        formatter.set_auto_capture(not current)
+
+        # Set up capture callback if not already done
+        if not formatter._capture_callback:
+            def on_capture(context, turn_index):
+                _do_vision_capture_ipc(display, agent_registry, context)
+            formatter.set_capture_callback(on_capture)
+
+        state = "enabled" if not current else "disabled"
+        display.add_system_message(f"Auto-capture on turn end: {state}", "cyan")
+        return
+
+    if subcommand == 'interval':
+        # Set periodic capture interval
+        _, formatter = _get_ipc_vision_state(display)
+        interval_str = parts[2] if len(parts) > 2 else ""
+        try:
+            interval_ms = int(interval_str) if interval_str else 0
+            formatter.set_capture_interval(interval_ms)
+
+            # Set up capture callback if not already done
+            if not formatter._capture_callback:
+                def on_capture(context, turn_index):
+                    _do_vision_capture_ipc(display, agent_registry, context)
+                formatter.set_capture_callback(on_capture)
+
+            if interval_ms > 0:
+                display.add_system_message(f"Periodic capture: every {interval_ms}ms during streaming", "cyan")
+            else:
+                display.add_system_message("Periodic capture: disabled", "cyan")
+        except ValueError:
+            display.add_system_message(f"[Invalid interval: {interval_str}]", "system_error")
+            display.add_system_message("  Usage: screenshot interval <milliseconds>", "dim")
+        return
+
+    if subcommand == 'nosend':
+        # Capture without sending hint to model
+        result = _do_vision_capture_ipc(display, agent_registry, CaptureContext.USER_REQUESTED)
+        if result and result.success:
+            display.add_system_message("Screenshot captured:", "system_success")
+            display.add_system_message(f"  {result.path}", "cyan")
+        elif result and not result.success:
+            display.add_system_message("[Screenshot failed]", "system_error")
+            display.add_system_message(f"  Error: {result.error}", "dim")
+        return
+
+    # Default: capture and send hint to model
+    result = _do_vision_capture_ipc(display, agent_registry, CaptureContext.USER_REQUESTED)
+    if result and result.success:
+        display.add_system_message("Screenshot captured:", "system_success")
+        display.add_system_message(f"  {result.path}", "cyan")
+        # Send hint to model as normal user message (queued if model is busy)
+        # Use cwd as workspace root for relative paths
+        hint = result.to_user_message(workspace_root=os.getcwd())
+        await ipc_client.send_message(hint)
+    elif result and not result.success:
+        display.add_system_message("[Screenshot failed]", "system_error")
+        display.add_system_message(f"  Error: {result.error}", "dim")
+
+
+def _do_vision_capture_ipc(display, agent_registry, context):
+    """Perform a vision capture in IPC mode."""
+    from shared.plugins.vision_capture.protocol import CaptureContext
+
+    try:
+        vision_capture, _ = _get_ipc_vision_state(display)
+
+        # Get the selected agent's output buffer
+        buffer = agent_registry.get_selected_buffer()
+        if not buffer:
+            display.show_lines([
+                ("[Screenshot failed]", "system_error"),
+                ("  No output buffer available", "dim"),
+            ])
+            return None
+
+        panel = buffer.render_panel(
+            height=50,
+            width=getattr(display, '_width', 120)
+        )
+        # Get terminal theme from display's theme config for consistent export styling
+        terminal_theme = None
+        if hasattr(display, '_theme') and display._theme:
+            terminal_theme = display._theme.to_terminal_theme()
+        result = vision_capture.capture(
+            panel,
+            context=context,
+            turn_index=0,
+            agent_id=agent_registry.get_selected_agent_id(),
+            terminal_theme=terminal_theme,
+        )
+
+        # For auto/periodic captures, just show a brief message
+        if context in (CaptureContext.TURN_END, CaptureContext.PERIODIC) and result.success:
+            display.add_system_message(f"Auto-captured: {result.path}", style="hint")
+
+        return result
+
+    except Exception as e:
+        display.show_lines([
+            ("[Screenshot failed]", "system_error"),
+            (f"  Error: {e}", "dim"),
+        ])
+        return None
+
 
 async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str = ".env",
                        initial_prompt: Optional[str] = None, single_prompt: Optional[str] = None,
@@ -2614,7 +3118,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     # Always add new line - don't update in place because other messages
                     # may have been added between "running" and "pending" (e.g., auth instructions)
                     msg = event.message or "PENDING"
-                    display.add_system_message(f"   {padded_name} {msg}", style="dim yellow")
+                    display.add_system_message(f"   {padded_name} {msg}", style="system_warning")
                     init_current_step = None
 
             elif isinstance(event, AgentOutputEvent):
@@ -3102,7 +3606,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
                     # Show result message if present
                     if event.message:
-                        lines.insert(0, (event.message, "green"))
+                        lines.insert(0, (event.message, "system_success"))
                         lines.insert(1, ("", ""))
 
                     for plugin_name in sorted(by_plugin.keys()):
@@ -3289,27 +3793,27 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     if choice == "c" and model_running:
                         # Cancel task but keep session
                         await client.stop()
-                        display.add_system_message("Task cancelled. Session preserved.", style="yellow")
-                        display.add_system_message("", style="dim")
-                        display.add_system_message("To reconnect:", style="bold")
-                        display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="cyan")
-                        display.add_system_message(f"Session ID: {session_id}", style="dim")
+                        display.add_system_message("Task cancelled. Session preserved.", style="system_warning")
+                        display.add_system_message("", style="hint")
+                        display.add_system_message("To reconnect:", style="system_info")
+                        display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="system_info")
+                        display.add_system_message(f"Session ID: {session_id}", style="hint")
                         should_exit = True
                         display.stop()
                         break
                     elif choice == "d":
                         # Detach - keep session alive
-                        display.add_system_message("", style="dim")
+                        display.add_system_message("", style="hint")
                         if model_running:
-                            display.add_system_message("Task will continue running on the server.", style="green")
+                            display.add_system_message("Task will continue running on the server.", style="system_success")
                         else:
-                            display.add_system_message("Session preserved on server.", style="green")
-                        display.add_system_message("", style="dim")
-                        display.add_system_message("To reconnect:", style="bold")
-                        display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="cyan")
-                        display.add_system_message("", style="dim")
-                        display.add_system_message(f"Session ID: {session_id}", style="dim")
-                        display.add_system_message("", style="dim")
+                            display.add_system_message("Session preserved on server.", style="system_success")
+                        display.add_system_message("", style="hint")
+                        display.add_system_message("To reconnect:", style="system_info")
+                        display.add_system_message(f"  python rich_client.py --connect {socket_path}", style="system_info")
+                        display.add_system_message("", style="hint")
+                        display.add_system_message(f"Session ID: {session_id}", style="hint")
+                        display.add_system_message("", style="hint")
                         should_exit = True
                         display.stop()
                         break
@@ -3318,13 +3822,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         if model_running:
                             await client.stop()
                         # TODO: Add client.delete_session() when available
-                        display.add_system_message("Session ended.", style="yellow")
+                        display.add_system_message("Session ended.", style="system_warning")
                         should_exit = True
                         display.stop()
                         break
                     else:
                         # Return to session (includes 'r' and any other input)
-                        display.add_system_message("Returning to session.", style="dim")
+                        display.add_system_message("Returning to session.", style="hint")
                         continue
 
                 # Client-only commands
@@ -3332,14 +3836,14 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     # Show confirmation dialog for session lifecycle
                     pending_exit_confirmation = True
 
-                    display.add_system_message("", style="dim")
+                    display.add_system_message("", style="hint")
                     if model_running:
-                        display.add_system_message("Task in progress. What would you like to do?", style="yellow bold")
-                        display.add_system_message("  [c] Cancel task and exit (session preserved)", style="dim")
-                        display.add_system_message("  [d] Detach (task continues in background)", style="dim")
-                        display.add_system_message("  [e] End session (cancel task and delete session)", style="dim")
-                        display.add_system_message("  [r] Return to session", style="dim")
-                        display.add_system_message("", style="dim")
+                        display.add_system_message("Task in progress. What would you like to do?", style="system_warning")
+                        display.add_system_message("  [c] Cancel task and exit (session preserved)", style="hint")
+                        display.add_system_message("  [d] Detach (task continues in background)", style="hint")
+                        display.add_system_message("  [e] End session (cancel task and delete session)", style="hint")
+                        display.add_system_message("  [r] Return to session", style="hint")
+                        display.add_system_message("", style="hint")
                         display.set_prompt("Choice [c/d/e/r]: ")
                         # Create simple response options for input filtering
                         exit_options = [
@@ -3349,11 +3853,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                             type('Option', (), {'short': 'r', 'full': 'return', 'description': 'Return'})(),
                         ]
                     else:
-                        display.add_system_message("Exit options:", style="bold")
-                        display.add_system_message("  [d] Detach (keep session, can reconnect later)", style="dim")
-                        display.add_system_message("  [e] End session (delete session from server)", style="dim")
-                        display.add_system_message("  [r] Return to session", style="dim")
-                        display.add_system_message("", style="dim")
+                        display.add_system_message("Exit options:", style="system_info")
+                        display.add_system_message("  [d] Detach (keep session, can reconnect later)", style="hint")
+                        display.add_system_message("  [e] End session (delete session from server)", style="hint")
+                        display.add_system_message("  [r] Return to session", style="hint")
+                        display.add_system_message("", style="hint")
                         display.set_prompt("Choice [d/e/r]: ")
                         exit_options = [
                             type('Option', (), {'short': 'd', 'full': 'detach', 'description': 'Detach'})(),
@@ -3420,6 +3924,11 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     handle_keybindings_command(text, display)
                     continue
 
+                # Screenshot command - handle locally (client-side only)
+                elif cmd == "screenshot":
+                    await handle_screenshot_command_ipc(text, display, agent_registry, client)
+                    continue
+
                 # Theme command - handle locally
                 elif cmd == "theme":
                     from theme import load_theme, BUILTIN_THEMES, save_theme_preference
@@ -3428,39 +3937,30 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     if not subcmd:
                         # Show current theme info
                         theme = display.theme
-                        lines = [
-                            (f"Current theme: {theme.name}", "bold"),
-                            (f"Source: {theme.source_path}", "dim"),
-                            ("", ""),
-                            ("Base colors:", "bold cyan"),
-                        ]
+                        display.add_system_message(f"Current theme: {theme.name}", "system_info")
+                        display.add_system_message(f"Source: {theme.source_path}", "hint")
+                        display.add_system_message("")
+                        display.add_system_message("Base colors:", "system_info")
                         for name in ["primary", "secondary", "success", "warning", "error", "muted"]:
                             color = theme.get_color(name)
-                            lines.append((f"  {name}: {color}", color))
-                        lines.append(("", ""))
-                        lines.append(("Commands:", "bold cyan"))
-                        lines.append(("  theme reload           - Reload from config files", ""))
-                        lines.append(("  theme <preset>         - Switch preset (dark, light, high-contrast)", ""))
-                        display.show_lines(lines)
+                            display.add_system_message(f"  {name}: {color}", "hint")
+                        display.add_system_message("")
+                        display.add_system_message("Commands:", "system_info")
+                        display.add_system_message("  theme reload           - Reload from config files", "hint")
+                        display.add_system_message("  theme <preset>         - Switch preset (dark, light, high-contrast)", "hint")
                     elif subcmd == "reload":
                         new_theme = load_theme()
                         display.set_theme(new_theme)
-                        display.show_lines([
-                            (f"Theme reloaded: {new_theme.name}", "green"),
-                            (f"Source: {new_theme.source_path}", "dim"),
-                        ])
+                        display.add_system_message(f"Theme reloaded: {new_theme.name}", "system_success")
+                        display.add_system_message(f"Source: {new_theme.source_path}", "hint")
                     elif subcmd in BUILTIN_THEMES:
                         new_theme = BUILTIN_THEMES[subcmd].copy()
                         display.set_theme(new_theme)
                         save_theme_preference(subcmd)  # Persist the selection
-                        display.show_lines([
-                            (f"Switched to '{subcmd}' theme", "green"),
-                        ])
+                        display.add_system_message(f"Switched to '{subcmd}' theme", "system_success")
                     else:
-                        display.show_lines([
-                            (f"Unknown theme command: {subcmd}", "yellow"),
-                            ("Available: reload, dark, light, high-contrast", "dim"),
-                        ])
+                        display.add_system_message(f"Unknown theme command: {subcmd}", "system_warning")
+                        display.add_system_message("Available: reload, dark, light, high-contrast", "hint")
                     continue
 
                 # Other server commands (reset, plugin commands) - forward directly
@@ -3506,6 +4006,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 # Send message to model
                 model_running = True
                 display.add_to_history(text)
+
+                # Inject any pending system hints (hidden from display)
+                pending_hints = _pop_ipc_system_hints(display)
+                if pending_hints:
+                    hints_text = "\n".join(pending_hints)
+                    text = f"{hints_text}\n\n{text}"
+
                 await client.send_message(text)
 
             except asyncio.CancelledError:
