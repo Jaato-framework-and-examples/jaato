@@ -41,7 +41,11 @@ class CaptureResult:
         return self.error is None
 
     def to_system_message(self) -> str:
-        """Generate system message for injection."""
+        """Generate system message for injection.
+
+        The message is wrapped in <hidden> tags so it's visible to the model
+        but filtered from output if the model echoes it.
+        """
         attrs = [
             f'path="{self.path}"',
             f'format="{self.format.value}"',
@@ -53,7 +57,7 @@ class CaptureResult:
         if self.agent_id:
             attrs.append(f'agent="{self.agent_id}"')
 
-        return f'<tui-screenshot {" ".join(attrs)}/>'
+        return f'<hidden><tui-screenshot {" ".join(attrs)}/></hidden>'
 
 
 @dataclass
