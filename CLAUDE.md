@@ -694,6 +694,60 @@ Use the `keybindings reload` command to reload keybindings without restarting:
 keybindings reload
 ```
 
+## Rich Client Theming
+
+The rich client supports theme customization with three built-in presets and automatic persistence.
+
+### Built-in Themes
+
+- `dark` (default) - Dark background with cyan/green accents
+- `light` - Light background for bright terminals
+- `high-contrast` - High contrast for accessibility
+
+### Switching Themes
+
+Use the `/theme` command:
+```
+/theme              # Show current theme info
+/theme dark         # Switch to dark theme
+/theme light        # Switch to light theme
+/theme high-contrast # Switch to high-contrast theme
+/theme reload       # Reload from config files
+```
+
+Theme selection is automatically persisted to `~/.jaato/preferences.json` and restored on next startup.
+
+### Theme Priority
+
+1. `JAATO_THEME` environment variable (temporary override)
+2. Saved user preference (`~/.jaato/preferences.json`)
+3. Project-level custom theme (`.jaato/theme.json`)
+4. User-level custom theme (`~/.jaato/theme.json`)
+5. Default "dark" theme
+
+### Custom Themes
+
+Create a custom theme by placing a `theme.json` file in `.jaato/` (project) or `~/.jaato/` (user):
+
+```json
+{
+  "name": "my-theme",
+  "version": "1.0",
+  "colors": {
+    "primary": "#5fd7ff",
+    "secondary": "#87d787",
+    "success": "#5fd75f",
+    "warning": "#ffff5f",
+    "error": "#ff5f5f",
+    "muted": "#808080",
+    "background": "#1a1a1a",
+    "surface": "#333333",
+    "text": "#ffffff",
+    "text_muted": "#aaaaaa"
+  }
+}
+```
+
 ## Testing
 
 ### Install Dev Dependencies
