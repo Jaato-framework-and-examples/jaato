@@ -584,6 +584,7 @@ class ClaudeCLIProvider:
             self._cli_path,
             "--print",  # Non-interactive mode
             "--output-format", "stream-json",  # NDJSON output
+            "--verbose",  # Required for stream-json
         ]
 
         # Model selection
