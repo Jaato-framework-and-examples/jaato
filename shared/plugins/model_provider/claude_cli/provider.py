@@ -618,6 +618,31 @@ class ClaudeCLIProvider:
         """
         return self._mode == CLIMode.PASSTHROUGH
 
+    def supports_thinking(self) -> bool:
+        """Check if extended thinking is supported.
+
+        The Claude CLI does support extended thinking through Claude models,
+        but it's controlled via the CLI's own mechanisms (model selection,
+        flags). For now, we don't expose dynamic thinking control.
+
+        Returns:
+            False - thinking control is delegated to the CLI.
+        """
+        # TODO: Could be enabled by detecting model capabilities and
+        # passing appropriate CLI flags
+        return False
+
+    def set_thinking_config(self, config: 'ThinkingConfig') -> None:
+        """Set thinking configuration (no-op for Claude CLI).
+
+        The CLI manages thinking mode internally based on model selection.
+        Dynamic thinking control would require CLI flag support.
+
+        Args:
+            config: ThinkingConfig (ignored).
+        """
+        pass  # CLI manages thinking internally
+
     # ==================== Agent Context ====================
 
     def set_agent_context(
