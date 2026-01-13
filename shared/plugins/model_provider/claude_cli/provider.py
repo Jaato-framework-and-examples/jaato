@@ -682,6 +682,9 @@ class ClaudeCLIProvider:
                 "--disallowedTools", "*",
             ])
 
+        # Use -- to separate options from the prompt (required when using --disallowedTools)
+        args.append("--")
+
         # The prompt itself
         args.append(prompt)
 
