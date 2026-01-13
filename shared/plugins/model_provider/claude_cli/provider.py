@@ -134,6 +134,11 @@ class ClaudeCLIProvider:
         # Captured from SystemMessage, used with --resume for subsequent calls
         self._cli_session_id: Optional[str] = None
 
+        # Thinking mode configuration
+        # Claude CLI uses trigger keywords: think < think hard < think harder < ultrathink
+        self._thinking_enabled: bool = False
+        self._thinking_budget: int = 0
+
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
         trace_path = os.environ.get('JAATO_PROVIDER_TRACE')
@@ -621,27 +626,49 @@ class ClaudeCLIProvider:
     def supports_thinking(self) -> bool:
         """Check if extended thinking is supported.
 
-        The Claude CLI does support extended thinking through Claude models,
-        but it's controlled via the CLI's own mechanisms (model selection,
-        flags). For now, we don't expose dynamic thinking control.
+        Claude CLI supports extended thinking via trigger keywords that
+        are prepended to prompts: "think", "think hard", "think harder",
+        "ultrathink". Each maps to increasing thinking budgets.
 
         Returns:
-            False - thinking control is delegated to the CLI.
+            True - thinking is supported via trigger keywords.
         """
-        # TODO: Could be enabled by detecting model capabilities and
-        # passing appropriate CLI flags
-        return False
+        return True
 
     def set_thinking_config(self, config: 'ThinkingConfig') -> None:
-        """Set thinking configuration (no-op for Claude CLI).
+        """Set thinking configuration for Claude CLI.
 
-        The CLI manages thinking mode internally based on model selection.
-        Dynamic thinking control would require CLI flag support.
+        Configures thinking mode which will prepend trigger keywords
+        to prompts. Budget is mapped to keywords:
+        - budget <= 0: disabled
+        - budget <= 10000: "think"
+        - budget <= 25000: "think hard"
+        - budget <= 50000: "think harder"
+        - budget > 50000: "ultrathink"
 
         Args:
-            config: ThinkingConfig (ignored).
+            config: ThinkingConfig with enabled and budget settings.
         """
-        pass  # CLI manages thinking internally
+        self._thinking_enabled = config.enabled
+        self._thinking_budget = config.budget if config.enabled else 0
+
+    def _get_thinking_trigger(self) -> Optional[str]:
+        """Get the thinking trigger keyword based on current config.
+
+        Returns:
+            Trigger keyword string, or None if thinking is disabled.
+        """
+        if not self._thinking_enabled or self._thinking_budget <= 0:
+            return None
+
+        if self._thinking_budget <= 10000:
+            return "think"
+        elif self._thinking_budget <= 25000:
+            return "think hard"
+        elif self._thinking_budget <= 50000:
+            return "think harder"
+        else:
+            return "ultrathink"
 
     # ==================== Agent Context ====================
 
@@ -849,8 +876,16 @@ class ClaudeCLIProvider:
         # Use -- to separate options from the prompt
         args.append("--")
 
-        # The prompt itself
-        args.append(prompt)
+        # The prompt itself - prepend thinking trigger if enabled
+        thinking_trigger = self._get_thinking_trigger()
+        if thinking_trigger:
+            # Prepend trigger keyword to activate thinking mode
+            # e.g., "ultrathink. <original prompt>"
+            final_prompt = f"{thinking_trigger}. {prompt}"
+            self._trace(f"_build_cli_args: thinking enabled, trigger='{thinking_trigger}'")
+        else:
+            final_prompt = prompt
+        args.append(final_prompt)
 
         # Log the CLI flags being used (not the full content)
         flags_used = [a for a in args if a.startswith("--")]
