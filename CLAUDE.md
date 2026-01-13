@@ -177,6 +177,8 @@ async for event in client.events():
     - `model_provider/`: Provider-agnostic types and protocol
     - `model_provider/google_genai/`: Google GenAI/Vertex AI implementation
     - `model_provider/github_models/`: GitHub Models API (GPT, Claude, Gemini via GitHub)
+    - `model_provider/anthropic/`: Anthropic Claude API implementation
+    - `model_provider/claude_cli/`: Claude Code CLI wrapper (uses subscription, not API credits)
 
 - **plugins/model_provider/**: Provider abstraction layer
   - `types.py`: Provider-agnostic types (`ToolSchema`, `Message`, `ProviderResponse`)
@@ -184,6 +186,7 @@ async for event in client.events():
   - `google_genai/`: Google GenAI/Vertex AI implementation
   - `github_models/`: GitHub Models API implementation (uses `azure-ai-inference` SDK)
   - `anthropic/`: Anthropic Claude implementation (uses `anthropic` SDK)
+  - `claude_cli/`: Claude Code CLI wrapper (subprocess + stream-json protocol)
   - `antigravity/`: Google Antigravity IDE backend (Gemini 3, Claude via Google OAuth)
 
 - **mcp_context_manager.py**: Multi-server MCP client manager
@@ -522,6 +525,55 @@ Cache behavior notes:
 - Content smaller than the minimum threshold (1024-2048 tokens) won't be cached
 - The `cache_exclude_recent_turns` setting controls how many recent turns remain uncached
 - Set `cache_history: false` to disable history caching while keeping system/tools cached
+
+### Claude CLI Provider
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_CLAUDE_CLI_PATH` | Path to claude CLI executable (default: `claude` from PATH) |
+| `JAATO_CLAUDE_CLI_MODE` | Operating mode: `delegated` or `passthrough` (default: `delegated`) |
+| `JAATO_CLAUDE_CLI_MAX_TURNS` | Maximum agentic turns (default: unlimited) |
+| `JAATO_CLAUDE_CLI_PERMISSION_MODE` | CLI permission mode (default: CLI default) |
+
+**Operating Modes:**
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `delegated` | CLI handles tool execution (Read, Write, Bash, etc.) | Simple setup, leverage CLI's mature tools |
+| `passthrough` | jaato handles tools via PluginRegistry | Custom tools, MCP servers, fine-grained control |
+
+**Example Usage:**
+```python
+from shared.plugins.model_provider.claude_cli import ClaudeCLIProvider
+from shared.plugins.model_provider.base import ProviderConfig
+
+provider = ClaudeCLIProvider()
+provider.initialize(ProviderConfig(
+    extra={
+        "cli_mode": "delegated",      # or "passthrough"
+        "cli_path": "/usr/local/bin/claude",
+        "max_turns": 10,
+        "permission_mode": "acceptEdits",
+    }
+))
+provider.connect("sonnet")  # or "opus", or full model name
+
+provider.create_session(system_instruction="You are a helpful assistant.")
+response = provider.send_message("Hello!")
+```
+
+**Requirements:**
+- Claude Code CLI installed: `npm install -g @anthropic-ai/claude-code`
+- CLI authenticated: `claude login` or API key configured in CLI
+
+**Benefits:**
+- Uses Claude Pro/Max subscription without API credits
+- Leverages CLI's built-in tools (Read, Write, Edit, Bash, WebFetch, etc.)
+- Automatic prompt caching and session management by CLI
+- No Anthropic SDK dependency (pure subprocess + JSON)
+
+**Note:** This provider has separate authentication from the `anthropic` provider.
+The CLI manages its own auth in `~/.claude/`, while the API provider uses
+`ANTHROPIC_API_KEY` or jaato's PKCE OAuth flow.
 
 ### Antigravity (Google IDE Backend)
 | Variable | Purpose |
