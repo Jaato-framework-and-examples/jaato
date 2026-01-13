@@ -957,7 +957,13 @@ class ClaudeCLIProvider:
                                     args=block.input,
                                 )
                                 function_calls.append(fc)
+                                # Detailed arg tracing for debugging
+                                args_preview = str(block.input)[:200]
                                 self._trace(f"  ToolUse: {block.name} id={block.id[:8]}")
+                                self._trace(f"    args type={type(block.input).__name__} preview={args_preview}")
+                                # Check array params specifically
+                                for k, v in (block.input or {}).items():
+                                    self._trace(f"    param '{k}': type={type(v).__name__} value={str(v)[:100]}")
                                 if on_function_call:
                                     on_function_call(fc)
 
@@ -1058,11 +1064,22 @@ class ClaudeCLIProvider:
                     continue
 
                 try:
-                    # Trace raw user messages to debug empty content_blocks
+                    # Trace raw messages to debug parsing issues
                     raw_data = json.loads(line)
                     if raw_data.get("type") == "user":
                         raw_preview = str(raw_data)[:300]
                         self._trace(f"RAW UserMessage: {raw_preview}")
+                    elif raw_data.get("type") == "assistant":
+                        # Trace raw assistant message with tool_use blocks
+                        content = raw_data.get("message", {}).get("content", raw_data.get("content", []))
+                        tool_uses = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+                        if tool_uses:
+                            for tu in tool_uses:
+                                input_data = tu.get("input", {})
+                                self._trace(f"RAW tool_use '{tu.get('name')}': input type={type(input_data).__name__}")
+                                if isinstance(input_data, dict):
+                                    for k, v in input_data.items():
+                                        self._trace(f"  RAW param '{k}': type={type(v).__name__} repr={repr(v)[:150]}")
 
                     msg = parse_ndjson_line(line)
                     yield msg
