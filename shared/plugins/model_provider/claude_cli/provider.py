@@ -841,7 +841,17 @@ class ClaudeCLIProvider:
         """Stream messages from the CLI process."""
         args = self._build_cli_args(prompt)
 
-        logger.debug(f"Spawning CLI: {' '.join(args[:5])}... cwd={self._workspace_root}")
+        # Determine working directory for CLI process
+        # Use workspace_root if set, otherwise try to detect from env at runtime
+        cli_cwd = self._workspace_root
+        if not cli_cwd:
+            # Try runtime detection in case env was loaded after initialize()
+            cli_cwd = self._detect_workspace_root()
+        if not cli_cwd:
+            # Final fallback: use current directory
+            cli_cwd = os.getcwd()
+
+        logger.debug(f"Spawning CLI: {' '.join(args[:5])}... cwd={cli_cwd}")
 
         process = subprocess.Popen(
             args,
@@ -849,7 +859,7 @@ class ClaudeCLIProvider:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,  # Line buffered
-            cwd=self._workspace_root,  # Use workspace root as working directory
+            cwd=cli_cwd,  # Use workspace root as working directory
         )
 
         with self._process_lock:
