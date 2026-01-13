@@ -36,6 +36,7 @@ from ..types import (
     Part,
     ProviderResponse,
     Role,
+    ThinkingConfig,
     ToolResult,
     ToolSchema,
     TokenUsage,
@@ -415,6 +416,38 @@ class AntigravityProvider:
         if "gemini-3" in self._model_name:
             return True
         return False
+
+    def set_thinking_config(self, config: ThinkingConfig) -> None:
+        """Set thinking configuration dynamically.
+
+        Updates the thinking settings for subsequent API calls.
+        For Gemini 3, maps budget to thinking level:
+        - budget <= 0: disabled
+        - budget <= 8192: low
+        - budget <= 16384: medium
+        - budget > 16384: high
+
+        For Claude thinking models, uses budget directly.
+
+        Args:
+            config: ThinkingConfig with enabled and budget settings.
+        """
+        if not config.enabled:
+            self._thinking_level = None
+            self._thinking_budget = 0
+            return
+
+        # Map budget to Gemini thinking level
+        if self._model_name and "gemini-3" in self._model_name:
+            if config.budget <= 8192:
+                self._thinking_level = "low"
+            elif config.budget <= 16384:
+                self._thinking_level = "medium"
+            else:
+                self._thinking_level = "high"
+        else:
+            # Claude thinking models use budget directly
+            self._thinking_budget = config.budget
 
     # ==================== Agent Context ====================
 
