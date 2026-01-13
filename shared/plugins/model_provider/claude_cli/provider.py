@@ -649,6 +649,46 @@ class ClaudeCLIProvider:
         logger.debug("No workspace root configured, using current directory")
         return None
 
+    def _format_tools_for_prompt(self) -> str:
+        """Format jaato's tool schemas as text for the system prompt.
+
+        Used in passthrough mode to expose jaato's tools to the CLI model.
+        The model will generate tool_use blocks that jaato then executes.
+
+        Returns:
+            Tool descriptions formatted for inclusion in system prompt.
+        """
+        if not self._tools:
+            return ""
+
+        lines = [
+            "",
+            "# Available Tools",
+            "",
+            "You have access to the following tools. Use them by generating tool_use blocks:",
+            "",
+        ]
+
+        for tool in self._tools:
+            lines.append(f"## {tool.name}")
+            if tool.description:
+                lines.append(f"{tool.description}")
+            if tool.parameters:
+                lines.append("")
+                lines.append("Parameters:")
+                params = tool.parameters.get("properties", {})
+                required = tool.parameters.get("required", [])
+                for param_name, param_info in params.items():
+                    param_type = param_info.get("type", "any")
+                    param_desc = param_info.get("description", "")
+                    req_marker = " (required)" if param_name in required else ""
+                    lines.append(f"  - {param_name}: {param_type}{req_marker}")
+                    if param_desc:
+                        lines.append(f"    {param_desc}")
+            lines.append("")
+
+        return "\n".join(lines)
+
     def _build_cli_args(self, prompt: str) -> List[str]:
         """Build CLI command arguments."""
         args = [
@@ -675,12 +715,17 @@ class ClaudeCLIProvider:
         if self._system_instruction:
             args.extend(["--system-prompt", self._system_instruction])
 
-        # In passthrough mode, disable all built-in tools so we get tool_use blocks
+        # In passthrough mode, disable all built-in tools and expose jaato's tools
         if self._mode == CLIMode.PASSTHROUGH:
-            # Disallow all tools - CLI will return tool_use blocks instead of executing
+            # Disallow all CLI tools - we want tool_use blocks returned to jaato
             args.extend([
                 "--disallowedTools", "*",
             ])
+
+            # Expose jaato's tools via system prompt so the model knows about them
+            if self._tools:
+                tool_prompt = self._format_tools_for_prompt()
+                args.extend(["--append-system-prompt", tool_prompt])
 
         # Use -- to separate options from the prompt (required when using --disallowedTools)
         args.append("--")
