@@ -72,6 +72,10 @@ class PermissionPlugin:
         self._original_executors: Dict[str, Callable] = {}
         self._execution_log: List[Dict[str, Any]] = []
         self._allow_all: bool = False  # When True, auto-approve all requests
+        # Lock for serializing channel interactions (permission prompts)
+        # This ensures only one permission prompt is shown at a time when
+        # multiple tools request permission concurrently (parallel execution)
+        self._channel_lock = threading.Lock()
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
         # Permission lifecycle hooks for UI integration
@@ -741,40 +745,51 @@ If permission is denied, do not attempt to proceed with that action."""
                 self._log_decision(tool_name, args, "deny", "No channel configured")
                 return False, {'reason': 'No channel configured for approval', 'method': 'no_channel'}
 
-            # Get custom display info from source plugin if available
-            channel_type = channel.name if channel else "console"
-            display_info = self._get_display_info(tool_name, args, channel_type)
+            # Serialize channel interactions to ensure only one permission prompt
+            # is shown at a time (important for parallel tool execution)
+            self._trace(f"check_permission: acquiring channel lock for {tool_name}")
+            with self._channel_lock:
+                # Re-check _allow_all after acquiring lock - another thread may have
+                # set it while we were waiting (e.g., user responded "all" to first prompt)
+                if self._allow_all:
+                    self._trace(f"check_permission: allow_all set while waiting, auto-approving {tool_name}")
+                    self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
+                    return True, {'reason': 'Pre-approved all requests', 'method': 'allow_all'}
 
-            # Build context with display info
-            request_context = dict(context) if context else {}
-            if display_info:
-                request_context["display_info"] = display_info
+                # Get custom display info from source plugin if available
+                channel_type = channel.name if channel else "console"
+                display_info = self._get_display_info(tool_name, args, channel_type)
 
-            request = PermissionRequest.create(
-                tool_name=tool_name,
-                arguments=args,
-                timeout=self._config.channel_timeout if self._config else 30,
-                context=request_context,
-            )
+                # Build context with display info
+                request_context = dict(context) if context else {}
+                if display_info:
+                    request_context["display_info"] = display_info
 
-            # Emit permission requested hook with raw args (client formats display)
-            # SKIP in subagent mode
-            if self._on_permission_requested and not is_subagent_mode:
-                self._on_permission_requested(
-                    tool_name, request.request_id, args, request.response_options
+                request = PermissionRequest.create(
+                    tool_name=tool_name,
+                    arguments=args,
+                    timeout=self._config.channel_timeout if self._config else 30,
+                    context=request_context,
                 )
 
-            response = channel.request_permission(request)
-            allowed, info = self._handle_channel_response(tool_name, args, response)
+                # Emit permission requested hook with raw args (client formats display)
+                # SKIP in subagent mode
+                if self._on_permission_requested and not is_subagent_mode:
+                    self._on_permission_requested(
+                        tool_name, request.request_id, args, request.response_options
+                    )
 
-            # Emit permission resolved hook
-            # SKIP in subagent mode
-            if self._on_permission_resolved and not is_subagent_mode:
-                self._on_permission_resolved(
-                    tool_name, request.request_id, allowed, info.get('method', 'unknown')
-                )
+                response = channel.request_permission(request)
+                allowed, info = self._handle_channel_response(tool_name, args, response)
 
-            return allowed, info
+                # Emit permission resolved hook
+                # SKIP in subagent mode
+                if self._on_permission_resolved and not is_subagent_mode:
+                    self._on_permission_resolved(
+                        tool_name, request.request_id, allowed, info.get('method', 'unknown')
+                    )
+
+                return allowed, info
 
         # Unknown decision type, deny by default
         return False, {'reason': 'Unknown policy decision', 'method': 'unknown'}

@@ -806,9 +806,14 @@ class JaatoSession:
         if not self._provider:
             return
 
+        # Check if provider uses external tools (backwards compatible - default True)
+        # Providers like claude_cli in delegated mode manage their own tools
+        uses_external = getattr(self._provider, 'uses_external_tools', lambda: True)()
+        tools_to_pass = self._tools if uses_external else []
+
         self._provider.create_session(
             system_instruction=self._system_instruction,
-            tools=self._tools,
+            tools=tools_to_pass,
             history=history
         )
 
