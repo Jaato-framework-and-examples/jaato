@@ -19,13 +19,17 @@ if TYPE_CHECKING:
 class PlanPanel:
     """Renders plan status as symbols for status bar and popup overlay."""
 
-    # Status symbols with colors
+    # Status symbols with colors - covers both step statuses and plan statuses
     STATUS_SYMBOLS = {
+        # Step statuses
         "pending": ("○", "dim"),
         "in_progress": ("◐", "blue"),
         "completed": ("●", "green"),
         "failed": ("✗", "red"),
         "skipped": ("⊘", "yellow"),
+        # Plan statuses (overall plan, not steps)
+        "active": ("▸", "cyan"),
+        "cancelled": ("⊘", "yellow"),
     }
 
     def __init__(self, toggle_key: Optional[KeyBinding] = None):
@@ -44,16 +48,23 @@ class PlanPanel:
         """
         self._theme = theme
 
+    # Known status values that have corresponding semantic styles
+    _KNOWN_STATUSES = frozenset({
+        "pending", "in_progress", "completed", "failed", "skipped",
+        "active", "cancelled",
+    })
+
     def _get_status_style(self, status: str) -> str:
         """Get style for a plan status from theme or fallback.
 
         Args:
-            status: Status name (pending, in_progress, completed, failed, skipped).
+            status: Status name (pending, in_progress, completed, failed, skipped,
+                   active, cancelled).
 
         Returns:
             Rich style string.
         """
-        if self._theme:
+        if self._theme and status in self._KNOWN_STATUSES:
             semantic_name = f"plan_{status}"
             style = self._theme.get_rich_style(semantic_name)
             if style:

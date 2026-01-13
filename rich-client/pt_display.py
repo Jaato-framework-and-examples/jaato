@@ -363,6 +363,8 @@ class PTDisplay:
             "completed": "class:plan.completed",
             "failed": "class:plan.failed",
             "skipped": "class:plan.skipped",
+            "active": "class:plan.active",
+            "cancelled": "class:plan.cancelled",
         }
 
         symbol_map = {
@@ -371,6 +373,8 @@ class PTDisplay:
             "completed": "●",
             "failed": "✗",
             "skipped": "⊘",
+            "active": "▸",
+            "cancelled": "⊘",
         }
 
         # Sort by sequence and build formatted tuples

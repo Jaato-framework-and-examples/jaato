@@ -246,12 +246,15 @@ DEFAULT_SEMANTIC_STYLES = {
     # Output panel
     "output_panel_bg": StyleSpec(bg="background"),
 
-    # Plan panel
+    # Plan panel - step statuses
     "plan_pending": StyleSpec(fg="muted"),
     "plan_in_progress": StyleSpec(fg="#5f87ff"),  # Blue
     "plan_completed": StyleSpec(fg="success"),
     "plan_failed": StyleSpec(fg="error"),
     "plan_skipped": StyleSpec(fg="warning"),
+    # Plan panel - overall plan statuses (for completeness)
+    "plan_active": StyleSpec(fg="primary"),
+    "plan_cancelled": StyleSpec(fg="warning", dim=True),
 
     # Output - headers
     "user_header": StyleSpec(fg="success", bold=True),
@@ -411,6 +414,8 @@ class ThemeConfig:
             "plan.completed": "plan_completed",
             "plan.failed": "plan_failed",
             "plan.skipped": "plan_skipped",
+            "plan.active": "plan_active",
+            "plan.cancelled": "plan_cancelled",
             # Completion menu
             "completion-menu.completion": "completion_bg",
             "completion-menu.completion.current": "completion_selected",
