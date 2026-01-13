@@ -10,6 +10,7 @@ import os
 import subprocess
 import threading
 import uuid
+from datetime import datetime
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from ..base import (
@@ -89,6 +90,14 @@ class ClaudeCLIProvider:
         model_name: Currently configured model name.
     """
 
+    # CLI built-in tools that must be blocked in passthrough mode
+    # These are disallowed via --disallowed-tools and documented in the system prompt
+    CLI_BUILTIN_TOOLS = [
+        "Task", "TaskOutput", "Bash", "Glob", "Grep", "ExitPlanMode",
+        "Read", "Edit", "Write", "NotebookEdit", "WebFetch", "TodoWrite",
+        "WebSearch", "KillShell", "AskUserQuestion", "Skill", "EnterPlanMode",
+    ]
+
     def __init__(self) -> None:
         self._cli_path: Optional[str] = None
         self._mode: CLIMode = CLIMode.DELEGATED
@@ -120,6 +129,22 @@ class ClaudeCLIProvider:
 
         # Workspace root for CLI working directory
         self._workspace_root: Optional[str] = None
+
+        # CLI session ID for multi-turn conversations
+        # Captured from SystemMessage, used with --resume for subsequent calls
+        self._cli_session_id: Optional[str] = None
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get('JAATO_PROVIDER_TRACE')
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [claude_cli] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
 
     @property
     def name(self) -> str:
@@ -293,6 +318,18 @@ class ClaudeCLIProvider:
         self._system_instruction = system_instruction
         self._history = list(history) if history else []
         self._session_id = str(uuid.uuid4())[:8]
+
+        # Log what we received
+        self._trace(f"create_session: mode={self._mode.value}, tools_received={len(tools) if tools else 0}, "
+                    f"sys_instr_len={len(system_instruction) if system_instruction else 0}")
+
+        # Only reset CLI session ID when starting a truly new conversation (no history)
+        # Preserve it when updating with existing history (e.g., tool refresh, history update)
+        if not history:
+            self._trace(f"create_session: new conversation, resetting cli_session_id")
+            self._cli_session_id = None
+        else:
+            self._trace(f"create_session: preserving cli_session_id={self._cli_session_id}, history_len={len(history)}")
         self._last_usage = None
         self._last_result = None
 
@@ -661,7 +698,36 @@ class ClaudeCLIProvider:
         if not self._tools:
             return ""
 
+        # Use class constant for blocked tools list
+        blocked_tools_list = ", ".join(self.CLI_BUILTIN_TOOLS)
+
         lines = [
+            "",
+            "# IMPORTANT: Tool Execution Mode",
+            "",
+            "You are running in **passthrough mode** where tool execution is handled by an external framework (jaato).",
+            "",
+            "**CRITICAL INSTRUCTIONS:**",
+            "- ONLY use the tools listed below in the 'Available Tools' section",
+            f"- DO NOT use any of Claude Code CLI's built-in tools: {blocked_tools_list}",
+            "- When you need to perform file operations, shell commands, or other actions, use the equivalent tools from the 'Available Tools' list below",
+            "",
+            "**TOOL EXECUTION BEHAVIOR:**",
+            "- When you call a tool, the jaato framework will execute it and provide you with the result",
+            "- DO NOT assume or hallucinate that a tool is unavailable or failed before receiving a tool result",
+            "- Simply call the tool and wait for the actual result from the framework",
+            "- The framework handles all tool execution - you will always receive a proper tool_result response",
+            "- When you need to perform multiple independent operations toward DIFFERENT goals, issue all tool calls in a single response",
+            "- Never parallelize alternative approaches to the SAME goal - try the preferred tool first and wait for results before falling back",
+            "- Do not rush to call alternative tools in parallel when one tool can achieve the goal - this avoids unnecessary permission prompts for the user",
+            "",
+            "**IGNORING INTERMEDIATE CLI ERRORS:**",
+            "- You may receive errors like 'No such tool available: <tool_name>' from the Claude CLI layer",
+            "- If the tool IS listed in your 'Available Tools' section below, IGNORE this CLI error",
+            "- The CLI does not know about jaato's tools - this is a false negative",
+            "- WAIT for the actual jaato framework response (permission request or execution result)",
+            "- DO NOT respond to the user until you receive jaato's final resolution",
+            "- Only treat a tool as unavailable if it is NOT in your 'Available Tools' section",
             "",
             "# Available Tools",
             "",
@@ -691,6 +757,8 @@ class ClaudeCLIProvider:
 
     def _build_cli_args(self, prompt: str) -> List[str]:
         """Build CLI command arguments."""
+        self._trace(f"_build_cli_args: cli_session_id={self._cli_session_id}")
+
         args = [
             self._cli_path,
             "--print",  # Non-interactive mode
@@ -699,39 +767,64 @@ class ClaudeCLIProvider:
             "--include-partial-messages",  # Enable token-level streaming
         ]
 
-        # Model selection
-        if self._model_name:
-            args.extend(["--model", self._model_name])
+        # Resume existing CLI session for multi-turn conversation
+        if self._cli_session_id:
+            self._trace(f"_build_cli_args: using --resume {self._cli_session_id}")
+            args.extend(["--resume", self._cli_session_id])
+        else:
+            # First message only - configure session-level settings
+            # Model selection
+            if self._model_name:
+                args.extend(["--model", self._model_name])
 
-        # Max turns
-        if self._max_turns is not None:
-            args.extend(["--max-turns", str(self._max_turns)])
+            # Max turns
+            if self._max_turns is not None:
+                args.extend(["--max-turns", str(self._max_turns)])
 
-        # Permission mode
-        if self._permission_mode:
-            args.extend(["--permission-mode", self._permission_mode])
+            # Permission mode
+            if self._permission_mode:
+                args.extend(["--permission-mode", self._permission_mode])
 
-        # System prompt
-        if self._system_instruction:
-            args.extend(["--system-prompt", self._system_instruction])
-
-        # In passthrough mode, disable all built-in tools and expose jaato's tools
+        # Tool configuration must be sent on EVERY invocation
+        # CLI's --resume does not preserve these settings
         if self._mode == CLIMode.PASSTHROUGH:
-            # Disallow all CLI tools - we want tool_use blocks returned to jaato
-            args.extend([
-                "--disallowedTools", "*",
-            ])
+            # Disallow CLI built-in tools - jaato provides its own tools
+            disallowed = ",".join(self.CLI_BUILTIN_TOOLS)
+            args.extend(["--disallowed-tools", disallowed])
+            self._trace(f"_build_cli_args: disallowed-tools={disallowed}")
 
-            # Expose jaato's tools via system prompt so the model knows about them
+            # Allow jaato's tools so CLI recognizes them
             if self._tools:
-                tool_prompt = self._format_tools_for_prompt()
-                args.extend(["--append-system-prompt", tool_prompt])
+                allowed = ",".join(tool.name for tool in self._tools)
+                args.extend(["--allowed-tools", allowed])
+                self._trace(f"_build_cli_args: allowed-tools count={len(self._tools)}")
 
-        # Use -- to separate options from the prompt (required when using --disallowedTools)
+            # Build system prompt with tool schemas
+            base_prompt_len = len(self._system_instruction) if self._system_instruction else 0
+            system_prompt = self._system_instruction or ""
+            tool_prompt = self._format_tools_for_prompt()
+            self._trace(f"_build_cli_args: passthrough mode, {len(self._tools)} tools, "
+                       f"base_prompt_len={base_prompt_len}, tool_prompt_len={len(tool_prompt) if tool_prompt else 0}")
+            if tool_prompt:
+                system_prompt = f"{system_prompt}\n\n{tool_prompt}" if system_prompt else tool_prompt
+            combined_len = len(system_prompt) if system_prompt else 0
+            self._trace(f"_build_cli_args: combined_system_prompt_len={combined_len}")
+            if system_prompt:
+                args.extend(["--system-prompt", system_prompt])
+
+        # Non-passthrough mode: just use the system instruction (also every time)
+        elif self._system_instruction:
+            args.extend(["--append-system-prompt", self._system_instruction])
+
+        # Use -- to separate options from the prompt
         args.append("--")
 
         # The prompt itself
         args.append(prompt)
+
+        # Log the CLI flags being used (not the full content)
+        flags_used = [a for a in args if a.startswith("--")]
+        self._trace(f"_build_cli_args: flags={flags_used}")
 
         return args
 
@@ -742,7 +835,13 @@ class ClaudeCLIProvider:
         finish_reason = FinishReason.STOP
 
         for msg in self._stream_cli_messages(prompt):
-            if isinstance(msg, AssistantMessage):
+            if isinstance(msg, SystemMessage):
+                # Capture CLI session ID for multi-turn conversation
+                if msg.session_id and not self._cli_session_id:
+                    self._cli_session_id = msg.session_id
+                    logger.debug(f"Captured CLI session ID: {self._cli_session_id}")
+
+            elif isinstance(msg, AssistantMessage):
                 for block in msg.content_blocks:
                     if isinstance(block, TextBlock):
                         accumulated_text += block.text
@@ -805,12 +904,21 @@ class ClaudeCLIProvider:
 
         try:
             for msg in self._stream_cli_messages(prompt, cancel_token):
+                self._trace(f"Got message type: {type(msg).__name__}")
+
                 # Check cancellation
                 if cancel_token and cancel_token.is_cancelled:
                     cancelled = True
                     break
 
-                if isinstance(msg, StreamEvent):
+                if isinstance(msg, SystemMessage):
+                    # Capture CLI session ID for multi-turn conversation
+                    self._trace(f"Got SystemMessage: session_id={msg.session_id}, current_cli_session_id={self._cli_session_id}")
+                    if msg.session_id and not self._cli_session_id:
+                        self._cli_session_id = msg.session_id
+                        self._trace(f"Captured CLI session ID: {self._cli_session_id}")
+
+                elif isinstance(msg, StreamEvent):
                     # Handle streaming text deltas
                     if msg.is_text_delta and msg.delta_text:
                         got_stream_events = True
