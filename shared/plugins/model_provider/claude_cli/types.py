@@ -11,6 +11,62 @@ from typing import Any, Dict, List, Literal, Optional, Union
 import json
 
 
+def _deserialize_tool_input(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Deserialize tool input values that CLI has stringified.
+
+    The Claude CLI stringifies all non-string values in tool_use blocks:
+    - Arrays become '["a", "b"]' instead of ["a", "b"]
+    - Objects become '{"key": "value"}' instead of {"key": "value"}
+    - Numbers become '50' instead of 50
+    - Booleans become 'true' instead of True
+
+    This function parses them back to their proper types.
+    """
+    if not input_data:
+        return input_data
+
+    result = {}
+    for key, value in input_data.items():
+        if isinstance(value, str):
+            # Try to parse JSON arrays and objects
+            stripped = value.strip()
+            if (stripped.startswith('[') and stripped.endswith(']')) or \
+               (stripped.startswith('{') and stripped.endswith('}')):
+                try:
+                    result[key] = json.loads(value)
+                    continue
+                except json.JSONDecodeError:
+                    pass  # Keep as string if parsing fails
+
+            # Try to parse booleans
+            if stripped.lower() == 'true':
+                result[key] = True
+                continue
+            elif stripped.lower() == 'false':
+                result[key] = False
+                continue
+
+            # Try to parse numbers (int first, then float)
+            try:
+                result[key] = int(value)
+                continue
+            except ValueError:
+                pass
+            try:
+                result[key] = float(value)
+                continue
+            except ValueError:
+                pass
+
+            # Keep as string
+            result[key] = value
+        else:
+            # Non-string values pass through unchanged
+            result[key] = value
+
+    return result
+
+
 class CLIMode(str, Enum):
     """Operating mode for the Claude CLI provider."""
 
@@ -96,10 +152,13 @@ class ToolUseBlock:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ToolUseBlock":
+        # Deserialize stringified values from CLI output
+        raw_input = data.get("input", {})
+        deserialized_input = _deserialize_tool_input(raw_input)
         return cls(
             id=data.get("id", ""),
             name=data.get("name", ""),
-            input=data.get("input", {}),
+            input=deserialized_input,
         )
 
 
