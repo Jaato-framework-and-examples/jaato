@@ -332,8 +332,17 @@ class UserMessage:
         else:
             created_at = datetime.now()
 
+        # Handle both formats:
+        # 1. Direct content: {"type":"user","content":[...]}
+        # 2. Nested message: {"type":"user","message":{"content":[...]}}
+        content_data = data.get("content", [])
+        if not content_data and "message" in data:
+            # Nested format from CLI --verbose output
+            message_data = data.get("message", {})
+            content_data = message_data.get("content", [])
+
         content_blocks = [
-            parse_content_block(b) for b in data.get("content", [])
+            parse_content_block(b) for b in content_data
         ]
 
         return cls(
