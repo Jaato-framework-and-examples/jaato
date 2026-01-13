@@ -799,6 +799,11 @@ class ClaudeCLIProvider:
                 args.extend(["--allowed-tools", allowed])
                 self._trace(f"_build_cli_args: allowed-tools count={len(self._tools)}")
 
+            # Force max-turns 1 in passthrough mode to prevent CLI's internal agentic loop
+            # This makes CLI return immediately when model generates tool_use blocks,
+            # allowing jaato to execute tools mid-turn instead of CLI failing internally
+            args.extend(["--max-turns", "1"])
+
             # Build system prompt with tool schemas
             base_prompt_len = len(self._system_instruction) if self._system_instruction else 0
             system_prompt = self._system_instruction or ""
@@ -904,8 +909,6 @@ class ClaudeCLIProvider:
 
         try:
             for msg in self._stream_cli_messages(prompt, cancel_token):
-                self._trace(f"Got message type: {type(msg).__name__}")
-
                 # Check cancellation
                 if cancel_token and cancel_token.is_cancelled:
                     cancelled = True
@@ -913,7 +916,7 @@ class ClaudeCLIProvider:
 
                 if isinstance(msg, SystemMessage):
                     # Capture CLI session ID for multi-turn conversation
-                    self._trace(f"Got SystemMessage: session_id={msg.session_id}, current_cli_session_id={self._cli_session_id}")
+                    self._trace(f"SystemMessage: session_id={msg.session_id}, subtype={msg.subtype}")
                     if msg.session_id and not self._cli_session_id:
                         self._cli_session_id = msg.session_id
                         self._trace(f"Captured CLI session ID: {self._cli_session_id}")
@@ -924,8 +927,17 @@ class ClaudeCLIProvider:
                         got_stream_events = True
                         accumulated_text += msg.delta_text
                         on_chunk(msg.delta_text)
+                        # Only trace non-empty deltas, show preview
+                        preview = msg.delta_text[:50].replace('\n', '\\n') if msg.delta_text else ""
+                        self._trace(f"StreamEvent: text_delta len={len(msg.delta_text)} preview='{preview}'")
 
                 elif isinstance(msg, AssistantMessage):
+                    # Count block types for tracing
+                    text_blocks = [b for b in msg.content_blocks if isinstance(b, TextBlock)]
+                    tool_blocks = [b for b in msg.content_blocks if isinstance(b, ToolUseBlock)]
+                    tool_names = [b.name for b in tool_blocks]
+                    self._trace(f"AssistantMessage: {len(text_blocks)} text, {len(tool_blocks)} tools: {tool_names}")
+
                     # If we got stream events, don't double-count text
                     # Only process tool use blocks from the final message
                     if not got_stream_events:
@@ -945,10 +957,21 @@ class ClaudeCLIProvider:
                                     args=block.input,
                                 )
                                 function_calls.append(fc)
+                                self._trace(f"  ToolUse: {block.name} id={block.id[:8]}")
                                 if on_function_call:
                                     on_function_call(fc)
 
+                elif isinstance(msg, UserMessage):
+                    # Tool results from CLI's internal execution (delegated mode)
+                    block_types = [type(b).__name__ for b in msg.content_blocks]
+                    self._trace(f"UserMessage: {len(msg.content_blocks)} blocks: {block_types} parent_tool_id={msg.parent_tool_use_id}")
+                    tool_results = [b for b in msg.content_blocks if isinstance(b, ToolResultBlock)]
+                    for tr in tool_results:
+                        content_preview = str(tr.content)[:100].replace('\n', '\\n') if tr.content else ""
+                        self._trace(f"  tool_result id={tr.tool_use_id[:8]} is_error={tr.is_error} preview='{content_preview}'")
+
                 elif isinstance(msg, ResultMessage):
+                    self._trace(f"ResultMessage: subtype={msg.subtype} is_error={msg.is_error} turns={msg.num_turns} cost=${msg.total_cost_usd or 0:.4f}")
                     self._last_result = msg
                     if msg.usage:
                         self._last_usage = TokenUsage(
@@ -1035,6 +1058,12 @@ class ClaudeCLIProvider:
                     continue
 
                 try:
+                    # Trace raw user messages to debug empty content_blocks
+                    raw_data = json.loads(line)
+                    if raw_data.get("type") == "user":
+                        raw_preview = str(raw_data)[:300]
+                        self._trace(f"RAW UserMessage: {raw_preview}")
+
                     msg = parse_ndjson_line(line)
                     yield msg
 
