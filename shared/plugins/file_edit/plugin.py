@@ -23,6 +23,16 @@ from .diff_utils import (
     summarize_diff,
     DEFAULT_MAX_LINES,
 )
+from .multi_file import (
+    MultiFileExecutor,
+    MultiFileResult,
+    generate_multi_file_diff_preview,
+)
+from .find_replace import (
+    FindReplaceExecutor,
+    FindReplaceResult,
+    generate_find_replace_preview,
+)
 
 
 def _detect_workspace_root() -> Optional[str]:
@@ -415,6 +425,127 @@ class FileEditPlugin:
                 },
                 category="filesystem",
             ),
+            ToolSchema(
+                name="multiFileEdit",
+                description="Execute multiple file operations atomically. Either ALL changes succeed "
+                           "or NONE are applied (automatic rollback on failure). Supports mixed operations: "
+                           "edit, create, delete, rename. Use this for refactoring operations that must "
+                           "succeed together (e.g., renaming a symbol across multiple files).",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "operations": {
+                            "type": "array",
+                            "description": "Array of file operations to execute atomically",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "action": {
+                                        "type": "string",
+                                        "enum": ["edit", "create", "delete", "rename"],
+                                        "description": "Type of operation"
+                                    },
+                                    "path": {
+                                        "type": "string",
+                                        "description": "File path (for edit, create, delete)"
+                                    },
+                                    "old": {
+                                        "type": "string",
+                                        "description": "Original content to verify (for edit)"
+                                    },
+                                    "new": {
+                                        "type": "string",
+                                        "description": "New content to write (for edit)"
+                                    },
+                                    "content": {
+                                        "type": "string",
+                                        "description": "Content for new file (for create)"
+                                    },
+                                    "from": {
+                                        "type": "string",
+                                        "description": "Source path (for rename)"
+                                    },
+                                    "to": {
+                                        "type": "string",
+                                        "description": "Destination path (for rename)"
+                                    }
+                                },
+                                "required": ["action"]
+                            }
+                        }
+                    },
+                    "required": ["operations"]
+                },
+                category="filesystem",
+            ),
+            ToolSchema(
+                name="findAndReplace",
+                description="Find and replace text across multiple files using regex patterns. "
+                           "Supports glob patterns for file selection and respects .gitignore by default. "
+                           "Use dry_run=true to preview changes without applying them.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Regex pattern to search for"
+                        },
+                        "replacement": {
+                            "type": "string",
+                            "description": "Replacement string (supports backreferences like \\1, \\2)"
+                        },
+                        "paths": {
+                            "type": "string",
+                            "description": "Glob pattern for files to search (e.g., 'src/**/*.py')"
+                        },
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "If true, preview changes without applying. Default is false."
+                        },
+                        "include_ignored": {
+                            "type": "boolean",
+                            "description": "If true, include files normally ignored by .gitignore. Default is false."
+                        }
+                    },
+                    "required": ["pattern", "replacement", "paths"]
+                },
+                category="filesystem",
+            ),
+            ToolSchema(
+                name="restoreFile",
+                description="Restore a file from a specific backup or the most recent backup. "
+                           "Lists available backups if no backup_path is specified.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file to restore"
+                        },
+                        "backup_path": {
+                            "type": "string",
+                            "description": "Specific backup file to restore from (optional, uses latest if not specified)"
+                        }
+                    },
+                    "required": ["path"]
+                },
+                category="filesystem",
+            ),
+            ToolSchema(
+                name="listBackups",
+                description="List all available file backups. Can filter by file path or list all backups.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Optional file path to list backups for. If not specified, lists all backups."
+                        }
+                    },
+                    "required": []
+                },
+                category="filesystem",
+            ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
@@ -427,6 +558,10 @@ class FileEditPlugin:
             "moveFile": self._execute_move_file,
             "renameFile": self._execute_move_file,  # Alias for moveFile
             "undoFileChange": self._execute_undo_file_change,
+            "multiFileEdit": self._execute_multi_file_edit,
+            "findAndReplace": self._execute_find_and_replace,
+            "restoreFile": self._execute_restore_file,
+            "listBackups": self._execute_list_backups,
         }
 
     def get_system_instructions(self) -> Optional[str]:
@@ -438,6 +573,8 @@ IMPORTANT: Always prefer these tools over CLI commands:
 - Use `updateFile`/`writeNewFile` instead of `echo >`, `sed`, or heredocs
 - Use `removeFile` instead of `rm`
 - Use `moveFile`/`renameFile` instead of `mv`
+- Use `multiFileEdit` for atomic multi-file operations (refactoring)
+- Use `findAndReplace` instead of `sed` for multi-file replacements
 
 These tools provide structured output, automatic backups, and proper encoding handling.
 
@@ -453,22 +590,34 @@ Tools available:
 - `moveFile(source_path, destination_path, overwrite=False)`: Move or rename a file. Creates destination directories if needed. Creates backup before moving. Fails if destination exists unless overwrite=True.
 - `renameFile(source_path, destination_path, overwrite=False)`: Alias for moveFile. Use for renaming files.
 - `undoFileChange(path)`: Restore a file from its most recent backup.
+- `multiFileEdit(operations)`: Execute multiple file operations atomically. ALL changes succeed or NONE are applied.
+  - Supports: edit, create, delete, rename operations
+  - Example: `multiFileEdit(operations=[{"action": "edit", "path": "a.py", "old": "...", "new": "..."},
+                                        {"action": "rename", "from": "b.py", "to": "c.py"}])`
+  - Use for refactoring that must succeed together (e.g., renaming a symbol across files)
+- `findAndReplace(pattern, replacement, paths, dry_run=False, include_ignored=False)`: Find and replace across files.
+  - `pattern`: Regex pattern to search for
+  - `replacement`: Replacement string (supports backreferences \\1, \\2, etc.)
+  - `paths`: Glob pattern (e.g., "src/**/*.py")
+  - `dry_run`: If true, preview changes without applying
+  - Respects .gitignore by default (use include_ignored=True to override)
+- `restoreFile(path, backup_path=None)`: Restore a file from backup. Uses latest backup if backup_path not specified.
+- `listBackups(path=None)`: List available backups. Filter by path or list all backups.
 
 IMPORTANT: When using updateFile or writeNewFile, provide the raw file content directly.
 Do NOT wrap the content in quotes, triple-quotes (''' or \"\"\"), or treat it as a string literal.
 For example, to create a Python file, the content should start with 'import ...' or actual code,
 NOT with ''' or quotes around the code. The content parameter value is written verbatim to the file.
 
-File modifications (updateFile, writeNewFile, removeFile, moveFile) will show you a preview
-and require approval before execution. Backups are automatically created for
-updateFile, removeFile, and moveFile operations."""
+File modifications (updateFile, writeNewFile, removeFile, moveFile, multiFileEdit, findAndReplace)
+will show you a preview and require approval before execution. Backups are automatically created."""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved.
 
-        readFile and undoFileChange are low-risk operations.
+        readFile, undoFileChange, restoreFile, and listBackups are low-risk operations.
         """
-        return ["readFile", "undoFileChange"]
+        return ["readFile", "undoFileChange", "restoreFile", "listBackups"]
 
     def get_user_commands(self) -> List[UserCommand]:
         """File edit plugin provides model tools only."""
@@ -501,6 +650,10 @@ updateFile, removeFile, and moveFile operations."""
             return self._format_remove_file(arguments)
         elif tool_name in ("moveFile", "renameFile"):
             return self._format_move_file(arguments)
+        elif tool_name == "multiFileEdit":
+            return self._format_multi_file_edit(arguments)
+        elif tool_name == "findAndReplace":
+            return self._format_find_and_replace(arguments)
 
         return None
 
@@ -914,6 +1067,265 @@ updateFile, removeFile, and moveFile operations."""
             }
         else:
             return {"error": f"Failed to restore file from backup"}
+
+    def _execute_multi_file_edit(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute multiFileEdit tool for atomic multi-file operations."""
+        operations = args.get("operations", [])
+        self._trace(f"multiFileEdit: {len(operations)} operations")
+
+        if not operations:
+            return {"error": "operations array is required and cannot be empty"}
+
+        if not isinstance(operations, list):
+            return {"error": "operations must be an array"}
+
+        # Create executor with plugin's path resolution and sandbox checking
+        executor = MultiFileExecutor(
+            resolve_path_fn=self._resolve_path,
+            is_path_allowed_fn=self._is_path_allowed,
+            trace_fn=self._trace
+        )
+
+        # Execute the batch
+        result = executor.execute(operations)
+
+        return result.to_dict()
+
+    def _execute_find_and_replace(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute findAndReplace tool for regex-based find/replace across files."""
+        pattern = args.get("pattern", "")
+        replacement = args.get("replacement", "")
+        paths = args.get("paths", "")
+        dry_run = args.get("dry_run", False)
+        include_ignored = args.get("include_ignored", False)
+
+        self._trace(f"findAndReplace: pattern='{pattern}', paths='{paths}', dry_run={dry_run}")
+
+        if not pattern:
+            return {"error": "pattern is required"}
+
+        if replacement is None:
+            return {"error": "replacement is required"}
+
+        if not paths:
+            return {"error": "paths glob pattern is required"}
+
+        # Create backup function that uses our backup manager
+        def backup_fn(file_path: Path) -> Optional[Path]:
+            if self._backup_manager:
+                return self._backup_manager.create_backup(file_path)
+            return None
+
+        # Create executor
+        workspace_root = Path(self._workspace_root) if self._workspace_root else None
+        executor = FindReplaceExecutor(
+            workspace_root=workspace_root,
+            resolve_path_fn=self._resolve_path,
+            is_path_allowed_fn=self._is_path_allowed,
+            backup_fn=backup_fn,
+            trace_fn=self._trace
+        )
+
+        # Execute find/replace
+        result = executor.execute(
+            pattern=pattern,
+            replacement=replacement,
+            paths=paths,
+            dry_run=dry_run,
+            include_ignored=include_ignored
+        )
+
+        return result.to_dict()
+
+    def _execute_restore_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute restoreFile tool to restore from a specific backup."""
+        path = args.get("path", "")
+        backup_path_str = args.get("backup_path")
+
+        self._trace(f"restoreFile: path={path}, backup_path={backup_path_str}")
+
+        if not path:
+            return {"error": "path is required"}
+
+        if not self._backup_manager:
+            return {"error": "Backup manager not initialized"}
+
+        file_path = self._resolve_path(path)
+
+        # If backup_path specified, use it; otherwise use latest
+        if backup_path_str:
+            backup_path = Path(backup_path_str)
+            if not backup_path.exists():
+                return {"error": f"Backup file not found: {backup_path_str}"}
+        else:
+            backup_path = self._backup_manager.get_latest_backup(file_path)
+            if not backup_path:
+                # List available backups
+                backups = self._backup_manager.list_backups(file_path)
+                if not backups:
+                    return {"error": f"No backups found for: {path}"}
+                return {
+                    "error": f"No backup specified. Available backups for {path}:",
+                    "available_backups": [str(b) for b in backups]
+                }
+
+        # Restore from backup
+        if self._backup_manager.restore_from_backup(file_path, backup_path):
+            return {
+                "success": True,
+                "path": path,
+                "restored_from": str(backup_path),
+                "message": "File restored from backup"
+            }
+        else:
+            return {"error": "Failed to restore file from backup"}
+
+    def _execute_list_backups(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute listBackups tool to list available backups."""
+        path = args.get("path")
+
+        self._trace(f"listBackups: path={path}")
+
+        if not self._backup_manager:
+            return {"error": "Backup manager not initialized"}
+
+        if path:
+            # List backups for specific file
+            file_path = self._resolve_path(path)
+            backups = self._backup_manager.list_backups(file_path)
+
+            if not backups:
+                return {
+                    "path": path,
+                    "backups": [],
+                    "message": f"No backups found for {path}"
+                }
+
+            return {
+                "path": path,
+                "backups": [
+                    {
+                        "backup_path": str(b),
+                        "timestamp": b.stat().st_mtime,
+                        "size": b.stat().st_size
+                    }
+                    for b in backups
+                ],
+                "count": len(backups)
+            }
+        else:
+            # List all backups
+            all_backups = self._backup_manager.list_all_backups()
+
+            if not all_backups:
+                return {
+                    "backups": [],
+                    "message": "No backups found"
+                }
+
+            return {
+                "backups": [b.to_dict() for b in all_backups],
+                "count": len(all_backups)
+            }
+
+    def _format_multi_file_edit(self, arguments: Dict[str, Any]) -> Optional[PermissionDisplayInfo]:
+        """Format multiFileEdit for permission display."""
+        operations = arguments.get("operations", [])
+
+        if not operations:
+            return None
+
+        # Generate preview diff
+        preview_text, truncated = generate_multi_file_diff_preview(
+            operations,
+            self._resolve_path,
+            max_lines_per_file=30
+        )
+
+        # Count operations by type
+        edit_count = sum(1 for op in operations if op.get("action") == "edit")
+        create_count = sum(1 for op in operations if op.get("action") == "create")
+        delete_count = sum(1 for op in operations if op.get("action") == "delete")
+        rename_count = sum(1 for op in operations if op.get("action") == "rename")
+
+        parts = []
+        if edit_count:
+            parts.append(f"{edit_count} edit{'s' if edit_count > 1 else ''}")
+        if create_count:
+            parts.append(f"{create_count} create{'s' if create_count > 1 else ''}")
+        if delete_count:
+            parts.append(f"{delete_count} delete{'s' if delete_count > 1 else ''}")
+        if rename_count:
+            parts.append(f"{rename_count} rename{'s' if rename_count > 1 else ''}")
+
+        summary = f"Atomic multi-file operation: {', '.join(parts)}"
+
+        return PermissionDisplayInfo(
+            summary=summary,
+            details=preview_text,
+            format_hint="diff",
+            truncated=truncated
+        )
+
+    def _format_find_and_replace(self, arguments: Dict[str, Any]) -> Optional[PermissionDisplayInfo]:
+        """Format findAndReplace for permission display."""
+        pattern = arguments.get("pattern", "")
+        replacement = arguments.get("replacement", "")
+        paths = arguments.get("paths", "")
+        dry_run = arguments.get("dry_run", False)
+        include_ignored = arguments.get("include_ignored", False)
+
+        # If dry_run, no approval needed
+        if dry_run:
+            return None
+
+        # Create executor to find matches for preview
+        workspace_root = Path(self._workspace_root) if self._workspace_root else None
+        executor = FindReplaceExecutor(
+            workspace_root=workspace_root,
+            resolve_path_fn=self._resolve_path,
+            is_path_allowed_fn=self._is_path_allowed,
+            trace_fn=self._trace
+        )
+
+        # Execute dry run to get preview
+        result = executor.execute(
+            pattern=pattern,
+            replacement=replacement,
+            paths=paths,
+            dry_run=True,
+            include_ignored=include_ignored
+        )
+
+        if not result.success:
+            return PermissionDisplayInfo(
+                summary=f"Find and replace: error",
+                details=result.error or "Unknown error",
+                format_hint="text"
+            )
+
+        if result.total_matches == 0:
+            return PermissionDisplayInfo(
+                summary=f"Find and replace: no matches found",
+                details=f"Pattern '{pattern}' not found in files matching '{paths}'",
+                format_hint="text"
+            )
+
+        # Generate preview
+        preview_text, truncated = generate_find_replace_preview(
+            result.file_matches,
+            max_matches_per_file=5,
+            max_files=10
+        )
+
+        summary = f"Find and replace: {result.total_matches} matches in {result.files_affected} files"
+
+        return PermissionDisplayInfo(
+            summary=summary,
+            details=preview_text,
+            format_hint="text",
+            truncated=truncated
+        )
 
 
 def create_plugin() -> FileEditPlugin:
