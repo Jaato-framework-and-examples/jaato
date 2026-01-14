@@ -1,6 +1,7 @@
 """OSC 52 clipboard provider."""
 
 import base64
+import os
 import sys
 
 # OSC 52 size limit (base64 encoded) - some terminals cap at ~74KB
@@ -19,8 +20,16 @@ class OSC52Provider:
     Note: macOS Terminal.app does not support OSC 52.
     """
 
+    def __init__(self):
+        self._in_tmux = bool(os.environ.get("TMUX"))
+        self._in_screen = "screen" in os.environ.get("TERM", "")
+
     @property
     def name(self) -> str:
+        if self._in_tmux:
+            return "OSC 52 (tmux)"
+        elif self._in_screen:
+            return "OSC 52 (screen)"
         return "OSC 52"
 
     def copy(self, text: str) -> bool:
@@ -44,9 +53,29 @@ class OSC52Provider:
             truncated = text.encode("utf-8")[:max_text_bytes].decode("utf-8", errors="ignore")
             encoded = base64.b64encode(truncated.encode("utf-8")).decode("ascii")
 
-        # OSC 52: ESC ] 52 ; c ; <base64> BEL
-        # c = clipboard, BEL (\x07) = string terminator
-        sys.stdout.write(f"\x1b]52;c;{encoded}\x07")
-        sys.stdout.flush()
+        # OSC 52: ESC ] 52 ; c ; <base64> ST
+        # c = clipboard, ST = string terminator (ESC \ or BEL)
+        # Use ESC \ as terminator for better compatibility
+        osc52_seq = f"\x1b]52;c;{encoded}\x1b\\"
+
+        # Wrap for tmux/screen passthrough if needed
+        if self._in_tmux:
+            # tmux passthrough: ESC Ptmux; ESC <seq> ESC \
+            # Double any ESC in the sequence for tmux
+            inner = osc52_seq.replace("\x1b", "\x1b\x1b")
+            osc52_seq = f"\x1bPtmux;{inner}\x1b\\"
+        elif self._in_screen:
+            # screen passthrough: ESC P <seq> ESC \
+            osc52_seq = f"\x1bP{osc52_seq}\x1b\\"
+
+        # Write directly to TTY to bypass prompt_toolkit's stdout capture
+        try:
+            with open("/dev/tty", "w") as tty:
+                tty.write(osc52_seq)
+                tty.flush()
+        except (OSError, IOError):
+            # Fallback to stdout if /dev/tty unavailable (e.g., Windows)
+            sys.stdout.write(osc52_seq)
+            sys.stdout.flush()
 
         return True

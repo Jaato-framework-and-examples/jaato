@@ -22,7 +22,10 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.menus import CompletionsMenu
+from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
 from prompt_toolkit.filters import Condition
+from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
+from prompt_toolkit.document import Document
 
 from rich.console import Console
 
@@ -43,6 +46,319 @@ from shared.plugins.formatter_pipeline import create_pipeline
 from shared.plugins.hidden_content_filter import create_plugin as create_hidden_filter
 from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter
 from shared.plugins.diff_formatter import create_plugin as create_diff_formatter
+
+
+def consolidate_fragments(fragments):
+    """Consolidate consecutive fragments with the same style.
+
+    ANSI parsing produces character-by-character fragments.
+    This merges them into larger chunks for efficiency.
+    """
+    result = []
+    current_style = None
+    current_text = []
+    for style, char in fragments:
+        if style == current_style:
+            current_text.append(char)
+        else:
+            if current_text:
+                result.append((current_style, ''.join(current_text)))
+            current_style = style
+            current_text = [char]
+    if current_text:
+        result.append((current_style, ''.join(current_text)))
+    return result
+
+
+def ansi_to_plain_and_fragments(ansi_str: str) -> Tuple[str, List[Tuple[str, str]]]:
+    """Convert ANSI string to plain text and style fragments.
+
+    Returns:
+        Tuple of (plain_text, fragments) where fragments is a list of (style, text) tuples.
+    """
+    fragments = consolidate_fragments(to_formatted_text(ANSI(ansi_str)))
+    plain_text = ''.join(text for _, text in fragments)
+    return plain_text, fragments
+
+
+class StyledOutputProcessor(Processor):
+    """Input processor that applies stored style fragments to buffer lines.
+
+    This enables BufferControl to display styled text while maintaining
+    selection functionality. The styles are looked up from a callback
+    that returns fragments for each line number.
+
+    Selection is visualized by applying reverse video to selected characters.
+    """
+
+    def __init__(self, get_line_fragments: Callable[[int], Optional[List[Tuple[str, str]]]],
+                 buffer: Optional['Buffer'] = None):
+        self._get_line_fragments = get_line_fragments
+        self._buffer = buffer
+
+    def apply_transformation(self, ti: TransformationInput) -> Transformation:
+        """Apply stored styles to existing fragments, with selection highlighting."""
+        styled_fragments = self._get_line_fragments(ti.lineno)
+        if not styled_fragments:
+            # No styling info, return as-is
+            return Transformation(ti.fragments)
+
+        # Get total character count from input
+        input_text = ''.join(text for _, text in ti.fragments)
+        input_len = len(input_text)
+
+        if input_len == 0:
+            return Transformation(ti.fragments)
+
+        # Get selection range for this line if buffer has active selection
+        selection_start_col = None
+        selection_end_col = None
+        if self._buffer and self._buffer.selection_state:
+            doc = self._buffer.document
+            sel_start = min(self._buffer.cursor_position, self._buffer.selection_state.original_cursor_position)
+            sel_end = max(self._buffer.cursor_position, self._buffer.selection_state.original_cursor_position)
+
+            # Convert absolute positions to line/column
+            sel_start_row, sel_start_col_abs = doc.translate_index_to_position(sel_start)
+            sel_end_row, sel_end_col_abs = doc.translate_index_to_position(sel_end)
+
+            # Check if this line is within selection
+            if sel_start_row <= ti.lineno <= sel_end_row:
+                if sel_start_row == sel_end_row:
+                    # Selection on single line
+                    selection_start_col = sel_start_col_abs
+                    selection_end_col = sel_end_col_abs
+                elif ti.lineno == sel_start_row:
+                    # First line of multi-line selection
+                    selection_start_col = sel_start_col_abs
+                    selection_end_col = input_len
+                elif ti.lineno == sel_end_row:
+                    # Last line of multi-line selection
+                    selection_start_col = 0
+                    selection_end_col = sel_end_col_abs
+                else:
+                    # Middle line - fully selected
+                    selection_start_col = 0
+                    selection_end_col = input_len
+
+        # Build result using our styled fragments, but ensure character count matches
+        result = []
+        styled_char_count = 0
+
+        for style, text in styled_fragments:
+            if styled_char_count >= input_len:
+                break
+            # Truncate if this fragment would exceed input length
+            remaining = input_len - styled_char_count
+            if len(text) > remaining:
+                text = text[:remaining]
+            if text:
+                # Apply selection highlighting if this fragment overlaps selection
+                if selection_start_col is not None:
+                    frag_start = styled_char_count
+                    frag_end = styled_char_count + len(text)
+
+                    # Check overlap with selection
+                    if frag_end > selection_start_col and frag_start < selection_end_col:
+                        # Fragment overlaps with selection - split if needed
+                        parts = []
+
+                        # Part before selection
+                        if frag_start < selection_start_col:
+                            before_len = selection_start_col - frag_start
+                            parts.append((style, text[:before_len]))
+                            text = text[before_len:]
+                            frag_start = selection_start_col
+
+                        # Selected part
+                        sel_in_frag_end = min(frag_end, selection_end_col)
+                        sel_len = sel_in_frag_end - frag_start
+                        if sel_len > 0:
+                            # Add reverse video for selected text
+                            sel_style = style + ' reverse' if style else 'reverse'
+                            parts.append((sel_style, text[:sel_len]))
+                            text = text[sel_len:]
+
+                        # Part after selection
+                        if text:
+                            parts.append((style, text))
+
+                        result.extend(parts)
+                        styled_char_count = frag_end
+                        continue
+
+                result.append((style, text))
+                styled_char_count += len(text)
+
+        # If our styled fragments are shorter than input, pad with remaining input text
+        if styled_char_count < input_len:
+            remaining_text = input_text[styled_char_count:]
+            result.append(('', remaining_text))
+
+        return Transformation(result)
+
+
+def _clean_panel_borders(text: str) -> str:
+    """Remove Rich panel borders from multi-line selection.
+
+    When selecting text across lines in a Rich panel, the box-drawing
+    border characters get included. This cleans them up for clipboard.
+    """
+    lines = text.split('\n')
+    if len(lines) <= 1:
+        return text
+
+    import re
+    cleaned = []
+    for line in lines:
+        # Remove left border: box-drawing chars (│║┃) + optional space
+        line = re.sub(r'^[│║┃]+\s?', '', line)
+        # Remove right border: optional space + box-drawing chars
+        line = re.sub(r'\s?[│║┃]+$', '', line)
+        cleaned.append(line)
+
+    return '\n'.join(cleaned)
+
+
+class ScrollableBufferControl(BufferControl):
+    """BufferControl that handles mouse scroll events.
+
+    Extends BufferControl to intercept scroll events while preserving
+    text selection functionality.
+    """
+
+    # Double-click threshold in seconds
+    DOUBLE_CLICK_THRESHOLD = 0.4
+
+    def __init__(self, on_scroll_up=None, on_scroll_down=None, input_buffer=None,
+                 on_selection_complete=None, **kwargs):
+        super().__init__(**kwargs)
+        self._on_scroll_up = on_scroll_up
+        self._on_scroll_down = on_scroll_down
+        self._input_buffer = input_buffer  # Reference to input buffer for focus return
+        self._mouse_down_cursor_pos = None  # Track cursor position at mouse down
+        self._on_selection_complete = on_selection_complete  # Callback with selected text
+        self._last_click_time = 0.0  # For double-click detection
+        self._last_click_pos = None  # Position of last click
+
+    def _select_word_at_cursor(self) -> str | None:
+        """Select the word at the current cursor position and return it."""
+        doc = self.buffer.document
+        text = doc.text
+        pos = self.buffer.cursor_position
+
+        if not text or pos < 0 or pos > len(text):
+            return None
+
+        # Find word boundaries (alphanumeric + underscore)
+        def is_word_char(c):
+            return c.isalnum() or c == '_'
+
+        # Find start of word
+        start = pos
+        while start > 0 and is_word_char(text[start - 1]):
+            start -= 1
+
+        # Find end of word
+        end = pos
+        while end < len(text) and is_word_char(text[end]):
+            end += 1
+
+        if start == end:
+            return None
+
+        return text[start:end]
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        """Handle mouse scroll events, delegate others to parent."""
+        import time
+
+        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+            if self._on_scroll_up:
+                self._on_scroll_up()
+                return None  # Event handled
+        elif mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            if self._on_scroll_down:
+                self._on_scroll_down()
+                return None  # Event handled
+        # For click/drag events, handle focus and selection
+        if mouse_event.event_type == MouseEventType.MOUSE_DOWN:
+            from prompt_toolkit.application import get_app
+            from prompt_toolkit.selection import SelectionType
+            app = get_app()
+            if app and app.layout:
+                # Focus this control to enable selection
+                app.layout.focus(self)
+            # Call parent handler to set cursor position
+            super().mouse_handler(mouse_event)
+
+            current_time = time.time()
+            current_pos = self.buffer.cursor_position
+
+            # Check for double-click (same position within threshold)
+            is_double_click = (
+                self._last_click_pos is not None and
+                current_pos == self._last_click_pos and
+                (current_time - self._last_click_time) < self.DOUBLE_CLICK_THRESHOLD
+            )
+
+            if is_double_click:
+                # Double-click: select word, copy, deselect
+                word = self._select_word_at_cursor()
+                if word and self._on_selection_complete:
+                    self._on_selection_complete(word)
+                # Reset double-click tracking
+                self._last_click_time = 0.0
+                self._last_click_pos = None
+                self._mouse_down_cursor_pos = None
+                # Return focus to input
+                if app and app.layout and self._input_buffer:
+                    app.layout.focus(self._input_buffer)
+                return None
+
+            # Single click - track for potential double-click
+            self._last_click_time = current_time
+            self._last_click_pos = current_pos
+            # Remember cursor position at mouse down
+            self._mouse_down_cursor_pos = self.buffer.cursor_position
+            # Start selection from current cursor position
+            self.buffer.start_selection(selection_type=SelectionType.CHARACTERS)
+            return None
+        elif mouse_event.event_type == MouseEventType.MOUSE_MOVE:
+            # During drag, update cursor position (extends selection)
+            super().mouse_handler(mouse_event)
+            return None
+        elif mouse_event.event_type == MouseEventType.MOUSE_UP:
+            # Update final cursor position
+            super().mouse_handler(mouse_event)
+            # If cursor didn't move (just a click, no drag), clear selection
+            if self._mouse_down_cursor_pos is not None:
+                if self.buffer.cursor_position == self._mouse_down_cursor_pos:
+                    # Just a click without drag - clear selection
+                    self.buffer.exit_selection()
+                else:
+                    # Selection completed - copy to clipboard if callback provided
+                    if self._on_selection_complete and self.buffer.selection_state:
+                        # Get selected text by extracting range from document
+                        sel_start = min(self.buffer.cursor_position,
+                                        self.buffer.selection_state.original_cursor_position)
+                        sel_end = max(self.buffer.cursor_position,
+                                      self.buffer.selection_state.original_cursor_position)
+                        selected_text = self.buffer.document.text[sel_start:sel_end]
+                        # Clean up panel borders from multi-line selections
+                        selected_text = _clean_panel_borders(selected_text)
+                        if selected_text:
+                            self._on_selection_complete(selected_text)
+                    # Clear selection after copying
+                    self.buffer.exit_selection()
+            self._mouse_down_cursor_pos = None
+            # Return focus to input so user can type
+            from prompt_toolkit.application import get_app
+            app = get_app()
+            if app and app.layout and self._input_buffer:
+                app.layout.focus(self._input_buffer)
+            return None
+        return super().mouse_handler(mouse_event)
 
 
 class RichRenderer:
@@ -172,6 +488,14 @@ class PTDisplay:
 
         # Rich renderer
         self._renderer = RichRenderer(self._width)
+
+        # Output display buffer (prompt_toolkit Buffer for selection support)
+        # Plain text goes here, styling is applied via StyledOutputProcessor
+        self._output_pt_buffer = Buffer(
+            document=Document("", 0),
+            read_only=True,
+        )
+        self._output_line_fragments: Dict[int, List[Tuple[str, str]]] = {}
 
         # Input handling with optional completion
         self._input_handler = input_handler
@@ -579,6 +903,84 @@ class PTDisplay:
         # Use full-width renderer - Panel's width parameter handles sizing
         return to_formatted_text(ANSI(self._renderer.render(panel)))
 
+    def _sync_output_display(self):
+        """Sync the output display buffer and fragments from ANSI content.
+
+        Converts ANSI output to:
+        1. Plain text in _output_pt_buffer (enables selection)
+        2. Style fragments in _output_line_fragments (enables styling)
+        """
+        # Check for terminal resize
+        self._update_dimensions()
+
+        # Get ANSI content
+        ansi_content = self._renderer.render(self._get_output_panel_content())
+
+        # Convert to plain text and fragments
+        plain_text, all_fragments = ansi_to_plain_and_fragments(ansi_content)
+
+        # Split fragments by line for the processor
+        self._output_line_fragments.clear()
+        line_num = 0
+        current_line_fragments = []
+        char_pos = 0
+
+        for style, text in all_fragments:
+            # Split text by newlines
+            parts = text.split('\n')
+            for i, part in enumerate(parts):
+                if part:
+                    current_line_fragments.append((style, part))
+                if i < len(parts) - 1:  # Newline encountered
+                    self._output_line_fragments[line_num] = current_line_fragments
+                    line_num += 1
+                    current_line_fragments = []
+
+        # Store last line if any content
+        if current_line_fragments:
+            self._output_line_fragments[line_num] = current_line_fragments
+
+        # Update the buffer with plain text, preserving selection state and cursor position
+        old_selection = self._output_pt_buffer.selection_state
+        old_cursor = self._output_pt_buffer.cursor_position
+        self._output_pt_buffer.set_document(
+            Document(plain_text, len(plain_text)),
+            bypass_readonly=True
+        )
+        # Restore selection and cursor position if selection was active (user might be selecting text)
+        if old_selection:
+            self._output_pt_buffer.selection_state = old_selection
+            # Clamp cursor to new document length in case document got shorter
+            self._output_pt_buffer.cursor_position = min(old_cursor, len(plain_text))
+
+    def _get_output_panel_content(self):
+        """Get the raw Rich panel for output (before ANSI rendering)."""
+        # Use pager temp buffer if pager is active, otherwise use main buffer
+        if getattr(self, '_pager_active', False) and hasattr(self, '_pager_temp_buffer'):
+            output_buffer = self._pager_temp_buffer
+        elif self._agent_registry:
+            output_buffer = self._agent_registry.get_selected_buffer()
+            if not output_buffer:
+                output_buffer = self._output_buffer
+        else:
+            output_buffer = self._output_buffer
+
+        # Calculate available height
+        input_height = self._get_input_height()
+        tab_bar_height = 1 if self._agent_tab_bar else 0
+        session_bar_height = 1
+        available_height = self._height - session_bar_height - 1 - tab_bar_height - input_height
+        panel_width = self._width
+
+        return output_buffer.render_panel(
+            height=available_height,
+            width=panel_width,
+        )
+
+    def _get_line_fragments(self, lineno: int) -> Optional[List[Tuple[str, str]]]:
+        """Get style fragments for a specific line (for StyledOutputProcessor)."""
+        return self._output_line_fragments.get(lineno)
+
     def _get_agent_tab_bar_content(self):
         """Get agent tab bar content as prompt_toolkit formatted text."""
         if not self._agent_tab_bar:
@@ -800,6 +1202,7 @@ class PTDisplay:
                     self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
             else:
                 self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
+            self._sync_output_display()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("scroll_down"))
@@ -814,6 +1217,7 @@ class PTDisplay:
                     self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
             else:
                 self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
+            self._sync_output_display()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("scroll_top"))
@@ -828,6 +1232,7 @@ class PTDisplay:
                     self._output_buffer.scroll_to_top()
             else:
                 self._output_buffer.scroll_to_top()
+            self._sync_output_display()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("scroll_bottom"))
@@ -842,6 +1247,38 @@ class PTDisplay:
                     self._output_buffer.scroll_to_bottom()
             else:
                 self._output_buffer.scroll_to_bottom()
+            self._sync_output_display()
+            self._app.invalidate()
+
+        # Mouse scroll handlers - bind mouse wheel to page up/down
+        @kb.add(*keys.get_key_args("mouse_scroll_up"), eager=True)
+        def handle_mouse_scroll_up(event):
+            """Handle mouse scroll up - scroll output up."""
+            # Use selected agent's buffer if registry present
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.scroll_up(lines=self._get_scroll_page_size())
+                else:
+                    self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
+            else:
+                self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
+            self._sync_output_display()
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("mouse_scroll_down"), eager=True)
+        def handle_mouse_scroll_down(event):
+            """Handle mouse scroll down - scroll output down."""
+            # Use selected agent's buffer if registry present
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.scroll_down(lines=self._get_scroll_page_size())
+                else:
+                    self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
+            else:
+                self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
+            self._sync_output_display()
             self._app.invalidate()
 
         @kb.add(*keys.get_key_args("nav_up"), eager=True)
@@ -989,9 +1426,74 @@ class PTDisplay:
             input_h = self._get_input_height()
             return max(1, total - fixed - pending - input_h)
 
+        # Mouse scroll callbacks for output panel
+        # Use smaller scroll amount (3 lines) for smoother mouse scrolling
+        mouse_scroll_lines = 3
+
+        def on_mouse_scroll_up():
+            """Handle mouse scroll up in output panel."""
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.scroll_up(lines=mouse_scroll_lines)
+                else:
+                    self._output_buffer.scroll_up(lines=mouse_scroll_lines)
+            else:
+                self._output_buffer.scroll_up(lines=mouse_scroll_lines)
+            # Re-sync display to reflect new scroll position, then invalidate
+            self._sync_output_display()
+            if self._app:
+                self._app.invalidate()
+
+        def on_mouse_scroll_down():
+            """Handle mouse scroll down in output panel."""
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.scroll_down(lines=mouse_scroll_lines)
+                else:
+                    self._output_buffer.scroll_down(lines=mouse_scroll_lines)
+            else:
+                self._output_buffer.scroll_down(lines=mouse_scroll_lines)
+            # Re-sync display to reflect new scroll position, then invalidate
+            self._sync_output_display()
+            if self._app:
+                self._app.invalidate()
+
         # Output panel (fills remaining space minus pending prompts)
+        # Uses BufferControl for mouse selection support, with StyledOutputProcessor for ANSI styling
+        styled_processor = StyledOutputProcessor(self._get_line_fragments, buffer=self._output_pt_buffer)
+        def on_selection_complete(text: str) -> None:
+            """Copy selected text to clipboard."""
+            success = self._clipboard.copy(text)
+            # Show status with provider info for debugging
+            char_count = len(text)
+            provider_name = getattr(self._clipboard, 'name', 'unknown')
+            if success:
+                self.set_status_message(f"Copied {char_count} chars via {provider_name}")
+            else:
+                # Try to get error details
+                error = ""
+                if hasattr(self._clipboard, '_native'):
+                    error = getattr(self._clipboard._native, '_last_error', '') or ''
+                elif hasattr(self._clipboard, '_last_error'):
+                    error = getattr(self._clipboard, '_last_error', '') or ''
+                if error:
+                    self.set_status_message(f"Copy failed: {error[:50]}")
+                else:
+                    self.set_status_message(f"Copy failed ({provider_name})")
+
+        self._output_control = ScrollableBufferControl(
+            buffer=self._output_pt_buffer,
+            input_processors=[styled_processor],
+            focusable=True,
+            on_scroll_up=on_mouse_scroll_up,
+            on_scroll_down=on_mouse_scroll_down,
+            input_buffer=self._input_buffer,  # For returning focus after selection
+            on_selection_complete=on_selection_complete,
+        )
         output_window = Window(
-            FormattedTextControl(self._get_output_content),
+            self._output_control,
             height=get_output_height,
             wrap_lines=False,
             style="class:output-panel",
@@ -1139,22 +1641,24 @@ class PTDisplay:
             layout=layout,
             key_bindings=kb,
             full_screen=True,
-            mouse_support=False,
+            mouse_support=True,
             style=style,
         )
 
     def refresh(self) -> None:
         """Refresh the display.
 
-        Invalidates the prompt_toolkit app to trigger re-render.
-        The content getter methods (_get_plan_content, _get_output_content)
-        are called automatically during render.
+        Syncs the output buffer and invalidates the prompt_toolkit app to trigger re-render.
+        The output sync updates the plain text buffer and style fragments for the
+        BufferControl-based output panel.
 
         NOTE: We only call invalidate() - do NOT call renderer.render() directly
         as this may be called from background threads and would cause race
         conditions with the main event loop's rendering.
         """
         if self._app and self._app.is_running:
+            # Sync output buffer and fragments for styled BufferControl
+            self._sync_output_display()
             # Invalidate schedules a redraw in the main event loop
             self._app.invalidate()
 

@@ -263,7 +263,7 @@ def show_keybindings(display) -> None:
     categories = {
         "Input": ["submit", "newline", "clear_input"],
         "Exit/Cancel": ["cancel", "exit"],
-        "Scrolling": ["scroll_up", "scroll_down", "scroll_top", "scroll_bottom"],
+        "Scrolling": ["scroll_up", "scroll_down", "scroll_top", "scroll_bottom", "mouse_scroll_up", "mouse_scroll_down"],
         "Navigation": ["nav_up", "nav_down"],
         "Pager": ["pager_quit", "pager_next"],
         "Features": ["toggle_plan", "toggle_tools", "cycle_agents", "yank", "view_full"],

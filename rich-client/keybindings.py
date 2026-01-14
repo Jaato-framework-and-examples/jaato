@@ -99,6 +99,8 @@ def format_key_for_display(key: KeyBinding) -> str:
         "down": "Down",
         "left": "Left",
         "right": "Right",
+        "<scroll-up>": "ScrollUp",
+        "<scroll-down>": "ScrollDn",
     }
 
     if key_str in special_keys:
@@ -128,6 +130,10 @@ DEFAULT_KEYBINDINGS = {
     "scroll_down": "pagedown",
     "scroll_top": "home",
     "scroll_bottom": "end",
+
+    # Mouse scroll (bound to same action as page up/down)
+    "mouse_scroll_up": "<scroll-up>",
+    "mouse_scroll_down": "<scroll-down>",
 
     # Navigation (also used for history when not in popup mode)
     "nav_up": "up",
@@ -292,6 +298,10 @@ class KeybindingConfig:
     scroll_down: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["scroll_down"])
     scroll_top: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["scroll_top"])
     scroll_bottom: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["scroll_bottom"])
+
+    # Mouse scroll
+    mouse_scroll_up: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["mouse_scroll_up"])
+    mouse_scroll_down: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["mouse_scroll_down"])
 
     # Navigation
     nav_up: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["nav_up"])
@@ -488,6 +498,8 @@ class KeybindingConfig:
             "scroll_down": self.scroll_down,
             "scroll_top": self.scroll_top,
             "scroll_bottom": self.scroll_bottom,
+            "mouse_scroll_up": self.mouse_scroll_up,
+            "mouse_scroll_down": self.mouse_scroll_down,
             "nav_up": self.nav_up,
             "nav_down": self.nav_down,
             "pager_quit": self.pager_quit,
@@ -661,6 +673,9 @@ def generate_example_config() -> str:
         "scroll_down": "pagedown",
         "scroll_top": "home",
         "scroll_bottom": "end",
+
+        "mouse_scroll_up": "<scroll-up>",
+        "mouse_scroll_down": "<scroll-down>",
 
         "nav_up": "up",
         "nav_down": "down",
