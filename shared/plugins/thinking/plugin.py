@@ -110,18 +110,17 @@ class ThinkingPlugin:
         if not self._session:
             return
 
-        # Check if session's provider supports thinking
-        if hasattr(self._session, '_provider') and self._session._provider:
-            provider = self._session._provider
-            if hasattr(provider, 'set_thinking_config'):
-                provider.set_thinking_config(self._current_config)
-            elif hasattr(provider, 'supports_thinking'):
-                if not provider.supports_thinking() and self._current_config.enabled:
-                    # Provider doesn't support thinking - warn but continue
-                    self._emit_output(
-                        f"Warning: Current provider does not support thinking mode",
-                        "system"
-                    )
+        # Use session's set_thinking_config method which properly accesses provider
+        if hasattr(self._session, 'set_thinking_config'):
+            self._session.set_thinking_config(self._current_config)
+
+        # Check provider support for warning message
+        if hasattr(self._session, 'supports_thinking'):
+            if not self._session.supports_thinking() and self._current_config.enabled:
+                self._emit_output(
+                    "Warning: Current provider does not support thinking mode",
+                    "system"
+                )
 
     def _emit_output(self, text: str, source: str = "thinking") -> None:
         """Emit output via callback or print."""
@@ -257,14 +256,14 @@ class ThinkingPlugin:
                 current_preset = name
                 break
 
-        # Check provider support
+        # Check provider support via session's public API
         provider_supports = True
         provider_name = None
-        if self._session and hasattr(self._session, '_provider') and self._session._provider:
-            provider = self._session._provider
-            provider_name = getattr(provider, 'name', None)
-            if hasattr(provider, 'supports_thinking'):
-                provider_supports = provider.supports_thinking()
+        if self._session:
+            if hasattr(self._session, 'supports_thinking'):
+                provider_supports = self._session.supports_thinking()
+            if hasattr(self._session, 'provider_name'):
+                provider_name = self._session.provider_name
 
         status = {
             "enabled": self._current_config.enabled,
