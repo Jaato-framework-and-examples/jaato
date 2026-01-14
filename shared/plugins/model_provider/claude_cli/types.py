@@ -102,6 +102,9 @@ class ContentBlockType(str, Enum):
     TEXT = "text"
     """Plain text content."""
 
+    THINKING = "thinking"
+    """Extended thinking content (reasoning before response)."""
+
     TOOL_USE = "tool_use"
     """Tool invocation request."""
 
@@ -128,6 +131,36 @@ class TextBlock:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TextBlock":
         return cls(text=data.get("text", ""))
+
+
+@dataclass
+class ThinkingBlock:
+    """Extended thinking content block.
+
+    Contains Claude's internal reasoning process before generating a response.
+    The signature field is used for verification when passing thinking blocks
+    back to the API.
+    """
+
+    thinking: str
+    signature: str = ""
+
+    @property
+    def type(self) -> ContentBlockType:
+        return ContentBlockType.THINKING
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = {"type": "thinking", "thinking": self.thinking}
+        if self.signature:
+            result["signature"] = self.signature
+        return result
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ThinkingBlock":
+        return cls(
+            thinking=data.get("thinking", ""),
+            signature=data.get("signature", ""),
+        )
 
 
 @dataclass
@@ -193,7 +226,7 @@ class ToolResultBlock:
         )
 
 
-ContentBlock = Union[TextBlock, ToolUseBlock, ToolResultBlock]
+ContentBlock = Union[TextBlock, ThinkingBlock, ToolUseBlock, ToolResultBlock]
 
 
 def parse_content_block(data: Dict[str, Any]) -> ContentBlock:
@@ -202,6 +235,8 @@ def parse_content_block(data: Dict[str, Any]) -> ContentBlock:
 
     if block_type == "text":
         return TextBlock.from_dict(data)
+    elif block_type == "thinking":
+        return ThinkingBlock.from_dict(data)
     elif block_type == "tool_use":
         return ToolUseBlock.from_dict(data)
     elif block_type == "tool_result":
@@ -521,6 +556,7 @@ class StreamEvent:
     event_type: str  # message_start, content_block_start, content_block_delta, etc.
     session_id: str
     delta_text: Optional[str] = None  # Text delta from content_block_delta
+    delta_thinking: Optional[str] = None  # Thinking delta from content_block_delta
     raw_event: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -532,22 +568,32 @@ class StreamEvent:
         """Check if this is a text delta event with content."""
         return self.event_type == "content_block_delta" and self.delta_text is not None
 
+    @property
+    def is_thinking_delta(self) -> bool:
+        """Check if this is a thinking delta event with content."""
+        return self.event_type == "content_block_delta" and self.delta_thinking is not None
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "StreamEvent":
         event = data.get("event", {})
         event_type = event.get("type", "")
 
-        # Extract text delta if present
+        # Extract text or thinking delta if present
         delta_text = None
+        delta_thinking = None
         if event_type == "content_block_delta":
             delta = event.get("delta", {})
-            if delta.get("type") == "text_delta":
+            delta_type = delta.get("type", "")
+            if delta_type == "text_delta":
                 delta_text = delta.get("text", "")
+            elif delta_type == "thinking_delta":
+                delta_thinking = delta.get("thinking", "")
 
         return cls(
             event_type=event_type,
             session_id=data.get("session_id", ""),
             delta_text=delta_text,
+            delta_thinking=delta_thinking,
             raw_event=event,
         )
 
