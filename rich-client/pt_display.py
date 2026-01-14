@@ -23,6 +23,7 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.filters import Condition
+from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 
 from rich.console import Console
 
@@ -43,6 +44,31 @@ from shared.plugins.formatter_pipeline import create_pipeline
 from shared.plugins.hidden_content_filter import create_plugin as create_hidden_filter
 from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter
 from shared.plugins.diff_formatter import create_plugin as create_diff_formatter
+
+
+class ScrollableFormattedTextControl(FormattedTextControl):
+    """FormattedTextControl that handles mouse scroll events.
+
+    Delegates scroll events to a callback for handling by the parent display.
+    """
+
+    def __init__(self, text, on_scroll_up=None, on_scroll_down=None, **kwargs):
+        super().__init__(text, **kwargs)
+        self._on_scroll_up = on_scroll_up
+        self._on_scroll_down = on_scroll_down
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        """Handle mouse scroll events."""
+        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+            if self._on_scroll_up:
+                self._on_scroll_up()
+                return None  # Event handled
+        elif mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            if self._on_scroll_down:
+                self._on_scroll_down()
+                return None  # Event handled
+        # Let parent handle other events
+        return NotImplemented
 
 
 class RichRenderer:
@@ -844,6 +870,35 @@ class PTDisplay:
                 self._output_buffer.scroll_to_bottom()
             self._app.invalidate()
 
+        # Mouse scroll handlers - bind mouse wheel to page up/down
+        @kb.add(*keys.get_key_args("mouse_scroll_up"), eager=True)
+        def handle_mouse_scroll_up(event):
+            """Handle mouse scroll up - scroll output up."""
+            # Use selected agent's buffer if registry present
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.scroll_up(lines=self._get_scroll_page_size())
+                else:
+                    self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
+            else:
+                self._output_buffer.scroll_up(lines=self._get_scroll_page_size())
+            self._app.invalidate()
+
+        @kb.add(*keys.get_key_args("mouse_scroll_down"), eager=True)
+        def handle_mouse_scroll_down(event):
+            """Handle mouse scroll down - scroll output down."""
+            # Use selected agent's buffer if registry present
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.scroll_down(lines=self._get_scroll_page_size())
+                else:
+                    self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
+            else:
+                self._output_buffer.scroll_down(lines=self._get_scroll_page_size())
+            self._app.invalidate()
+
         @kb.add(*keys.get_key_args("nav_up"), eager=True)
         def handle_up(event):
             """Handle Up arrow - tool nav, scroll popup, or history/completion."""
@@ -989,9 +1044,43 @@ class PTDisplay:
             input_h = self._get_input_height()
             return max(1, total - fixed - pending - input_h)
 
+        # Mouse scroll callbacks for output panel
+        # Use smaller scroll amount (3 lines) for smoother mouse scrolling
+        mouse_scroll_lines = 3
+
+        def on_mouse_scroll_up():
+            """Handle mouse scroll up in output panel."""
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.scroll_up(lines=mouse_scroll_lines)
+                else:
+                    self._output_buffer.scroll_up(lines=mouse_scroll_lines)
+            else:
+                self._output_buffer.scroll_up(lines=mouse_scroll_lines)
+            if self._app:
+                self._app.invalidate()
+
+        def on_mouse_scroll_down():
+            """Handle mouse scroll down in output panel."""
+            if self._agent_registry:
+                buffer = self._agent_registry.get_selected_buffer()
+                if buffer:
+                    buffer.scroll_down(lines=mouse_scroll_lines)
+                else:
+                    self._output_buffer.scroll_down(lines=mouse_scroll_lines)
+            else:
+                self._output_buffer.scroll_down(lines=mouse_scroll_lines)
+            if self._app:
+                self._app.invalidate()
+
         # Output panel (fills remaining space minus pending prompts)
         output_window = Window(
-            FormattedTextControl(self._get_output_content),
+            ScrollableFormattedTextControl(
+                self._get_output_content,
+                on_scroll_up=on_mouse_scroll_up,
+                on_scroll_down=on_mouse_scroll_down,
+            ),
             height=get_output_height,
             wrap_lines=False,
             style="class:output-panel",
@@ -1139,7 +1228,7 @@ class PTDisplay:
             layout=layout,
             key_bindings=kb,
             full_screen=True,
-            mouse_support=False,
+            mouse_support=True,
             style=style,
         )
 
