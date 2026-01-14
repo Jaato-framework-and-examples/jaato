@@ -63,7 +63,7 @@ from pt_display import PTDisplay
 from plan_reporter import create_live_reporter
 from agent_registry import AgentRegistry
 from keybindings import load_keybindings, detect_terminal, list_available_profiles
-from theme import load_theme
+from theme import load_theme, list_available_themes
 
 # Backend abstraction for mode-agnostic operation
 from backend import Backend, DirectBackend, IPCBackend
@@ -113,6 +113,7 @@ class RichClient:
 
         # Input handler (for file expansion, history, completions)
         self._input_handler = InputHandler()
+        self._input_handler.set_available_themes(list_available_themes())
 
         # Track original inputs for session export
         self._original_inputs: list[dict] = []
@@ -1965,15 +1966,16 @@ class RichClient:
         Subcommands:
             theme           - Show current theme info
             theme reload    - Reload theme from config files
-            theme <preset>  - Switch to a preset (dark, light, high-contrast)
+            theme <preset>  - Switch to an available theme
 
         Args:
             user_input: The full user input string starting with 'theme'.
         """
-        from theme import load_theme, BUILTIN_THEMES, save_theme_preference
+        from theme import load_theme, BUILTIN_THEMES, save_theme_preference, list_available_themes
 
         parts = user_input.strip().split(maxsplit=1)
         subcommand = parts[1].lower() if len(parts) > 1 else ""
+        available = list_available_themes()
 
         if not subcommand:
             # Show current theme info
@@ -1988,12 +1990,14 @@ class RichClient:
             self._display.add_system_message("")
             self._display.add_system_message("Commands:", "system_info")
             self._display.add_system_message("  theme reload           - Reload from config files", "hint")
-            self._display.add_system_message("  theme <preset>         - Switch preset (dark, light, high-contrast)", "hint")
+            self._display.add_system_message(f"  theme <preset>         - Switch preset ({', '.join(sorted(available))})", "hint")
             return
 
         if subcommand == "reload":
             new_theme = load_theme()
             self._display.set_theme(new_theme)
+            # Refresh available themes list for completions
+            self._input_handler.set_available_themes(list_available_themes())
             self._display.add_system_message(f"Theme reloaded: {new_theme.name}", "system_success")
             self._display.add_system_message(f"Source: {new_theme.source_path}", "hint")
             return
@@ -2007,7 +2011,7 @@ class RichClient:
 
         # Unknown subcommand
         self._display.add_system_message(f"Unknown theme command: {subcommand}", "system_warning")
-        self._display.add_system_message("Available: reload, dark, light, high-contrast", "hint")
+        self._display.add_system_message(f"Available: reload, {', '.join(sorted(available))}", "hint")
 
     def _get_tool_status(self) -> list:
         """Get status of all tools including enabled/disabled state."""
@@ -2937,6 +2941,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
     # Create input handler for completions - use default commands like direct mode
     # Server/plugin commands are added dynamically when CommandListEvent is received
     input_handler = InputHandler()
+    input_handler.set_available_themes(list_available_themes())
 
     # Session provider will be set after state variables are defined (below)
 
@@ -3929,8 +3934,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
                 # Theme command - handle locally
                 elif cmd == "theme":
-                    from theme import load_theme, BUILTIN_THEMES, save_theme_preference
+                    from theme import load_theme, BUILTIN_THEMES, save_theme_preference, list_available_themes
                     subcmd = args[0].lower() if args else ""
+                    available = list_available_themes()
 
                     if not subcmd:
                         # Show current theme info
@@ -3945,10 +3951,12 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         display.add_system_message("")
                         display.add_system_message("Commands:", "system_info")
                         display.add_system_message("  theme reload           - Reload from config files", "hint")
-                        display.add_system_message("  theme <preset>         - Switch preset (dark, light, high-contrast)", "hint")
+                        display.add_system_message(f"  theme <preset>         - Switch preset ({', '.join(sorted(available))})", "hint")
                     elif subcmd == "reload":
                         new_theme = load_theme()
                         display.set_theme(new_theme)
+                        # Refresh available themes list for completions
+                        input_handler.set_available_themes(list_available_themes())
                         display.add_system_message(f"Theme reloaded: {new_theme.name}", "system_success")
                         display.add_system_message(f"Source: {new_theme.source_path}", "hint")
                     elif subcmd in BUILTIN_THEMES:
@@ -3958,7 +3966,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         display.add_system_message(f"Switched to '{subcmd}' theme", "system_success")
                     else:
                         display.add_system_message(f"Unknown theme command: {subcmd}", "system_warning")
-                        display.add_system_message("Available: reload, dark, light, high-contrast", "hint")
+                        display.add_system_message(f"Available: reload, {', '.join(sorted(available))}", "hint")
                     continue
 
                 # Other server commands (reset, plugin commands) - forward directly

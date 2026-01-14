@@ -120,9 +120,9 @@ Captures are saved to `/tmp/jaato_vision/` by default. SVG is the default format
 
 | Command | Description |
 |---------|-------------|
-| `/theme` | Show current theme info |
-| `/theme <name>` | Switch theme (dark, light, high-contrast) |
-| `/theme reload` | Reload from config files |
+| `theme` | Show current theme info |
+| `theme <name>` | Switch theme (dark, light, high-contrast, dracula, or custom) |
+| `theme reload` | Reload from config files |
 
 ## Default Keybindings
 

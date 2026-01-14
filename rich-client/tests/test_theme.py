@@ -19,7 +19,7 @@ from theme import (
     validate_theme,
     is_hex_color,
     BUILTIN_THEMES,
-    BUILTIN_THEME_NAMES,
+    get_builtin_theme_names,
     DEFAULT_PALETTE,
     DEFAULT_SEMANTIC_STYLES,
     get_semantic_style_names,
@@ -611,7 +611,7 @@ class TestJSONThemeLoading:
     def test_builtin_themes_json_files_exist(self):
         """Test JSON files exist for all built-in themes."""
         themes_dir = _get_builtin_themes_dir()
-        for name in BUILTIN_THEME_NAMES:
+        for name in get_builtin_theme_names():
             theme_file = themes_dir / f"{name}.json"
             assert theme_file.exists(), f"Theme file should exist: {theme_file}"
 
@@ -654,7 +654,7 @@ class TestJSONThemeLoading:
     def test_list_available_themes_includes_builtins(self):
         """Test list_available_themes includes all built-in themes."""
         themes = list_available_themes()
-        for name in BUILTIN_THEME_NAMES:
+        for name in get_builtin_theme_names():
             assert name in themes
 
     def test_list_available_themes_sorted(self):
@@ -664,7 +664,7 @@ class TestJSONThemeLoading:
 
     def test_theme_json_has_all_semantic_styles(self):
         """Test JSON theme files have all semantic styles."""
-        for name in BUILTIN_THEME_NAMES:
+        for name in get_builtin_theme_names():
             theme = get_builtin_theme(name)
             for style_name in get_semantic_style_names():
                 assert style_name in theme.semantic, \
@@ -672,7 +672,7 @@ class TestJSONThemeLoading:
 
     def test_theme_json_has_all_palette_colors(self):
         """Test JSON theme files have all palette colors."""
-        for name in BUILTIN_THEME_NAMES:
+        for name in get_builtin_theme_names():
             theme = get_builtin_theme(name)
             for color_name in get_palette_color_names():
                 assert color_name in theme.colors, \

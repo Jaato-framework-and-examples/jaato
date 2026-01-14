@@ -177,8 +177,28 @@ class StyleSpec:
         return result
 
 
-# Names of built-in themes (available as JSON files in themes/ directory)
-BUILTIN_THEME_NAMES = ["dark", "light", "high-contrast"]
+def _discover_builtin_themes() -> List[str]:
+    """Discover built-in themes by scanning the themes/ directory.
+
+    Returns:
+        List of theme names (without .json extension).
+    """
+    themes_dir = _get_builtin_themes_dir()
+    if not themes_dir.exists():
+        return ["dark"]  # Minimum fallback
+
+    return sorted([
+        path.stem for path in themes_dir.glob("*.json")
+    ])
+
+
+def get_builtin_theme_names() -> List[str]:
+    """Get list of built-in theme names.
+
+    Returns:
+        List of available built-in theme names.
+    """
+    return _discover_builtin_themes()
 
 # Fallback palette colors (used when JSON files are unavailable)
 # These are kept as a safety net and for backwards compatibility.
@@ -232,7 +252,6 @@ _FALLBACK_PALETTE_HIGH_CONTRAST = {
 
 # Backwards compatibility alias
 HIGH_CONTRAST_PALETTE = _FALLBACK_PALETTE_HIGH_CONTRAST
-
 
 # Default semantic style mappings
 DEFAULT_SEMANTIC_STYLES = {
@@ -551,7 +570,7 @@ def get_builtin_theme(theme_name: str) -> "ThemeConfig":
     Returns:
         ThemeConfig instance.
     """
-    if theme_name not in BUILTIN_THEME_NAMES:
+    if theme_name not in get_builtin_theme_names():
         logger.warning(f"Unknown theme '{theme_name}', falling back to 'dark'")
         theme_name = "dark"
 
@@ -571,7 +590,7 @@ def list_available_themes() -> List[str]:
     Returns:
         List of theme names (built-in + any custom themes found).
     """
-    themes = set(BUILTIN_THEME_NAMES)
+    themes = set(get_builtin_theme_names())
 
     # Check for custom themes in user directory
     user_themes_dir = Path.home() / ".jaato" / "themes"
@@ -951,28 +970,28 @@ class _BuiltinThemesDict(dict):
         return super().__getitem__(key)
 
     def __contains__(self, key: object) -> bool:
-        return key in BUILTIN_THEME_NAMES
+        return key in get_builtin_theme_names()
 
     def get(self, key: str, default=None) -> Optional[ThemeConfig]:
-        if key not in BUILTIN_THEME_NAMES:
+        if key not in get_builtin_theme_names():
             return default
         return self[key]
 
     def _load_theme(self, name: str) -> None:
         """Load a theme and cache it."""
-        if name in BUILTIN_THEME_NAMES:
+        if name in get_builtin_theme_names():
             theme = get_builtin_theme(name)
             super().__setitem__(name, theme)
             self._loaded.add(name)
 
     def keys(self):
-        return BUILTIN_THEME_NAMES
+        return get_builtin_theme_names()
 
     def values(self):
-        return [self[name] for name in BUILTIN_THEME_NAMES]
+        return [self[name] for name in get_builtin_theme_names()]
 
     def items(self):
-        return [(name, self[name]) for name in BUILTIN_THEME_NAMES]
+        return [(name, self[name]) for name in get_builtin_theme_names()]
 
 
 # Built-in themes (lazy-loaded from JSON files)
@@ -1035,14 +1054,14 @@ def load_theme(
 
     # Check for preset selection via environment (highest priority - temporary override)
     preset = os.environ.get("JAATO_THEME", "").strip().lower()
-    if preset and preset in BUILTIN_THEME_NAMES:
+    if preset and preset in get_builtin_theme_names():
         logger.info(f"Using theme preset '{preset}' from JAATO_THEME environment variable")
         return get_builtin_theme(preset).copy()
 
     # Check for saved user preference
     saved_pref = load_theme_preference()
     if saved_pref:
-        if saved_pref in BUILTIN_THEME_NAMES:
+        if saved_pref in get_builtin_theme_names():
             logger.info(f"Using saved theme preference: {saved_pref}")
             return get_builtin_theme(saved_pref).copy()
         # If preference is "custom" or unknown, fall through to file loading
