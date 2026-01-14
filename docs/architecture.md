@@ -942,6 +942,41 @@ The `enrichment_only` mode is used when:
 2. You want to avoid duplicate tool declarations in `get_exposed_tool_schemas()`
 3. The plugin only needs prompt enrichment, not full exposure
 
+### Plugin Auto-Wiring
+
+Plugins are automatically wired to shared resources during initialization, eliminating manual setup:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Plugin Auto-Wiring                                   │
+│                                                                             │
+│  ┌────────────────────────────────────────────────────────────────────┐     │
+│  │  During PluginRegistry.expose_tool():                              │     │
+│  │    for each exposed plugin:                                        │     │
+│  │      if hasattr(plugin, 'set_plugin_registry'):                   │     │
+│  │        plugin.set_plugin_registry(registry)  ◄─── Cross-plugin    │     │
+│  └────────────────────────────────────────────────────────────────────┘     │
+│                                                                             │
+│  ┌────────────────────────────────────────────────────────────────────┐     │
+│  │  During JaatoSession.configure():                                  │     │
+│  │    for each exposed plugin:                                        │     │
+│  │      if hasattr(plugin, 'set_session'):                           │     │
+│  │        plugin.set_session(session)  ◄─── Session access            │     │
+│  └────────────────────────────────────────────────────────────────────┘     │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+| Method | Called During | By | Purpose |
+|--------|--------------|-----|---------|
+| `set_plugin_registry(registry)` | `expose_tool()` | PluginRegistry | Cross-plugin access |
+| `set_session(session)` | `configure()` | JaatoSession | Session/provider access |
+
+Plugins using auto-wiring:
+- **`set_plugin_registry()`**: `background`, `file_edit`, `cli`, `references`, `artifact_tracker`
+- **`set_session()`**: `thinking` (for applying thinking config to provider)
+
+This pattern ensures plugins get wired automatically when discovered and exposed, without requiring explicit wiring in client code
+
 ```mermaid
 flowchart LR
     subgraph Registry["PluginRegistry"]

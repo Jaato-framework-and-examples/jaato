@@ -17,6 +17,7 @@ from ..base import (
     FunctionCallDetectedCallback,
     ProviderConfig,
     StreamingCallback,
+    ThinkingCallback,
     UsageUpdateCallback,
 )
 from ..types import (
@@ -46,6 +47,7 @@ from .types import (
     StreamEvent,
     SystemMessage,
     TextBlock,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -475,6 +477,7 @@ class ClaudeCLIProvider:
         response_schema: Optional[Dict[str, Any]] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
     ) -> ProviderResponse:
         """Send a message with streaming response.
 
@@ -485,6 +488,7 @@ class ClaudeCLIProvider:
             response_schema: Not supported.
             on_usage_update: Optional callback for token usage updates.
             on_function_call: Optional callback when function call detected.
+            on_thinking: Optional callback for extended thinking content.
 
         Returns:
             ProviderResponse with accumulated text and/or function calls.
@@ -495,6 +499,7 @@ class ClaudeCLIProvider:
             cancel_token=cancel_token,
             on_usage_update=on_usage_update,
             on_function_call=on_function_call,
+            on_thinking=on_thinking,
         )
 
     def send_tool_results_streaming(
@@ -505,6 +510,7 @@ class ClaudeCLIProvider:
         response_schema: Optional[Dict[str, Any]] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
     ) -> ProviderResponse:
         """Send tool results with streaming response.
 
@@ -526,6 +532,7 @@ class ClaudeCLIProvider:
             cancel_token=cancel_token,
             on_usage_update=on_usage_update,
             on_function_call=on_function_call,
+            on_thinking=on_thinking,
         )
 
     # ==================== Token Management ====================
@@ -896,6 +903,7 @@ class ClaudeCLIProvider:
     def _execute_query(self, prompt: str) -> ProviderResponse:
         """Execute a query synchronously."""
         accumulated_text = ""
+        accumulated_thinking = ""
         function_calls: List[FunctionCall] = []
         finish_reason = FinishReason.STOP
 
@@ -910,6 +918,8 @@ class ClaudeCLIProvider:
                 for block in msg.content_blocks:
                     if isinstance(block, TextBlock):
                         accumulated_text += block.text
+                    elif isinstance(block, ThinkingBlock):
+                        accumulated_thinking += block.thinking
                     elif isinstance(block, ToolUseBlock):
                         # Only return function calls in passthrough mode
                         # In delegated mode, CLI handles tool execution internally
@@ -949,6 +959,7 @@ class ClaudeCLIProvider:
         return ProviderResponse(
             parts=parts,
             finish_reason=finish_reason,
+            thinking=accumulated_thinking if accumulated_thinking else None,
         )
 
     def _execute_query_streaming(
@@ -958,14 +969,18 @@ class ClaudeCLIProvider:
         cancel_token: Optional[CancelToken] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
         on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None,
     ) -> ProviderResponse:
         """Execute a query with streaming."""
         accumulated_text = ""
+        accumulated_thinking = ""
         function_calls: List[FunctionCall] = []
         finish_reason = FinishReason.STOP
         cancelled = False
 
         got_stream_events = False  # Track if we got streaming deltas
+        got_thinking_stream = False  # Track if we got thinking deltas
+        thinking_emitted = False  # Track if thinking was already emitted
 
         try:
             for msg in self._stream_cli_messages(prompt, cancel_token):
@@ -984,27 +999,49 @@ class ClaudeCLIProvider:
                 elif isinstance(msg, StreamEvent):
                     # Handle streaming text deltas
                     if msg.is_text_delta and msg.delta_text:
+                        # Emit accumulated thinking BEFORE first text chunk
+                        if not thinking_emitted and accumulated_thinking and on_thinking:
+                            self._trace(f"Emitting thinking BEFORE text: len={len(accumulated_thinking)}")
+                            on_thinking(accumulated_thinking)
+                            thinking_emitted = True
                         got_stream_events = True
                         accumulated_text += msg.delta_text
                         on_chunk(msg.delta_text)
                         # Only trace non-empty deltas, show preview
                         preview = msg.delta_text[:50].replace('\n', '\\n') if msg.delta_text else ""
                         self._trace(f"StreamEvent: text_delta len={len(msg.delta_text)} preview='{preview}'")
+                    # Handle streaming thinking deltas
+                    elif msg.is_thinking_delta and msg.delta_thinking:
+                        got_thinking_stream = True
+                        accumulated_thinking += msg.delta_thinking
+                        # Trace thinking deltas
+                        preview = msg.delta_thinking[:50].replace('\n', '\\n') if msg.delta_thinking else ""
+                        self._trace(f"StreamEvent: thinking_delta len={len(msg.delta_thinking)} preview='{preview}'")
 
                 elif isinstance(msg, AssistantMessage):
                     # Count block types for tracing
                     text_blocks = [b for b in msg.content_blocks if isinstance(b, TextBlock)]
+                    thinking_blocks = [b for b in msg.content_blocks if isinstance(b, ThinkingBlock)]
                     tool_blocks = [b for b in msg.content_blocks if isinstance(b, ToolUseBlock)]
                     tool_names = [b.name for b in tool_blocks]
-                    self._trace(f"AssistantMessage: {len(text_blocks)} text, {len(tool_blocks)} tools: {tool_names}")
+                    self._trace(f"AssistantMessage: {len(text_blocks)} text, {len(thinking_blocks)} thinking, {len(tool_blocks)} tools: {tool_names}")
 
-                    # If we got stream events, don't double-count text
+                    # If we got stream events, don't double-count text/thinking
                     # Only process tool use blocks from the final message
                     if not got_stream_events:
                         for block in msg.content_blocks:
                             if isinstance(block, TextBlock):
                                 accumulated_text += block.text
                                 on_chunk(block.text)
+                    if not got_thinking_stream:
+                        for block in msg.content_blocks:
+                            if isinstance(block, ThinkingBlock):
+                                accumulated_thinking += block.thinking
+                        # Emit non-streamed thinking via callback
+                        if not thinking_emitted and accumulated_thinking and on_thinking:
+                            self._trace(f"Emitting non-streamed thinking from AssistantMessage: len={len(accumulated_thinking)}")
+                            on_thinking(accumulated_thinking)
+                            thinking_emitted = True
 
                     # Process tool use blocks only in passthrough mode
                     # In delegated mode, CLI handles tool execution internally
@@ -1073,9 +1110,13 @@ class ClaudeCLIProvider:
         for fc in function_calls:
             parts.append(Part.from_function_call(fc))
 
+        # Don't include thinking in response if it was already emitted via callback
+        # This prevents duplicate emission by the session layer
+        final_thinking = None if thinking_emitted else (accumulated_thinking if accumulated_thinking else None)
         return ProviderResponse(
             parts=parts,
             finish_reason=finish_reason,
+            thinking=final_thinking,
         )
 
     def _stream_cli_messages(
@@ -1098,6 +1139,12 @@ class ClaudeCLIProvider:
 
         logger.debug(f"Spawning CLI: {' '.join(args[:5])}... cwd={cli_cwd}")
 
+        # Build environment with thinking tokens if enabled
+        cli_env = os.environ.copy()
+        if self._thinking_enabled and self._thinking_budget > 0:
+            cli_env["MAX_THINKING_TOKENS"] = str(self._thinking_budget)
+            self._trace(f"_stream_cli_messages: MAX_THINKING_TOKENS={self._thinking_budget}")
+
         process = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
@@ -1105,6 +1152,7 @@ class ClaudeCLIProvider:
             text=True,
             bufsize=1,  # Line buffered
             cwd=cli_cwd,  # Use workspace root as working directory
+            env=cli_env,  # Pass environment with thinking tokens
         )
 
         with self._process_lock:

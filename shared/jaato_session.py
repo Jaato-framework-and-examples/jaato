@@ -1499,12 +1499,20 @@ class JaatoSession:
                         self._forward_to_parent("MODEL_OUTPUT", chunk)
 
                     self._trace(f"STREAMING on_usage_update={'set' if wrapped_usage_callback else 'None'}")
+
+                    # Create thinking callback to emit thinking BEFORE text
+                    def thinking_callback(thinking: str) -> None:
+                        if on_output:
+                            self._trace(f"SESSION_THINKING_CALLBACK len={len(thinking)}")
+                            on_output("thinking", thinking, "write")
+
                     response, _retry_stats = with_retry(
                         lambda: self._provider.send_message_streaming(
                             message,
                             on_chunk=streaming_callback,
                             cancel_token=self._cancel_token,
-                            on_usage_update=wrapped_usage_callback
+                            on_usage_update=wrapped_usage_callback,
+                            on_thinking=thinking_callback
                             # Note: on_function_call is intentionally NOT used here.
                             # The SDK may deliver function calls before preceding text,
                             # which would cause tool trees to appear in wrong positions.
@@ -1534,6 +1542,11 @@ class JaatoSession:
                     if response.usage.reasoning_tokens is not None:
                         llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
             self._trace(f"SESSION_STREAMING_COMPLETE parts_count={len(response.parts)} finish={response.finish_reason}")
+
+            # Emit thinking content if present (extended thinking from providers)
+            if on_output and response.thinking:
+                self._trace(f"SESSION_THINKING_OUTPUT len={len(response.thinking)}")
+                on_output("thinking", response.thinking, "write")
 
             # Check for cancellation after initial message (including parent)
             if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
@@ -2458,12 +2471,19 @@ class JaatoSession:
                         on_output("model", chunk, mode)
                         first_chunk_after_tools[0] = True
 
+                # Create thinking callback to emit thinking BEFORE text
+                def thinking_callback(thinking: str) -> None:
+                    if on_output:
+                        self._trace(f"SESSION_TOOL_RESULT_THINKING_CALLBACK len={len(thinking)}")
+                        on_output("thinking", thinking, "write")
+
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_tool_results_streaming(
                         tool_results,
                         on_chunk=streaming_callback,
                         cancel_token=self._cancel_token,
-                        on_usage_update=wrapped_usage_callback
+                        on_usage_update=wrapped_usage_callback,
+                        on_thinking=thinking_callback
                         # Note: on_function_call is intentionally NOT used here.
                         # See comment in send_message for explanation.
                     ),
@@ -2478,6 +2498,11 @@ class JaatoSession:
                     on_retry=self._on_retry,
                     cancel_token=self._cancel_token
                 )
+
+            # Emit thinking content if present (extended thinking from providers)
+            if on_output and response.thinking:
+                self._trace(f"SESSION_TOOL_RESULT_THINKING_OUTPUT len={len(response.thinking)}")
+                on_output("thinking", response.thinking, "write")
 
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
@@ -2573,12 +2598,19 @@ class JaatoSession:
                         on_output("model", chunk, mode)
                         first_chunk_sent[0] = True
 
+                # Create thinking callback to emit thinking BEFORE text
+                def thinking_callback(thinking: str) -> None:
+                    if on_output:
+                        self._trace(f"MID_TURN_THINKING_CALLBACK len={len(thinking)}")
+                        on_output("thinking", thinking, "write")
+
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_message_streaming(
                         prompt,
                         on_chunk=streaming_callback,
                         cancel_token=self._cancel_token,
-                        on_usage_update=wrapped_usage_callback
+                        on_usage_update=wrapped_usage_callback,
+                        on_thinking=thinking_callback
                     ),
                     context="mid_turn_prompt_streaming",
                     on_retry=self._on_retry,
@@ -2591,6 +2623,10 @@ class JaatoSession:
                     on_retry=self._on_retry,
                     cancel_token=self._cancel_token
                 )
+
+                # Emit thinking content if present
+                if on_output and response.thinking:
+                    on_output("thinking", response.thinking, "write")
 
                 # Emit response text if not streaming
                 if on_output and response.get_text():
