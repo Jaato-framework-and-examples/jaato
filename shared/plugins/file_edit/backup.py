@@ -2,12 +2,20 @@
 
 Provides automatic backup creation before file modifications and
 restoration capabilities for undoing changes.
+
+Features:
+- Automatic backup creation before file modifications
+- Configurable backup retention per file
+- Session-based backup tracking for cleanup
+- List all backups across all files
+- Restore from any backup
 """
 
 import os
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 
 # Default number of backups to keep per file
@@ -15,6 +23,27 @@ DEFAULT_BACKUP_COUNT = 5
 
 # Environment variable for configuring backup count
 BACKUP_COUNT_ENV_VAR = "JAATO_FILE_BACKUP_COUNT"
+
+# Default max session operations before auto-cleanup
+DEFAULT_SESSION_MAX_OPS = 100
+
+
+@dataclass
+class BackupInfo:
+    """Information about a single backup file."""
+    backup_path: Path
+    original_path: str  # The original file path this is a backup of
+    timestamp: datetime
+    size: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for API response."""
+        return {
+            "backup_path": str(self.backup_path),
+            "original_path": self.original_path,
+            "timestamp": self.timestamp.isoformat(),
+            "size": self.size
+        }
 
 
 class BackupManager:
@@ -25,14 +54,25 @@ class BackupManager:
 
     The number of backups kept per file is controlled by the
     JAATO_FILE_BACKUP_COUNT environment variable (default: 5).
+
+    Session tracking:
+    - Tracks backups created in current session
+    - Auto-cleanup when session operation count exceeds threshold
+    - Manual cleanup via cleanup_session()
     """
 
-    def __init__(self, base_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        base_dir: Optional[Path] = None,
+        session_max_ops: Optional[int] = None
+    ):
         """Initialize the backup manager.
 
         Args:
             base_dir: Directory for storing backups. Defaults to .jaato/backups
                      resolved as an absolute path from the current working directory.
+            session_max_ops: Max operations before auto-cleanup. Defaults to 100.
+                            Set to 0 to disable auto-cleanup.
         """
         # Always resolve to absolute path to avoid issues with CWD changes
         if base_dir is not None:
@@ -42,6 +82,11 @@ class BackupManager:
         self._max_backups = int(
             os.environ.get(BACKUP_COUNT_ENV_VAR, DEFAULT_BACKUP_COUNT)
         )
+
+        # Session tracking
+        self._session_max_ops = session_max_ops if session_max_ops is not None else DEFAULT_SESSION_MAX_OPS
+        self._session_operation_count = 0
+        self._session_backups: List[Path] = []  # Backups created in this session
 
     @property
     def base_dir(self) -> Path:
@@ -110,6 +155,7 @@ class BackupManager:
         """Create a backup of the specified file.
 
         Also prunes old backups if the count exceeds max_backups.
+        Tracks backup in session for potential cleanup.
 
         Args:
             file_path: Path to the file to backup
@@ -127,6 +173,14 @@ class BackupManager:
         # Create backup
         backup_path = self._base_dir / self._backup_filename(file_path)
         backup_path.write_bytes(file_path.read_bytes())
+
+        # Track in session
+        self._session_backups.append(backup_path)
+        self._session_operation_count += 1
+
+        # Auto-cleanup if threshold exceeded
+        if self._session_max_ops > 0 and self._session_operation_count >= self._session_max_ops:
+            self._auto_cleanup_session()
 
         # Prune old backups
         self._prune_old_backups(file_path)
@@ -238,4 +292,173 @@ class BackupManager:
             except OSError:
                 pass
 
+        # Reset session tracking
+        self._session_backups = []
+        self._session_operation_count = 0
+
         return removed
+
+    def list_all_backups(self) -> List[BackupInfo]:
+        """List all backup files across all original files.
+
+        Returns:
+            List of BackupInfo objects, sorted by timestamp (newest first)
+        """
+        if not self._base_dir.exists():
+            return []
+
+        backups: List[BackupInfo] = []
+
+        for backup_path in self._base_dir.glob("*.bak"):
+            try:
+                stat = backup_path.stat()
+
+                # Parse original path from backup filename
+                # Format: {sanitized_path}_{timestamp}.bak
+                name = backup_path.name[:-4]  # Remove .bak
+                # Split at last underscore followed by timestamp pattern
+                parts = name.rsplit("_", 1)
+                if len(parts) == 2:
+                    sanitized_path = parts[0]
+                    timestamp_str = parts[1]
+
+                    # Reconstruct approximate original path
+                    # Note: This is an approximation since we can't fully reverse sanitization
+                    original_path = "/" + sanitized_path.replace("_", "/")
+
+                    # Parse timestamp
+                    try:
+                        timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H-%M-%S")
+                    except ValueError:
+                        timestamp = datetime.fromtimestamp(stat.st_mtime)
+                else:
+                    original_path = name
+                    timestamp = datetime.fromtimestamp(stat.st_mtime)
+
+                backups.append(BackupInfo(
+                    backup_path=backup_path,
+                    original_path=original_path,
+                    timestamp=timestamp,
+                    size=stat.st_size
+                ))
+
+            except OSError:
+                continue
+
+        # Sort by timestamp, newest first
+        return sorted(backups, key=lambda b: b.timestamp, reverse=True)
+
+    def get_backup_info(self, backup_path: Path) -> Optional[BackupInfo]:
+        """Get information about a specific backup file.
+
+        Args:
+            backup_path: Path to the backup file
+
+        Returns:
+            BackupInfo if backup exists, None otherwise
+        """
+        backup_path = Path(backup_path)
+        if not backup_path.exists():
+            return None
+
+        try:
+            stat = backup_path.stat()
+
+            # Parse original path from backup filename
+            name = backup_path.name[:-4] if backup_path.name.endswith(".bak") else backup_path.name
+            parts = name.rsplit("_", 1)
+
+            if len(parts) == 2:
+                sanitized_path = parts[0]
+                timestamp_str = parts[1]
+                original_path = "/" + sanitized_path.replace("_", "/")
+
+                try:
+                    timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H-%M-%S")
+                except ValueError:
+                    timestamp = datetime.fromtimestamp(stat.st_mtime)
+            else:
+                original_path = name
+                timestamp = datetime.fromtimestamp(stat.st_mtime)
+
+            return BackupInfo(
+                backup_path=backup_path,
+                original_path=original_path,
+                timestamp=timestamp,
+                size=stat.st_size
+            )
+
+        except OSError:
+            return None
+
+    def cleanup_session(self) -> int:
+        """Clean up backups created in the current session.
+
+        This removes all backups created since the session started,
+        but respects the max_backups setting (won't remove if doing
+        so would leave fewer than max_backups for a file).
+
+        Returns:
+            Number of backups removed
+        """
+        removed = 0
+
+        for backup_path in self._session_backups:
+            if backup_path.exists():
+                try:
+                    backup_path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+
+        # Reset session tracking
+        self._session_backups = []
+        self._session_operation_count = 0
+
+        return removed
+
+    def _auto_cleanup_session(self) -> int:
+        """Internal auto-cleanup when session threshold is exceeded.
+
+        Removes the oldest half of session backups to make room for more.
+
+        Returns:
+            Number of backups removed
+        """
+        if not self._session_backups:
+            return 0
+
+        # Remove oldest half of session backups
+        remove_count = len(self._session_backups) // 2
+        to_remove = self._session_backups[:remove_count]
+        self._session_backups = self._session_backups[remove_count:]
+
+        removed = 0
+        for backup_path in to_remove:
+            if backup_path.exists():
+                try:
+                    backup_path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+
+        return removed
+
+    def reset_session(self) -> None:
+        """Reset session tracking without removing backups.
+
+        Call this when starting a new logical session where you want
+        to keep existing backups but start fresh tracking.
+        """
+        self._session_backups = []
+        self._session_operation_count = 0
+
+    @property
+    def session_operation_count(self) -> int:
+        """Get the number of operations in the current session."""
+        return self._session_operation_count
+
+    @property
+    def session_backup_count(self) -> int:
+        """Get the number of backups created in the current session."""
+        return len(self._session_backups)
