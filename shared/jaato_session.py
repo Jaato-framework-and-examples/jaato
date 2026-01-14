@@ -777,6 +777,14 @@ class JaatoSession:
             if subagent_plugin and hasattr(subagent_plugin, 'set_parent_session'):
                 subagent_plugin.set_parent_session(self)
 
+        # Auto-wire plugins that need session access
+        # Any plugin with set_session() will receive this session reference
+        if self._runtime.registry:
+            for plugin_name in self._runtime.registry._exposed:
+                plugin = self._runtime.registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'set_session'):
+                    plugin.set_session(self)
+
         # Build system instructions
         self._system_instruction = self._runtime.get_system_instructions(
             plugin_names=tools,
