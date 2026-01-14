@@ -556,7 +556,7 @@ class JaatoDaemon:
                                     "description": description or "",
                                 })
 
-                        # Get commands from registry plugins (with subcommand expansion)
+                        # Get commands from registry plugins (with two-level subcommand expansion)
                         if session.server.registry:
                             for plugin_name in session.server.registry.list_exposed():
                                 plugin = session.server.registry.get_plugin(plugin_name)
@@ -572,6 +572,15 @@ class JaatoDaemon:
                                                         "name": f"{cmd.name} {sub.value}",
                                                         "description": sub.description or "",
                                                     })
+                                                    # Check for second-level completions
+                                                    sub_completions = plugin.get_command_completions(
+                                                        cmd.name, [sub.value, ""]
+                                                    )
+                                                    for sub2 in sub_completions:
+                                                        commands.append({
+                                                            "name": f"{cmd.name} {sub.value} {sub2.value}",
+                                                            "description": sub2.description or "",
+                                                        })
                                             else:
                                                 # No subcommands, add base command
                                                 commands.append({
@@ -585,7 +594,7 @@ class JaatoDaemon:
                                                 "description": cmd.description or "",
                                             })
 
-                        # Get commands from permission plugin (with subcommand expansion)
+                        # Get commands from permission plugin (with two-level subcommand expansion)
                         if session.server.permission_plugin:
                             perm = session.server.permission_plugin
                             if hasattr(perm, 'get_user_commands'):
@@ -594,10 +603,20 @@ class JaatoDaemon:
                                         subcommands = perm.get_command_completions(cmd.name, [])
                                         if subcommands:
                                             for sub in subcommands:
+                                                # Add first-level subcommand
                                                 commands.append({
                                                     "name": f"{cmd.name} {sub.value}",
                                                     "description": sub.description or "",
                                                 })
+                                                # Check for second-level completions
+                                                sub_completions = perm.get_command_completions(
+                                                    cmd.name, [sub.value, ""]
+                                                )
+                                                for sub2 in sub_completions:
+                                                    commands.append({
+                                                        "name": f"{cmd.name} {sub.value} {sub2.value}",
+                                                        "description": sub2.description or "",
+                                                    })
                                         else:
                                             commands.append({
                                                 "name": cmd.name,
