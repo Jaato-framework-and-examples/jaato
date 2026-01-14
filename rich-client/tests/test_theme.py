@@ -19,10 +19,15 @@ from theme import (
     validate_theme,
     is_hex_color,
     BUILTIN_THEMES,
+    get_builtin_theme_names,
     DEFAULT_PALETTE,
     DEFAULT_SEMANTIC_STYLES,
     get_semantic_style_names,
     get_palette_color_names,
+    get_builtin_theme,
+    list_available_themes,
+    _get_builtin_themes_dir,
+    _get_theme_search_paths,
 )
 
 
@@ -593,3 +598,129 @@ class TestHelperFunctions:
         assert "primary" in names
         assert "success" in names
         assert "text" in names
+
+
+class TestJSONThemeLoading:
+    """Tests for JSON-based theme loading."""
+
+    def test_builtin_themes_dir_exists(self):
+        """Test the built-in themes directory exists."""
+        themes_dir = _get_builtin_themes_dir()
+        assert themes_dir.exists(), f"Themes directory should exist: {themes_dir}"
+
+    def test_builtin_themes_json_files_exist(self):
+        """Test JSON files exist for all built-in themes."""
+        themes_dir = _get_builtin_themes_dir()
+        for name in get_builtin_theme_names():
+            theme_file = themes_dir / f"{name}.json"
+            assert theme_file.exists(), f"Theme file should exist: {theme_file}"
+
+    def test_get_theme_search_paths_order(self):
+        """Test theme search paths are in correct priority order."""
+        paths = _get_theme_search_paths("dark")
+        assert len(paths) == 3
+
+        # First should be user override
+        assert ".jaato" in str(paths[0]) and str(Path.home()) in str(paths[0])
+        # Second should be project override
+        assert ".jaato" in str(paths[1]) and str(Path.home()) not in str(paths[1])
+        # Third should be built-in
+        assert "themes" in str(paths[2])
+
+    def test_get_builtin_theme_dark(self):
+        """Test loading dark theme from JSON."""
+        theme = get_builtin_theme("dark")
+        assert theme.name == "dark"
+        assert "primary" in theme.colors
+        assert "user_header" in theme.semantic
+
+    def test_get_builtin_theme_light(self):
+        """Test loading light theme from JSON."""
+        theme = get_builtin_theme("light")
+        assert theme.name == "light"
+        # Light theme should have different primary color
+        assert theme.colors["primary"] != DEFAULT_PALETTE["primary"]
+
+    def test_get_builtin_theme_high_contrast(self):
+        """Test loading high-contrast theme from JSON."""
+        theme = get_builtin_theme("high-contrast")
+        assert theme.name == "high-contrast"
+
+    def test_get_builtin_theme_unknown_falls_back(self):
+        """Test unknown theme name falls back to dark."""
+        theme = get_builtin_theme("nonexistent")
+        assert theme.name == "dark"
+
+    def test_list_available_themes_includes_builtins(self):
+        """Test list_available_themes includes all built-in themes."""
+        themes = list_available_themes()
+        for name in get_builtin_theme_names():
+            assert name in themes
+
+    def test_list_available_themes_sorted(self):
+        """Test list_available_themes returns sorted list."""
+        themes = list_available_themes()
+        assert themes == sorted(themes)
+
+    def test_theme_json_has_all_semantic_styles(self):
+        """Test JSON theme files have all semantic styles."""
+        for name in get_builtin_theme_names():
+            theme = get_builtin_theme(name)
+            for style_name in get_semantic_style_names():
+                assert style_name in theme.semantic, \
+                    f"{name} theme missing semantic style: {style_name}"
+
+    def test_theme_json_has_all_palette_colors(self):
+        """Test JSON theme files have all palette colors."""
+        for name in get_builtin_theme_names():
+            theme = get_builtin_theme(name)
+            for color_name in get_palette_color_names():
+                assert color_name in theme.colors, \
+                    f"{name} theme missing palette color: {color_name}"
+
+    def test_user_override_takes_priority(self):
+        """Test user override theme takes priority over built-in."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create a mock user themes directory
+            user_themes_dir = Path(temp_dir) / ".jaato" / "themes"
+            user_themes_dir.mkdir(parents=True)
+
+            # Create an override for dark theme
+            override_data = {
+                "name": "dark",
+                "description": "User override of dark theme",
+                "colors": {"primary": "#123456"},
+                "semantic": {},
+            }
+            override_path = user_themes_dir / "dark.json"
+            with open(override_path, "w") as f:
+                json.dump(override_data, f)
+
+            # Patch Path.home() to use our temp directory
+            original_home = Path.home
+
+            def mock_home():
+                return Path(temp_dir)
+
+            Path.home = staticmethod(mock_home)
+            try:
+                # Clear any cached themes
+                BUILTIN_THEMES._loaded.discard("dark")
+                if "dark" in BUILTIN_THEMES:
+                    del BUILTIN_THEMES["dark"]
+
+                theme = get_builtin_theme("dark")
+                # Should load from user override
+                assert theme.colors["primary"] == "#123456"
+            finally:
+                Path.home = original_home
+                # Restore cached themes
+                BUILTIN_THEMES._loaded.discard("dark")
+                if "dark" in BUILTIN_THEMES:
+                    del BUILTIN_THEMES["dark"]
+
+    def test_builtin_themes_source_path(self):
+        """Test built-in themes report correct source path."""
+        theme = get_builtin_theme("dark")
+        assert "themes" in theme.source_path
+        assert "dark.json" in theme.source_path or theme.source_path == "fallback"
