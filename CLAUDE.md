@@ -439,6 +439,34 @@ Key types in `shared/plugins/model_provider/types.py`:
 - `ProviderResponse`: Unified response from any provider
 - `FunctionCall`, `ToolResult`: Function calling types
 
+### Plugin Auto-Wiring
+
+Plugins are automatically wired during initialization - no manual wiring needed:
+
+| Method | When Called | By |
+|--------|-------------|-----|
+| `set_plugin_registry(registry)` | During `expose_tool()` | PluginRegistry |
+| `set_session(session)` | During `configure()` | JaatoSession |
+
+This enables plugins to access shared resources without explicit setup in client code:
+
+```python
+# In PluginRegistry.expose_tool():
+plugin = self.get_plugin(name)
+if hasattr(plugin, 'set_plugin_registry'):
+    plugin.set_plugin_registry(self)
+
+# In JaatoSession.configure():
+for plugin_name in self._runtime.registry._exposed:
+    plugin = self._runtime.registry.get_plugin(plugin_name)
+    if plugin and hasattr(plugin, 'set_session'):
+        plugin.set_session(self)
+```
+
+Plugins implementing these methods receive automatic wiring:
+- **`set_plugin_registry()`**: Used by `background`, `file_edit`, `cli`, `references`, `artifact_tracker` for cross-plugin access
+- **`set_session()`**: Used by `thinking` plugin for applying thinking configuration to the session
+
 ## Key Environment Variables
 
 ### Google GenAI / Vertex AI

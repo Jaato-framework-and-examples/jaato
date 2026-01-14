@@ -23,6 +23,7 @@ from .plugins.model_provider.base import UsageUpdateCallback, GCThresholdCallbac
 from .plugins.model_provider.types import (
     Message,
     Part,
+    ThinkingConfig,
     ToolSchema,
 )
 
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
     from .plugins.registry import PluginRegistry
     from .plugins.permission import PermissionPlugin
     from .plugins.subagent.ui_hooks import AgentUIHooks
+    from .plugins.thinking import ThinkingPlugin
 
 
 class JaatoClient:
@@ -745,6 +747,58 @@ class JaatoClient:
         if not self._session:
             return []
         return self._session.get_gc_history()
+
+    # ==================== Thinking Mode ====================
+
+    def set_thinking_plugin(self, plugin: 'ThinkingPlugin') -> None:
+        """Set the thinking plugin for controlling reasoning modes.
+
+        The thinking plugin provides user commands for controlling extended
+        thinking capabilities (e.g., Anthropic extended thinking, Gemini
+        thinking mode).
+
+        Args:
+            plugin: The ThinkingPlugin instance.
+        """
+        if self._session:
+            self._session.set_thinking_plugin(plugin)
+
+    def remove_thinking_plugin(self) -> None:
+        """Remove the thinking plugin."""
+        if self._session:
+            self._session.remove_thinking_plugin()
+
+    def set_thinking_config(self, config: ThinkingConfig) -> None:
+        """Set thinking mode configuration directly.
+
+        This is a convenience method that bypasses the plugin and sets
+        the thinking configuration directly on the provider.
+
+        Args:
+            config: ThinkingConfig with enabled flag and budget.
+        """
+        if self._session:
+            self._session.set_thinking_config(config)
+
+    def get_thinking_config(self) -> Optional[ThinkingConfig]:
+        """Get current thinking configuration.
+
+        Returns:
+            Current ThinkingConfig if plugin is set, None otherwise.
+        """
+        if self._session:
+            return self._session.get_thinking_config()
+        return None
+
+    def supports_thinking(self) -> bool:
+        """Check if the current provider supports thinking mode.
+
+        Returns:
+            True if thinking is supported, False otherwise.
+        """
+        if self._session:
+            return self._session.supports_thinking()
+        return False
 
     # ==================== Session Persistence ====================
 

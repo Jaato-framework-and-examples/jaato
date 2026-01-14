@@ -446,13 +446,8 @@ class RichClient:
         self.registry.expose_all(plugin_configs)
         self.todo_plugin = self.registry.get_plugin("todo")
 
-        # Wire up artifact tracker with registry for cross-plugin access (LSP integration)
-        artifact_tracker = self.registry.get_plugin("artifact_tracker")
-        if artifact_tracker and hasattr(artifact_tracker, 'set_plugin_registry'):
-            artifact_tracker.set_plugin_registry(self.registry)
-            self.log(f"[plugin] artifact_tracker wired with registry (LSP integration enabled)")
-        else:
-            self.log(f"[plugin] artifact_tracker not found or missing set_plugin_registry - LSP integration disabled")
+        # Note: Plugins with set_plugin_registry() are auto-wired during expose_all()
+        # No manual wiring needed for artifact_tracker, file_edit, cli, references, etc.
 
         # Initialize permission plugin with queue channel for TUI integration
         self.permission_plugin = PermissionPlugin()
@@ -500,6 +495,9 @@ class RichClient:
             # Get strategy name from plugin (e.g., "gc_truncate" -> "truncate")
             plugin_name = getattr(gc_plugin, 'name', 'gc')
             self._gc_strategy = plugin_name.replace('gc_', '') if plugin_name.startswith('gc_') else plugin_name
+
+        # Note: Plugins with set_session() are auto-wired during session.configure()
+        # This includes thinking plugin, etc. No manual wiring needed.
 
         # Setup session plugin
         self._setup_session_plugin()

@@ -402,6 +402,17 @@ class OutputBuffer:
                 content_lines = output.count('\n') + 1 if output else 1
                 # 1 (blank) + 1 (header) + content lines
                 return 2 + content_lines
+        elif source == "thinking":
+            if is_turn_start:
+                # Blank line (1) + Model header (1) + thinking header (1) + content + footer (1)
+                # Note: footer is only rendered for last thinking line, but we count it
+                # for all thinking lines to ensure the last one fits on screen.
+                with self._measure_console.capture() as capture:
+                    self._measure_console.print(rendered, end='')
+                output = capture.get()
+                content_lines = output.count('\n') + 1 if output else 1
+                # 1 (blank) + 1 (Model header) + 1 (thinking header) + content + 1 (footer)
+                return 4 + content_lines
         elif source in ("user", "parent"):
             if is_turn_start:
                 # Blank line (1) + header line (1) + wrapped content lines
@@ -492,9 +503,9 @@ class OutputBuffer:
             # Only show header when switching between user/parent and model turns
             # (not for every model response within same agentic loop)
             is_new_turn = False
-            if source in ("user", "parent", "model"):
-                # Treat "parent" like "user" for turn tracking
-                effective_source = "user" if source == "parent" else source
+            if source in ("user", "parent", "model", "thinking"):
+                # Treat "parent" like "user", "thinking" like "model" for turn tracking
+                effective_source = "user" if source == "parent" else ("model" if source == "thinking" else source)
                 is_new_turn = (self._last_turn_source != effective_source)
                 self._last_turn_source = effective_source
             self._current_block = (source, [text], is_new_turn)
@@ -507,9 +518,9 @@ class OutputBuffer:
                 # First streaming chunk or source changed - create new block
                 self._flush_current_block()
                 is_new_turn = False
-                if source in ("user", "parent", "model"):
-                    # Treat "parent" like "user" for turn tracking
-                    effective_source = "user" if source == "parent" else source
+                if source in ("user", "parent", "model", "thinking"):
+                    # Treat "parent" like "user", "thinking" like "model" for turn tracking
+                    effective_source = "user" if source == "parent" else ("model" if source == "thinking" else source)
                     is_new_turn = (self._last_turn_source != effective_source)
                     self._last_turn_source = effective_source
                 self._current_block = (source, [text], is_new_turn)
@@ -524,8 +535,9 @@ class OutputBuffer:
                 # First chunk or source changed - create new block
                 self._flush_current_block()
                 is_new_turn = False
-                if source in ("user", "parent", "model"):
-                    effective_source = "user" if source == "parent" else source
+                if source in ("user", "parent", "model", "thinking"):
+                    # Treat "parent" like "user", "thinking" like "model" for turn tracking
+                    effective_source = "user" if source == "parent" else ("model" if source == "thinking" else source)
                     is_new_turn = (self._last_turn_source != effective_source)
                     self._last_turn_source = effective_source
                 self._current_block = (source, [text], is_new_turn)
@@ -2055,6 +2067,48 @@ class OutputBuffer:
                     if j > 0:
                         output.append("\n")
                     output.append(wrapped_line, style=self._style("muted", "dim"))
+            elif line.source == "thinking":
+                # Extended thinking output - render with header/footer and indentation
+                # This is the model's internal reasoning before generating response
+                # Box characters: ┌ (top-left), │ (vertical), └ (bottom-left), ┘ (bottom-right)
+                border = "│ "
+                border_width = len(border)
+                if line.is_turn_start:
+                    # First render Model header (thinking is part of model turn)
+                    header_prefix = "── Model "
+                    remaining = max(0, wrap_width - len(header_prefix))
+                    output.append(header_prefix, style=self._style("model_header", "bold cyan"))
+                    output.append("─" * remaining, style=self._style("model_header_separator", "dim cyan"))
+                    output.append("\n")
+                    # Then render thinking header: ┌─ Internal thinking ───────┐
+                    thinking_header = "┌─ Internal thinking "
+                    remaining = max(0, wrap_width - len(thinking_header) - 1)
+                    output.append(thinking_header, style=self._style("thinking_header", "dim #D7AF5F"))
+                    output.append("─" * remaining, style=self._style("thinking_header_separator", "dim #D7AF5F"))
+                    output.append("┐", style=self._style("thinking_header", "dim #D7AF5F"))
+                    output.append("\n")
+                # Render thinking content with border (aligned with box)
+                wrapped = wrap_text(line.text, border_width)
+                for j, wrapped_line in enumerate(wrapped):
+                    if j > 0:
+                        output.append("\n")
+                    output.append(border, style=self._style("thinking_border", "dim #D7AF5F"))
+                    output.append(wrapped_line, style=self._style("thinking_content", "italic #D7AF87"))
+                # Track that we're in thinking mode for footer rendering
+                self._in_thinking = True
+                # Check if this is the last thinking line in the visible items
+                # to render footer (look ahead to next item)
+                is_last_thinking = (i == len(items_to_show) - 1) or (
+                    i + 1 < len(items_to_show) and items_to_show[i + 1].source != "thinking"
+                )
+                if is_last_thinking:
+                    # Render footer: └─────────────────────────────────────────┘
+                    output.append("\n")
+                    remaining = max(0, wrap_width - 2)  # -2 for └ and ┘
+                    output.append("└", style=self._style("thinking_footer", "dim #D7AF5F"))
+                    output.append("─" * remaining, style=self._style("thinking_footer_separator", "dim #D7AF5F"))
+                    output.append("┘", style=self._style("thinking_footer", "dim #D7AF5F"))
+                    self._in_thinking = False
             else:
                 # Other plugin output - wrap and preserve ANSI codes
                 # Use cache for expensive ANSI parsing (only for non-turn-start simple cases)
