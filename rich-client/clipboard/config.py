@@ -9,8 +9,8 @@ from typing import Set
 class ClipboardMechanism(Enum):
     """Supported clipboard mechanisms."""
     OSC52 = "osc52"
-    # Future: PYPERCLIP = "pyperclip"
-    # Future: NATIVE = "native"  # pbcopy/xclip/clip.exe
+    NATIVE = "native"  # xclip/xsel/wl-copy/pbcopy/clip.exe
+    AUTO = "auto"  # Try native first, fallback to OSC52
 
 
 # Default sources to include when copying (chrome-free)
@@ -27,7 +27,7 @@ def parse_sources(sources_str: str) -> Set[str]:
 @dataclass
 class ClipboardConfig:
     """Configuration for clipboard operations."""
-    mechanism: ClipboardMechanism = ClipboardMechanism.OSC52
+    mechanism: ClipboardMechanism = ClipboardMechanism.AUTO
     sources: Set[str] = field(default_factory=lambda: DEFAULT_COPY_SOURCES.copy())
 
     @classmethod
@@ -35,14 +35,14 @@ class ClipboardConfig:
         """Create config from environment variables.
 
         Env vars:
-            JAATO_COPY_MECHANISM: osc52 (default)
+            JAATO_COPY_MECHANISM: auto (default), native, osc52
             JAATO_COPY_SOURCES: model&user&tool format (default: model)
         """
-        mechanism_str = os.environ.get("JAATO_COPY_MECHANISM", "osc52").lower()
+        mechanism_str = os.environ.get("JAATO_COPY_MECHANISM", "auto").lower()
         try:
             mechanism = ClipboardMechanism(mechanism_str)
         except ValueError:
-            mechanism = ClipboardMechanism.OSC52
+            mechanism = ClipboardMechanism.AUTO
 
         sources_str = os.environ.get("JAATO_COPY_SOURCES", "")
         sources = parse_sources(sources_str)
