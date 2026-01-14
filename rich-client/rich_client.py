@@ -501,11 +501,8 @@ class RichClient:
             plugin_name = getattr(gc_plugin, 'name', 'gc')
             self._gc_strategy = plugin_name.replace('gc_', '') if plugin_name.startswith('gc_') else plugin_name
 
-        # Setup thinking plugin for user-controlled thinking modes
-        thinking_plugin = self.registry.get_plugin("thinking")
-        if thinking_plugin:
-            self._backend.set_thinking_plugin(thinking_plugin)
-            self._trace("[plugin] thinking plugin wired with session")
+        # Note: Plugins with set_session() are auto-wired during session.configure()
+        # This includes thinking plugin, etc. No manual wiring needed.
 
         # Setup session plugin
         self._setup_session_plugin()
