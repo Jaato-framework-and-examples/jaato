@@ -41,6 +41,7 @@ from ..types import (
     Message,
     ProviderResponse,
     Role,
+    ThinkingConfig,
     ToolResult,
     ToolSchema,
     TokenUsage,
@@ -933,6 +934,30 @@ class GoogleGenAIProvider:
             True - Google GenAI supports stop via streaming cancellation.
         """
         return True
+
+    def supports_thinking(self) -> bool:
+        """Check if the current model supports thinking mode.
+
+        Gemini 2.0+ models support thinking mode, but this is currently
+        not implemented in this provider.
+
+        Returns:
+            False - Thinking mode not yet implemented for Google GenAI.
+        """
+        # TODO: Implement thinking mode when Google GenAI SDK supports it
+        return False
+
+    def set_thinking_config(self, config: ThinkingConfig) -> None:
+        """Set the thinking/reasoning mode configuration.
+
+        Currently a no-op as thinking mode is not yet implemented
+        for Google GenAI provider.
+
+        Args:
+            config: ThinkingConfig with enabled flag and budget.
+        """
+        # TODO: Implement when Google GenAI SDK supports thinking mode
+        pass
 
     # ==================== Streaming ====================
 

@@ -15,6 +15,7 @@ from .types import (
     Message,
     Part,
     ProviderResponse,
+    ThinkingConfig,
     ToolResult,
     ToolSchema,
     TokenUsage,
@@ -31,6 +32,11 @@ OutputCallback = Callable[[str, str, str], None]
 # Streaming callback type for token-level streaming
 # Parameters: (chunk: str) - the text chunk received from the model
 StreamingCallback = Callable[[str], None]
+
+# Thinking callback type for extended thinking content
+# Parameters: (thinking: str) - accumulated thinking content from the model
+# Called BEFORE text streaming begins, when thinking is complete
+ThinkingCallback = Callable[[str], None]
 
 # Usage update callback for real-time token accounting
 # Parameters: (usage: TokenUsage) - current token usage from streaming
@@ -399,7 +405,8 @@ class ModelProviderPlugin(Protocol):
         cancel_token: Optional[CancelToken] = None,
         response_schema: Optional[Dict[str, Any]] = None,
         on_usage_update: Optional['UsageUpdateCallback'] = None,
-        on_function_call: Optional['FunctionCallDetectedCallback'] = None
+        on_function_call: Optional['FunctionCallDetectedCallback'] = None,
+        on_thinking: Optional['ThinkingCallback'] = None
     ) -> ProviderResponse:
         """Send a message with streaming response and optional cancellation.
 
@@ -418,6 +425,9 @@ class ModelProviderPlugin(Protocol):
                 is detected mid-stream. Called BEFORE any subsequent text
                 chunks are emitted, allowing the caller to insert tool tree
                 markers at the correct position between text blocks.
+            on_thinking: Optional callback invoked when extended thinking
+                content is available. Called BEFORE text streaming begins,
+                when the model's thinking phase is complete.
 
         Returns:
             ProviderResponse with accumulated text and/or function calls.
@@ -452,7 +462,8 @@ class ModelProviderPlugin(Protocol):
         cancel_token: Optional[CancelToken] = None,
         response_schema: Optional[Dict[str, Any]] = None,
         on_usage_update: Optional['UsageUpdateCallback'] = None,
-        on_function_call: Optional['FunctionCallDetectedCallback'] = None
+        on_function_call: Optional['FunctionCallDetectedCallback'] = None,
+        on_thinking: Optional['ThinkingCallback'] = None
     ) -> ProviderResponse:
         """Send tool results with streaming response and optional cancellation.
 
@@ -467,6 +478,8 @@ class ModelProviderPlugin(Protocol):
                 updated during streaming (for real-time accounting).
             on_function_call: Optional callback invoked when a function call
                 is detected mid-stream. See send_message_streaming() for details.
+            on_thinking: Optional callback invoked when extended thinking
+                content is available. See send_message_streaming() for details.
 
         Returns:
             ProviderResponse with accumulated text and/or function calls.
@@ -502,5 +515,37 @@ class ModelProviderPlugin(Protocol):
             agent_type: Type of agent ("main" or "subagent").
             agent_name: Optional name for the agent (e.g., profile name).
             agent_id: Unique identifier for the agent instance.
+        """
+        ...
+
+    # ==================== Thinking Mode ====================
+    # Optional extended thinking/reasoning support
+
+    def supports_thinking(self) -> bool:
+        """Check if this provider/model supports extended thinking.
+
+        Thinking mode enables extended reasoning capabilities:
+        - Anthropic: Extended thinking with visible reasoning traces
+        - Google Gemini: Thinking mode (Gemini 2.0+)
+
+        Returns:
+            True if thinking mode is supported, False otherwise.
+        """
+        ...
+
+    def set_thinking_config(self, config: ThinkingConfig) -> None:
+        """Set the thinking/reasoning mode configuration.
+
+        Dynamically enables or disables extended thinking for subsequent
+        API calls. Takes effect immediately for the next send_message().
+
+        Args:
+            config: ThinkingConfig with enabled flag and budget.
+                - enabled: Whether to use thinking mode
+                - budget: Token budget for thinking (provider-specific)
+
+        Note:
+            If the provider/model doesn't support thinking, this is a no-op.
+            Check supports_thinking() to verify capability first.
         """
         ...

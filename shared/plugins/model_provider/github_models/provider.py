@@ -816,6 +816,25 @@ class GitHubModelsProvider:
         """
         return True
 
+    def supports_thinking(self) -> bool:
+        """Check if extended thinking is supported.
+
+        Returns:
+            False - GitHub Models does not support extended thinking.
+        """
+        return False
+
+    def set_thinking_config(self, config: 'ThinkingConfig') -> None:
+        """Set thinking configuration (no-op for GitHub Models).
+
+        GitHub Models does not support extended thinking, so this
+        method does nothing.
+
+        Args:
+            config: ThinkingConfig (ignored).
+        """
+        pass  # GitHub Models doesn't support thinking
+
     # ==================== Streaming ====================
 
     def send_message_streaming(

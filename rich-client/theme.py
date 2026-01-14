@@ -279,6 +279,14 @@ DEFAULT_SEMANTIC_STYLES = {
     "model_header": StyleSpec(fg="primary", bold=True),
     "model_header_separator": StyleSpec(fg="primary", dim=True),
 
+    # Output - thinking (extended reasoning)
+    "thinking_header": StyleSpec(fg="primary", dim=True),
+    "thinking_header_separator": StyleSpec(dim=True),
+    "thinking_border": StyleSpec(fg="primary", dim=True),
+    "thinking_content": StyleSpec(dim=True, italic=True),
+    "thinking_footer": StyleSpec(fg="primary", dim=True),
+    "thinking_footer_separator": StyleSpec(dim=True),
+
     # Output - tool display
     "tool_output": StyleSpec(fg="#87D7D7", italic=True),  # Pale cyan
     "tool_source_label": StyleSpec(fg="#808080", dim=True),  # Dim magenta replaced with muted

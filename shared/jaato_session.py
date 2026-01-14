@@ -35,6 +35,7 @@ from .plugins.model_provider.types import (
     Part,
     ProviderResponse,
     Role,
+    ThinkingConfig,
     TokenUsage,
     ToolResult,
     ToolSchema,
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from .plugins.model_provider.base import ModelProviderPlugin
     from .plugins.subagent.ui_hooks import AgentUIHooks
     from .plugins.telemetry import TelemetryPlugin
+    from .plugins.thinking import ThinkingPlugin
 
 # Import framework instruction for tool result injection
 from .jaato_runtime import _TASK_COMPLETION_INSTRUCTION
@@ -142,6 +144,9 @@ class JaatoSession:
         self._gc_plugin: Optional[GCPlugin] = None
         self._gc_config: Optional[GCConfig] = None
         self._gc_history: List[GCResult] = []
+
+        # Thinking mode
+        self._thinking_plugin: Optional['ThinkingPlugin'] = None
 
         # Session persistence
         self._session_plugin: Optional[SessionPlugin] = None
@@ -771,6 +776,14 @@ class JaatoSession:
             subagent_plugin = self._runtime.registry.get_plugin("subagent")
             if subagent_plugin and hasattr(subagent_plugin, 'set_parent_session'):
                 subagent_plugin.set_parent_session(self)
+
+        # Auto-wire plugins that need session access
+        # Any plugin with set_session() will receive this session reference
+        if self._runtime.registry:
+            for plugin_name in self._runtime.registry._exposed:
+                plugin = self._runtime.registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'set_session'):
+                    plugin.set_session(self)
 
         # Build system instructions
         self._system_instruction = self._runtime.get_system_instructions(
@@ -1486,12 +1499,20 @@ class JaatoSession:
                         self._forward_to_parent("MODEL_OUTPUT", chunk)
 
                     self._trace(f"STREAMING on_usage_update={'set' if wrapped_usage_callback else 'None'}")
+
+                    # Create thinking callback to emit thinking BEFORE text
+                    def thinking_callback(thinking: str) -> None:
+                        if on_output:
+                            self._trace(f"SESSION_THINKING_CALLBACK len={len(thinking)}")
+                            on_output("thinking", thinking, "write")
+
                     response, _retry_stats = with_retry(
                         lambda: self._provider.send_message_streaming(
                             message,
                             on_chunk=streaming_callback,
                             cancel_token=self._cancel_token,
-                            on_usage_update=wrapped_usage_callback
+                            on_usage_update=wrapped_usage_callback,
+                            on_thinking=thinking_callback
                             # Note: on_function_call is intentionally NOT used here.
                             # The SDK may deliver function calls before preceding text,
                             # which would cause tool trees to appear in wrong positions.
@@ -1521,6 +1542,11 @@ class JaatoSession:
                     if response.usage.reasoning_tokens is not None:
                         llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
             self._trace(f"SESSION_STREAMING_COMPLETE parts_count={len(response.parts)} finish={response.finish_reason}")
+
+            # Emit thinking content if present (extended thinking from providers)
+            if on_output and response.thinking:
+                self._trace(f"SESSION_THINKING_OUTPUT len={len(response.thinking)}")
+                on_output("thinking", response.thinking, "write")
 
             # Check for cancellation after initial message (including parent)
             if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
@@ -2445,12 +2471,19 @@ class JaatoSession:
                         on_output("model", chunk, mode)
                         first_chunk_after_tools[0] = True
 
+                # Create thinking callback to emit thinking BEFORE text
+                def thinking_callback(thinking: str) -> None:
+                    if on_output:
+                        self._trace(f"SESSION_TOOL_RESULT_THINKING_CALLBACK len={len(thinking)}")
+                        on_output("thinking", thinking, "write")
+
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_tool_results_streaming(
                         tool_results,
                         on_chunk=streaming_callback,
                         cancel_token=self._cancel_token,
-                        on_usage_update=wrapped_usage_callback
+                        on_usage_update=wrapped_usage_callback,
+                        on_thinking=thinking_callback
                         # Note: on_function_call is intentionally NOT used here.
                         # See comment in send_message for explanation.
                     ),
@@ -2465,6 +2498,11 @@ class JaatoSession:
                     on_retry=self._on_retry,
                     cancel_token=self._cancel_token
                 )
+
+            # Emit thinking content if present (extended thinking from providers)
+            if on_output and response.thinking:
+                self._trace(f"SESSION_TOOL_RESULT_THINKING_OUTPUT len={len(response.thinking)}")
+                on_output("thinking", response.thinking, "write")
 
             self._record_token_usage(response)
             self._accumulate_turn_tokens(response, turn_data)
@@ -2560,12 +2598,19 @@ class JaatoSession:
                         on_output("model", chunk, mode)
                         first_chunk_sent[0] = True
 
+                # Create thinking callback to emit thinking BEFORE text
+                def thinking_callback(thinking: str) -> None:
+                    if on_output:
+                        self._trace(f"MID_TURN_THINKING_CALLBACK len={len(thinking)}")
+                        on_output("thinking", thinking, "write")
+
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_message_streaming(
                         prompt,
                         on_chunk=streaming_callback,
                         cancel_token=self._cancel_token,
-                        on_usage_update=wrapped_usage_callback
+                        on_usage_update=wrapped_usage_callback,
+                        on_thinking=thinking_callback
                     ),
                     context="mid_turn_prompt_streaming",
                     on_retry=self._on_retry,
@@ -2578,6 +2623,10 @@ class JaatoSession:
                     on_retry=self._on_retry,
                     cancel_token=self._cancel_token
                 )
+
+                # Emit thinking content if present
+                if on_output and response.thinking:
+                    on_output("thinking", response.thinking, "write")
 
                 # Emit response text if not streaming
                 if on_output and response.get_text():
@@ -3277,6 +3326,73 @@ class JaatoSession:
             return result
 
         return None
+
+    # ==================== Thinking Mode ====================
+
+    def set_thinking_plugin(self, plugin: 'ThinkingPlugin') -> None:
+        """Set the thinking plugin for controlling reasoning modes.
+
+        The thinking plugin provides user commands for controlling extended
+        thinking capabilities (e.g., Anthropic extended thinking, Gemini
+        thinking mode).
+
+        Args:
+            plugin: The ThinkingPlugin instance.
+        """
+        self._thinking_plugin = plugin
+
+        # Give plugin access to this session
+        if hasattr(plugin, 'set_session'):
+            plugin.set_session(self)
+
+        # Register user commands
+        if hasattr(plugin, 'get_user_commands'):
+            for cmd in plugin.get_user_commands():
+                self._user_commands[cmd.name] = cmd
+
+        # Register executors
+        if hasattr(plugin, 'get_executors') and self._executor:
+            for name, fn in plugin.get_executors().items():
+                self._executor.register(name, fn)
+
+    def remove_thinking_plugin(self) -> None:
+        """Remove the thinking plugin."""
+        if self._thinking_plugin:
+            if hasattr(self._thinking_plugin, 'shutdown'):
+                self._thinking_plugin.shutdown()
+        self._thinking_plugin = None
+
+    def set_thinking_config(self, config: ThinkingConfig) -> None:
+        """Set thinking mode configuration directly on the provider.
+
+        This is a convenience method that bypasses the plugin and sets
+        the thinking configuration directly on the provider.
+
+        Args:
+            config: ThinkingConfig with enabled flag and budget.
+        """
+        if self._provider and hasattr(self._provider, 'set_thinking_config'):
+            self._provider.set_thinking_config(config)
+
+    def get_thinking_config(self) -> Optional[ThinkingConfig]:
+        """Get current thinking configuration from the plugin.
+
+        Returns:
+            Current ThinkingConfig if plugin is set, None otherwise.
+        """
+        if self._thinking_plugin and hasattr(self._thinking_plugin, 'get_current_config'):
+            return self._thinking_plugin.get_current_config()
+        return None
+
+    def supports_thinking(self) -> bool:
+        """Check if the current provider supports thinking mode.
+
+        Returns:
+            True if thinking is supported, False otherwise.
+        """
+        if self._provider and hasattr(self._provider, 'supports_thinking'):
+            return self._provider.supports_thinking()
+        return False
 
     # ==================== Session Persistence ====================
 

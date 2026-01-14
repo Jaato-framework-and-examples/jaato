@@ -35,6 +35,7 @@ from ..types import (
     Part,
     ProviderResponse,
     Role,
+    ThinkingConfig,
     ToolResult,
     ToolSchema,
     TokenUsage,
@@ -998,6 +999,18 @@ class AnthropicProvider:
             True if thinking is supported.
         """
         return self._is_thinking_capable()
+
+    def set_thinking_config(self, config: ThinkingConfig) -> None:
+        """Set the thinking/reasoning mode configuration.
+
+        Dynamically enables or disables extended thinking for subsequent
+        API calls.
+
+        Args:
+            config: ThinkingConfig with enabled flag and budget.
+        """
+        self._enable_thinking = config.enabled
+        self._thinking_budget = config.budget
 
     def supports_streaming(self) -> bool:
         """Check if streaming is supported.
