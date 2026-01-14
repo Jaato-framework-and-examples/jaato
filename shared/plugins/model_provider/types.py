@@ -20,6 +20,19 @@ class Role(str, Enum):
     TOOL = "tool"
 
 
+# Standard tool categories for consistent classification
+TOOL_CATEGORIES = [
+    "filesystem",   # File reading, writing, editing, navigation
+    "code",         # Code editing, refactoring, analysis
+    "search",       # Searching files, content, web
+    "memory",       # Persistent memory, notes, context storage
+    "planning",     # Task planning, progress tracking, todos
+    "system",       # System commands, shell execution, environment
+    "web",          # Web fetching, API calls, external resources
+    "communication",  # User interaction, prompts, questions
+]
+
+
 @dataclass
 class ToolSchema:
     """Provider-agnostic tool/function declaration.
@@ -31,10 +44,14 @@ class ToolSchema:
         name: Unique tool name (e.g., 'cli_based_tool').
         description: Human-readable description of what the tool does.
         parameters: JSON Schema object describing the tool's parameters.
+        category: Optional category for tool organization and filtering.
+            Standard categories: filesystem, code, search, memory, planning,
+            system, web, communication. Custom categories are also allowed.
     """
     name: str
     description: str
     parameters: Dict[str, Any] = field(default_factory=dict)
+    category: Optional[str] = None
 
 
 @dataclass
