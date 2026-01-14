@@ -484,6 +484,13 @@ def _create_fallback_theme(theme_name: str) -> "ThemeConfig":
         semantic["plan_popup_error_prefix"] = StyleSpec(fg="#555555")
         semantic["plan_popup_separator"] = StyleSpec(fg="#888888")
         semantic["plan_popup_progress_detail"] = StyleSpec(fg="#555555")
+        # Thinking styles - use darker colors without dim for light background
+        semantic["thinking_header"] = StyleSpec(fg="#555555")
+        semantic["thinking_header_separator"] = StyleSpec(fg="#888888")
+        semantic["thinking_border"] = StyleSpec(fg="#888888")
+        semantic["thinking_content"] = StyleSpec(fg="#555555", italic=True)
+        semantic["thinking_footer"] = StyleSpec(fg="#555555")
+        semantic["thinking_footer_separator"] = StyleSpec(fg="#888888")
         return ThemeConfig(
             name="light",
             description="Light theme for bright terminals (fallback)",
@@ -508,6 +515,13 @@ def _create_fallback_theme(theme_name: str) -> "ThemeConfig":
         semantic["plan_popup_error_prefix"] = StyleSpec(fg="#aaaaaa")
         semantic["plan_popup_separator"] = StyleSpec(fg="#aaaaaa")
         semantic["plan_popup_progress_detail"] = StyleSpec(fg="#cccccc")
+        # Thinking styles - use brighter colors without dim for high contrast
+        semantic["thinking_header"] = StyleSpec(fg="#cccccc")
+        semantic["thinking_header_separator"] = StyleSpec(fg="#aaaaaa")
+        semantic["thinking_border"] = StyleSpec(fg="#cccccc")
+        semantic["thinking_content"] = StyleSpec(fg="#cccccc", italic=True)
+        semantic["thinking_footer"] = StyleSpec(fg="#cccccc")
+        semantic["thinking_footer_separator"] = StyleSpec(fg="#aaaaaa")
         return ThemeConfig(
             name="high-contrast",
             description="High contrast theme for accessibility (fallback)",
