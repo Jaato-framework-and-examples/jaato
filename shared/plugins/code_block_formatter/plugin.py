@@ -188,6 +188,22 @@ class CodeBlockFormatterPlugin:
         """Update the console width for rendering."""
         self._console_width = max(20, width)
 
+    def set_syntax_theme(self, theme_name: str) -> None:
+        """Set the syntax highlighting theme based on UI theme.
+
+        Maps UI theme names to appropriate Pygments syntax themes.
+
+        Args:
+            theme_name: UI theme name ("dark", "light", "high-contrast", etc.)
+        """
+        # Map UI themes to Pygments syntax themes
+        theme_mapping = {
+            "dark": "monokai",
+            "light": "solarized-light",  # Light background, good contrast
+            "high-contrast": "native",  # High contrast dark theme
+        }
+        self._theme = theme_mapping.get(theme_name, "monokai")
+
     def shutdown(self) -> None:
         """Cleanup when plugin is disabled."""
         self.reset()

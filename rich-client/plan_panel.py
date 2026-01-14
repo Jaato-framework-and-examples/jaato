@@ -4,6 +4,7 @@ Provides compact plan progress display in the status bar (symbols only)
 with a detailed popup overlay accessible via the configured toggle key.
 """
 
+import logging
 from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
 from rich.panel import Panel
@@ -12,6 +13,8 @@ from rich.console import Group
 
 from keybindings import KeyBinding, format_key_for_display
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from theme import ThemeConfig
 
@@ -19,13 +22,17 @@ if TYPE_CHECKING:
 class PlanPanel:
     """Renders plan status as symbols for status bar and popup overlay."""
 
-    # Status symbols with colors
+    # Status symbols with colors - covers both step statuses and plan statuses
     STATUS_SYMBOLS = {
+        # Step statuses
         "pending": ("○", "dim"),
         "in_progress": ("◐", "blue"),
         "completed": ("●", "green"),
         "failed": ("✗", "red"),
         "skipped": ("⊘", "yellow"),
+        # Plan statuses (overall plan, not steps)
+        "active": ("▸", "cyan"),
+        "cancelled": ("⊘", "yellow"),
     }
 
     def __init__(self, toggle_key: Optional[KeyBinding] = None):
@@ -44,16 +51,38 @@ class PlanPanel:
         """
         self._theme = theme
 
+    def _style(self, semantic_name: str) -> str:
+        """Get a Rich style string from the theme.
+
+        Args:
+            semantic_name: Semantic style name (e.g., "plan_popup_hint").
+
+        Returns:
+            Rich style string, or empty string if not found.
+        """
+        if self._theme:
+            style = self._theme.get_rich_style(semantic_name)
+            if style:
+                return style
+        return ""
+
+    # Known status values that have corresponding semantic styles
+    _KNOWN_STATUSES = frozenset({
+        "pending", "in_progress", "completed", "failed", "skipped",
+        "active", "cancelled",
+    })
+
     def _get_status_style(self, status: str) -> str:
         """Get style for a plan status from theme or fallback.
 
         Args:
-            status: Status name (pending, in_progress, completed, failed, skipped).
+            status: Status name (pending, in_progress, completed, failed, skipped,
+                   active, cancelled).
 
         Returns:
             Rich style string.
         """
-        if self._theme:
+        if self._theme and status in self._KNOWN_STATUSES:
             semantic_name = f"plan_{status}"
             style = self._theme.get_rich_style(semantic_name)
             if style:
@@ -61,6 +90,38 @@ class PlanPanel:
         # Fallback to STATUS_SYMBOLS
         _, fallback = self.STATUS_SYMBOLS.get(status, ("?", ""))
         return fallback
+
+    def _get_popup_border_style(self) -> str:
+        """Get style for popup border from theme or fallback."""
+        if self._theme:
+            style = self._theme.get_rich_style("plan_popup_border")
+            if style:
+                return style
+        return "blue"
+
+    def _get_result_style(self) -> str:
+        """Get style for step result text from theme or fallback."""
+        if self._theme:
+            style = self._theme.get_rich_style("plan_result")
+            if style:
+                return style
+        return "dim green"
+
+    def _get_error_style(self) -> str:
+        """Get style for step error text from theme or fallback."""
+        if self._theme:
+            style = self._theme.get_rich_style("plan_error_text")
+            if style:
+                return style
+        return "dim red"
+
+    def _get_popup_background_style(self) -> str:
+        """Get style for popup background from theme or fallback."""
+        if self._theme:
+            style = self._theme.get_rich_style("plan_popup_background")
+            if style:
+                return style
+        return ""
 
     def update_plan(self, plan_data: Dict[str, Any]) -> None:
         """Update the plan data to render.
@@ -204,9 +265,10 @@ class PlanPanel:
 
         if not data:
             return Panel(
-                Text("No active plan", style="dim italic"),
+                Text("No active plan", style=self._style("plan_popup_empty")),
                 title="[bold]Plan[/bold]",
-                border_style="dim",
+                border_style=self._style("plan_popup_empty_border"),
+                style=self._get_popup_background_style(),
                 width=width,
             )
 
@@ -237,8 +299,8 @@ class PlanPanel:
             # Show "more above" indicator
             if start_idx > 0:
                 more_above = Text()
-                more_above.append(f" ↑ {start_idx} more above ", style="dim italic")
-                more_above.append("[↑/↓ to scroll]", style="dim")
+                more_above.append(f" ↑ {start_idx} more above ", style=self._style("plan_popup_scroll_indicator"))
+                more_above.append("[↑/↓ to scroll]", style=self._style("plan_popup_hint"))
                 elements.append(more_above)
 
             # Render visible steps
@@ -256,51 +318,53 @@ class PlanPanel:
                 # Step line
                 line = Text()
                 line.append(f" {symbol} ", style=color)
-                line.append(f"{seq}. ", style="dim")
-                line.append(desc, style="bold" if step_status == "in_progress" else "")
+                line.append(f"{seq}. ", style=self._style("plan_popup_step_number"))
+                desc_style = self._style("plan_popup_step_active") if step_status == "in_progress" else self._style("plan_popup_step_description")
+                line.append(desc, style=desc_style)
                 elements.append(line)
 
                 # Result/error line
                 if step_status == "completed" and result:
                     result_line = Text()
-                    result_line.append("    → ", style="dim")
-                    result_line.append(result, style="dim green")
+                    result_line.append("    → ", style=self._style("plan_popup_result_prefix"))
+                    result_line.append(result, style=self._get_result_style())
                     elements.append(result_line)
                 elif step_status == "failed" and error:
                     error_line = Text()
-                    error_line.append("    ✗ ", style="dim")
-                    error_line.append(error, style="dim red")
+                    error_line.append("    ✗ ", style=self._style("plan_popup_error_prefix"))
+                    error_line.append(error, style=self._get_error_style())
                     elements.append(error_line)
 
             # Show "more below" indicator
             remaining = total_steps - end_idx
             if remaining > 0:
                 more_below = Text()
-                more_below.append(f" ↓ {remaining} more below ", style="dim italic")
-                more_below.append("[↑/↓ to scroll]", style="dim")
+                more_below.append(f" ↓ {remaining} more below ", style=self._style("plan_popup_scroll_indicator"))
+                more_below.append("[↑/↓ to scroll]", style=self._style("plan_popup_hint"))
                 elements.append(more_below)
 
         # Separator
-        elements.append(Text("─" * (width - 4), style="dim"))
+        elements.append(Text("─" * (width - 4), style=self._style("plan_popup_separator")))
 
         # Progress line with close hint
         total = progress.get("total", 0)
         completed = progress.get("completed", 0)
         percent = progress.get("percent", 0)
         progress_text = Text()
-        progress_text.append(f" {percent:.0f}% ", style="bold")
-        progress_text.append(f"({completed}/{total})", style="dim")
+        progress_text.append(f" {percent:.0f}% ", style=self._style("plan_popup_progress"))
+        progress_text.append(f"({completed}/{total})", style=self._style("plan_popup_progress_detail"))
         # Calculate padding to right-align hint
         left_content = f" {percent:.0f}% ({completed}/{total})"
         right_content = f"[{format_key_for_display(self._toggle_key)} to close]"
         padding = max(1, width - 4 - len(left_content) - len(right_content))
         progress_text.append(" " * padding)
-        progress_text.append(right_content, style="dim")
+        progress_text.append(right_content, style=self._style("plan_popup_hint"))
         elements.append(progress_text)
 
         return Panel(
             Group(*elements),
             title=f"[bold]{title}[/bold]",
-            border_style="blue",
+            border_style=self._get_popup_border_style(),
+            style=self._get_popup_background_style(),
             width=width,
         )
