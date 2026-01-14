@@ -231,6 +231,15 @@ class InputHandler:
         if self._completer:
             self._completer.set_permission_mode(enabled, options)
 
+    def set_available_themes(self, theme_names: List[str]) -> None:
+        """Set available theme names for completion.
+
+        Args:
+            theme_names: List of available theme names.
+        """
+        if self._completer:
+            self._completer.set_available_themes(theme_names)
+
     @property
     def permission_mode(self) -> bool:
         """Check if permission completion mode is currently active.
