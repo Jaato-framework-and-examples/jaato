@@ -246,15 +246,32 @@ DEFAULT_SEMANTIC_STYLES = {
     # Output panel
     "output_panel_bg": StyleSpec(bg="background"),
 
-    # Plan panel - step statuses
-    "plan_pending": StyleSpec(fg="muted"),
-    "plan_in_progress": StyleSpec(fg="#5f87ff"),  # Blue
-    "plan_completed": StyleSpec(fg="success"),
-    "plan_failed": StyleSpec(fg="error"),
-    "plan_skipped": StyleSpec(fg="warning"),
+    # Plan panel - step statuses (bg="surface" to match status bar)
+    "plan_pending": StyleSpec(fg="muted", bg="surface"),
+    "plan_in_progress": StyleSpec(fg="#5f87ff", bg="surface"),  # Blue
+    "plan_completed": StyleSpec(fg="success", bg="surface"),
+    "plan_failed": StyleSpec(fg="error", bg="surface"),
+    "plan_skipped": StyleSpec(fg="warning", bg="surface"),
     # Plan panel - overall plan statuses (for completeness)
-    "plan_active": StyleSpec(fg="primary"),
-    "plan_cancelled": StyleSpec(fg="warning", dim=True),
+    "plan_active": StyleSpec(fg="primary", bg="surface"),
+    "plan_cancelled": StyleSpec(fg="warning", bg="surface", dim=True),
+    # Plan popup - additional styles
+    "plan_popup_border": StyleSpec(fg="primary"),
+    "plan_popup_background": StyleSpec(bg="background"),
+    "plan_result": StyleSpec(fg="success", dim=True),
+    "plan_error_text": StyleSpec(fg="error", dim=True),
+    "plan_popup_empty": StyleSpec(fg="muted", dim=True, italic=True),
+    "plan_popup_empty_border": StyleSpec(fg="muted", dim=True),
+    "plan_popup_scroll_indicator": StyleSpec(fg="muted", dim=True, italic=True),
+    "plan_popup_hint": StyleSpec(fg="muted", dim=True),
+    "plan_popup_step_number": StyleSpec(fg="muted", dim=True),
+    "plan_popup_step_description": StyleSpec(fg="text"),
+    "plan_popup_step_active": StyleSpec(fg="text", bold=True),
+    "plan_popup_result_prefix": StyleSpec(fg="muted", dim=True),
+    "plan_popup_error_prefix": StyleSpec(fg="muted", dim=True),
+    "plan_popup_separator": StyleSpec(fg="muted", dim=True),
+    "plan_popup_progress": StyleSpec(fg="text", bold=True),
+    "plan_popup_progress_detail": StyleSpec(fg="muted", dim=True),
 
     # Output - headers
     "user_header": StyleSpec(fg="success", bold=True),
@@ -702,9 +719,19 @@ def _create_light_theme() -> ThemeConfig:
     theme.semantic["agent_tab_hint"] = StyleSpec(fg="#888888", italic=True)
     theme.semantic["session_bar_separator"] = StyleSpec(fg="#aaaaaa")
     theme.semantic["status_bar_separator"] = StyleSpec(fg="#bbbbbb", bg="surface")
-    theme.semantic["plan_in_progress"] = StyleSpec(fg="#0055cc")  # Darker blue
+    theme.semantic["plan_in_progress"] = StyleSpec(fg="#0055cc", bg="surface")  # Darker blue
     theme.semantic["agent_processing"] = StyleSpec(fg="#0055cc")  # Darker blue
     theme.semantic["tool_indicator"] = StyleSpec(fg="#0055cc", dim=True)  # Darker blue
+    # Plan popup - use darker colors without dim for readability on light background
+    theme.semantic["plan_popup_empty"] = StyleSpec(fg="#666666", italic=True)
+    theme.semantic["plan_popup_empty_border"] = StyleSpec(fg="#888888")
+    theme.semantic["plan_popup_scroll_indicator"] = StyleSpec(fg="#666666", italic=True)
+    theme.semantic["plan_popup_hint"] = StyleSpec(fg="#666666")
+    theme.semantic["plan_popup_step_number"] = StyleSpec(fg="#555555")
+    theme.semantic["plan_popup_result_prefix"] = StyleSpec(fg="#555555")
+    theme.semantic["plan_popup_error_prefix"] = StyleSpec(fg="#555555")
+    theme.semantic["plan_popup_separator"] = StyleSpec(fg="#888888")
+    theme.semantic["plan_popup_progress_detail"] = StyleSpec(fg="#555555")
     return theme
 
 
@@ -721,6 +748,16 @@ def _create_high_contrast_theme() -> ThemeConfig:
     # Boost contrast on specific styles
     theme.semantic["separator"] = StyleSpec(fg="#aaaaaa")
     theme.semantic["hint"] = StyleSpec(fg="#cccccc", italic=True)
+    # Plan popup - use brighter colors without dim for high contrast
+    theme.semantic["plan_popup_empty"] = StyleSpec(fg="#aaaaaa", italic=True)
+    theme.semantic["plan_popup_empty_border"] = StyleSpec(fg="#aaaaaa")
+    theme.semantic["plan_popup_scroll_indicator"] = StyleSpec(fg="#cccccc", italic=True)
+    theme.semantic["plan_popup_hint"] = StyleSpec(fg="#cccccc")
+    theme.semantic["plan_popup_step_number"] = StyleSpec(fg="#aaaaaa")
+    theme.semantic["plan_popup_result_prefix"] = StyleSpec(fg="#aaaaaa")
+    theme.semantic["plan_popup_error_prefix"] = StyleSpec(fg="#aaaaaa")
+    theme.semantic["plan_popup_separator"] = StyleSpec(fg="#aaaaaa")
+    theme.semantic["plan_popup_progress_detail"] = StyleSpec(fg="#cccccc")
     return theme
 
 

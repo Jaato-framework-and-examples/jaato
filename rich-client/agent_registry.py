@@ -129,6 +129,10 @@ class AgentRegistry:
             if self._formatter_pipeline and agent_info.output_buffer:
                 agent_info.output_buffer.set_formatter_pipeline(self._formatter_pipeline)
 
+            # Apply theme if set
+            if self._theme and agent_info.output_buffer:
+                agent_info.output_buffer.set_theme(self._theme)
+
             # If this is the first agent (main), select it
             if len(self._agents) == 1:
                 self._selected_agent_id = agent_id
