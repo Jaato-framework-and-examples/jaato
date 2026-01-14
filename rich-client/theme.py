@@ -11,6 +11,22 @@ Themes use a two-tier color system:
 
 Both prompt_toolkit (for TUI chrome) and Rich (for output formatting)
 styles derive from the same theme configuration.
+
+Built-in themes are stored as JSON files in the themes/ directory alongside
+this module. Users can inspect and override them by placing custom theme
+files in:
+- ~/.jaato/themes/<name>.json (user-level override)
+- .jaato/themes/<name>.json (project-level override)
+
+Theme file discovery order (first found wins):
+1. JAATO_THEME environment variable (preset name)
+2. Saved user preference (~/.jaato/preferences.json)
+3. Project custom theme (.jaato/theme.json)
+4. User custom theme (~/.jaato/theme.json)
+5. User override of built-in theme (~/.jaato/themes/<name>.json)
+6. Project override of built-in theme (.jaato/themes/<name>.json)
+7. Built-in theme from package (rich-client/themes/<name>.json)
+8. Hardcoded fallback (if all else fails)
 """
 
 import json
@@ -161,8 +177,12 @@ class StyleSpec:
         return result
 
 
-# Default base palette colors (dark theme)
-DEFAULT_PALETTE = {
+# Names of built-in themes (available as JSON files in themes/ directory)
+BUILTIN_THEME_NAMES = ["dark", "light", "high-contrast"]
+
+# Fallback palette colors (used when JSON files are unavailable)
+# These are kept as a safety net and for backwards compatibility.
+_FALLBACK_PALETTE_DARK = {
     "primary": "#5fd7ff",      # Cyan - main accent
     "secondary": "#87d787",    # Light green - secondary accent
     "accent": "#d7af87",       # Tan/orange - tertiary accent
@@ -176,8 +196,10 @@ DEFAULT_PALETTE = {
     "text_muted": "#aaaaaa",   # Secondary text
 }
 
-# Light theme palette
-LIGHT_PALETTE = {
+# Backwards compatibility alias
+DEFAULT_PALETTE = _FALLBACK_PALETTE_DARK
+
+_FALLBACK_PALETTE_LIGHT = {
     "primary": "#0077cc",
     "secondary": "#006600",
     "accent": "#996600",
@@ -191,8 +213,10 @@ LIGHT_PALETTE = {
     "text_muted": "#666666",
 }
 
-# High contrast palette
-HIGH_CONTRAST_PALETTE = {
+# Backwards compatibility alias
+LIGHT_PALETTE = _FALLBACK_PALETTE_LIGHT
+
+_FALLBACK_PALETTE_HIGH_CONTRAST = {
     "primary": "#00ffff",
     "secondary": "#00ff00",
     "accent": "#ffaa00",
@@ -205,6 +229,9 @@ HIGH_CONTRAST_PALETTE = {
     "text": "#ffffff",
     "text_muted": "#cccccc",
 }
+
+# Backwards compatibility alias
+HIGH_CONTRAST_PALETTE = _FALLBACK_PALETTE_HIGH_CONTRAST
 
 
 # Default semantic style mappings
@@ -349,6 +376,202 @@ DEFAULT_SEMANTIC_STYLES = {
     "input_text": StyleSpec(fg="text"),
     "input_prompt": StyleSpec(fg="primary", bold=True),
 }
+
+
+def _get_builtin_themes_dir() -> Path:
+    """Get the path to the built-in themes directory.
+
+    Returns:
+        Path to the themes/ directory alongside this module.
+    """
+    return Path(__file__).parent / "themes"
+
+
+def _get_theme_search_paths(theme_name: str) -> List[Path]:
+    """Get ordered list of paths to search for a theme file.
+
+    Args:
+        theme_name: Name of the theme (e.g., "dark", "light").
+
+    Returns:
+        List of paths in priority order (first found wins):
+        1. User override: ~/.jaato/themes/<name>.json
+        2. Project override: .jaato/themes/<name>.json
+        3. Built-in: rich-client/themes/<name>.json
+    """
+    filename = f"{theme_name}.json"
+    return [
+        Path.home() / ".jaato" / "themes" / filename,  # User override
+        Path(".jaato") / "themes" / filename,           # Project override
+        _get_builtin_themes_dir() / filename,           # Built-in
+    ]
+
+
+def _load_theme_from_json(theme_name: str) -> Optional["ThemeConfig"]:
+    """Load a theme from JSON file, checking override locations first.
+
+    Searches for the theme in this order:
+    1. ~/.jaato/themes/<name>.json (user override)
+    2. .jaato/themes/<name>.json (project override)
+    3. rich-client/themes/<name>.json (built-in)
+
+    Args:
+        theme_name: Name of the theme to load.
+
+    Returns:
+        ThemeConfig if found and loaded, None otherwise.
+    """
+    for path in _get_theme_search_paths(theme_name):
+        if path.exists():
+            try:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+
+                # Import here to avoid circular dependency
+                config = ThemeConfig.from_dict(data)
+                config._source_path = str(path)
+
+                # Check if this is an override or built-in
+                if path.parent.name == "themes" and path.parent.parent == Path.home() / ".jaato":
+                    logger.info(f"Loaded theme '{theme_name}' from user override: {path}")
+                elif path.parent.name == "themes" and path.parent.parent == Path(".jaato"):
+                    logger.info(f"Loaded theme '{theme_name}' from project override: {path}")
+                else:
+                    logger.debug(f"Loaded built-in theme '{theme_name}' from {path}")
+
+                return config
+
+            except json.JSONDecodeError as e:
+                logger.warning(f"Invalid JSON in theme file {path}: {e}")
+            except Exception as e:
+                logger.warning(f"Error reading theme file {path}: {e}")
+
+    return None
+
+
+def _create_fallback_theme(theme_name: str) -> "ThemeConfig":
+    """Create a fallback theme from hardcoded values.
+
+    Used when JSON theme files are unavailable.
+
+    Args:
+        theme_name: Name of the theme ("dark", "light", "high-contrast").
+
+    Returns:
+        ThemeConfig with hardcoded values.
+    """
+    if theme_name == "light":
+        palette = _FALLBACK_PALETTE_LIGHT.copy()
+        semantic = {k: StyleSpec(
+            fg=v.fg, bg=v.bg, bold=v.bold, italic=v.italic, dim=v.dim, underline=v.underline
+        ) for k, v in DEFAULT_SEMANTIC_STYLES.items()}
+        # Light theme overrides
+        semantic["tool_output"] = StyleSpec(fg="#006688", italic=True)
+        semantic["tool_source_label"] = StyleSpec(fg="#555555", dim=True)
+        semantic["agent_tab_separator"] = StyleSpec(fg="#aaaaaa")
+        semantic["agent_tab_hint"] = StyleSpec(fg="#888888", italic=True)
+        semantic["session_bar_separator"] = StyleSpec(fg="#aaaaaa")
+        semantic["status_bar_separator"] = StyleSpec(fg="#bbbbbb", bg="surface")
+        semantic["plan_in_progress"] = StyleSpec(fg="#0055cc", bg="surface")
+        semantic["agent_processing"] = StyleSpec(fg="#0055cc")
+        semantic["tool_indicator"] = StyleSpec(fg="#0055cc", dim=True)
+        semantic["plan_popup_empty"] = StyleSpec(fg="#666666", italic=True)
+        semantic["plan_popup_empty_border"] = StyleSpec(fg="#888888")
+        semantic["plan_popup_scroll_indicator"] = StyleSpec(fg="#666666", italic=True)
+        semantic["plan_popup_hint"] = StyleSpec(fg="#666666")
+        semantic["plan_popup_step_number"] = StyleSpec(fg="#555555")
+        semantic["plan_popup_result_prefix"] = StyleSpec(fg="#555555")
+        semantic["plan_popup_error_prefix"] = StyleSpec(fg="#555555")
+        semantic["plan_popup_separator"] = StyleSpec(fg="#888888")
+        semantic["plan_popup_progress_detail"] = StyleSpec(fg="#555555")
+        return ThemeConfig(
+            name="light",
+            description="Light theme for bright terminals (fallback)",
+            colors=palette,
+            semantic=semantic,
+            _source_path="fallback",
+        )
+    elif theme_name == "high-contrast":
+        palette = _FALLBACK_PALETTE_HIGH_CONTRAST.copy()
+        semantic = {k: StyleSpec(
+            fg=v.fg, bg=v.bg, bold=v.bold, italic=v.italic, dim=v.dim, underline=v.underline
+        ) for k, v in DEFAULT_SEMANTIC_STYLES.items()}
+        # High contrast overrides
+        semantic["separator"] = StyleSpec(fg="#aaaaaa")
+        semantic["hint"] = StyleSpec(fg="#cccccc", italic=True)
+        semantic["plan_popup_empty"] = StyleSpec(fg="#aaaaaa", italic=True)
+        semantic["plan_popup_empty_border"] = StyleSpec(fg="#aaaaaa")
+        semantic["plan_popup_scroll_indicator"] = StyleSpec(fg="#cccccc", italic=True)
+        semantic["plan_popup_hint"] = StyleSpec(fg="#cccccc")
+        semantic["plan_popup_step_number"] = StyleSpec(fg="#aaaaaa")
+        semantic["plan_popup_result_prefix"] = StyleSpec(fg="#aaaaaa")
+        semantic["plan_popup_error_prefix"] = StyleSpec(fg="#aaaaaa")
+        semantic["plan_popup_separator"] = StyleSpec(fg="#aaaaaa")
+        semantic["plan_popup_progress_detail"] = StyleSpec(fg="#cccccc")
+        return ThemeConfig(
+            name="high-contrast",
+            description="High contrast theme for accessibility (fallback)",
+            colors=palette,
+            semantic=semantic,
+            _source_path="fallback",
+        )
+    else:
+        # Default to dark theme
+        return ThemeConfig(
+            name="dark",
+            description="Default dark theme (fallback)",
+            colors=_FALLBACK_PALETTE_DARK.copy(),
+            semantic={k: StyleSpec(
+                fg=v.fg, bg=v.bg, bold=v.bold, italic=v.italic, dim=v.dim, underline=v.underline
+            ) for k, v in DEFAULT_SEMANTIC_STYLES.items()},
+            _source_path="fallback",
+        )
+
+
+def get_builtin_theme(theme_name: str) -> "ThemeConfig":
+    """Get a built-in theme by name, loading from JSON with fallback.
+
+    Args:
+        theme_name: Name of the theme ("dark", "light", "high-contrast").
+
+    Returns:
+        ThemeConfig instance.
+    """
+    if theme_name not in BUILTIN_THEME_NAMES:
+        logger.warning(f"Unknown theme '{theme_name}', falling back to 'dark'")
+        theme_name = "dark"
+
+    # Try loading from JSON first
+    config = _load_theme_from_json(theme_name)
+    if config:
+        return config
+
+    # Fall back to hardcoded values
+    logger.warning(f"Could not load theme '{theme_name}' from JSON, using fallback")
+    return _create_fallback_theme(theme_name)
+
+
+def list_available_themes() -> List[str]:
+    """List all available theme names.
+
+    Returns:
+        List of theme names (built-in + any custom themes found).
+    """
+    themes = set(BUILTIN_THEME_NAMES)
+
+    # Check for custom themes in user directory
+    user_themes_dir = Path.home() / ".jaato" / "themes"
+    if user_themes_dir.exists():
+        for path in user_themes_dir.glob("*.json"):
+            themes.add(path.stem)
+
+    # Check for custom themes in project directory
+    project_themes_dir = Path(".jaato") / "themes"
+    if project_themes_dir.exists():
+        for path in project_themes_dir.glob("*.json"):
+            themes.add(path.stem)
+
+    return sorted(themes)
 
 
 @dataclass
@@ -697,84 +920,49 @@ class ThemeConfig:
         return self._source_path
 
 
-def _create_dark_theme() -> ThemeConfig:
-    """Create the built-in dark theme."""
-    return ThemeConfig(
-        name="dark",
-        description="Default dark theme",
-        colors=DEFAULT_PALETTE.copy(),
-        semantic={k: StyleSpec(
-            fg=v.fg, bg=v.bg, bold=v.bold, italic=v.italic, dim=v.dim, underline=v.underline
-        ) for k, v in DEFAULT_SEMANTIC_STYLES.items()},
-    )
+class _BuiltinThemesDict(dict):
+    """Lazy-loading dictionary for built-in themes.
+
+    Loads themes from JSON files on first access, with fallback to
+    hardcoded values if JSON files are unavailable.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._loaded = set()
+
+    def __getitem__(self, key: str) -> ThemeConfig:
+        if key not in self._loaded:
+            self._load_theme(key)
+        return super().__getitem__(key)
+
+    def __contains__(self, key: object) -> bool:
+        return key in BUILTIN_THEME_NAMES
+
+    def get(self, key: str, default=None) -> Optional[ThemeConfig]:
+        if key not in BUILTIN_THEME_NAMES:
+            return default
+        return self[key]
+
+    def _load_theme(self, name: str) -> None:
+        """Load a theme and cache it."""
+        if name in BUILTIN_THEME_NAMES:
+            theme = get_builtin_theme(name)
+            super().__setitem__(name, theme)
+            self._loaded.add(name)
+
+    def keys(self):
+        return BUILTIN_THEME_NAMES
+
+    def values(self):
+        return [self[name] for name in BUILTIN_THEME_NAMES]
+
+    def items(self):
+        return [(name, self[name]) for name in BUILTIN_THEME_NAMES]
 
 
-def _create_light_theme() -> ThemeConfig:
-    """Create the built-in light theme."""
-    # Create with light palette but same semantic mappings
-    theme = ThemeConfig(
-        name="light",
-        description="Light theme for bright terminals",
-        colors=LIGHT_PALETTE.copy(),
-        semantic={k: StyleSpec(
-            fg=v.fg, bg=v.bg, bold=v.bold, italic=v.italic, dim=v.dim, underline=v.underline
-        ) for k, v in DEFAULT_SEMANTIC_STYLES.items()},
-    )
-    # Adjust specific styles for light theme visibility
-    theme.semantic["tool_output"] = StyleSpec(fg="#006688", italic=True)
-    theme.semantic["tool_source_label"] = StyleSpec(fg="#555555", dim=True)
-    theme.semantic["agent_tab_separator"] = StyleSpec(fg="#aaaaaa")
-    theme.semantic["agent_tab_hint"] = StyleSpec(fg="#888888", italic=True)
-    theme.semantic["session_bar_separator"] = StyleSpec(fg="#aaaaaa")
-    theme.semantic["status_bar_separator"] = StyleSpec(fg="#bbbbbb", bg="surface")
-    theme.semantic["plan_in_progress"] = StyleSpec(fg="#0055cc", bg="surface")  # Darker blue
-    theme.semantic["agent_processing"] = StyleSpec(fg="#0055cc")  # Darker blue
-    theme.semantic["tool_indicator"] = StyleSpec(fg="#0055cc", dim=True)  # Darker blue
-    # Plan popup - use darker colors without dim for readability on light background
-    theme.semantic["plan_popup_empty"] = StyleSpec(fg="#666666", italic=True)
-    theme.semantic["plan_popup_empty_border"] = StyleSpec(fg="#888888")
-    theme.semantic["plan_popup_scroll_indicator"] = StyleSpec(fg="#666666", italic=True)
-    theme.semantic["plan_popup_hint"] = StyleSpec(fg="#666666")
-    theme.semantic["plan_popup_step_number"] = StyleSpec(fg="#555555")
-    theme.semantic["plan_popup_result_prefix"] = StyleSpec(fg="#555555")
-    theme.semantic["plan_popup_error_prefix"] = StyleSpec(fg="#555555")
-    theme.semantic["plan_popup_separator"] = StyleSpec(fg="#888888")
-    theme.semantic["plan_popup_progress_detail"] = StyleSpec(fg="#555555")
-    return theme
-
-
-def _create_high_contrast_theme() -> ThemeConfig:
-    """Create the built-in high contrast theme."""
-    theme = ThemeConfig(
-        name="high-contrast",
-        description="High contrast theme for accessibility",
-        colors=HIGH_CONTRAST_PALETTE.copy(),
-        semantic={k: StyleSpec(
-            fg=v.fg, bg=v.bg, bold=v.bold, italic=v.italic, dim=v.dim, underline=v.underline
-        ) for k, v in DEFAULT_SEMANTIC_STYLES.items()},
-    )
-    # Boost contrast on specific styles
-    theme.semantic["separator"] = StyleSpec(fg="#aaaaaa")
-    theme.semantic["hint"] = StyleSpec(fg="#cccccc", italic=True)
-    # Plan popup - use brighter colors without dim for high contrast
-    theme.semantic["plan_popup_empty"] = StyleSpec(fg="#aaaaaa", italic=True)
-    theme.semantic["plan_popup_empty_border"] = StyleSpec(fg="#aaaaaa")
-    theme.semantic["plan_popup_scroll_indicator"] = StyleSpec(fg="#cccccc", italic=True)
-    theme.semantic["plan_popup_hint"] = StyleSpec(fg="#cccccc")
-    theme.semantic["plan_popup_step_number"] = StyleSpec(fg="#aaaaaa")
-    theme.semantic["plan_popup_result_prefix"] = StyleSpec(fg="#aaaaaa")
-    theme.semantic["plan_popup_error_prefix"] = StyleSpec(fg="#aaaaaa")
-    theme.semantic["plan_popup_separator"] = StyleSpec(fg="#aaaaaa")
-    theme.semantic["plan_popup_progress_detail"] = StyleSpec(fg="#cccccc")
-    return theme
-
-
-# Built-in themes
-BUILTIN_THEMES: Dict[str, ThemeConfig] = {
-    "dark": _create_dark_theme(),
-    "light": _create_light_theme(),
-    "high-contrast": _create_high_contrast_theme(),
-}
+# Built-in themes (lazy-loaded from JSON files)
+BUILTIN_THEMES: Dict[str, ThemeConfig] = _BuiltinThemesDict()
 
 
 def save_theme_preference(theme_name: str) -> bool:
@@ -810,9 +998,16 @@ def load_theme(
     Priority order:
     1. JAATO_THEME environment variable (preset name: dark, light, high-contrast)
     2. Saved user preference (~/.jaato/preferences.json)
-    3. Project-level file (.jaato/theme.json)
-    4. User-level file (~/.jaato/theme.json)
-    5. Default "dark" theme
+    3. Project-level custom theme (.jaato/theme.json)
+    4. User-level custom theme (~/.jaato/theme.json)
+    5. Default "dark" theme (loaded from JSON with fallback to hardcoded)
+
+    When loading a built-in theme (via env var, preference, or default),
+    the system checks for overrides in this order:
+    - ~/.jaato/themes/<name>.json (user override)
+    - .jaato/themes/<name>.json (project override)
+    - rich-client/themes/<name>.json (built-in)
+    - Hardcoded fallback (if all JSON files unavailable)
 
     Args:
         project_path: Project-level theme config path.
@@ -826,16 +1021,16 @@ def load_theme(
 
     # Check for preset selection via environment (highest priority - temporary override)
     preset = os.environ.get("JAATO_THEME", "").strip().lower()
-    if preset and preset in BUILTIN_THEMES:
+    if preset and preset in BUILTIN_THEME_NAMES:
         logger.info(f"Using theme preset '{preset}' from JAATO_THEME environment variable")
-        return BUILTIN_THEMES[preset].copy()
+        return get_builtin_theme(preset).copy()
 
     # Check for saved user preference
     saved_pref = load_theme_preference()
     if saved_pref:
-        if saved_pref in BUILTIN_THEMES:
+        if saved_pref in BUILTIN_THEME_NAMES:
             logger.info(f"Using saved theme preference: {saved_pref}")
-            return BUILTIN_THEMES[saved_pref].copy()
+            return get_builtin_theme(saved_pref).copy()
         # If preference is "custom" or unknown, fall through to file loading
 
     # Try project-level config
@@ -850,7 +1045,7 @@ def load_theme(
 
     # Fall back to default
     logger.debug("Using default dark theme")
-    return BUILTIN_THEMES["dark"].copy()
+    return get_builtin_theme("dark").copy()
 
 
 def get_semantic_style_names() -> List[str]:
