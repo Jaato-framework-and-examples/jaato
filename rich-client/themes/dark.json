@@ -76,6 +76,13 @@
     "model_header": {"fg": "primary", "bold": true},
     "model_header_separator": {"fg": "primary", "dim": true},
 
+    "thinking_header": {"fg": "primary", "dim": true},
+    "thinking_header_separator": {"dim": true},
+    "thinking_border": {"fg": "primary", "dim": true},
+    "thinking_content": {"dim": true, "italic": true},
+    "thinking_footer": {"fg": "primary", "dim": true},
+    "thinking_footer_separator": {"dim": true},
+
     "tool_output": {"fg": "#87D7D7", "italic": true},
     "tool_source_label": {"fg": "#808080", "dim": true},
     "tool_name": {"fg": "primary"},
