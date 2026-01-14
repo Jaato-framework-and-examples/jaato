@@ -514,31 +514,8 @@ class JaatoServer:
         self.registry.expose_all(plugin_configs)
         self.todo_plugin = self.registry.get_plugin("todo")
 
-        # Wire up artifact tracker with registry for cross-plugin access (LSP integration)
-        artifact_tracker = self.registry.get_plugin("artifact_tracker")
-        if artifact_tracker and hasattr(artifact_tracker, 'set_plugin_registry'):
-            artifact_tracker.set_plugin_registry(self.registry)
-            self._trace("artifact_tracker wired with registry (LSP integration enabled)")
-        else:
-            self._trace("artifact_tracker not found or missing set_plugin_registry - LSP integration disabled")
-
-        # Wire up file_edit plugin with registry for authorized external paths
-        file_edit_plugin = self.registry.get_plugin("file_edit")
-        if file_edit_plugin and hasattr(file_edit_plugin, 'set_plugin_registry'):
-            file_edit_plugin.set_plugin_registry(self.registry)
-            self._trace("file_edit wired with registry (authorized paths enabled)")
-
-        # Wire up CLI plugin with registry for authorized external paths
-        cli_plugin = self.registry.get_plugin("cli")
-        if cli_plugin and hasattr(cli_plugin, 'set_plugin_registry'):
-            cli_plugin.set_plugin_registry(self.registry)
-            self._trace("cli wired with registry (authorized paths enabled)")
-
-        # Wire up references plugin with registry for authorizing external paths
-        references_plugin = self.registry.get_plugin("references")
-        if references_plugin and hasattr(references_plugin, 'set_plugin_registry'):
-            references_plugin.set_plugin_registry(self.registry)
-            self._trace("references wired with registry (can authorize external paths)")
+        # Note: Plugins with set_plugin_registry() are auto-wired during expose_all()
+        # No manual wiring needed for artifact_tracker, file_edit, cli, references, etc.
 
         self.permission_plugin = PermissionPlugin()
         self.permission_plugin.initialize({
