@@ -125,6 +125,10 @@ class IntrospectionPlugin:
         """Return introspection tools as auto-approved (read-only, no security implications)."""
         return ["list_tools", "get_tool_schema"]
 
+    def get_user_commands(self) -> List:
+        """Return user commands (none for this plugin)."""
+        return []
+
     def _execute_list_tools(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the list_tools tool.
 
