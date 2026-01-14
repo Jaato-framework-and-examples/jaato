@@ -123,7 +123,8 @@ class MemoryPlugin:
                         }
                     },
                     "required": ["content", "description", "tags"]
-                }
+                },
+                category="memory",
             ),
             ToolSchema(
                 name='retrieve_memories',
@@ -146,7 +147,8 @@ class MemoryPlugin:
                         }
                     },
                     "required": ["tags"]
-                }
+                },
+                category="memory",
             ),
             ToolSchema(
                 name='list_memory_tags',
@@ -158,7 +160,8 @@ class MemoryPlugin:
                     "type": "object",
                     "properties": {},
                     "required": []
-                }
+                },
+                category="memory",
             )
         ]
 

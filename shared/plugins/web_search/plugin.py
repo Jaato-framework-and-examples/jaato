@@ -101,7 +101,8 @@ class WebSearchPlugin:
                     }
                 },
                 "required": ["query"]
-            }
+            },
+            category="search",
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:

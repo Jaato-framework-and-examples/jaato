@@ -278,7 +278,8 @@ class FileEditPlugin:
                         }
                     },
                     "required": ["path"]
-                }
+                },
+                category="filesystem",
             ),
             ToolSchema(
                 name="updateFile",
@@ -302,7 +303,8 @@ class FileEditPlugin:
                         }
                     },
                     "required": ["path", "new_content"]
-                }
+                },
+                category="filesystem",
             ),
             ToolSchema(
                 name="writeNewFile",
@@ -328,7 +330,8 @@ class FileEditPlugin:
                         }
                     },
                     "required": ["path", "content"]
-                }
+                },
+                category="filesystem",
             ),
             ToolSchema(
                 name="removeFile",
@@ -343,7 +346,8 @@ class FileEditPlugin:
                         }
                     },
                     "required": ["path"]
-                }
+                },
+                category="filesystem",
             ),
             ToolSchema(
                 name="moveFile",
@@ -367,7 +371,8 @@ class FileEditPlugin:
                         }
                     },
                     "required": ["source_path", "destination_path"]
-                }
+                },
+                category="filesystem",
             ),
             ToolSchema(
                 name="renameFile",
@@ -391,7 +396,8 @@ class FileEditPlugin:
                         }
                     },
                     "required": ["source_path", "destination_path"]
-                }
+                },
+                category="filesystem",
             ),
             ToolSchema(
                 name="undoFileChange",
@@ -406,7 +412,8 @@ class FileEditPlugin:
                         }
                     },
                     "required": ["path"]
-                }
+                },
+                category="filesystem",
             ),
         ]
 
