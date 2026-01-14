@@ -49,9 +49,7 @@ DEFAULT_COMMANDS = [
     ("keybindings reload", "Reload keybindings from config files"),
     ("theme", "Show current theme information"),
     ("theme reload", "Reload theme from config files"),
-    ("theme dark", "Switch to dark theme preset"),
-    ("theme light", "Switch to light theme preset"),
-    ("theme high-contrast", "Switch to high-contrast theme preset"),
+    # Theme presets are added dynamically via set_available_themes()
     ("plugins", "List available plugins with status"),
     ("reset", "Clear conversation history"),
     ("history", "Show full conversation history"),
@@ -1122,6 +1120,22 @@ class CombinedCompleter(Completer):
             True if permission mode is enabled, False otherwise.
         """
         return self._permission_mode
+
+    def set_available_themes(self, theme_names: list[str]) -> None:
+        """Set available theme names for completion.
+
+        Generates 'theme <name>' commands for each available theme.
+        This allows theme completions to be populated dynamically from
+        the theme discovery system rather than being hardcoded.
+
+        Args:
+            theme_names: List of available theme names.
+        """
+        theme_commands = [
+            (f"theme {name}", f"Switch to {name} theme")
+            for name in sorted(theme_names)
+        ]
+        self._command_completer.add_commands(theme_commands)
 
     def get_completions(
         self, document: Document, complete_event
