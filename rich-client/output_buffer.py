@@ -304,6 +304,10 @@ class OutputBuffer:
         Returns:
             Rich style string.
         """
+        # Handle empty semantic name - just return fallback
+        if not semantic_name:
+            return fallback
+
         # Check if this is a raw Rich style (primitive or compound like "bold cyan")
         # If any word is a Rich primitive, treat the whole thing as a raw style
         words = semantic_name.split()

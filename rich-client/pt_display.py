@@ -149,14 +149,16 @@ class PTDisplay:
         # Formatter pipeline for output processing (syntax highlighting, diff coloring)
         # Skip in server_formatted mode - server already handles formatting
         self._formatter_pipeline = None
+        self._code_block_formatter = None  # Keep reference for theme updates
         if not server_formatted:
             self._formatter_pipeline = create_pipeline()
             self._formatter_pipeline.register(create_hidden_filter())         # priority 5
             self._formatter_pipeline.register(create_diff_formatter())        # priority 20
             # Code block formatter with line numbers enabled
-            code_block_formatter = create_code_block_formatter()
-            code_block_formatter.initialize({"line_numbers": True})
-            self._formatter_pipeline.register(code_block_formatter)           # priority 40
+            self._code_block_formatter = create_code_block_formatter()
+            self._code_block_formatter.initialize({"line_numbers": True})
+            self._code_block_formatter.set_syntax_theme(self._theme.name)  # Match UI theme
+            self._formatter_pipeline.register(self._code_block_formatter)     # priority 40
             self._formatter_pipeline.set_console_width(output_width)
             self._output_buffer.set_formatter_pipeline(self._formatter_pipeline)
 
@@ -1411,6 +1413,10 @@ class PTDisplay:
         self._plan_panel.set_theme(theme)
         if self._agent_registry:
             self._agent_registry.set_theme_all(theme)
+
+        # Update code block formatter syntax theme to match UI theme
+        if self._code_block_formatter:
+            self._code_block_formatter.set_syntax_theme(theme.name)
 
         # Update prompt_toolkit styles on the running application
         if self._app:
