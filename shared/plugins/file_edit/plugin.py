@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..base import UserCommand, PermissionDisplayInfo
 from ..model_provider.types import ToolSchema
+from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from .backup import BackupManager
 from .diff_utils import (
     generate_unified_diff,
@@ -132,6 +133,12 @@ class FileEditPlugin:
         workspace_str = self._workspace_root or "none"
         self._trace(f"initialize: backup_dir={backup_dir_str}, workspace_root={workspace_str}")
 
+        # Log .jaato symlink detection for visibility
+        if self._workspace_root:
+            is_symlink, target = detect_jaato_symlink(self._workspace_root)
+            if is_symlink:
+                self._trace(f"initialize: .jaato is symlink -> {target} (contained escape enabled)")
+
     def shutdown(self) -> None:
         """Shutdown the plugin."""
         self._trace("shutdown: cleaning up")
@@ -169,7 +176,9 @@ class FileEditPlugin:
         A path is allowed if:
         1. No workspace_root is configured (sandboxing disabled)
         2. The path is within the workspace_root
-        3. The path is authorized via the plugin registry
+        3. The path is under .jaato and within the .jaato containment boundary
+           (see sandbox_utils.py for .jaato contained symlink escape rules)
+        4. The path is authorized via the plugin registry
 
         Args:
             path: Path to check.
@@ -181,21 +190,20 @@ class FileEditPlugin:
         if not self._workspace_root:
             return True
 
-        # Normalize the path
-        abs_path = os.path.realpath(os.path.abspath(path))
+        # Resolve path relative to workspace first
+        resolved = self._resolve_path(path)
+        abs_path = str(resolved.absolute())
 
-        # Check if within workspace
-        workspace_prefix = self._workspace_root.rstrip(os.sep) + os.sep
-        if abs_path == self._workspace_root or abs_path.startswith(workspace_prefix):
-            return True
+        # Use shared sandbox utility with .jaato containment support
+        allowed = check_path_with_jaato_containment(
+            abs_path,
+            self._workspace_root,
+            self._plugin_registry
+        )
 
-        # Check if authorized via plugin registry
-        if self._plugin_registry and self._plugin_registry.is_path_authorized(abs_path):
-            self._trace(f"_is_path_allowed: {path} authorized via registry")
-            return True
-
-        self._trace(f"_is_path_allowed: {path} blocked (outside workspace)")
-        return False
+        if not allowed:
+            self._trace(f"_is_path_allowed: {path} blocked (outside sandbox)")
+        return allowed
 
     def _resolve_path(self, path: str) -> Path:
         """Resolve a path, making relative paths relative to workspace_root.

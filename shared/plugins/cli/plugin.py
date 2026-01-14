@@ -13,6 +13,7 @@ from typing import Dict, List, Any, Callable, Optional
 from ..base import UserCommand
 from ..background import BackgroundCapableMixin
 from ..model_provider.types import ToolSchema
+from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from shared.ai_tool_runner import get_current_tool_output_callback
 
 
@@ -187,6 +188,12 @@ class CLIToolPlugin(BackgroundCapableMixin):
 
         self._initialized = True
         self._trace(f"initialize: extra_paths={self._extra_paths}, max_output={self._max_output_chars}, auto_bg_threshold={self._auto_background_threshold}, workspace_root={self._workspace_root}")
+
+        # Log .jaato symlink detection for visibility
+        if self._workspace_root:
+            is_symlink, target = detect_jaato_symlink(self._workspace_root)
+            if is_symlink:
+                self._trace(f"initialize: .jaato is symlink -> {target} (contained escape enabled)")
 
     def set_tool_output_callback(self, callback: Optional[Callable[[str], None]]) -> None:
         """Set the callback for streaming output during execution.
@@ -695,13 +702,15 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         A path is allowed if:
         1. No workspace_root is configured (sandboxing disabled)
         2. The path is within the workspace_root
-        3. The path is authorized via the plugin registry
+        3. The path is under .jaato and within the .jaato containment boundary
+           (see sandbox_utils.py for .jaato contained symlink escape rules)
+        4. The path is authorized via the plugin registry
 
         Handles:
         - Absolute paths
-        - Relative paths (resolved against cwd)
+        - Relative paths (resolved against workspace_root)
         - Paths with .. traversal
-        - Symlinks (resolved to real path)
+        - Symlinks (resolved to real path, but .jaato gets special handling)
         - ~ home directory expansion
 
         Args:
@@ -718,22 +727,20 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             # Expand ~ to home directory
             expanded = os.path.expanduser(path)
 
-            # Resolve to absolute path, following symlinks
-            # Use realpath to resolve symlinks and normalize
-            resolved = os.path.realpath(os.path.abspath(expanded))
+            # Make absolute relative to workspace_root
+            if not os.path.isabs(expanded):
+                expanded = os.path.join(self._workspace_root, expanded)
 
-            # Check if the resolved path starts with workspace_root
-            # Add trailing separator to prevent /workspace matching /workspace2
-            workspace_prefix = self._workspace_root.rstrip(os.sep) + os.sep
-            if resolved == self._workspace_root or resolved.startswith(workspace_prefix):
-                return True
+            # Use shared sandbox utility with .jaato containment support
+            allowed = check_path_with_jaato_containment(
+                expanded,
+                self._workspace_root,
+                self._plugin_registry
+            )
 
-            # Check if authorized via plugin registry (for external paths like knowledge base)
-            if self._plugin_registry and self._plugin_registry.is_path_authorized(resolved):
-                self._trace(f"_is_path_within_workspace: {path} authorized via registry")
-                return True
-
-            return False
+            if not allowed:
+                self._trace(f"_is_path_within_workspace: {path} blocked (outside sandbox)")
+            return allowed
 
         except (OSError, ValueError):
             # If path resolution fails, treat as outside workspace for safety
