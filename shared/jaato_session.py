@@ -535,7 +535,8 @@ class JaatoSession:
         if not updates:
             return ""
 
-        parts = ["<streaming_updates>"]
+        # Wrap in <hidden> so user doesn't see raw streaming data, only model sees it
+        parts = ["<hidden><streaming_updates>"]
         for update in updates:
             parts.append(f"\n[Stream: {update.tool_name} (stream_id={update.stream_id})]")
             if update.new_chunks:
@@ -552,6 +553,7 @@ class JaatoSession:
             "\nYou can continue acting on these results. "
             "Call dismiss_stream(stream_id='*') when you have enough results from all streams."
         )
+        parts.append("</hidden>")
 
         return "".join(parts)
 
@@ -828,10 +830,12 @@ class JaatoSession:
 
             # Register streaming control tools (e.g., dismiss_stream) as core tools
             # This makes them visible to introspection and includes them in tool schemas
+            auto_approved = self._stream_manager.get_auto_approved_tools()
             for schema in self._stream_manager.get_tool_schemas():
                 executor = self._stream_manager.get_executors().get(schema.name)
                 if executor:
-                    self._runtime.registry.register_core_tool(schema, executor)
+                    is_auto_approved = schema.name in auto_approved
+                    self._runtime.registry.register_core_tool(schema, executor, is_auto_approved)
 
             # Refresh runtime's tool cache to include the newly registered core tools
             self._runtime.refresh_tool_cache()
@@ -2385,10 +2389,12 @@ class JaatoSession:
         if plugin:
             plugin_name = getattr(plugin, 'name', type(plugin).__name__)
 
-        # Create chunk callback for UI
+        # Create chunk callback for UI - wrapped in hidden tags so only model sees content
         def on_chunk(chunk: StreamChunk) -> None:
             if on_output:
-                on_output("streaming", f"[{base_name}] {chunk.content}", "append")
+                # Wrap in <hidden> so the hidden_content_filter strips it from user view
+                # but the model still receives the streaming results
+                on_output("streaming", f"<hidden>[{base_name}] {chunk.content}</hidden>", "append")
 
         try:
             # Start the streaming execution

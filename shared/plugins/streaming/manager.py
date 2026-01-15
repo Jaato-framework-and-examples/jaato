@@ -456,6 +456,17 @@ class StreamManager:
             "dismiss_stream": self._execute_dismiss_stream,
         }
 
+    def get_auto_approved_tools(self) -> list:
+        """Return list of auto-approved tools.
+
+        dismiss_stream is auto-approved because it's a control tool
+        with no security implications - it just stops receiving updates.
+
+        Returns:
+            List of tool names that should be auto-approved.
+        """
+        return ["dismiss_stream"]
+
     def _execute_dismiss_stream(self, args: dict) -> dict:
         """Execute the dismiss_stream tool.
 
