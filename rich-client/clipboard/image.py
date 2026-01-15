@@ -1,15 +1,21 @@
 """Image clipboard support using platform-specific tools."""
 
+import os
 import platform
 import subprocess
 from pathlib import Path
 
 
-def copy_image_to_clipboard(path: str) -> bool:
+def is_ssh_session() -> bool:
+    """Check if running in an SSH session."""
+    return bool(os.environ.get("SSH_CLIENT") or os.environ.get("SSH_TTY"))
+
+
+def copy_image_to_clipboard(path: str) -> tuple[bool, str]:
     """Copy an image file to the system clipboard.
 
     Uses platform-specific tools:
-    - Linux: xclip (falls back to xsel)
+    - Linux: wl-copy (Wayland), xclip, or xsel (X11)
     - macOS: osascript
     - Windows: PowerShell with System.Windows.Forms
 
@@ -17,24 +23,49 @@ def copy_image_to_clipboard(path: str) -> bool:
         path: Path to the image file (PNG recommended).
 
     Returns:
-        True if copy succeeded, False otherwise.
+        Tuple of (success, error_message). Error message is empty on success.
     """
+    # Check for SSH session - clipboard won't work without X11 forwarding
+    if is_ssh_session():
+        has_display = bool(os.environ.get("DISPLAY"))
+        if not has_display:
+            return False, "SSH session without X11 forwarding (use 'ssh -X' for clipboard)"
+
     path = str(Path(path).resolve())
     system = platform.system()
 
     if system == "Linux":
-        return _copy_linux(path)
+        if _copy_linux(path):
+            return True, ""
+        return False, "wl-copy/xclip/xsel not available"
     elif system == "Darwin":
-        return _copy_macos(path)
+        if _copy_macos(path):
+            return True, ""
+        return False, "osascript failed"
     elif system == "Windows":
-        return _copy_windows(path)
+        if _copy_windows(path):
+            return True, ""
+        return False, "PowerShell clipboard failed"
 
-    return False
+    return False, f"Unsupported platform: {system}"
 
 
 def _copy_linux(path: str) -> bool:
-    """Copy image to clipboard on Linux using xclip or xsel."""
-    # Try xclip first (more common)
+    """Copy image to clipboard on Linux using wl-copy (Wayland) or xclip/xsel (X11)."""
+    # Try wl-copy first (Wayland) - most modern Linux desktops
+    try:
+        with open(path, "rb") as f:
+            subprocess.run(
+                ["wl-copy", "--type", "image/png"],
+                stdin=f,
+                check=True,
+                capture_output=True,
+            )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pass
+
+    # Try xclip (X11)
     try:
         with open(path, "rb") as f:
             subprocess.run(
@@ -47,7 +78,7 @@ def _copy_linux(path: str) -> bool:
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         pass
 
-    # Fall back to xsel
+    # Fall back to xsel (X11)
     try:
         with open(path, "rb") as f:
             subprocess.run(

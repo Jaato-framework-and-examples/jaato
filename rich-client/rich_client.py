@@ -1970,13 +1970,14 @@ class RichClient:
 
             if result and result.success:
                 # Copy to clipboard
-                if copy_image_to_clipboard(result.path):
+                success, error_msg = copy_image_to_clipboard(result.path)
+                if success:
                     self._display.add_system_message("Screenshot copied to clipboard:", "system_success")
                     self._display.add_system_message(f"  {result.path}", "cyan")
                 else:
                     self._display.add_system_message("Screenshot captured but clipboard copy failed:", "system_warning")
                     self._display.add_system_message(f"  {result.path}", "cyan")
-                    self._display.add_system_message("  (xclip/xsel may not be installed)", "dim")
+                    self._display.add_system_message(f"  ({error_msg})", "dim")
             elif result and not result.success:
                 self._display.add_system_message("[Screenshot failed]", "system_error")
                 self._display.add_system_message(f"  Error: {result.error}", "dim")
@@ -2872,13 +2873,14 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
 
         if result and result.success:
             # Copy to clipboard
-            if copy_image_to_clipboard(result.path):
+            success, error_msg = copy_image_to_clipboard(result.path)
+            if success:
                 display.add_system_message("Screenshot copied to clipboard:", "system_success")
                 display.add_system_message(f"  {result.path}", "cyan")
             else:
                 display.add_system_message("Screenshot captured but clipboard copy failed:", "system_warning")
                 display.add_system_message(f"  {result.path}", "cyan")
-                display.add_system_message("  (xclip/xsel may not be installed)", "dim")
+                display.add_system_message(f"  ({error_msg})", "dim")
         elif result and not result.success:
             display.add_system_message("[Screenshot failed]", "system_error")
             display.add_system_message(f"  Error: {result.error}", "dim")
