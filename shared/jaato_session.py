@@ -2563,7 +2563,12 @@ class JaatoSession:
             call_id=fc.id or "",
             plugin_type=plugin_type,
         ) as tool_span:
-            if self._executor:
+            # Check if this is a streaming tool (name ends with :stream)
+            if self._is_streaming_tool(name):
+                # Route to streaming execution
+                executor_result = self._execute_streaming_tool(fc, None)
+                tool_span.set_attribute("jaato.tool.streaming", True)
+            elif self._executor:
                 # Create callback that captures this tool's call_id
                 def tool_output_callback(chunk: str, _call_id=fc.id, _name=name) -> None:
                     if self._ui_hooks and _call_id:
