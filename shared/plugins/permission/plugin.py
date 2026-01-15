@@ -72,6 +72,9 @@ class PermissionPlugin:
         self._original_executors: Dict[str, Callable] = {}
         self._execution_log: List[Dict[str, Any]] = []
         self._allow_all: bool = False  # When True, auto-approve all requests
+        # Suspension state flags for temporary permission bypasses
+        self._turn_suspended: bool = False  # Allow all remaining tools this turn
+        self._idle_suspended: bool = False  # Allow until session goes idle
         # Lock for serializing channel interactions (permission prompts)
         # This ensures only one permission prompt is shown at a time when
         # multiple tools request permission concurrently (parallel execution)
@@ -235,6 +238,8 @@ class PermissionPlugin:
         self._wrapped_executors.clear()
         self._original_executors.clear()
         self._allow_all = False
+        self._turn_suspended = False
+        self._idle_suspended = False
 
     def add_whitelist_tools(self, tools: List[str]) -> None:
         """Add tools to the permission whitelist.
@@ -248,6 +253,76 @@ class PermissionPlugin:
         if self._policy and tools:
             for tool in tools:
                 self._policy.whitelist_tools.add(tool)
+
+    # Suspension management methods
+
+    def clear_turn_suspension(self) -> None:
+        """Clear turn-scoped permission suspension.
+
+        Called when a turn ends (model returns final response) to restore
+        normal permission prompting for the next turn.
+        """
+        if self._turn_suspended:
+            self._trace("clear_turn_suspension: clearing turn suspension")
+            self._turn_suspended = False
+
+    def clear_idle_suspension(self) -> None:
+        """Clear idle-scoped permission suspension.
+
+        Called when the session transitions to idle state (awaiting user input)
+        to restore normal permission prompting.
+        """
+        if self._idle_suspended:
+            self._trace("clear_idle_suspension: clearing idle suspension")
+            self._idle_suspended = False
+
+    def clear_all_suspensions(self) -> None:
+        """Clear all temporary permission suspensions.
+
+        Clears both turn and idle suspensions. Called by 'permissions resume'.
+        Does NOT clear _allow_all (session-wide pre-approval).
+        """
+        self._trace("clear_all_suspensions: clearing all suspensions")
+        self._turn_suspended = False
+        self._idle_suspended = False
+
+    def suspend_for_turn(self) -> None:
+        """Suspend permission prompts for the remainder of this turn.
+
+        All permission requests will be auto-approved until the turn ends.
+        """
+        self._trace("suspend_for_turn: activating turn suspension")
+        self._turn_suspended = True
+
+    def suspend_until_idle(self) -> None:
+        """Suspend permission prompts until session goes idle.
+
+        All permission requests will be auto-approved until the session
+        returns to idle state (awaiting user input).
+        """
+        self._trace("suspend_until_idle: activating idle suspension")
+        self._idle_suspended = True
+
+    @property
+    def is_suspended(self) -> bool:
+        """Check if any suspension is currently active."""
+        return self._turn_suspended or self._idle_suspended or self._allow_all
+
+    @property
+    def suspension_scope(self) -> Optional[str]:
+        """Get the current suspension scope, if any.
+
+        Returns:
+            "turn" if turn-suspended, "idle" if idle-suspended,
+            "session" if allow_all, None if not suspended.
+        """
+        if self._turn_suspended:
+            return "turn"
+        if self._idle_suspended:
+            return "idle"
+        if self._allow_all:
+            return "session"
+        return None
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return function declarations for the askPermission tool.
@@ -361,10 +436,13 @@ If permission is denied, do not attempt to proceed with that action."""
         # Subcommand completions
         subcommands = [
             CommandCompletion("show", "Display current effective policy"),
+            CommandCompletion("status", "Quick view of suspension state"),
             CommandCompletion("check", "Test what decision a tool would get"),
             CommandCompletion("allow", "Add tool/pattern to session whitelist"),
             CommandCompletion("deny", "Add tool/pattern to session blacklist"),
             CommandCompletion("default", "Set session default policy"),
+            CommandCompletion("suspend", "Suspend prompting (--turn for turn only)"),
+            CommandCompletion("resume", "Resume normal prompting"),
             CommandCompletion("clear", "Reset all session modifications"),
         ]
 
@@ -400,6 +478,13 @@ If permission is denied, do not attempt to proceed with that action."""
             if subcommand == "check":
                 # "permissions check <partial>" - provide all tool names
                 return self._get_tool_completions(partial)
+
+            if subcommand == "suspend":
+                # "permissions suspend <partial>" - offer --turn flag
+                suspend_options = [
+                    CommandCompletion("--turn", "Suspend for this turn only"),
+                ]
+                return [c for c in suspend_options if c.value.startswith(partial)]
 
         return []
 
@@ -461,10 +546,13 @@ If permission is denied, do not attempt to proceed with that action."""
 
         Subcommands:
             show              - Display current effective policy with diff from base
+            status            - Quick view of current suspension state
             check <tool>      - Test what decision a tool would get (uses real evaluation)
             allow <pattern>   - Add tool/pattern to session whitelist
             deny <pattern>    - Add tool/pattern to session blacklist
             default <policy>  - Set session default policy (allow|deny|ask)
+            suspend [--turn]  - Suspend prompting (until idle, or just this turn)
+            resume            - Resume normal permission prompting
             clear             - Reset all session modifications
 
         Args:
@@ -482,6 +570,8 @@ If permission is denied, do not attempt to proceed with that action."""
 
         if subcommand == "show":
             return self._permissions_show()
+        elif subcommand == "status":
+            return self._permissions_status()
         elif subcommand == "check":
             if len(cmd_args) < 2:
                 return "Usage: permissions check <tool_name>"
@@ -502,17 +592,26 @@ If permission is denied, do not attempt to proceed with that action."""
                 return "Usage: permissions default <allow|deny|ask>"
             policy = cmd_args[1].lower()
             return self._permissions_default(policy)
+        elif subcommand == "suspend":
+            # Check for --turn flag
+            turn_only = "--turn" in cmd_args[1:] if len(cmd_args) > 1 else False
+            return self._permissions_suspend(turn_only=turn_only)
+        elif subcommand == "resume":
+            return self._permissions_resume()
         elif subcommand == "clear":
             return self._permissions_clear()
         else:
             return (
                 f"Unknown subcommand: {subcommand}\n"
-                "Usage: permissions <show|check|allow|deny|default|clear>\n"
+                "Usage: permissions <show|status|check|allow|deny|default|suspend|resume|clear>\n"
                 "  show              - Display current effective policy\n"
+                "  status            - Quick view of suspension state\n"
                 "  check <tool>      - Test what decision a tool would get\n"
                 "  allow <pattern>   - Add to session whitelist\n"
                 "  deny <pattern>    - Add to session blacklist\n"
                 "  default <policy>  - Set session default (allow|deny|ask)\n"
+                "  suspend [--turn]  - Suspend prompting (until idle, or --turn for this turn only)\n"
+                "  resume            - Resume normal prompting\n"
                 "  clear             - Reset session modifications"
             )
 
@@ -526,6 +625,18 @@ If permission is denied, do not attempt to proceed with that action."""
         if not self._policy:
             lines.append("Permission plugin not initialized.")
             return "\n".join(lines)
+
+        # Suspension status
+        if self._idle_suspended:
+            lines.append("⚡ Status: SUSPENDED (until-idle)")
+        elif self._turn_suspended:
+            lines.append("⚡ Status: SUSPENDED (turn-scope)")
+        elif self._allow_all:
+            lines.append("⚡ Status: SUSPENDED (session-scope, allow-all)")
+        else:
+            lines.append("Status: Normal prompting")
+
+        lines.append("")
 
         # Effective default policy
         session_default = self._policy.session_default_policy
@@ -648,6 +759,59 @@ If permission is denied, do not attempt to proceed with that action."""
         self._policy.clear_session_rules()
         return "Session rules cleared.\nReverted to base config."
 
+    def _permissions_status(self) -> str:
+        """Show quick status of permission prompting state."""
+        lines = []
+
+        if self._idle_suspended:
+            lines.append("Prompting: SUSPENDED (until-idle)")
+            lines.append("  All tool requests auto-approved until session goes idle.")
+            lines.append("  Use 'permissions resume' to restore prompting early.")
+        elif self._turn_suspended:
+            lines.append("Prompting: SUSPENDED (turn-scope)")
+            lines.append("  All tool requests auto-approved for remainder of this turn.")
+            lines.append("  Will auto-resume when turn completes.")
+        elif self._allow_all:
+            lines.append("Prompting: SUSPENDED (session-scope)")
+            lines.append("  All tool requests auto-approved for this session.")
+            lines.append("  Use 'permissions resume' to restore prompting.")
+        else:
+            lines.append("Prompting: NORMAL")
+            lines.append("  Tools checked against whitelist/blacklist.")
+            lines.append("  Unknown tools will prompt for approval.")
+
+        return "\n".join(lines)
+
+    def _permissions_suspend(self, turn_only: bool = False) -> str:
+        """Suspend permission prompting.
+
+        Args:
+            turn_only: If True, suspend only for this turn. Otherwise until idle.
+        """
+        if turn_only:
+            if self._turn_suspended:
+                return "Turn suspension already active."
+            self._turn_suspended = True
+            return "Prompting suspended for this turn.\nWill auto-resume when turn completes."
+        else:
+            if self._idle_suspended:
+                return "Idle suspension already active."
+            self._idle_suspended = True
+            return "Prompting suspended until session goes idle.\nUse 'permissions resume' to restore prompting early."
+
+    def _permissions_resume(self) -> str:
+        """Resume normal permission prompting."""
+        was_suspended = self._turn_suspended or self._idle_suspended or self._allow_all
+
+        self._turn_suspended = False
+        self._idle_suspended = False
+        self._allow_all = False
+
+        if was_suspended:
+            return "Prompting resumed. All suspensions cleared."
+        else:
+            return "Prompting was not suspended."
+
     def _execute_ask_permission(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the askPermission tool.
 
@@ -702,6 +866,18 @@ If permission is denied, do not attempt to proceed with that action."""
                        'user_approved', 'user_denied', 'allow_all', 'timeout')
         """
         self._trace(f"check_permission: tool={tool_name}")
+
+        # Check suspension states in priority order:
+        # 1. idle suspension (most conservative - clears on idle)
+        # 2. turn suspension (clears on turn end)
+        # 3. allow_all (session-wide, persists until session ends)
+        if self._idle_suspended:
+            self._log_decision(tool_name, args, "allow", "Permission suspended until idle")
+            return True, {'reason': 'Permission suspended until idle', 'method': 'idle_suspension'}
+
+        if self._turn_suspended:
+            self._log_decision(tool_name, args, "allow", "Permission suspended for turn")
+            return True, {'reason': 'Permission suspended for turn', 'method': 'turn_suspension'}
 
         # Check if user pre-approved all requests
         if self._allow_all:
@@ -826,6 +1002,18 @@ If permission is denied, do not attempt to proceed with that action."""
             self._allow_all = True
             self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
             return True, {'reason': response.reason, 'method': 'allow_all'}
+
+        elif decision == ChannelDecision.ALLOW_TURN:
+            # Suspend prompts for remainder of this turn
+            self._turn_suspended = True
+            self._log_decision(tool_name, args, "allow", "Permission suspended for turn")
+            return True, {'reason': response.reason, 'method': 'turn_suspension'}
+
+        elif decision == ChannelDecision.ALLOW_UNTIL_IDLE:
+            # Suspend prompts until session goes idle
+            self._idle_suspended = True
+            self._log_decision(tool_name, args, "allow", "Permission suspended until idle")
+            return True, {'reason': response.reason, 'method': 'idle_suspension'}
 
         elif decision == ChannelDecision.DENY:
             self._log_decision(tool_name, args, "deny", response.reason)
