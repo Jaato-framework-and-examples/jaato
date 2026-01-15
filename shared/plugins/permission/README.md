@@ -591,9 +591,57 @@ Responses:
 | `y` / `yes` | Allow this execution |
 | `n` / `no` | Deny this execution |
 | `a` / `always` | Allow and add this tool to session whitelist |
+| `t` / `turn` | Allow remaining tools this turn (clears when session goes IDLE) |
+| `i` / `idle` | Allow until session goes idle (clears when session goes IDLE) |
 | `never` | Deny and add this tool to session blacklist |
 | `once` | Allow but don't remember |
 | `all` | Pre-approve ALL future requests in this session |
+
+#### Understanding Turn vs Idle Scoped Approvals
+
+The `turn` and `idle` options provide **temporary approval** that automatically expires. Understanding when each clears is important for choosing the right option.
+
+**In typical interactive sessions, both behave identically:**
+
+```
+User sends message ──► Turn starts
+       │                   │
+       │             Tool calls (approved via "turn" or "idle")
+       │                   │
+       │             Model responds ──► Turn ends
+       │                   │
+       │             Session goes IDLE ◄── Both suspensions clear here
+       │
+User sends next message ──► New turn (fresh permissions)
+```
+
+**The distinction matters in automated pipelines:**
+
+```
+Script sends message 1 ──► Turn 1 starts
+       │                       │
+       │                 Tool calls (approved)
+       │                       │
+       │                 Turn 1 ends
+       │                       │
+       │                 ◄── "turn" clears here, "idle" persists
+       │                       │
+Script sends message 2 ──► Turn 2 starts (no IDLE between!)
+       │                       │
+       │                 If "turn": NEW permission prompt needed
+       │                 If "idle": Still auto-approved
+       │                       │
+       │                 Turn 2 ends
+       │                       │
+No more messages ──────► Session goes IDLE ◄── "idle" clears here
+```
+
+| Scope | Best For | Clears When |
+|-------|----------|-------------|
+| `turn` | Interactive use - trust model for this one response | Session goes IDLE |
+| `idle` | Automated pipelines, batch processing, multi-turn scripts | Session goes IDLE |
+
+**Key insight:** For typical interactive use (one message at a time), it doesn't matter which one you choose - both clear when you're waiting for input again. The `idle` option exists for automated scenarios where approval should persist across multiple programmatic message sends.
 
 **Readline History**: By default, permission responses are automatically excluded from readline history since they have no utility for recall. This can be disabled via config:
 
@@ -1062,6 +1110,10 @@ Manage session permissions without modifying the persistent `permissions.json` f
 | `permissions deny <pattern>` | Add tool/pattern to session blacklist |
 | `permissions default <policy>` | Set session default policy (allow\|deny\|ask) |
 | `permissions clear` | Reset all session modifications |
+| `permissions suspend` | Suspend prompts until session goes idle |
+| `permissions suspend turn` | Suspend prompts for remainder of this turn |
+| `permissions resume` | Resume normal permission prompting |
+| `permissions status` | Show detailed suspension status |
 
 #### Usage Examples
 
@@ -1121,6 +1173,34 @@ Base Config:
 > permissions clear
 Session rules cleared.
 Reverted to base config.
+```
+
+**Suspend prompting until idle:**
+```
+> permissions suspend
+Prompting suspended until session goes idle.
+Use 'permissions resume' to restore prompting early.
+```
+
+**Suspend prompting for this turn only:**
+```
+> permissions suspend turn
+Prompting suspended for this turn.
+Will auto-resume when turn completes.
+```
+
+**Check suspension status:**
+```
+> permissions status
+Prompting: SUSPENDED (until-idle)
+  All tool requests auto-approved until session goes idle.
+  Use 'permissions resume' to restore prompting early.
+```
+
+**Resume normal prompting:**
+```
+> permissions resume
+Resumed normal permission prompting.
 ```
 
 #### Priority Order

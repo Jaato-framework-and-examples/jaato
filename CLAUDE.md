@@ -792,6 +792,93 @@ model <name>                # Switch to a different model
 keybindings reload          # Reload keybindings from config
 ```
 
+### Permission Commands
+
+The permission system controls which tools the model can execute. When a tool requires
+permission, the user is prompted before execution.
+
+```
+permissions                 # Show current permission state
+permissions show            # Same as above
+permissions whitelist       # Show whitelisted tools
+permissions blacklist       # Show blacklisted tools
+permissions suspend         # Suspend prompts until session goes idle
+permissions suspend turn    # Suspend prompts for remainder of this turn
+permissions resume          # Resume normal permission prompting
+permissions status          # Show detailed suspension status
+```
+
+**Permission Response Options:**
+
+When prompted for permission, these responses are available:
+
+| Key | Full | Description |
+|-----|------|-------------|
+| `y` | `yes` | Allow this tool execution |
+| `n` | `no` | Deny this tool execution |
+| `a` | `always` | Allow and whitelist for session |
+| `t` | `turn` | Allow remaining tools this turn |
+| `i` | `idle` | Allow until session goes idle |
+| `once` | `once` | Allow once without remembering |
+| `never` | `never` | Deny and blacklist for session |
+| `all` | `all` | Allow all future requests in session |
+
+**Turn-Scoped vs Idle-Scoped Approval:**
+
+Understanding the difference between `turn` and `idle` scoped approvals:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  TYPICAL INTERACTIVE SESSION                                        │
+│                                                                     │
+│  User sends message ──► Turn starts                                 │
+│         │                  │                                        │
+│         │           Model processes, makes tool calls               │
+│         │                  │                                        │
+│         │           Model responds ──► Turn ends                    │
+│         │                  │                                        │
+│         │           Session goes IDLE ◄── Both suspensions clear   │
+│         │                  │                                        │
+│  User sends next message ──► New turn starts                        │
+│                                                                     │
+│  In this flow, "turn" and "idle" behave identically because         │
+│  the session goes IDLE immediately after each turn ends.            │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  AUTOMATED PIPELINE (where the difference matters)                  │
+│                                                                     │
+│  Script sends message 1 ──► Turn 1 starts                          │
+│         │                      │                                    │
+│         │               Tool calls (approved via "turn")            │
+│         │                      │                                    │
+│         │               Turn 1 ends ──► Turn suspension clears     │
+│         │                      │                                    │
+│  Script sends message 2 ──► Turn 2 starts (no IDLE between)        │
+│         │                      │                                    │
+│         │               Tool calls (need new approval!)             │
+│         │                      │         ▲                          │
+│         │                      │    "idle" would still be active   │
+│         │                      │                                    │
+│         │               Turn 2 ends                                 │
+│         │                      │                                    │
+│         │               Session goes IDLE ◄── Idle suspension clears│
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**When to use which:**
+
+| Scope | Use Case |
+|-------|----------|
+| `turn` | Interactive use - approval lasts until model finishes responding |
+| `idle` | Automated pipelines - approval persists across multiple consecutive turns |
+
+**Note:** In typical interactive sessions where the user sends one message at a time,
+both options behave identically. The distinction only matters for automated multi-turn
+scenarios where messages are sent programmatically without user interaction between them.
+
 ### Vision Capture (TUI Screenshots)
 
 The rich client supports capturing TUI screenshots. The command itself is intercepted

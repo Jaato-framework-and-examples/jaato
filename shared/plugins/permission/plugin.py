@@ -146,6 +146,7 @@ class PermissionPlugin:
                 method is one of: "yes", "always", "once", "never",
                 "whitelist", "blacklist", "timeout", "default"
         """
+        self._trace(f"set_permission_hooks: on_requested={on_requested is not None}, on_resolved={on_resolved is not None}")
         self._on_permission_requested = on_requested
         self._on_permission_resolved = on_resolved
 
