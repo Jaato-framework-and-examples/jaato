@@ -35,6 +35,25 @@ _PARALLEL_TOOL_GUIDANCE = (
 )
 
 
+def _get_sandbox_guidance() -> Optional[str]:
+    """Get sandbox guidance if workspace is configured.
+
+    Returns sandbox awareness instructions if a workspace root is set,
+    informing the model about path restrictions.
+    """
+    workspace = os.environ.get('JAATO_WORKSPACE_ROOT') or os.environ.get('workspaceRoot')
+    if not workspace:
+        return None
+
+    return (
+        f"SANDBOX ENVIRONMENT: You are operating in a sandboxed workspace. "
+        f"File operations (read, write, glob, grep, cli) are restricted to: {workspace}\n"
+        f"- Paths outside the workspace will be rejected\n"
+        f"- Use relative paths or absolute paths within the workspace\n"
+        f"- The .jaato/ directory may reference external configuration"
+    )
+
+
 def _is_parallel_tools_enabled() -> bool:
     """Check if parallel tool execution is enabled."""
     return os.environ.get(
@@ -394,6 +413,12 @@ class JaatoRuntime:
 
         # Build system instructions
         parts = []
+
+        # Core framework instructions (sandbox, parallel tools)
+        sandbox_guidance = _get_sandbox_guidance()
+        if sandbox_guidance:
+            parts.append(sandbox_guidance)
+
         registry_instructions = self._registry.get_system_instructions()
         if registry_instructions:
             parts.append(registry_instructions)

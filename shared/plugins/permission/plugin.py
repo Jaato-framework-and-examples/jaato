@@ -285,7 +285,9 @@ class PermissionPlugin:
                         }
                     },
                     "required": ["tool_name", "intent"]
-                }
+                },
+                category="system",
+                discoverability="discoverable",
             )
         ]
 

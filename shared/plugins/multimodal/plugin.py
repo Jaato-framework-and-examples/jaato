@@ -235,7 +235,9 @@ class MultimodalPlugin:
                     }
                 },
                 "required": ["path"]
-            }
+            },
+            category="filesystem",
+            discoverability="discoverable",
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:

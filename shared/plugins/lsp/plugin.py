@@ -520,7 +520,9 @@ class LSPToolPlugin:
                         }
                     },
                     "required": ["symbol"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="lsp_find_references",
@@ -547,7 +549,9 @@ class LSPToolPlugin:
                         }
                     },
                     "required": ["symbol"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="lsp_hover",
@@ -569,7 +573,9 @@ class LSPToolPlugin:
                         }
                     },
                     "required": ["symbol"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="lsp_get_diagnostics",
@@ -589,7 +595,9 @@ class LSPToolPlugin:
                         }
                     },
                     "required": ["file_path"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="lsp_document_symbols",
@@ -603,7 +611,9 @@ class LSPToolPlugin:
                         }
                     },
                     "required": ["file_path"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="lsp_workspace_symbols",
@@ -617,7 +627,9 @@ class LSPToolPlugin:
                         }
                     },
                     "required": ["query"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="lsp_rename_symbol",
@@ -648,7 +660,9 @@ class LSPToolPlugin:
                         }
                     },
                     "required": ["symbol", "new_name"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="lsp_get_code_actions",
@@ -687,7 +701,9 @@ class LSPToolPlugin:
                         }
                     },
                     "required": ["file_path", "start_line", "start_column", "end_line", "end_column"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="lsp_apply_code_action",
@@ -726,7 +742,9 @@ class LSPToolPlugin:
                         }
                     },
                     "required": ["file_path", "start_line", "start_column", "end_line", "end_column", "action_title"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
         ]
 

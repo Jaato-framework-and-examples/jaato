@@ -317,7 +317,9 @@ class ArtifactTrackerPlugin:
                         }
                     },
                     "required": ["path", "artifact_type", "description"]
-                }
+                },
+                category="memory",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="updateArtifact",
@@ -372,7 +374,9 @@ class ArtifactTrackerPlugin:
                         }
                     },
                     "required": ["path"]
-                }
+                },
+                category="memory",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="listArtifacts",
@@ -399,7 +403,9 @@ class ArtifactTrackerPlugin:
                         }
                     },
                     "required": []
-                }
+                },
+                category="memory",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="flagForReview",
@@ -421,7 +427,9 @@ class ArtifactTrackerPlugin:
                         }
                     },
                     "required": ["path", "reason"]
-                }
+                },
+                category="memory",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="acknowledgeReview",
@@ -454,7 +462,9 @@ class ArtifactTrackerPlugin:
                         }
                     },
                     "required": []
-                }
+                },
+                category="memory",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="checkRelated",
@@ -478,7 +488,9 @@ class ArtifactTrackerPlugin:
                         }
                     },
                     "required": ["path"]
-                }
+                },
+                category="memory",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="removeArtifact",
@@ -501,7 +513,9 @@ class ArtifactTrackerPlugin:
                         }
                     },
                     "required": []
-                }
+                },
+                category="memory",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="notifyChange",
@@ -527,7 +541,9 @@ class ArtifactTrackerPlugin:
                         }
                     },
                     "required": ["path", "reason"]
-                }
+                },
+                category="memory",
+                discoverability="discoverable",
             ),
         ]
 
