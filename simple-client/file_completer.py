@@ -738,12 +738,16 @@ class PermissionResponseCompleter(Completer):
 
     # Default fallback options in case none are provided
     # Format: (short, full, description)
+    # NOTE: Keep in sync with DEFAULT_PERMISSION_OPTIONS in channels.py
     DEFAULT_OPTIONS = [
         ("y", "yes", "Allow this tool execution"),
         ("n", "no", "Deny this tool execution"),
         ("a", "always", "Allow and whitelist for session"),
+        ("t", "turn", "Allow remaining tools this turn"),
+        ("i", "idle", "Allow until session goes idle"),
         ("once", "once", "Allow once without remembering"),
         ("never", "never", "Deny and blacklist for session"),
+        ("all", "all", "Allow all future requests in session"),
     ]
 
     def __init__(self):
