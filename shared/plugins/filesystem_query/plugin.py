@@ -163,11 +163,10 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
         """Check if a path is allowed for access.
 
         A path is allowed if:
-        1. No workspace_root is configured (sandboxing disabled)
-        2. The path is within the workspace_root
-        3. The path is under .jaato and within the .jaato containment boundary
+        1. The path is within the workspace_root (or CWD if not configured)
+        2. The path is under .jaato and within the .jaato containment boundary
            (see sandbox_utils.py for .jaato contained symlink escape rules)
-        4. The path is authorized via the plugin registry
+        3. The path is authorized via the plugin registry
 
         Args:
             path: Path to check.
@@ -175,9 +174,9 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
         Returns:
             True if access is allowed, False otherwise.
         """
-        # If no workspace_root, allow all paths
-        if not self._workspace_root:
-            return True
+        # Use workspace_root if configured, otherwise fall back to CWD
+        # This ensures absolute paths outside the boundary are always blocked
+        workspace = self._workspace_root or os.path.realpath(os.getcwd())
 
         # Resolve path relative to workspace first
         resolved = self._resolve_path(path)
@@ -186,7 +185,7 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
         # Use shared sandbox utility with .jaato containment support
         allowed = check_path_with_jaato_containment(
             abs_path,
-            self._workspace_root,
+            workspace,
             self._plugin_registry
         )
 
