@@ -126,7 +126,7 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
                     "required": ["pattern"],
                 },
                 category="search",
-                discoverability="core",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="grep_content",
@@ -184,7 +184,7 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
                     "required": ["pattern"],
                 },
                 category="search",
-                discoverability="core",
+                discoverability="discoverable",
             ),
         ]
 
