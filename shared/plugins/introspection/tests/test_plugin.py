@@ -183,53 +183,51 @@ class TestListTools:
         # Wire up plugin with registry
         self.plugin.set_plugin_registry(self.registry)
 
-    def test_list_tools_returns_all_tools(self):
-        """Test list_tools returns all registered tools."""
+    def test_list_tools_no_category_returns_categories(self):
+        """Test list_tools without category returns category summary."""
         executors = self.plugin.get_executors()
         result = executors["list_tools"]({})
 
-        assert "tools" in result
-        assert result["total_count"] == 4
-        tool_names = [t["name"] for t in result["tools"]]
-        assert "readFile" in tool_names
-        assert "writeFile" in tool_names
-        assert "web_search" in tool_names
-        assert "createPlan" in tool_names
+        assert "categories" in result
+        assert "total_tools" in result
+        assert result["total_tools"] == 4
 
-    def test_list_tools_filter_by_category(self):
-        """Test list_tools filters by category correctly."""
+        # Check categories are listed with counts
+        category_names = [c["name"] for c in result["categories"]]
+        assert "filesystem" in category_names
+        assert "search" in category_names
+        assert "planning" in category_names
+
+        # Check counts
+        fs_cat = next(c for c in result["categories"] if c["name"] == "filesystem")
+        assert fs_cat["tool_count"] == 2
+
+    def test_list_tools_with_category_returns_tools(self):
+        """Test list_tools with category returns tools in that category."""
         executors = self.plugin.get_executors()
         result = executors["list_tools"]({"category": "filesystem"})
 
-        assert result["filtered_by"] == "filesystem"
-        assert result["total_count"] == 2
-        for tool in result["tools"]:
-            assert tool["category"] == "filesystem"
+        assert result["category"] == "filesystem"
+        assert result["tool_count"] == 2
+        assert "tools" in result
 
-    def test_list_tools_category_all(self):
-        """Test list_tools with category='all' returns all tools."""
-        executors = self.plugin.get_executors()
-        result = executors["list_tools"]({"category": "all"})
-
-        assert result["total_count"] == 4
-        assert "filtered_by" not in result
+        tool_names = [t["name"] for t in result["tools"]]
+        assert "readFile" in tool_names
+        assert "writeFile" in tool_names
 
     def test_list_tools_includes_plugin_source(self):
         """Test list_tools includes plugin source for each tool."""
         executors = self.plugin.get_executors()
-        result = executors["list_tools"]({})
+        result = executors["list_tools"]({"category": "filesystem"})
 
         for tool in result["tools"]:
             assert "plugin_source" in tool
-            if tool["name"] == "readFile":
-                assert tool["plugin_source"] == "file_edit"
-            elif tool["name"] == "web_search":
-                assert tool["plugin_source"] == "web_search"
+            assert tool["plugin_source"] == "file_edit"
 
     def test_list_tools_concise_descriptions(self):
         """Test list_tools truncates long descriptions by default."""
         executors = self.plugin.get_executors()
-        result = executors["list_tools"]({"verbose": False})
+        result = executors["list_tools"]({"category": "filesystem", "verbose": False})
 
         for tool in result["tools"]:
             assert "description" in tool
@@ -239,10 +237,10 @@ class TestListTools:
     def test_list_tools_verbose_mode(self):
         """Test list_tools returns full descriptions in verbose mode."""
         executors = self.plugin.get_executors()
-        result = executors["list_tools"]({"verbose": True})
+        result = executors["list_tools"]({"category": "search", "verbose": True})
 
         # Find the search tool and check its description is complete
-        search_tool = next(t for t in result["tools"] if t["name"] == "web_search")
+        search_tool = result["tools"][0]
         assert search_tool["description"] == "Search the web for information on any topic."
 
     def test_list_tools_includes_enabled_status(self):
@@ -251,7 +249,7 @@ class TestListTools:
         self.registry.disable_tool("readFile")
 
         executors = self.plugin.get_executors()
-        result = executors["list_tools"]({})
+        result = executors["list_tools"]({"category": "filesystem"})
 
         for tool in result["tools"]:
             assert "enabled" in tool
@@ -260,15 +258,14 @@ class TestListTools:
             else:
                 assert tool["enabled"] is True
 
-    def test_list_tools_sorted_by_category_and_name(self):
-        """Test list_tools returns tools sorted by category then name."""
+    def test_list_tools_sorted_by_name(self):
+        """Test list_tools returns tools sorted by name."""
         executors = self.plugin.get_executors()
-        result = executors["list_tools"]({})
+        result = executors["list_tools"]({"category": "filesystem"})
 
         tools = result["tools"]
-        # Should be sorted: filesystem (readFile, writeFile), planning (createPlan), search (web_search)
-        categories = [t.get("category", "zzz") for t in tools]
-        assert categories == sorted(categories)
+        names = [t["name"] for t in tools]
+        assert names == sorted(names)
 
     def test_list_tools_no_registry_error(self):
         """Test list_tools returns error when registry not set."""

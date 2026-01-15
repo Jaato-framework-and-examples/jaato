@@ -75,23 +75,22 @@ class IntrospectionPlugin:
         return [
             ToolSchema(
                 name="list_tools",
-                description="List all available tools that can be invoked. "
-                           "Use this to discover what capabilities are available. "
-                           "Returns tool names with brief descriptions. "
-                           "Optionally filter by category for focused discovery.",
+                description="Discover available tools. "
+                           "Without a category: returns available categories with tool counts. "
+                           "With a category: returns tools in that category with brief descriptions.",
                 parameters={
                     "type": "object",
                     "properties": {
                         "category": {
                             "type": "string",
-                            "description": f"Optional category to filter tools. "
-                                         f"Standard categories: {', '.join(TOOL_CATEGORIES)}",
-                            "enum": TOOL_CATEGORIES + ["all"],
+                            "description": f"Category to list tools from. "
+                                         f"If omitted, returns category summary. "
+                                         f"Categories: {', '.join(TOOL_CATEGORIES)}",
+                            "enum": TOOL_CATEGORIES,
                         },
                         "verbose": {
                             "type": "boolean",
-                            "description": "If true, include full descriptions instead of summaries. "
-                                         "Default is false for concise output.",
+                            "description": "If true, include full descriptions. Default is false.",
                             "default": False,
                         },
                     },
@@ -153,15 +152,11 @@ class IntrospectionPlugin:
         return (
             "You have access to tool discovery capabilities.\n\n"
             "TOOL DISCOVERY WORKFLOW:\n"
-            "1. Use `list_tools` to discover available tools (optionally filter by category)\n"
-            "2. Use `get_tool_schemas(names=[...])` to get full schemas for tools you need\n"
-            "3. Call the tools using the schema information\n\n"
-            "TIPS:\n"
-            "- Categories help narrow down relevant tools: filesystem, code, search, memory, "
-            "planning, system, web, communication\n"
-            "- Only request schemas for tools you intend to use\n"
-            "- get_tool_schemas returns parameter types, required/optional flags, and descriptions\n"
-            "- Use verbose=true in list_tools only when brief descriptions aren't sufficient"
+            "1. `list_tools()` - See available categories and tool counts\n"
+            "2. `list_tools(category='...')` - See tools in a specific category\n"
+            "3. `get_tool_schemas(names=[...])` - Get full schemas for tools you need\n"
+            "4. Call the tools using the schema information\n\n"
+            "CATEGORIES: filesystem, code, search, memory, planning, system, web, communication"
         )
 
     def get_auto_approved_tools(self) -> List[str]:
@@ -179,7 +174,8 @@ class IntrospectionPlugin:
             args: Dictionary with optional 'category' and 'verbose' keys.
 
         Returns:
-            Dictionary with 'tools' list and metadata.
+            - If no category: returns available categories with tool counts
+            - If category specified: returns tools in that category
         """
         if not self._registry:
             return {"error": "Registry not available. Plugin not properly initialized."}
@@ -187,18 +183,30 @@ class IntrospectionPlugin:
         category = args.get("category")
         verbose = args.get("verbose", False)
 
-        # Normalize "all" category to None (no filter)
-        if category == "all":
-            category = None
-
         # Get all tool schemas from exposed plugins
         all_schemas = self._registry.get_exposed_tool_schemas()
 
-        # Build tool list with plugin source info
+        # If no category specified, return category summary only
+        if not category:
+            category_counts: Dict[str, int] = {}
+            for schema in all_schemas:
+                cat = schema.category or "uncategorized"
+                category_counts[cat] = category_counts.get(cat, 0) + 1
+
+            return {
+                "categories": [
+                    {"name": cat, "tool_count": count}
+                    for cat, count in sorted(category_counts.items())
+                ],
+                "total_tools": len(all_schemas),
+                "hint": "Call list_tools(category='<name>') to see tools in a specific category.",
+            }
+
+        # Category specified - return tools in that category
         tools = []
         for schema in all_schemas:
-            # Apply category filter if specified
-            if category and schema.category != category:
+            # Apply category filter
+            if schema.category != category:
                 continue
 
             # Find which plugin provides this tool
@@ -215,9 +223,6 @@ class IntrospectionPlugin:
                 "enabled": is_enabled,
             }
 
-            if schema.category:
-                tool_entry["category"] = schema.category
-
             if verbose:
                 tool_entry["description"] = schema.description
             else:
@@ -233,25 +238,17 @@ class IntrospectionPlugin:
 
             tools.append(tool_entry)
 
-        # Sort by category then name for consistent output
-        tools.sort(key=lambda t: (t.get("category", "zzz"), t["name"]))
-
-        # Gather category summary
-        categories_found = set()
-        for tool in tools:
-            if "category" in tool:
-                categories_found.add(tool["category"])
+        # Sort by name for consistent output
+        tools.sort(key=lambda t: t["name"])
 
         result = {
-            "total_count": len(tools),
+            "category": category,
+            "tool_count": len(tools),
             "tools": tools,
         }
 
-        if category:
-            result["filtered_by"] = category
-
-        if categories_found:
-            result["categories_present"] = sorted(categories_found)
+        if tools:
+            result["hint"] = "Call get_tool_schemas(names=['<tool_name>']) to get full parameter details."
 
         return result
 
