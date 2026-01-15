@@ -104,6 +104,9 @@ class PluginRegistry:
         self._terminal_width: int = 80
         # Authorized external paths: path -> source plugin name
         self._authorized_external_paths: Dict[str, str] = {}
+        # Core tools: framework-provided tools not from plugins
+        self._core_tools: Dict[str, ToolSchema] = {}
+        self._core_executors: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
 
     def set_output_callback(
         self,
@@ -487,6 +490,31 @@ class PluginRegistry:
         elif expose:
             self.expose_tool(plugin.name, config)
 
+    def register_core_tool(
+        self,
+        schema: ToolSchema,
+        executor: Callable[[Dict[str, Any]], Any]
+    ) -> None:
+        """Register a core framework tool.
+
+        Core tools are provided directly by framework components (like StreamManager)
+        rather than through plugins. They are included in get_exposed_tool_schemas()
+        and get_exposed_executors() alongside plugin tools.
+
+        Args:
+            schema: The tool's schema.
+            executor: The tool's executor function.
+
+        Example:
+            # Register dismiss_stream from StreamManager
+            for schema in stream_manager.get_tool_schemas():
+                executor = stream_manager.get_executors()[schema.name]
+                registry.register_core_tool(schema, executor)
+        """
+        self._core_tools[schema.name] = schema
+        self._core_executors[schema.name] = executor
+        _trace(f"Registered core tool: {schema.name}")
+
     def expose_tool(self, name: str, config: Optional[Dict[str, Any]] = None) -> bool:
         """Expose a plugin's tools to the model.
 
@@ -571,23 +599,29 @@ class PluginRegistry:
             self.unexpose_tool(name)
 
     def get_exposed_tool_schemas(self) -> List[ToolSchema]:
-        """Get ToolSchemas from all exposed plugins."""
+        """Get ToolSchemas from all exposed plugins and core tools."""
         schemas = []
+        # Add plugin tool schemas
         for name in self._exposed:
             try:
                 schemas.extend(self._plugins[name].get_tool_schemas())
             except Exception as exc:
                 _trace(f" Error getting tool schemas from '{name}': {exc}")
+        # Add core tool schemas
+        schemas.extend(self._core_tools.values())
         return schemas
 
     def get_exposed_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Get executor callables from all exposed plugins."""
+        """Get executor callables from all exposed plugins and core tools."""
         executors = {}
+        # Add plugin executors
         for name in self._exposed:
             try:
                 executors.update(self._plugins[name].get_executors())
             except Exception as exc:
                 _trace(f" Error getting executors from '{name}': {exc}")
+        # Add core tool executors
+        executors.update(self._core_executors)
         return executors
 
     # ==================== Individual Tool Management ====================
@@ -693,7 +727,7 @@ class PluginRegistry:
         return status
 
     def get_enabled_tool_schemas(self) -> List[ToolSchema]:
-        """Get ToolSchemas from exposed plugins, excluding disabled tools.
+        """Get ToolSchemas from exposed plugins and core tools, excluding disabled.
 
         This is what should be sent to the model - only enabled tools.
         For plugins implementing StreamingCapable, auto-generates :stream
@@ -720,6 +754,12 @@ class PluginRegistry:
                                 schemas.append(stream_schema)
             except Exception as exc:
                 _trace(f" Error getting tool schemas from '{name}': {exc}")
+
+        # Add core tool schemas (excluding disabled)
+        for name, schema in self._core_tools.items():
+            if name not in self._disabled_tools:
+                schemas.append(schema)
+
         return schemas
 
     def _create_streaming_schema(self, base_schema: ToolSchema) -> ToolSchema:
@@ -786,10 +826,17 @@ class PluginRegistry:
                                 schemas.append(stream_schema)
             except Exception as exc:
                 _trace(f" Error getting tool schemas from '{name}': {exc}")
+
+        # Add core tool schemas that have discoverability='core' (excluding disabled)
+        for name, schema in self._core_tools.items():
+            if name not in self._disabled_tools:
+                if getattr(schema, 'discoverability', 'discoverable') == 'core':
+                    schemas.append(schema)
+
         return schemas
 
     def get_enabled_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Get executor callables from exposed plugins, excluding disabled tools.
+        """Get executor callables from exposed plugins and core tools, excluding disabled.
 
         Returns:
             Dict mapping tool names to executor callables for enabled tools only.
@@ -804,6 +851,12 @@ class PluginRegistry:
                         executors[tool_name] = executor
             except Exception as exc:
                 _trace(f" Error getting executors from '{name}': {exc}")
+
+        # Add core tool executors (excluding disabled)
+        for tool_name, executor in self._core_executors.items():
+            if tool_name not in self._disabled_tools:
+                executors[tool_name] = executor
+
         return executors
 
     def list_disabled_tools(self) -> List[str]:
