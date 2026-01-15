@@ -7,6 +7,7 @@ from .config import ClipboardConfig, ClipboardMechanism
 from .protocol import ClipboardProvider
 from .osc52 import OSC52Provider
 from .native import NativeProvider
+from .image import copy_image_to_clipboard
 
 
 class AutoProvider:
@@ -60,4 +61,5 @@ __all__ = [
     "OSC52Provider",
     "NativeProvider",
     "create_provider",
+    "copy_image_to_clipboard",
 ]
