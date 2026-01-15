@@ -710,6 +710,31 @@ class PluginRegistry:
                 _trace(f" Error getting tool schemas from '{name}': {exc}")
         return schemas
 
+    def get_core_tool_schemas(self) -> List[ToolSchema]:
+        """Get ToolSchemas for 'core' tools only (always loaded in context).
+
+        This supports deferred tool loading by returning only tools marked
+        with discoverability='core'. Other tools can be discovered via
+        introspection (list_tools, get_tool_schemas).
+
+        Returns:
+            List of ToolSchema objects for core tools only.
+        """
+        schemas = []
+        for name in self._exposed:
+            try:
+                plugin_schemas = self._plugins[name].get_tool_schemas()
+                # Filter to core, enabled tools only
+                core_schemas = [
+                    s for s in plugin_schemas
+                    if s.name not in self._disabled_tools
+                    and getattr(s, 'discoverability', 'discoverable') == 'core'
+                ]
+                schemas.extend(core_schemas)
+            except Exception as exc:
+                _trace(f" Error getting tool schemas from '{name}': {exc}")
+        return schemas
+
     def get_enabled_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
         """Get executor callables from exposed plugins, excluding disabled tools.
 
