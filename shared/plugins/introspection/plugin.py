@@ -12,6 +12,7 @@ The plugin supports deferred tool loading for token economy:
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from ..model_provider.types import ToolSchema, TOOL_CATEGORIES
+from ..streaming import StreamingCapable
 
 
 class IntrospectionPlugin:
@@ -217,11 +218,20 @@ class IntrospectionPlugin:
             # Check if tool is enabled
             is_enabled = self._registry.is_tool_enabled(schema.name)
 
+            # Check if tool supports streaming
+            supports_streaming = False
+            if plugin and isinstance(plugin, StreamingCapable):
+                try:
+                    supports_streaming = plugin.supports_streaming(schema.name)
+                except Exception:
+                    pass  # Plugin may not implement the method correctly
+
             # Build tool entry
             tool_entry = {
                 "name": schema.name,
                 "plugin_source": plugin_source,
                 "enabled": is_enabled,
+                "streaming": supports_streaming,
             }
 
             if verbose:
