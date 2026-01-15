@@ -292,6 +292,7 @@ class CLIToolPlugin(BackgroundCapableMixin):
                 "required": ["command"]
             },
             category="system",
+            discoverability="core",
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:

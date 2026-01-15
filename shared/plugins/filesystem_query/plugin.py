@@ -125,6 +125,8 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
                     },
                     "required": ["pattern"],
                 },
+                category="search",
+                discoverability="core",
             ),
             ToolSchema(
                 name="grep_content",
@@ -181,6 +183,8 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
                     },
                     "required": ["pattern"],
                 },
+                category="search",
+                discoverability="core",
             ),
         ]
 

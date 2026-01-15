@@ -2,9 +2,14 @@
 
 This plugin provides tools for agents to discover and query available tools
 at runtime, enabling dynamic tool selection and self-documentation.
+
+The plugin supports deferred tool loading for token economy:
+- Only "core" tools are loaded into initial context
+- "discoverable" tools can be queried via list_tools and get_tool_schemas
+- Models request schemas on-demand, reducing initial context overhead
 """
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from ..model_provider.types import ToolSchema, TOOL_CATEGORIES
 
@@ -14,15 +19,25 @@ class IntrospectionPlugin:
 
     This plugin exposes tools for the LLM to:
     - list_tools: Discover available tools with optional category filtering
-    - get_tool_schema: Get full documentation for a specific tool
+    - get_tool_schemas: Get full schemas for specific tools (enables on-demand loading)
 
     The plugin receives access to the PluginRegistry via set_plugin_registry(),
     which is called automatically by the registry during expose_tool().
+
+    Deferred Loading:
+        Tools have a "discoverability" attribute:
+        - "core": Always in initial context
+        - "discoverable": Schema provided on-demand via get_tool_schemas
+
+        This plugin's tools are marked as "core" since they're needed for discovery.
+        The _accessed_tools set tracks which tools the model has requested schemas for,
+        useful for telemetry and GC decisions.
     """
 
     def __init__(self):
         self._initialized = False
         self._registry = None  # Set via set_plugin_registry()
+        self._accessed_tools: Set[str] = set()  # Track tools model has requested
 
     @property
     def name(self) -> str:
@@ -52,7 +67,11 @@ class IntrospectionPlugin:
         self._registry = registry
 
     def get_tool_schemas(self) -> List[ToolSchema]:
-        """Return tool schemas for introspection tools."""
+        """Return tool schemas for introspection tools.
+
+        Both tools are marked as 'core' discoverability since they're required
+        for the deferred tool loading mechanism to work.
+        """
         return [
             ToolSchema(
                 name="list_tools",
@@ -79,24 +98,27 @@ class IntrospectionPlugin:
                     "required": []
                 },
                 category="system",
+                discoverability="core",
             ),
             ToolSchema(
-                name="get_tool_schema",
-                description="Get detailed documentation for a specific tool. "
+                name="get_tool_schemas",
+                description="Get detailed schemas for specific tools. "
+                           "Use this after list_tools to learn how to call tools you need. "
                            "Returns full parameter specifications, types, "
-                           "required/optional flags, and descriptions. "
-                           "Use this when you need to understand exactly how to call a tool.",
+                           "required/optional flags, and descriptions.",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "tool_name": {
-                            "type": "string",
-                            "description": "Name of the tool to get schema for."
+                        "names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Names of the tools to get schemas for."
                         }
                     },
-                    "required": ["tool_name"]
+                    "required": ["names"]
                 },
                 category="system",
+                discoverability="core",
             ),
         ]
 
@@ -104,26 +126,47 @@ class IntrospectionPlugin:
         """Return the executors for introspection tools."""
         return {
             "list_tools": self._execute_list_tools,
-            "get_tool_schema": self._execute_get_tool_schema,
+            "get_tool_schemas": self._execute_get_tool_schemas,
         }
+
+    def get_accessed_tools(self) -> Set[str]:
+        """Get the set of tools the model has requested schemas for.
+
+        This is useful for:
+        - Telemetry: Understanding which tools the model uses
+        - GC decisions: Preserving schemas the model has accessed
+
+        Returns:
+            Set of tool names that have been accessed via get_tool_schemas.
+        """
+        return self._accessed_tools.copy()
+
+    def clear_accessed_tools(self) -> None:
+        """Clear the accessed tools tracking.
+
+        Call this when resetting the session or for fresh tracking.
+        """
+        self._accessed_tools.clear()
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the introspection plugin."""
         return (
-            "You have access to tool introspection capabilities.\n\n"
-            "WHEN TO USE:\n"
-            "- Use `list_tools` when you need to know what tools are available\n"
-            "- Use `list_tools(category=...)` to find tools for a specific purpose\n"
-            "- Use `get_tool_schema(tool_name=...)` when you need exact parameter details\n\n"
+            "You have access to tool discovery capabilities.\n\n"
+            "TOOL DISCOVERY WORKFLOW:\n"
+            "1. Use `list_tools` to discover available tools (optionally filter by category)\n"
+            "2. Use `get_tool_schemas(names=[...])` to get full schemas for tools you need\n"
+            "3. Call the tools using the schema information\n\n"
             "TIPS:\n"
-            "- Categories help narrow down relevant tools: filesystem, code, search, etc.\n"
-            "- get_tool_schema provides parameter types and required/optional flags\n"
-            "- Use verbose=true in list_tools only when you need full descriptions"
+            "- Categories help narrow down relevant tools: filesystem, code, search, memory, "
+            "planning, system, web, communication\n"
+            "- Only request schemas for tools you intend to use\n"
+            "- get_tool_schemas returns parameter types, required/optional flags, and descriptions\n"
+            "- Use verbose=true in list_tools only when brief descriptions aren't sufficient"
         )
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return introspection tools as auto-approved (read-only, no security implications)."""
-        return ["list_tools", "get_tool_schema"]
+        return ["list_tools", "get_tool_schemas"]
 
     def get_user_commands(self) -> List:
         """Return user commands (none for this plugin)."""
@@ -212,62 +255,83 @@ class IntrospectionPlugin:
 
         return result
 
-    def _execute_get_tool_schema(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the get_tool_schema tool.
+    def _execute_get_tool_schemas(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the get_tool_schemas tool.
 
         Args:
-            args: Dictionary with required 'tool_name' key.
+            args: Dictionary with required 'names' key (array of tool names).
 
         Returns:
-            Dictionary with full tool schema details.
+            Dictionary with schemas for requested tools and tracking info.
         """
         if not self._registry:
             return {"error": "Registry not available. Plugin not properly initialized."}
 
-        tool_name = args.get("tool_name", "")
-        if not tool_name:
-            return {"error": "tool_name is required"}
+        names = args.get("names", [])
+        if not names:
+            return {"error": "names is required (array of tool names)"}
 
-        # Search for the tool in all exposed plugins
+        if not isinstance(names, list):
+            names = [names]  # Handle single name as array
+
+        # Get all available schemas for lookup
         all_schemas = self._registry.get_exposed_tool_schemas()
-        target_schema = None
-        for schema in all_schemas:
-            if schema.name == tool_name:
-                target_schema = schema
-                break
+        schema_map = {s.name: s for s in all_schemas}
+        available_tools = list(schema_map.keys())
 
-        if not target_schema:
-            # Provide helpful suggestions
-            available_tools = [s.name for s in all_schemas]
-            similar_tools = [t for t in available_tools if tool_name.lower() in t.lower()]
+        # Build results
+        schemas = []
+        not_found = []
 
-            error_msg = f"Tool '{tool_name}' not found."
-            if similar_tools:
-                error_msg += f" Similar tools: {', '.join(similar_tools[:5])}"
+        for tool_name in names:
+            if tool_name in schema_map:
+                target_schema = schema_map[tool_name]
+
+                # Track this access
+                self._accessed_tools.add(tool_name)
+
+                # Find plugin source
+                plugin = self._registry.get_plugin_for_tool(tool_name)
+                plugin_source = plugin.name if plugin else "unknown"
+
+                # Build detailed schema response
+                schema_entry = {
+                    "name": target_schema.name,
+                    "description": target_schema.description,
+                    "plugin_source": plugin_source,
+                    "enabled": self._registry.is_tool_enabled(tool_name),
+                }
+
+                if target_schema.category:
+                    schema_entry["category"] = target_schema.category
+
+                # Format parameters in a more readable way
+                params = target_schema.parameters
+                if params:
+                    schema_entry["parameters"] = self._format_parameters(params)
+
+                schemas.append(schema_entry)
             else:
-                error_msg += f" Use list_tools() to see available tools."
+                not_found.append(tool_name)
 
-            return {"error": error_msg}
-
-        # Find plugin source
-        plugin = self._registry.get_plugin_for_tool(tool_name)
-        plugin_source = plugin.name if plugin else "unknown"
-
-        # Build detailed schema response
+        # Build response
         result = {
-            "name": target_schema.name,
-            "description": target_schema.description,
-            "plugin_source": plugin_source,
-            "enabled": self._registry.is_tool_enabled(tool_name),
+            "schemas": schemas,
+            "count": len(schemas),
         }
 
-        if target_schema.category:
-            result["category"] = target_schema.category
+        if not_found:
+            # Provide helpful suggestions for not found tools
+            suggestions = {}
+            for tool_name in not_found:
+                similar = [t for t in available_tools if tool_name.lower() in t.lower()]
+                if similar:
+                    suggestions[tool_name] = similar[:3]
 
-        # Format parameters in a more readable way
-        params = target_schema.parameters
-        if params:
-            result["parameters"] = self._format_parameters(params)
+            result["not_found"] = not_found
+            if suggestions:
+                result["suggestions"] = suggestions
+            result["hint"] = "Use list_tools() to see available tools."
 
         return result
 
