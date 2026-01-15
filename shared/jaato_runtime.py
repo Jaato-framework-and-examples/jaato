@@ -49,12 +49,12 @@ def _is_deferred_tools_enabled() -> bool:
     Other tools can be discovered via the introspection plugin (list_tools,
     get_tool_schemas). This reduces initial context size significantly.
 
-    Default is 'false' for backwards compatibility. Set JAATO_DEFERRED_TOOLS=true
-    to enable.
+    Default is 'true' for token economy. Set JAATO_DEFERRED_TOOLS=false
+    to disable and load all tools upfront.
     """
     return os.environ.get(
-        'JAATO_DEFERRED_TOOLS', 'false'
-    ).lower() in ('true', '1', 'yes')
+        'JAATO_DEFERRED_TOOLS', 'true'
+    ).lower() not in ('false', '0', 'no')
 
 
 class JaatoRuntime:

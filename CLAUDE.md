@@ -493,10 +493,10 @@ ToolSchema(
 
 **Configuration:**
 
-Set `JAATO_DEFERRED_TOOLS=true` to enable deferred loading (default: false for backwards compatibility).
+Deferred loading is enabled by default. Set `JAATO_DEFERRED_TOOLS=false` to disable and load all tools upfront.
 
 ```bash
-export JAATO_DEFERRED_TOOLS=true
+export JAATO_DEFERRED_TOOLS=false  # Disable deferred loading
 ```
 
 **Programmatic Check:**
@@ -744,7 +744,7 @@ Configuration options via `ProviderConfig.extra`:
 | `LEDGER_PATH` | Output path for token accounting JSONL |
 | `JAATO_GC_THRESHOLD` | GC trigger threshold percentage (default: 80.0) |
 | `JAATO_PARALLEL_TOOLS` | Enable parallel tool execution (default: `true`) |
-| `JAATO_DEFERRED_TOOLS` | Enable deferred tool loading (default: `false`) |
+| `JAATO_DEFERRED_TOOLS` | Enable deferred tool loading (default: `true`) |
 
 ### Rate Limiting
 | Variable | Purpose |
