@@ -11,9 +11,6 @@ Key components:
 - StreamManager: Manages active streams and coordinates with session
 """
 
-# Plugin kind for discovery
-PLUGIN_KIND = "tool"
-
 from .protocol import (
     StreamStatus,
     StreamChunk,
