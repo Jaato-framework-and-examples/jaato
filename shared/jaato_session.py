@@ -24,6 +24,7 @@ from .plugins.base import UserCommand, OutputCallback
 from .plugins.gc import GCConfig, GCPlugin, GCResult, GCTriggerReason
 from .plugins.gc.utils import estimate_history_tokens
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
+from .plugins.streaming import StreamManager, StreamingCapable, StreamChunk, StreamUpdate
 from .plugins.model_provider.base import UsageUpdateCallback, GCThresholdCallback
 from .plugins.model_provider.types import (
     Attachment,
@@ -214,6 +215,11 @@ class JaatoSession:
 
         # Turn counter for telemetry
         self._turn_index: int = 0
+
+        # Streaming tool support
+        self._stream_manager: Optional[StreamManager] = None
+        # Timeout for waiting on streaming updates when model is idle (seconds)
+        self._streaming_wait_timeout: float = 5.0
 
     @property
     def _telemetry(self) -> 'TelemetryPlugin':
@@ -495,6 +501,60 @@ class JaatoSession:
             source_type=SourceType.CHILD
         )
 
+    def _has_active_streams(self) -> bool:
+        """Check if there are active streaming tools.
+
+        Returns:
+            True if there are streaming tools that may produce more output.
+        """
+        if not self._stream_manager:
+            return False
+        return self._stream_manager.has_active_streams()
+
+    def _wait_for_streaming_updates(self) -> List[StreamUpdate]:
+        """Wait for updates from active streaming tools.
+
+        Blocks until updates are available or timeout is reached.
+
+        Returns:
+            List of StreamUpdate objects (may be empty).
+        """
+        if not self._stream_manager:
+            return []
+        return self._stream_manager.wait_for_updates(timeout=self._streaming_wait_timeout)
+
+    def _format_streaming_updates(self, updates: List[StreamUpdate]) -> str:
+        """Format streaming updates for injection into the conversation.
+
+        Args:
+            updates: List of StreamUpdate objects.
+
+        Returns:
+            Formatted message string for model consumption.
+        """
+        if not updates:
+            return ""
+
+        parts = ["<streaming_updates>"]
+        for update in updates:
+            parts.append(f"\n[Stream: {update.tool_name} (stream_id={update.stream_id})]")
+            if update.new_chunks:
+                parts.append(f"New results ({len(update.new_chunks)} items):")
+                for chunk in update.new_chunks:
+                    parts.append(f"  - {chunk.content}")
+            if update.is_complete:
+                parts.append(f"Stream completed. Total results: {update.total_chunks}")
+                if update.final_result:
+                    # Only include final result if it's different from chunks
+                    parts.append(f"Final result summary available.")
+        parts.append("\n</streaming_updates>")
+        parts.append(
+            "\nYou can continue acting on these results. "
+            "Call dismiss_stream(stream_id='*') when you have enough results from all streams."
+        )
+
+        return "".join(parts)
+
     def _drain_child_messages(self, on_output: Optional[OutputCallback] = None) -> str:
         """Process all pending messages when becoming idle.
 
@@ -760,6 +820,11 @@ class JaatoSession:
         # Set registry for auto-background support
         if self._runtime.registry:
             self._executor.set_registry(self._runtime.registry)
+
+        # Initialize stream manager for streaming tool support
+        self._stream_manager = StreamManager()
+        if self._runtime.registry:
+            self._stream_manager.set_registry(self._runtime.registry)
 
         # Set permission plugin with agent context
         if self._runtime.permission_plugin:
@@ -1966,6 +2031,81 @@ class JaatoSession:
                     if any(p.function_call for p in remaining_response.parts):
                         self._trace("FINAL_MID_TURN_CHECK: Safety loop response had function calls (not processed)")
 
+            # Check for active streaming tools before completing
+            # If there are active streams, wait for updates and continue the loop
+            streaming_continuation_attempts = 0
+            max_streaming_continuations = 20  # Prevent infinite loops
+            while self._has_active_streams() and streaming_continuation_attempts < max_streaming_continuations:
+                streaming_continuation_attempts += 1
+                self._trace(f"STREAMING_CONTINUATION: Active streams detected, waiting for updates (attempt {streaming_continuation_attempts})")
+
+                # Check for cancellation
+                if self._is_cancelled():
+                    self._trace("STREAMING_CONTINUATION: Cancelled, exiting streaming loop")
+                    break
+
+                # Wait for streaming updates
+                updates = self._wait_for_streaming_updates()
+
+                if not updates:
+                    self._trace("STREAMING_CONTINUATION: No updates received, timeout")
+                    break
+
+                # Format and inject streaming updates
+                update_message = self._format_streaming_updates(updates)
+                self._trace(f"STREAMING_CONTINUATION: Injecting {len(updates)} updates")
+
+                # Notify UI about streaming updates
+                if on_output:
+                    on_output("streaming", f"Streaming updates received ({len(updates)} streams)", "write")
+
+                # Inject the update message into the conversation
+                self._message_queue.put(update_message, "streaming", SourceType.SYSTEM)
+
+                # Process the injected message to let model react
+                streaming_response = self._check_and_handle_mid_turn_prompt(
+                    use_streaming, on_output, wrapped_usage_callback, turn_data
+                )
+
+                if streaming_response:
+                    # Model responded to streaming updates
+                    # Check if it called any tools (including dismiss_stream)
+                    streaming_fc = [p.function_call for p in streaming_response.parts if p.function_call]
+
+                    # Collect any text from the response
+                    for part in streaming_response.parts:
+                        if part.text:
+                            if not use_streaming:
+                                if on_output:
+                                    on_output("model", part.text, "write")
+                                self._forward_to_parent("MODEL_OUTPUT", part.text)
+                            accumulated_text.append(part.text)
+
+                    # Process any tool calls from the streaming response
+                    if streaming_fc:
+                        self._trace(f"STREAMING_CONTINUATION: Model called {len(streaming_fc)} tools")
+                        # Execute the tools and continue
+                        tool_results = self._execute_function_call_group(
+                            streaming_fc, turn_data, on_output, cancellation_notified
+                        )
+                        if not self._is_cancelled():
+                            response = self._send_tool_results_and_continue(
+                                tool_results, use_streaming, on_output, wrapped_usage_callback, turn_data
+                            )
+                            # Collect text from tool continuation response
+                            for part in response.parts:
+                                if part.text:
+                                    if not use_streaming:
+                                        if on_output:
+                                            on_output("model", part.text, "write")
+                                        self._forward_to_parent("MODEL_OUTPUT", part.text)
+                                    accumulated_text.append(part.text)
+                else:
+                    self._trace("STREAMING_CONTINUATION: No response to streaming updates")
+
+            if streaming_continuation_attempts >= max_streaming_continuations:
+                self._trace("STREAMING_CONTINUATION: Max attempts reached, completing")
+
             # Forward completion to parent
             final_response = ''.join(accumulated_text) if accumulated_text else ''
             self._forward_to_parent("COMPLETED", final_response)
@@ -2192,6 +2332,79 @@ class JaatoSession:
 
         return tool_results
 
+    def _is_streaming_tool(self, tool_name: str) -> bool:
+        """Check if a tool name is a streaming variant."""
+        if not self._runtime.registry:
+            return False
+        return self._runtime.registry.is_streaming_tool(tool_name)
+
+    def _execute_streaming_tool(
+        self,
+        fc: FunctionCall,
+        on_output: Optional[OutputCallback]
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Execute a streaming tool via the StreamManager.
+
+        Args:
+            fc: The function call (with :stream suffix).
+            on_output: Optional callback for UI updates.
+
+        Returns:
+            Tuple of (success, result_dict) where result_dict contains
+            stream_id, initial_chunks, and status.
+        """
+        if not self._stream_manager or not self._runtime.registry:
+            return (False, {"error": "Streaming not available"})
+
+        # Get base tool name and streaming plugin
+        base_name = self._runtime.registry.get_base_tool_name(fc.name)
+        streaming_plugin = self._runtime.registry.get_streaming_plugin(base_name)
+
+        if not streaming_plugin:
+            return (False, {"error": f"Tool {base_name} does not support streaming"})
+
+        # Get plugin name for handle
+        plugin_name = "unknown"
+        plugin = self._runtime.registry.get_plugin_for_tool(base_name)
+        if plugin:
+            plugin_name = getattr(plugin, 'name', type(plugin).__name__)
+
+        # Create chunk callback for UI
+        def on_chunk(chunk: StreamChunk) -> None:
+            if on_output:
+                on_output("streaming", f"[{base_name}] {chunk.content}", "append")
+
+        try:
+            # Start the streaming execution
+            handle = self._stream_manager.start_stream(
+                plugin=streaming_plugin,
+                plugin_name=plugin_name,
+                tool_name=base_name,
+                arguments=fc.args,
+                call_id=fc.id or "",
+                on_ui_chunk=on_chunk,
+            )
+
+            # Format initial chunks for model
+            initial_content = []
+            for chunk in handle.initial_chunks:
+                initial_content.append(chunk.content)
+
+            return (True, {
+                "stream_id": handle.stream_id,
+                "tool_name": base_name,
+                "status": handle.status.value,
+                "initial_results": initial_content,
+                "initial_count": len(handle.initial_chunks),
+                "message": (
+                    f"Streaming started. Received {len(handle.initial_chunks)} initial results. "
+                    f"More results will be automatically provided as they become available. "
+                    f"Call dismiss_stream(stream_id='{handle.stream_id}') when you have enough results."
+                ),
+            })
+        except Exception as e:
+            return (False, {"error": f"Streaming execution failed: {str(e)}"})
+
     def _execute_single_tool(
         self,
         fc: FunctionCall,
@@ -2235,7 +2448,12 @@ class JaatoSession:
             call_id=fc.id or "",
             plugin_type=plugin_type,
         ) as tool_span:
-            if self._executor:
+            # Check if this is a streaming tool (name ends with :stream)
+            if self._is_streaming_tool(name):
+                # Route to streaming execution
+                executor_result = self._execute_streaming_tool(fc, on_output)
+                tool_span.set_attribute("jaato.tool.streaming", True)
+            elif self._executor:
                 # Set up tool output callback for streaming output during execution
                 def tool_output_callback(chunk: str, _call_id=fc.id, _name=name) -> None:
                     if self._ui_hooks and _call_id:

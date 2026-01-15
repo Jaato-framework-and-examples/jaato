@@ -5,9 +5,11 @@ This plugin provides fast, safe, auto-approved tools for:
 - Searching file contents with regex (grep_content)
 
 Both tools return structured JSON output and support background execution
-for large searches.
+for large searches. grep_content also supports streaming execution for
+incremental result delivery.
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -15,12 +17,13 @@ import stat
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from ..background.mixin import BackgroundCapableMixin
 from ..base import UserCommand
 from ..model_provider.types import ToolSchema
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
+from ..streaming.protocol import StreamingCapable, StreamChunk, ChunkCallback
 from .config_loader import (
     FilesystemQueryConfig,
     load_config,
@@ -50,7 +53,7 @@ def _detect_workspace_root() -> Optional[str]:
     return None
 
 
-class FilesystemQueryPlugin(BackgroundCapableMixin):
+class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
     """Plugin providing filesystem query tools (glob and grep).
 
     This plugin offers read-only, auto-approved tools for exploring codebases:
@@ -62,6 +65,9 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
     - Result limits to prevent overwhelming output
     - Background execution for large searches
     - Structured JSON responses
+
+    grep_content additionally supports streaming execution for incremental
+    result delivery via the :stream tool variant.
     """
 
     def __init__(self):
@@ -701,6 +707,174 @@ Tips:
 
         except (OSError, PermissionError):
             return True  # Can't read, treat as binary
+
+    # --- StreamingCapable implementation ---
+
+    def supports_streaming(self, tool_name: str) -> bool:
+        """Check if a tool supports streaming execution.
+
+        Currently only grep_content supports streaming.
+        """
+        return tool_name == "grep_content"
+
+    def get_streaming_tool_names(self) -> List[str]:
+        """Get list of tools that support streaming."""
+        return ["grep_content"]
+
+    async def execute_streaming(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        on_chunk: Optional[ChunkCallback] = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Execute grep_content with streaming results.
+
+        Yields matches as they are found, allowing the model to act on
+        partial results while the search continues.
+
+        Args:
+            tool_name: Must be "grep_content".
+            arguments: Tool arguments (pattern, path, file_glob, etc.).
+            on_chunk: Optional callback for each chunk.
+
+        Yields:
+            StreamChunk objects for each match found.
+        """
+        if tool_name != "grep_content":
+            raise ValueError(f"Streaming not supported for tool: {tool_name}")
+
+        if not self._config:
+            self._config = load_config()
+
+        pattern = arguments.get("pattern", "")
+        path = arguments.get("path", os.getcwd())
+        file_glob = arguments.get("file_glob")
+        context_lines = arguments.get("context_lines", self._config.context_lines)
+        case_sensitive = arguments.get("case_sensitive", True)
+        max_results = arguments.get("max_results", self._config.max_results)
+
+        if not pattern:
+            yield StreamChunk(
+                content="Error: Pattern is required",
+                chunk_type="error"
+            )
+            return
+
+        # Compile regex
+        try:
+            flags = 0 if case_sensitive else re.IGNORECASE
+            regex = re.compile(pattern, flags)
+        except re.error as e:
+            yield StreamChunk(
+                content=f"Error: Invalid regex pattern: {e}",
+                chunk_type="error"
+            )
+            return
+
+        search_path = Path(path).resolve()
+        if not search_path.exists():
+            yield StreamChunk(
+                content=f"Error: Path does not exist: {path}",
+                chunk_type="error"
+            )
+            return
+
+        # Determine files to search
+        files_to_search: List[Path] = []
+        if search_path.is_file():
+            files_to_search = [search_path]
+        else:
+            glob_patterns = file_glob if file_glob else ["**/*"]
+            seen_files: set = set()
+
+            for glob_pattern in glob_patterns:
+                for match in search_path.glob(glob_pattern):
+                    if match.is_file() and match not in seen_files:
+                        seen_files.add(match)
+                        rel_path = str(match.relative_to(search_path))
+
+                        if self._config.should_exclude(rel_path):
+                            continue
+
+                        try:
+                            if match.stat().st_size > self._config.max_file_size_kb * 1024:
+                                continue
+                        except (OSError, PermissionError):
+                            continue
+
+                        files_to_search.append(match)
+
+        # Stream matches as they are found
+        match_count = 0
+        files_searched = 0
+
+        for file_path in files_to_search:
+            if match_count >= max_results:
+                break
+
+            try:
+                if self._is_binary_file(file_path):
+                    continue
+
+                files_searched += 1
+
+                try:
+                    content = file_path.read_text(encoding="utf-8", errors="replace")
+                except (OSError, PermissionError):
+                    continue
+
+                lines = content.splitlines()
+
+                for line_num, line in enumerate(lines, start=1):
+                    if match_count >= max_results:
+                        break
+
+                    match_obj = regex.search(line)
+                    if match_obj:
+                        match_count += 1
+
+                        # Determine relative path
+                        if search_path.is_dir():
+                            rel_path = str(file_path.relative_to(search_path))
+                        else:
+                            rel_path = file_path.name
+
+                        # Format match for streaming
+                        match_text = f"{rel_path}:{line_num}: {line.strip()}"
+
+                        chunk = StreamChunk(
+                            content=match_text,
+                            chunk_type="match",
+                            sequence=match_count,
+                            metadata={
+                                "file": rel_path,
+                                "line": line_num,
+                                "column": match_obj.start() + 1,
+                                "match": match_obj.group(),
+                            }
+                        )
+
+                        if on_chunk:
+                            on_chunk(chunk)
+
+                        yield chunk
+
+                        # Allow other tasks to run
+                        await asyncio.sleep(0)
+
+            except Exception as e:
+                logger.debug("Error searching file %s: %s", file_path, e)
+                continue
+
+        # Final summary chunk
+        yield StreamChunk(
+            content=f"Search complete: {match_count} matches in {files_searched} files",
+            chunk_type="summary",
+            metadata={
+                "total_matches": match_count,
+                "files_searched": files_searched,
+            }
+        )
 
 
 def create_plugin() -> FilesystemQueryPlugin:
