@@ -4,9 +4,9 @@ This plugin provides fast, safe, auto-approved tools for:
 - Finding files with glob patterns (glob_files)
 - Searching file contents with regex (grep_content)
 
-Both tools return structured JSON output and support background execution
-for large searches. grep_content also supports streaming execution for
-incremental result delivery.
+Both tools return structured JSON output and support:
+- Background execution for large searches
+- Streaming execution for incremental result delivery (via :stream suffix)
 """
 
 import asyncio
@@ -65,9 +65,7 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
     - Result limits to prevent overwhelming output
     - Background execution for large searches
     - Structured JSON responses
-
-    grep_content additionally supports streaming execution for incremental
-    result delivery via the :stream tool variant.
+    - Streaming execution via :stream suffix (e.g., glob_files:stream)
     """
 
     def __init__(self):
@@ -713,13 +711,13 @@ Tips:
     def supports_streaming(self, tool_name: str) -> bool:
         """Check if a tool supports streaming execution.
 
-        Currently only grep_content supports streaming.
+        Both glob_files and grep_content support streaming.
         """
-        return tool_name == "grep_content"
+        return tool_name in ("glob_files", "grep_content")
 
     def get_streaming_tool_names(self) -> List[str]:
         """Get list of tools that support streaming."""
-        return ["grep_content"]
+        return ["glob_files", "grep_content"]
 
     async def execute_streaming(
         self,
@@ -727,20 +725,24 @@ Tips:
         arguments: Dict[str, Any],
         on_chunk: Optional[ChunkCallback] = None,
     ) -> AsyncIterator[StreamChunk]:
-        """Execute grep_content with streaming results.
+        """Execute tool with streaming results.
 
-        Yields matches as they are found, allowing the model to act on
-        partial results while the search continues.
+        Yields results as they are found, allowing the model to act on
+        partial results while the operation continues.
 
         Args:
-            tool_name: Must be "grep_content".
-            arguments: Tool arguments (pattern, path, file_glob, etc.).
+            tool_name: "glob_files" or "grep_content".
+            arguments: Tool arguments.
             on_chunk: Optional callback for each chunk.
 
         Yields:
-            StreamChunk objects for each match found.
+            StreamChunk objects for each result found.
         """
-        if tool_name != "grep_content":
+        if tool_name == "glob_files":
+            async for chunk in self._stream_glob_files(arguments, on_chunk):
+                yield chunk
+            return
+        elif tool_name != "grep_content":
             raise ValueError(f"Streaming not supported for tool: {tool_name}")
 
         if not self._config:
@@ -875,6 +877,149 @@ Tips:
                 "files_searched": files_searched,
             }
         )
+
+    async def _stream_glob_files(
+        self,
+        arguments: Dict[str, Any],
+        on_chunk: Optional[ChunkCallback] = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Stream glob_files results as files are found.
+
+        Args:
+            arguments: Tool arguments (pattern, root, max_results, etc.).
+            on_chunk: Optional callback for each chunk.
+
+        Yields:
+            StreamChunk objects for each file found.
+        """
+        if not self._config:
+            self._config = load_config()
+
+        pattern = arguments.get("pattern", "")
+        root = arguments.get("root", self._workspace_root or os.getcwd())
+        max_results = arguments.get("max_results", self._config.max_results)
+        include_hidden = arguments.get("include_hidden", False)
+
+        if not pattern:
+            yield StreamChunk(
+                content="Error: Pattern is required",
+                chunk_type="error"
+            )
+            return
+
+        # Sandbox check
+        if not self._is_path_allowed(root):
+            yield StreamChunk(
+                content=f"Error: Path not allowed: {root}",
+                chunk_type="error"
+            )
+            return
+
+        root_path = self._resolve_path(root).resolve()
+        if not root_path.exists():
+            yield StreamChunk(
+                content=f"Error: Root path does not exist: {root}",
+                chunk_type="error"
+            )
+            return
+
+        if not root_path.is_dir():
+            yield StreamChunk(
+                content=f"Error: Root path is not a directory: {root}",
+                chunk_type="error"
+            )
+            return
+
+        # Stream files as they are found
+        file_count = 0
+        total_found = 0
+
+        try:
+            for match in root_path.glob(pattern):
+                # Skip directories
+                if match.is_dir():
+                    continue
+
+                # Skip hidden files unless requested
+                if not include_hidden:
+                    if any(part.startswith(".") for part in match.relative_to(root_path).parts):
+                        continue
+
+                # Check exclusions
+                rel_path = str(match.relative_to(root_path))
+                if self._config.should_exclude(rel_path):
+                    continue
+
+                total_found += 1
+
+                if file_count >= max_results:
+                    continue  # Keep counting but don't stream more
+
+                file_count += 1
+
+                # Get file info
+                try:
+                    stat_info = match.stat()
+                    size_str = self._format_size(stat_info.st_size)
+                    modified = datetime.fromtimestamp(stat_info.st_mtime).strftime("%Y-%m-%d %H:%M")
+                    content = f"{rel_path} ({size_str}, {modified})"
+                    metadata = {
+                        "path": rel_path,
+                        "absolute_path": str(match),
+                        "size": stat_info.st_size,
+                        "modified": datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
+                    }
+                except (OSError, PermissionError):
+                    content = rel_path
+                    metadata = {
+                        "path": rel_path,
+                        "absolute_path": str(match),
+                    }
+
+                chunk = StreamChunk(
+                    content=content,
+                    chunk_type="file",
+                    sequence=file_count,
+                    metadata=metadata,
+                )
+
+                if on_chunk:
+                    on_chunk(chunk)
+
+                yield chunk
+
+                # Allow other tasks to run
+                await asyncio.sleep(0)
+
+        except Exception as e:
+            logger.exception("Error in streaming glob_files: %s", e)
+            yield StreamChunk(
+                content=f"Error during search: {str(e)}",
+                chunk_type="error"
+            )
+            return
+
+        # Final summary chunk
+        truncated = total_found > max_results
+        yield StreamChunk(
+            content=f"Found {total_found} files{' (truncated)' if truncated else ''}",
+            chunk_type="summary",
+            metadata={
+                "total_found": total_found,
+                "returned": file_count,
+                "truncated": truncated,
+                "root": str(root_path),
+                "pattern": pattern,
+            }
+        )
+
+    def _format_size(self, size: int) -> str:
+        """Format file size in human-readable form."""
+        for unit in ["B", "KB", "MB", "GB"]:
+            if size < 1024:
+                return f"{size:.1f}{unit}" if unit != "B" else f"{size}{unit}"
+            size /= 1024
+        return f"{size:.1f}TB"
 
 
 def create_plugin() -> FilesystemQueryPlugin:
