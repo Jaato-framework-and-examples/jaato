@@ -33,6 +33,13 @@ TOOL_CATEGORIES = [
 ]
 
 
+# Standard discoverability modes for tool loading behavior
+TOOL_DISCOVERABILITY = [
+    "core",          # Always loaded in initial context
+    "discoverable",  # Loaded on-demand via introspection tools
+]
+
+
 @dataclass
 class ToolSchema:
     """Provider-agnostic tool/function declaration.
@@ -47,11 +54,16 @@ class ToolSchema:
         category: Optional category for tool organization and filtering.
             Standard categories: filesystem, code, search, memory, planning,
             system, web, communication. Custom categories are also allowed.
+        discoverability: Controls when the tool schema is loaded into context.
+            - "core": Always present in initial context (default for essential tools)
+            - "discoverable": Loaded on-demand when model requests via introspection
+            Default is "discoverable" to minimize initial context size.
     """
     name: str
     description: str
     parameters: Dict[str, Any] = field(default_factory=dict)
     category: Optional[str] = None
+    discoverability: str = "discoverable"
 
 
 @dataclass

@@ -290,6 +290,7 @@ class FileEditPlugin:
                     "required": ["path"]
                 },
                 category="filesystem",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="updateFile",
@@ -315,6 +316,7 @@ class FileEditPlugin:
                     "required": ["path", "new_content"]
                 },
                 category="filesystem",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="writeNewFile",
@@ -342,6 +344,7 @@ class FileEditPlugin:
                     "required": ["path", "content"]
                 },
                 category="filesystem",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="removeFile",
@@ -358,6 +361,7 @@ class FileEditPlugin:
                     "required": ["path"]
                 },
                 category="filesystem",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="moveFile",
@@ -383,6 +387,7 @@ class FileEditPlugin:
                     "required": ["source_path", "destination_path"]
                 },
                 category="filesystem",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="renameFile",
@@ -408,6 +413,7 @@ class FileEditPlugin:
                     "required": ["source_path", "destination_path"]
                 },
                 category="filesystem",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="undoFileChange",
@@ -424,6 +430,7 @@ class FileEditPlugin:
                     "required": ["path"]
                 },
                 category="filesystem",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="multiFileEdit",
@@ -477,6 +484,7 @@ class FileEditPlugin:
                     "required": ["operations"]
                 },
                 category="filesystem",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="findAndReplace",
@@ -510,6 +518,7 @@ class FileEditPlugin:
                     "required": ["pattern", "replacement", "paths"]
                 },
                 category="filesystem",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="restoreFile",
@@ -530,6 +539,7 @@ class FileEditPlugin:
                     "required": ["path"]
                 },
                 category="filesystem",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="listBackups",
@@ -545,6 +555,7 @@ class FileEditPlugin:
                     "required": []
                 },
                 category="filesystem",
+                discoverability="discoverable",
             ),
         ]
 
