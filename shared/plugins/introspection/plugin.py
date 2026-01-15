@@ -157,6 +157,12 @@ class IntrospectionPlugin:
             "2. `list_tools(category='...')` - See tools in a specific category\n"
             "3. `get_tool_schemas(names=[...])` - Get full schemas for tools you need\n"
             "4. Call the tools using the schema information\n\n"
+            "STREAMING TOOLS:\n"
+            "Tools with `streaming: true` support incremental results. To use streaming:\n"
+            "- Call `<tool_name>:stream` instead of `<tool_name>` (e.g., `grep_content:stream`)\n"
+            "- You'll receive a stream_id and initial results immediately\n"
+            "- More results arrive automatically as the tool finds them\n"
+            "- Call `dismiss_stream(stream_id)` when you have enough results\n\n"
             "CATEGORIES: filesystem, code, search, memory, planning, system, web, communication"
         )
 
@@ -260,6 +266,15 @@ class IntrospectionPlugin:
 
         if tools:
             result["hint"] = "Call get_tool_schemas(names=['<tool_name>']) to get full parameter details."
+
+            # Add streaming hint if any tools support streaming
+            streaming_tools = [t["name"] for t in tools if t.get("streaming")]
+            if streaming_tools:
+                result["streaming_hint"] = (
+                    f"Tools with streaming=true support incremental results. "
+                    f"Call '<tool_name>:stream' (e.g., '{streaming_tools[0]}:stream') "
+                    f"to receive results as they're found. Use dismiss_stream(stream_id) when done."
+                )
 
         return result
 
