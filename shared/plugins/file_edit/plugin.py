@@ -270,7 +270,8 @@ class FileEditPlugin:
                 description="Read the contents of a file. ALWAYS use this instead of `cat`, `head`, "
                            "`tail`, or `less` CLI commands. Returns file content as text with proper "
                            "encoding handling and structured metadata. Supports chunked reading with "
-                           "offset and limit parameters for large files.",
+                           "offset and limit parameters for large files. For image files (PNG, JPG, GIF, "
+                           "WebP, BMP, ICO, SVG), returns the image as multimodal content that you can view.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -290,7 +291,7 @@ class FileEditPlugin:
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability="core",
             ),
             ToolSchema(
                 name="updateFile",
@@ -595,6 +596,7 @@ Tools available:
   - Example: `readFile(path="large.txt", offset=1, limit=100)` reads lines 1-100.
   - Example: `readFile(path="large.txt", offset=101, limit=100)` reads lines 101-200.
   - Chunked responses include: `total_lines`, `start_line`, `end_line`, and `has_more` (boolean).
+  - **Image support**: For image files (PNG, JPG, GIF, WebP, BMP, ICO, SVG), returns multimodal content you can view directly.
 - `updateFile(path, new_content)`: Update an existing file. Shows diff for approval and creates backup.
 - `writeNewFile(path, content)`: Create a new file. Shows content for approval. Fails if file exists.
 - `removeFile(path)`: Delete a file. Creates backup before deletion.
@@ -835,6 +837,38 @@ will show you a preview and require approval before execution. Backups are autom
 
         if not file_path.is_file():
             return {"error": f"Not a file: {path}"}
+
+        # Check if file is an image - return as multimodal content
+        IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.svg'}
+        IMAGE_MIME_TYPES = {
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp',
+            '.bmp': 'image/bmp',
+            '.ico': 'image/x-icon',
+            '.svg': 'image/svg+xml',
+        }
+        ext = file_path.suffix.lower()
+
+        if ext in IMAGE_EXTENSIONS:
+            self._trace(f"readFile: detected image file, returning as multimodal")
+            try:
+                data = file_path.read_bytes()
+                mime_type = IMAGE_MIME_TYPES.get(ext, 'image/png')
+                return {
+                    "_multimodal": True,
+                    "_multimodal_type": "image",
+                    "image_data": data,
+                    "mime_type": mime_type,
+                    "display_name": file_path.name,
+                    "path": path,
+                    "size": len(data),
+                    "type": "image",
+                }
+            except OSError as e:
+                return {"error": f"Failed to read image: {e}"}
 
         # Validate offset and limit if provided
         if offset is not None:

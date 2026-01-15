@@ -1856,6 +1856,7 @@ class RichClient:
             self._display.add_system_message("Usage:")
             self._display.add_system_message("  screenshot              Capture and send hint to model", "dim")
             self._display.add_system_message("  screenshot nosend       Capture only, no hint to model", "dim")
+            self._display.add_system_message("  screenshot copy         Capture and copy to clipboard (PNG)", "dim")
             self._display.add_system_message("  screenshot format F     Set output format (svg, png, html)", "dim")
             self._display.add_system_message("  screenshot auto         Toggle auto-capture on turn end", "dim")
             self._display.add_system_message("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim")
@@ -1942,6 +1943,41 @@ class RichClient:
             if result and result.success:
                 self._display.add_system_message("Screenshot captured:", "system_success")
                 self._display.add_system_message(f"  {result.path}", "cyan")
+            elif result and not result.success:
+                self._display.add_system_message("[Screenshot failed]", "system_error")
+                self._display.add_system_message(f"  Error: {result.error}", "dim")
+            return
+
+        if subcommand == 'copy':
+            # Capture and copy to clipboard (requires PNG format)
+            from shared.plugins.vision_capture.protocol import CaptureFormat
+            from clipboard import copy_image_to_clipboard
+
+            self._init_vision_capture()
+
+            # Save current format and temporarily switch to PNG for clipboard
+            original_format = None
+            if self._vision_capture:
+                original_format = self._vision_capture._config.format
+                if original_format != CaptureFormat.PNG:
+                    self._vision_capture._config.format = CaptureFormat.PNG
+
+            result = self._do_vision_capture(CaptureContext.USER_REQUESTED)
+
+            # Restore original format
+            if self._vision_capture and original_format is not None:
+                self._vision_capture._config.format = original_format
+
+            if result and result.success:
+                # Copy to clipboard
+                success, error_msg = copy_image_to_clipboard(result.path)
+                if success:
+                    self._display.add_system_message("Screenshot copied to clipboard:", "system_success")
+                    self._display.add_system_message(f"  {result.path}", "cyan")
+                else:
+                    self._display.add_system_message("Screenshot captured but clipboard copy failed:", "system_warning")
+                    self._display.add_system_message(f"  {result.path}", "cyan")
+                    self._display.add_system_message(f"  ({error_msg})", "dim")
             elif result and not result.success:
                 self._display.add_system_message("[Screenshot failed]", "system_error")
                 self._display.add_system_message(f"  Error: {result.error}", "dim")
@@ -2715,6 +2751,7 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
         display.add_system_message("Usage:")
         display.add_system_message("  screenshot              Capture and send hint to model", "dim")
         display.add_system_message("  screenshot nosend       Capture only, no hint to model", "dim")
+        display.add_system_message("  screenshot copy         Capture and copy to clipboard (PNG)", "dim")
         display.add_system_message("  screenshot format F     Set output format (svg, png, html)", "dim")
         display.add_system_message("  screenshot auto         Toggle auto-capture on turn end", "dim")
         display.add_system_message("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim")
@@ -2812,6 +2849,38 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
         if result and result.success:
             display.add_system_message("Screenshot captured:", "system_success")
             display.add_system_message(f"  {result.path}", "cyan")
+        elif result and not result.success:
+            display.add_system_message("[Screenshot failed]", "system_error")
+            display.add_system_message(f"  Error: {result.error}", "dim")
+        return
+
+    if subcommand == 'copy':
+        # Capture and copy to clipboard (requires PNG format)
+        from shared.plugins.vision_capture.protocol import CaptureFormat
+        from clipboard import copy_image_to_clipboard
+
+        vision_capture, _ = _get_ipc_vision_state(display)
+
+        # Save current format and temporarily switch to PNG for clipboard
+        original_format = vision_capture._config.format
+        if original_format != CaptureFormat.PNG:
+            vision_capture._config.format = CaptureFormat.PNG
+
+        result = _do_vision_capture_ipc(display, agent_registry, CaptureContext.USER_REQUESTED)
+
+        # Restore original format
+        vision_capture._config.format = original_format
+
+        if result and result.success:
+            # Copy to clipboard
+            success, error_msg = copy_image_to_clipboard(result.path)
+            if success:
+                display.add_system_message("Screenshot copied to clipboard:", "system_success")
+                display.add_system_message(f"  {result.path}", "cyan")
+            else:
+                display.add_system_message("Screenshot captured but clipboard copy failed:", "system_warning")
+                display.add_system_message(f"  {result.path}", "cyan")
+                display.add_system_message(f"  ({error_msg})", "dim")
         elif result and not result.success:
             display.add_system_message("[Screenshot failed]", "system_error")
             display.add_system_message(f"  Error: {result.error}", "dim")

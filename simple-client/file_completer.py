@@ -57,6 +57,7 @@ DEFAULT_COMMANDS = [
     ("export", "Export session to YAML for replay"),
     ("screenshot", "Capture TUI and send hint to model"),
     ("screenshot nosend", "Capture TUI only, no hint to model"),
+    ("screenshot copy", "Capture TUI and copy to clipboard (PNG)"),
     ("screenshot format", "Show/set output format"),
     ("screenshot format svg", "SVG format (default, no dependencies)"),
     ("screenshot format png", "PNG format (requires cairosvg)"),
