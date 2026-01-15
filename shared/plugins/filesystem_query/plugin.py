@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..background.mixin import BackgroundCapableMixin
 from ..base import UserCommand
 from ..model_provider.types import ToolSchema
+from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
 from .config_loader import (
     FilesystemQueryConfig,
     load_config,
@@ -30,6 +31,23 @@ from .config_loader import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _detect_workspace_root() -> Optional[str]:
+    """Auto-detect workspace root from environment variables.
+
+    Checks JAATO_WORKSPACE_ROOT first, then workspaceRoot.
+
+    Returns:
+        Absolute path to workspace root, or None if not configured.
+    """
+    workspace = os.environ.get('JAATO_WORKSPACE_ROOT')
+    if workspace:
+        return os.path.realpath(os.path.abspath(workspace))
+    workspace = os.environ.get('workspaceRoot')
+    if workspace:
+        return os.path.realpath(os.path.abspath(workspace))
+    return None
 
 
 class FilesystemQueryPlugin(BackgroundCapableMixin):
@@ -51,6 +69,10 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
         super().__init__(max_workers=2, default_timeout=300.0)
         self._config: Optional[FilesystemQueryConfig] = None
         self._initialized = False
+        # Workspace root for path sandboxing
+        self._workspace_root: Optional[str] = None
+        # Plugin registry for checking external path authorization
+        self._plugin_registry = None
 
     @property
     def name(self) -> str:
@@ -62,20 +84,115 @@ class FilesystemQueryPlugin(BackgroundCapableMixin):
 
         Args:
             config: Optional configuration dict to override defaults.
+                - workspace_root: Path to workspace root for sandboxing.
+                                  Auto-detected from JAATO_WORKSPACE_ROOT or
+                                  workspaceRoot env vars if not specified.
         """
+        config = config or {}
         self._config = load_config(runtime_config=config)
+
+        # Configure workspace root for path sandboxing
+        workspace_root = config.get("workspace_root")
+        if workspace_root:
+            self._workspace_root = os.path.realpath(os.path.abspath(workspace_root))
+        else:
+            self._workspace_root = _detect_workspace_root()
+
         self._initialized = True
         logger.info(
-            "FilesystemQueryPlugin initialized (max_results=%d, timeout=%ds)",
+            "FilesystemQueryPlugin initialized (max_results=%d, timeout=%ds, workspace=%s)",
             self._config.max_results,
             self._config.timeout_seconds,
+            self._workspace_root or "none",
         )
+
+        # Log .jaato symlink detection for visibility
+        if self._workspace_root:
+            is_symlink, target = detect_jaato_symlink(self._workspace_root)
+            if is_symlink:
+                logger.info("FilesystemQueryPlugin: .jaato is symlink -> %s", target)
 
     def shutdown(self) -> None:
         """Shutdown the plugin and release resources."""
         self._shutdown_bg_executor()
         self._initialized = False
+        self._workspace_root = None
+        self._plugin_registry = None
         logger.info("FilesystemQueryPlugin shutdown")
+
+    def set_plugin_registry(self, registry) -> None:
+        """Set the plugin registry for checking external path authorization.
+
+        Args:
+            registry: The PluginRegistry instance.
+        """
+        self._plugin_registry = registry
+
+    def set_workspace_path(self, path: Optional[str]) -> None:
+        """Update the workspace root path.
+
+        Called when a client connects with a different working directory.
+
+        Args:
+            path: The new workspace root path, or None to disable sandboxing.
+        """
+        if path:
+            self._workspace_root = os.path.realpath(os.path.abspath(path))
+        else:
+            self._workspace_root = None
+        logger.debug("FilesystemQueryPlugin workspace_root=%s", self._workspace_root)
+
+    def _resolve_path(self, path: str) -> Path:
+        """Resolve a path, making relative paths relative to workspace_root.
+
+        Args:
+            path: Path string (absolute or relative).
+
+        Returns:
+            Resolved Path object. Relative paths are resolved against
+            workspace_root if configured, otherwise against CWD.
+        """
+        p = Path(path)
+        if p.is_absolute():
+            return p
+        if self._workspace_root:
+            return Path(self._workspace_root) / p
+        return p
+
+    def _is_path_allowed(self, path: str) -> bool:
+        """Check if a path is allowed for access.
+
+        A path is allowed if:
+        1. No workspace_root is configured (sandboxing disabled)
+        2. The path is within the workspace_root
+        3. The path is under .jaato and within the .jaato containment boundary
+           (see sandbox_utils.py for .jaato contained symlink escape rules)
+        4. The path is authorized via the plugin registry
+
+        Args:
+            path: Path to check.
+
+        Returns:
+            True if access is allowed, False otherwise.
+        """
+        # If no workspace_root, allow all paths
+        if not self._workspace_root:
+            return True
+
+        # Resolve path relative to workspace first
+        resolved = self._resolve_path(path)
+        abs_path = str(resolved.absolute())
+
+        # Use shared sandbox utility with .jaato containment support
+        allowed = check_path_with_jaato_containment(
+            abs_path,
+            self._workspace_root,
+            self._plugin_registry
+        )
+
+        if not allowed:
+            logger.debug("FilesystemQueryPlugin: path blocked (outside sandbox): %s", path)
+        return allowed
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the tool schemas for glob_files and grep_content."""
@@ -284,14 +401,22 @@ Tips:
             self._config = load_config()
 
         pattern = args.get("pattern", "")
-        root = args.get("root", os.getcwd())
+        root = args.get("root", self._workspace_root or os.getcwd())
         max_results = args.get("max_results", self._config.max_results)
         include_hidden = args.get("include_hidden", False)
 
         if not pattern:
             return {"error": "Pattern is required", "files": [], "total": 0}
 
-        root_path = Path(root).resolve()
+        # Sandbox check: ensure root path is within allowed workspace
+        if not self._is_path_allowed(root):
+            return {
+                "error": f"Root path does not exist: {root}",
+                "files": [],
+                "total": 0,
+            }
+
+        root_path = self._resolve_path(root).resolve()
         if not root_path.exists():
             return {
                 "error": f"Root path does not exist: {root}",
@@ -391,7 +516,7 @@ Tips:
             self._config = load_config()
 
         pattern = args.get("pattern", "")
-        path = args.get("path", os.getcwd())
+        path = args.get("path", self._workspace_root or os.getcwd())
         file_glob = args.get("file_glob")
         context_lines = args.get("context_lines", self._config.context_lines)
         case_sensitive = args.get("case_sensitive", True)
@@ -399,6 +524,14 @@ Tips:
 
         if not pattern:
             return {"error": "Pattern is required", "matches": [], "total_matches": 0}
+
+        # Sandbox check: ensure search path is within allowed workspace
+        if not self._is_path_allowed(path):
+            return {
+                "error": f"Path does not exist: {path}",
+                "matches": [],
+                "total_matches": 0,
+            }
 
         # Compile regex
         try:
@@ -411,7 +544,7 @@ Tips:
                 "total_matches": 0,
             }
 
-        search_path = Path(path).resolve()
+        search_path = self._resolve_path(path).resolve()
         if not search_path.exists():
             return {
                 "error": f"Path does not exist: {path}",
