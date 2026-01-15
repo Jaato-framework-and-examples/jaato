@@ -274,15 +274,14 @@ class AnthropicProvider:
         import anthropic
 
         # Headers for OAuth authentication
-        # Uses oauth-2025-04-20 beta (required for OAuth tokens) instead of
-        # claude-code-20250219 which is restricted to official Claude Code clients
+        # Must match Claude Code CLI headers for OAuth tokens to work
         oauth_headers = {
             "anthropic-beta": (
                 "oauth-2025-04-20,"
                 "interleaved-thinking-2025-05-14,"
-                "fine-grained-tool-streaming-2025-05-14"
+                "claude-code-20250219"
             ),
-            "anthropic-dangerous-direct-browser-access": "true",
+            "user-agent": "claude-cli/2.1.2 (external, cli)",
         }
 
         # Priority: PKCE OAuth > env var OAuth > API key
