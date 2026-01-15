@@ -291,7 +291,7 @@ class FileEditPlugin:
                     "required": ["path"]
                 },
                 category="filesystem",
-                discoverability="discoverable",
+                discoverability="core",
             ),
             ToolSchema(
                 name="updateFile",
