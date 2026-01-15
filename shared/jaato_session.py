@@ -619,8 +619,16 @@ class JaatoSession:
         Args:
             phase: The new activity phase.
         """
+        previous_phase = self._activity_phase
         self._activity_phase = phase
         self._phase_started_at = datetime.now() if phase != ActivityPhase.IDLE else None
+
+        # Clear permission suspensions on phase transitions
+        if phase == ActivityPhase.IDLE and self._runtime and self._runtime.permission_plugin:
+            # Clear idle suspension when session goes idle
+            self._runtime.permission_plugin.clear_idle_suspension()
+            # Also clear turn suspension (turn has ended)
+            self._runtime.permission_plugin.clear_turn_suspension()
 
     def request_stop(self) -> bool:
         """Request cancellation of the current message processing.
