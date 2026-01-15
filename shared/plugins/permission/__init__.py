@@ -26,6 +26,7 @@ from .sanitization import (
     check_path_scope,
     create_strict_config,
     create_permissive_config,
+    SYSTEM_TEMP_PATHS,
 )
 
 __all__ = [
@@ -55,4 +56,5 @@ __all__ = [
     'check_path_scope',
     'create_strict_config',
     'create_permissive_config',
+    'SYSTEM_TEMP_PATHS',
 ]

@@ -397,7 +397,8 @@ class PermissionPolicy:
                     "allowed_roots": ["."],
                     "block_absolute": true,
                     "block_parent_traversal": true,
-                    "allow_home": false
+                    "allow_home": false,
+                    "allow_tmp": true
                 }
             }
         }
@@ -420,6 +421,7 @@ class PermissionPolicy:
                     block_parent_traversal=ps_cfg.get("block_parent_traversal", True),
                     resolve_symlinks=ps_cfg.get("resolve_symlinks", True),
                     allow_home=ps_cfg.get("allow_home", False),
+                    allow_tmp=ps_cfg.get("allow_tmp", True),
                 )
 
             sanitization_config = SanitizationConfig(

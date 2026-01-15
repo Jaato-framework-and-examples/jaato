@@ -71,6 +71,11 @@ class SanitizationResult:
     violations: List[str] = field(default_factory=list)
 
 
+# System paths that are always allowed for temporary files
+# These are considered safe for sandboxed operations
+SYSTEM_TEMP_PATHS = ["/tmp"]
+
+
 @dataclass
 class PathScopeConfig:
     """Configuration for path scope validation."""
@@ -79,6 +84,7 @@ class PathScopeConfig:
     block_parent_traversal: bool = True
     resolve_symlinks: bool = True
     allow_home: bool = False
+    allow_tmp: bool = True  # Allow /tmp/** access by default
 
 
 @dataclass
@@ -221,6 +227,23 @@ def resolve_path(path: str, cwd: str) -> Tuple[bool, str]:
         return False, str(e)
 
 
+def _is_under_temp_path(path: str) -> bool:
+    """Check if a path is under a system temp directory.
+
+    Args:
+        path: The path to check (absolute or relative)
+
+    Returns:
+        True if path is under /tmp or another system temp directory
+    """
+    # Normalize the path for comparison
+    normalized = os.path.normpath(path)
+    for temp_path in SYSTEM_TEMP_PATHS:
+        if normalized == temp_path or normalized.startswith(temp_path + os.sep):
+            return True
+    return False
+
+
 def check_path_scope(
     path: str,
     config: PathScopeConfig,
@@ -239,9 +262,14 @@ def check_path_scope(
     violations = []
     cwd = cwd or os.getcwd()
 
+    # Check if path is under allowed temp directories
+    is_temp_path = _is_under_temp_path(path)
+
     # Check for obvious violations before resolving
+    # Skip absolute path check for temp paths when allow_tmp is enabled
     if config.block_absolute and path.startswith('/'):
-        violations.append(f"Absolute path not allowed: {path}")
+        if not (config.allow_tmp and is_temp_path):
+            violations.append(f"Absolute path not allowed: {path}")
 
     if config.block_parent_traversal and '..' in path:
         violations.append(f"Parent traversal not allowed: {path}")
@@ -266,9 +294,16 @@ def check_path_scope(
             violations=[f"Path resolution failed: {path}"]
         )
 
+    # Build the list of allowed roots, including temp paths if enabled
+    effective_roots = list(config.allowed_roots)
+    if config.allow_tmp:
+        for temp_path in SYSTEM_TEMP_PATHS:
+            if temp_path not in effective_roots:
+                effective_roots.append(temp_path)
+
     # Check if resolved path is within allowed roots
     allowed = False
-    for root in config.allowed_roots:
+    for root in effective_roots:
         # Resolve the allowed root too
         _, resolved_root = resolve_path(root, cwd)
         if resolved.startswith(resolved_root + os.sep) or resolved == resolved_root:
@@ -338,7 +373,7 @@ def sanitize_command(
     return SanitizationResult(is_safe=True, reason="Command passed all checks")
 
 
-def create_strict_config(cwd: Optional[str] = None) -> SanitizationConfig:
+def create_strict_config(cwd: Optional[str] = None, allow_tmp: bool = True) -> SanitizationConfig:
     """Create a strict sanitization config for sandboxed execution.
 
     This configuration:
@@ -346,9 +381,11 @@ def create_strict_config(cwd: Optional[str] = None) -> SanitizationConfig:
     - Blocks dangerous commands
     - Restricts paths to current working directory only
     - Blocks absolute paths, parent traversal, and home access
+    - Allows /tmp/** access by default for temporary file operations
 
     Args:
         cwd: Current working directory (defaults to ".")
+        allow_tmp: Whether to allow /tmp/** access (default: True)
 
     Returns:
         Strict SanitizationConfig
@@ -364,6 +401,7 @@ def create_strict_config(cwd: Optional[str] = None) -> SanitizationConfig:
             block_parent_traversal=True,
             resolve_symlinks=True,
             allow_home=False,
+            allow_tmp=allow_tmp,
         )
     )
 
