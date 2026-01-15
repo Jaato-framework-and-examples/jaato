@@ -54,6 +54,9 @@ dev = [
     "pytest",
     "pytest-asyncio",
 ]
+ast = [
+    "ast-grep-py>=0.30.0",  # AST-based code search
+]
 
 # Entry points for plugin discovery
 # External packages can register plugins by adding to this group
@@ -72,6 +75,7 @@ references = "shared.plugins.references:create_plugin"
 template = "shared.plugins.template:create_plugin"
 todo = "shared.plugins.todo:create_plugin"
 anthropic_auth = "shared.plugins.anthropic_auth:create_plugin"
+ast_search = "shared.plugins.ast_search:create_plugin"
 
 # Entry points for GC strategy plugins
 # GC plugins implement context window garbage collection strategies
