@@ -826,15 +826,21 @@ class JaatoSession:
         if self._runtime.registry:
             self._stream_manager.set_registry(self._runtime.registry)
 
-        # Register streaming control tool (dismiss_stream) as a core tool
-        # This is provided directly by StreamManager, not via a plugin
-        for name, executor in self._stream_manager.get_executors().items():
-            self._executor.register(name, executor)
-        # Add streaming tool schemas to session tools
-        if self._tools is None:
-            self._tools = []
-        self._tools = list(self._tools)
-        self._tools.extend(self._stream_manager.get_tool_schemas())
+            # Register streaming control tools (e.g., dismiss_stream) as core tools
+            # This makes them visible to introspection and includes them in tool schemas
+            for schema in self._stream_manager.get_tool_schemas():
+                executor = self._stream_manager.get_executors().get(schema.name)
+                if executor:
+                    self._runtime.registry.register_core_tool(schema, executor)
+
+            # Refresh runtime's tool cache to include the newly registered core tools
+            self._runtime.refresh_tool_cache()
+
+            # Re-fetch tools to include core tools, and update session tools
+            self._tools = self._runtime.get_tool_schemas(tools)
+            executors = self._runtime.get_executors(tools)
+            for name, fn in executors.items():
+                self._executor.register(name, fn)
 
         # Set permission plugin with agent context
         if self._runtime.permission_plugin:
