@@ -78,6 +78,15 @@ class TestASTSearchPluginBasics:
         assert "pattern" in schemas[0].parameters["properties"]
         assert "language" in schemas[0].parameters["properties"]
 
+    def test_tool_schema_category_and_discoverability(self):
+        """Test that tool schema has correct category and discoverability."""
+        plugin = ASTSearchPlugin()
+        schemas = plugin.get_tool_schemas()
+
+        schema = schemas[0]
+        assert schema.category == "search"
+        assert schema.discoverability == "discoverable"
+
     def test_get_executors(self):
         """Test that executors are returned correctly."""
         plugin = ASTSearchPlugin()

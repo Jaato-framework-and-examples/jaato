@@ -153,7 +153,12 @@ class ASTSearchPlugin(BackgroundCapableMixin):
         logger.info("ASTSearchPlugin shutdown")
 
     def get_tool_schemas(self) -> List[ToolSchema]:
-        """Return the tool schemas for AST search."""
+        """Return the tool schemas for AST search.
+
+        The ast_search tool is categorized as "search" and marked as "discoverable"
+        to support the deferred tool loading mechanism. Models can discover it via
+        list_tools(category='search') and request full schema via get_tool_schemas().
+        """
         return [
             ToolSchema(
                 name="ast_search",
@@ -222,6 +227,8 @@ class ASTSearchPlugin(BackgroundCapableMixin):
                     },
                     "required": ["pattern"],
                 },
+                category="search",
+                discoverability="discoverable",
             ),
         ]
 
