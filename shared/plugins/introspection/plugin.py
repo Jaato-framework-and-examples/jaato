@@ -205,8 +205,9 @@ class IntrospectionPlugin:
         # Category specified - return tools in that category
         tools = []
         for schema in all_schemas:
-            # Apply category filter
-            if schema.category != category:
+            # Apply category filter (treat None as "uncategorized")
+            schema_category = schema.category or "uncategorized"
+            if schema_category != category:
                 continue
 
             # Find which plugin provides this tool
