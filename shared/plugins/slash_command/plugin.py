@@ -132,7 +132,9 @@ class SlashCommandPlugin:
                     }
                 },
                 "required": ["command_name"]
-            }
+            },
+            category="system",
+            discoverability="discoverable",
         )]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:

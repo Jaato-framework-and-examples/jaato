@@ -125,6 +125,7 @@ class MemoryPlugin:
                     "required": ["content", "description", "tags"]
                 },
                 category="memory",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name='retrieve_memories',
@@ -149,6 +150,7 @@ class MemoryPlugin:
                     "required": ["tags"]
                 },
                 category="memory",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name='list_memory_tags',
@@ -162,6 +164,7 @@ class MemoryPlugin:
                     "required": []
                 },
                 category="memory",
+                discoverability="discoverable",
             )
         ]
 

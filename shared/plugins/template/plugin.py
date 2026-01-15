@@ -184,7 +184,9 @@ class TemplatePlugin:
                         }
                     },
                     "required": ["variables", "output_path"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="listExtractedTemplates",
@@ -198,7 +200,9 @@ class TemplatePlugin:
                     "type": "object",
                     "properties": {},
                     "required": []
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="renderTemplateToFile",
@@ -235,7 +239,9 @@ class TemplatePlugin:
                         }
                     },
                     "required": ["output_path", "variables"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="listTemplateVariables",
@@ -253,7 +259,9 @@ class TemplatePlugin:
                         }
                     },
                     "required": ["template_path"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
         ]
 

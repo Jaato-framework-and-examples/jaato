@@ -631,7 +631,9 @@ class ReferencesPlugin:
                         }
                     },
                     "required": []
-                }
+                },
+                category="system",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="listReferences",
@@ -655,7 +657,9 @@ class ReferencesPlugin:
                         }
                     },
                     "required": []
-                }
+                },
+                category="system",
+                discoverability="discoverable",
             )
         ]
 

@@ -75,7 +75,9 @@ class EnvironmentPlugin:
                         }
                     },
                     "required": []
-                }
+                },
+                category="system",
+                discoverability="discoverable",
             )
         ]
 
@@ -296,7 +298,11 @@ class EnvironmentPlugin:
     # ==================== Required Protocol Methods ====================
 
     def get_system_instructions(self) -> Optional[str]:
-        """Instructions for the model about environment tools."""
+        """Instructions for the model about environment tools.
+
+        Note: Sandbox awareness is handled by JaatoRuntime to ensure it's
+        always included regardless of which plugins are exposed.
+        """
         return None
 
     def get_auto_approved_tools(self) -> List[str]:

@@ -73,7 +73,9 @@ class CalculatorPlugin:
                         }
                     },
                     "required": ["a", "b"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="subtract",
@@ -91,7 +93,9 @@ class CalculatorPlugin:
                         }
                     },
                     "required": ["a", "b"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="multiply",
@@ -109,7 +113,9 @@ class CalculatorPlugin:
                         }
                     },
                     "required": ["a", "b"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="divide",
@@ -127,7 +133,9 @@ class CalculatorPlugin:
                         }
                     },
                     "required": ["a", "b"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="calculate",
@@ -141,7 +149,9 @@ class CalculatorPlugin:
                         }
                     },
                     "required": ["expression"]
-                }
+                },
+                category="code",
+                discoverability="discoverable",
             )
         ]
 

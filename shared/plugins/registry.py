@@ -20,6 +20,7 @@ from .base import (
     OutputCallback,
 )
 from .model_provider.types import ToolSchema
+from .streaming.protocol import StreamingCapable
 from .enrichment_formatter import (
     EnrichmentNotification,
     format_enrichment_notifications,
@@ -103,6 +104,10 @@ class PluginRegistry:
         self._terminal_width: int = 80
         # Authorized external paths: path -> source plugin name
         self._authorized_external_paths: Dict[str, str] = {}
+        # Core tools: framework-provided tools not from plugins
+        self._core_tools: Dict[str, ToolSchema] = {}
+        self._core_executors: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
+        self._core_auto_approved: Set[str] = set()  # Auto-approved core tools
 
     def set_output_callback(
         self,
@@ -486,6 +491,36 @@ class PluginRegistry:
         elif expose:
             self.expose_tool(plugin.name, config)
 
+    def register_core_tool(
+        self,
+        schema: ToolSchema,
+        executor: Callable[[Dict[str, Any]], Any],
+        auto_approved: bool = False
+    ) -> None:
+        """Register a core framework tool.
+
+        Core tools are provided directly by framework components (like StreamManager)
+        rather than through plugins. They are included in get_exposed_tool_schemas()
+        and get_exposed_executors() alongside plugin tools.
+
+        Args:
+            schema: The tool's schema.
+            executor: The tool's executor function.
+            auto_approved: If True, tool is auto-approved (no permission required).
+
+        Example:
+            # Register dismiss_stream from StreamManager
+            for schema in stream_manager.get_tool_schemas():
+                executor = stream_manager.get_executors()[schema.name]
+                auto_approved = schema.name in stream_manager.get_auto_approved_tools()
+                registry.register_core_tool(schema, executor, auto_approved)
+        """
+        self._core_tools[schema.name] = schema
+        self._core_executors[schema.name] = executor
+        if auto_approved:
+            self._core_auto_approved.add(schema.name)
+        _trace(f"Registered core tool: {schema.name} (auto_approved={auto_approved})")
+
     def expose_tool(self, name: str, config: Optional[Dict[str, Any]] = None) -> bool:
         """Expose a plugin's tools to the model.
 
@@ -570,23 +605,29 @@ class PluginRegistry:
             self.unexpose_tool(name)
 
     def get_exposed_tool_schemas(self) -> List[ToolSchema]:
-        """Get ToolSchemas from all exposed plugins."""
+        """Get ToolSchemas from all exposed plugins and core tools."""
         schemas = []
+        # Add plugin tool schemas
         for name in self._exposed:
             try:
                 schemas.extend(self._plugins[name].get_tool_schemas())
             except Exception as exc:
                 _trace(f" Error getting tool schemas from '{name}': {exc}")
+        # Add core tool schemas
+        schemas.extend(self._core_tools.values())
         return schemas
 
     def get_exposed_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Get executor callables from all exposed plugins."""
+        """Get executor callables from all exposed plugins and core tools."""
         executors = {}
+        # Add plugin executors
         for name in self._exposed:
             try:
                 executors.update(self._plugins[name].get_executors())
             except Exception as exc:
                 _trace(f" Error getting executors from '{name}': {exc}")
+        # Add core tool executors
+        executors.update(self._core_executors)
         return executors
 
     # ==================== Individual Tool Management ====================
@@ -692,9 +733,11 @@ class PluginRegistry:
         return status
 
     def get_enabled_tool_schemas(self) -> List[ToolSchema]:
-        """Get ToolSchemas from exposed plugins, excluding disabled tools.
+        """Get ToolSchemas from exposed plugins and core tools, excluding disabled.
 
         This is what should be sent to the model - only enabled tools.
+        For plugins implementing StreamingCapable, auto-generates :stream
+        variants for tools that support streaming.
 
         Returns:
             List of ToolSchema objects for enabled tools only.
@@ -702,13 +745,57 @@ class PluginRegistry:
         schemas = []
         for name in self._exposed:
             try:
-                plugin_schemas = self._plugins[name].get_tool_schemas()
+                plugin = self._plugins[name]
+                plugin_schemas = plugin.get_tool_schemas()
                 # Filter out disabled tools
                 enabled_schemas = [s for s in plugin_schemas if s.name not in self._disabled_tools]
                 schemas.extend(enabled_schemas)
+
+                # Auto-generate :stream variants for streaming-capable plugins
+                if isinstance(plugin, StreamingCapable):
+                    for schema in enabled_schemas:
+                        if plugin.supports_streaming(schema.name):
+                            stream_schema = self._create_streaming_schema(schema)
+                            if stream_schema.name not in self._disabled_tools:
+                                schemas.append(stream_schema)
             except Exception as exc:
                 _trace(f" Error getting tool schemas from '{name}': {exc}")
+
+        # Add core tool schemas (excluding disabled)
+        for name, schema in self._core_tools.items():
+            if name not in self._disabled_tools:
+                schemas.append(schema)
+
         return schemas
+
+    def _create_streaming_schema(self, base_schema: ToolSchema) -> ToolSchema:
+        """Create a :stream variant of a tool schema.
+
+        The streaming variant has the same parameters but different behavior -
+        it returns immediately with initial chunks and continues streaming
+        in the background.
+
+        Inherits category and discoverability from the base schema.
+
+        Args:
+            base_schema: The base tool schema to create a streaming variant for.
+
+        Returns:
+            A new ToolSchema for the :stream variant.
+        """
+        streaming_description = (
+            f"{base_schema.description} "
+            f"(STREAMING MODE: Returns immediately with initial results and stream_id. "
+            f"More results will be automatically injected as they become available. "
+            f"Call dismiss_stream(stream_id) when you have enough results.)"
+        )
+        return ToolSchema(
+            name=f"{base_schema.name}:stream",
+            description=streaming_description,
+            parameters=base_schema.parameters,
+            category=base_schema.category,
+            discoverability=base_schema.discoverability,
+        )
 
     def get_core_tool_schemas(self) -> List[ToolSchema]:
         """Get ToolSchemas for 'core' tools only (always loaded in context).
@@ -717,13 +804,17 @@ class PluginRegistry:
         with discoverability='core'. Other tools can be discovered via
         introspection (list_tools, get_tool_schemas).
 
+        For plugins implementing StreamingCapable, auto-generates :stream
+        variants for core tools that support streaming.
+
         Returns:
             List of ToolSchema objects for core tools only.
         """
         schemas = []
         for name in self._exposed:
             try:
-                plugin_schemas = self._plugins[name].get_tool_schemas()
+                plugin = self._plugins[name]
+                plugin_schemas = plugin.get_tool_schemas()
                 # Filter to core, enabled tools only
                 core_schemas = [
                     s for s in plugin_schemas
@@ -731,12 +822,27 @@ class PluginRegistry:
                     and getattr(s, 'discoverability', 'discoverable') == 'core'
                 ]
                 schemas.extend(core_schemas)
+
+                # Auto-generate :stream variants for streaming-capable plugins (core tools)
+                if isinstance(plugin, StreamingCapable):
+                    for schema in core_schemas:
+                        if plugin.supports_streaming(schema.name):
+                            stream_schema = self._create_streaming_schema(schema)
+                            if stream_schema.name not in self._disabled_tools:
+                                schemas.append(stream_schema)
             except Exception as exc:
                 _trace(f" Error getting tool schemas from '{name}': {exc}")
+
+        # Add core tool schemas that have discoverability='core' (excluding disabled)
+        for name, schema in self._core_tools.items():
+            if name not in self._disabled_tools:
+                if getattr(schema, 'discoverability', 'discoverable') == 'core':
+                    schemas.append(schema)
+
         return schemas
 
     def get_enabled_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Get executor callables from exposed plugins, excluding disabled tools.
+        """Get executor callables from exposed plugins and core tools, excluding disabled.
 
         Returns:
             Dict mapping tool names to executor callables for enabled tools only.
@@ -751,6 +857,12 @@ class PluginRegistry:
                         executors[tool_name] = executor
             except Exception as exc:
                 _trace(f" Error getting executors from '{name}': {exc}")
+
+        # Add core tool executors (excluding disabled)
+        for tool_name, executor in self._core_executors.items():
+            if tool_name not in self._disabled_tools:
+                executors[tool_name] = executor
+
         return executors
 
     def list_disabled_tools(self) -> List[str]:
@@ -760,6 +872,72 @@ class PluginRegistry:
             List of disabled tool names.
         """
         return list(self._disabled_tools)
+
+    # ==================== Streaming Tool Support ====================
+
+    def is_streaming_tool(self, tool_name: str) -> bool:
+        """Check if a tool name is a streaming variant.
+
+        Args:
+            tool_name: Tool name to check (e.g., "grep_content:stream").
+
+        Returns:
+            True if this is a :stream variant.
+        """
+        return tool_name.endswith(":stream")
+
+    def get_base_tool_name(self, tool_name: str) -> str:
+        """Get the base tool name from a streaming variant.
+
+        Args:
+            tool_name: Tool name (e.g., "grep_content:stream").
+
+        Returns:
+            Base tool name (e.g., "grep_content").
+        """
+        if self.is_streaming_tool(tool_name):
+            return tool_name[:-7]  # Remove ":stream" suffix
+        return tool_name
+
+    def get_streaming_plugin(self, tool_name: str) -> Optional[StreamingCapable]:
+        """Get the streaming-capable plugin for a tool.
+
+        Args:
+            tool_name: Tool name (base or :stream variant).
+
+        Returns:
+            The StreamingCapable plugin, or None if not found or not streaming-capable.
+        """
+        base_name = self.get_base_tool_name(tool_name)
+
+        for plugin_name in self._exposed:
+            try:
+                plugin = self._plugins[plugin_name]
+                if base_name in plugin.get_executors():
+                    if isinstance(plugin, StreamingCapable):
+                        return plugin
+                    return None
+            except Exception:
+                pass
+        return None
+
+    def get_streaming_tools(self) -> List[str]:
+        """Get list of all tools that support streaming.
+
+        Returns:
+            List of base tool names (without :stream suffix) that support streaming.
+        """
+        streaming_tools = []
+        for plugin_name in self._exposed:
+            try:
+                plugin = self._plugins[plugin_name]
+                if isinstance(plugin, StreamingCapable):
+                    for schema in plugin.get_tool_schemas():
+                        if plugin.supports_streaming(schema.name):
+                            streaming_tools.append(schema.name)
+            except Exception as exc:
+                _trace(f" Error getting streaming tools from '{plugin_name}': {exc}")
+        return streaming_tools
 
     def get_system_instructions(self, run_enrichment: bool = True) -> Optional[str]:
         """Combine system instructions from all exposed plugins.
@@ -798,12 +976,15 @@ class PluginRegistry:
         return combined
 
     def get_auto_approved_tools(self) -> List[str]:
-        """Collect auto-approved tool names from all exposed plugins.
+        """Collect auto-approved tool names from all exposed plugins and core tools.
 
         Returns:
             List of tool names that should be whitelisted for permission checks.
         """
         tools = []
+        # Include core auto-approved tools
+        tools.extend(self._core_auto_approved)
+        # Include plugin auto-approved tools
         for name in self._exposed:
             try:
                 if hasattr(self._plugins[name], 'get_auto_approved_tools'):

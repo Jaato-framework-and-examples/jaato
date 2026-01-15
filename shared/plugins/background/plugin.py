@@ -139,7 +139,9 @@ Returns a task_id you can use to check status or get results later.""",
                         },
                     },
                     "required": ["tool_name", "arguments"]
-                }
+                },
+                category="system",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="getBackgroundTask",
@@ -182,7 +184,9 @@ Response fields:
                         },
                     },
                     "required": ["task_id"]
-                }
+                },
+                category="system",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="cancelBackgroundTask",
@@ -196,7 +200,9 @@ Response fields:
                         },
                     },
                     "required": ["task_id"]
-                }
+                },
+                category="system",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="listBackgroundTasks",
@@ -209,7 +215,9 @@ Response fields:
                             "description": "Optional: filter by plugin name"
                         },
                     },
-                }
+                },
+                category="system",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="listBackgroundCapableTools",
@@ -219,7 +227,9 @@ Use this to discover which tools can be run in background mode.""",
                 parameters={
                     "type": "object",
                     "properties": {},
-                }
+                },
+                category="system",
+                discoverability="discoverable",
             ),
         ]
 

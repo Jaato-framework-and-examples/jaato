@@ -328,7 +328,9 @@ class SubagentPlugin:
                         }
                     },
                     "required": ["task"]
-                }
+                },
+                category="planning",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name='send_to_subagent',
@@ -360,7 +362,9 @@ class SubagentPlugin:
                         }
                     },
                     "required": ["subagent_id", "message"]
-                }
+                },
+                category="planning",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name='close_subagent',
@@ -385,7 +389,9 @@ class SubagentPlugin:
                         }
                     },
                     "required": ["subagent_id"]
-                }
+                },
+                category="planning",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name='cancel_subagent',
@@ -412,7 +418,9 @@ class SubagentPlugin:
                         }
                     },
                     "required": ["subagent_id"]
-                }
+                },
+                category="planning",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name='list_active_subagents',
@@ -442,7 +450,9 @@ class SubagentPlugin:
                     "type": "object",
                     "properties": {},
                     "required": []
-                }
+                },
+                category="planning",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name='list_subagent_profiles',
@@ -454,7 +464,9 @@ class SubagentPlugin:
                     "type": "object",
                     "properties": {},
                     "required": []
-                }
+                },
+                category="planning",
+                discoverability="discoverable",
             ),
         ]
         return declarations
