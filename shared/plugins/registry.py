@@ -107,6 +107,7 @@ class PluginRegistry:
         # Core tools: framework-provided tools not from plugins
         self._core_tools: Dict[str, ToolSchema] = {}
         self._core_executors: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
+        self._core_auto_approved: Set[str] = set()  # Auto-approved core tools
 
     def set_output_callback(
         self,
@@ -493,7 +494,8 @@ class PluginRegistry:
     def register_core_tool(
         self,
         schema: ToolSchema,
-        executor: Callable[[Dict[str, Any]], Any]
+        executor: Callable[[Dict[str, Any]], Any],
+        auto_approved: bool = False
     ) -> None:
         """Register a core framework tool.
 
@@ -504,16 +506,20 @@ class PluginRegistry:
         Args:
             schema: The tool's schema.
             executor: The tool's executor function.
+            auto_approved: If True, tool is auto-approved (no permission required).
 
         Example:
             # Register dismiss_stream from StreamManager
             for schema in stream_manager.get_tool_schemas():
                 executor = stream_manager.get_executors()[schema.name]
-                registry.register_core_tool(schema, executor)
+                auto_approved = schema.name in stream_manager.get_auto_approved_tools()
+                registry.register_core_tool(schema, executor, auto_approved)
         """
         self._core_tools[schema.name] = schema
         self._core_executors[schema.name] = executor
-        _trace(f"Registered core tool: {schema.name}")
+        if auto_approved:
+            self._core_auto_approved.add(schema.name)
+        _trace(f"Registered core tool: {schema.name} (auto_approved={auto_approved})")
 
     def expose_tool(self, name: str, config: Optional[Dict[str, Any]] = None) -> bool:
         """Expose a plugin's tools to the model.
@@ -970,12 +976,15 @@ class PluginRegistry:
         return combined
 
     def get_auto_approved_tools(self) -> List[str]:
-        """Collect auto-approved tool names from all exposed plugins.
+        """Collect auto-approved tool names from all exposed plugins and core tools.
 
         Returns:
             List of tool names that should be whitelisted for permission checks.
         """
         tools = []
+        # Include core auto-approved tools
+        tools.extend(self._core_auto_approved)
+        # Include plugin auto-approved tools
         for name in self._exposed:
             try:
                 if hasattr(self._plugins[name], 'get_auto_approved_tools'):
