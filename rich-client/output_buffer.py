@@ -1228,12 +1228,15 @@ class OutputBuffer:
         """Mark a tool as awaiting permission with the prompt to display.
 
         Args:
-            tool_name: Name of the tool awaiting permission.
+            tool_name: Name of the tool awaiting permission (may be the tool being
+                checked, not necessarily the currently executing tool).
             prompt_lines: Lines of the permission prompt to display (may contain ANSI codes).
             format_hint: Optional hint about content format ("diff" = pre-formatted, skip box).
         """
         _trace(f"set_tool_permission_pending: looking for tool={tool_name}")
         _trace(f"set_tool_permission_pending: active_tools={[(t.name, t.completed) for t in self._active_tools]}")
+
+        # First try exact match by tool name
         for tool in self._active_tools:
             if tool.name == tool_name and not tool.completed:
                 tool.permission_state = "pending"
@@ -1241,8 +1244,20 @@ class OutputBuffer:
                 tool.permission_format_hint = format_hint
                 # Scroll to bottom to show the prompt
                 self._scroll_offset = 0
-                _trace(f"set_tool_permission_pending: FOUND and set pending for {tool_name}")
+                _trace(f"set_tool_permission_pending: FOUND exact match for {tool_name}")
                 return
+
+        # Fallback: attach to the last uncompleted tool (handles askPermission checking other tools)
+        # When askPermission checks permission for "cli_based_tool", the active tool is "askPermission"
+        for tool in reversed(self._active_tools):
+            if not tool.completed:
+                tool.permission_state = "pending"
+                tool.permission_prompt_lines = prompt_lines
+                tool.permission_format_hint = format_hint
+                self._scroll_offset = 0
+                _trace(f"set_tool_permission_pending: FALLBACK attached to {tool.name} (requested: {tool_name})")
+                return
+
         _trace(f"set_tool_permission_pending: NO MATCH for {tool_name}")
 
     def set_tool_permission_resolved(self, tool_name: str, granted: bool,
@@ -1250,17 +1265,32 @@ class OutputBuffer:
         """Mark a tool's permission as resolved.
 
         Args:
-            tool_name: Name of the tool.
+            tool_name: Name of the tool (may be the tool being checked, not the executing tool).
             granted: Whether permission was granted.
             method: How permission was resolved (yes, always, once, never, whitelist, etc.)
         """
+        _trace(f"set_tool_permission_resolved: looking for tool={tool_name}, granted={granted}")
+
+        # First try exact match by tool name with pending permission
         for tool in self._active_tools:
-            # Match the tool with pending permission state (only one at a time due to blocking)
             if tool.name == tool_name and tool.permission_state == "pending":
                 tool.permission_state = "granted" if granted else "denied"
                 tool.permission_method = method
                 tool.permission_prompt_lines = None  # Clear expanded prompt
+                _trace(f"set_tool_permission_resolved: FOUND exact match for {tool_name}")
                 return
+
+        # Fallback: find any tool with pending permission state
+        # This handles askPermission checking other tools (permission attached to askPermission)
+        for tool in self._active_tools:
+            if tool.permission_state == "pending":
+                tool.permission_state = "granted" if granted else "denied"
+                tool.permission_method = method
+                tool.permission_prompt_lines = None  # Clear expanded prompt
+                _trace(f"set_tool_permission_resolved: FALLBACK resolved {tool.name} (requested: {tool_name})")
+                return
+
+        _trace(f"set_tool_permission_resolved: NO PENDING TOOL for {tool_name}")
 
     def set_tool_clarification_pending(self, tool_name: str, prompt_lines: List[str]) -> None:
         """Mark a tool as awaiting clarification (initial context only).

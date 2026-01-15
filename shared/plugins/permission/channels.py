@@ -31,13 +31,44 @@ except ImportError:
 
 
 class ChannelDecision(Enum):
-    """Possible decisions from an channel."""
+    """Possible decisions from a permission channel.
+
+    Scoped Approval Options (ALLOW_TURN vs ALLOW_UNTIL_IDLE):
+
+    In typical interactive sessions, both behave identically because the session
+    goes IDLE immediately after each turn ends. The distinction matters only in
+    automated pipelines where multiple messages are sent programmatically without
+    user interaction between them.
+
+    ALLOW_TURN:
+        - Approves all remaining tool executions for the current turn only
+        - Clears when the session transitions to IDLE state
+        - Use case: Interactive sessions where you trust the model for this response
+
+    ALLOW_UNTIL_IDLE:
+        - Approves all tool executions until the session goes idle (awaiting user input)
+        - Persists across multiple consecutive turns if messages are sent programmatically
+        - Clears when the session finally transitions to IDLE state
+        - Use case: Automated pipelines, batch processing, multi-turn scripts
+
+    Lifecycle:
+        Interactive session:
+            User message -> Turn starts -> Tools execute -> Turn ends -> IDLE
+            (Both ALLOW_TURN and ALLOW_UNTIL_IDLE clear at IDLE)
+
+        Automated pipeline:
+            Script message 1 -> Turn 1 -> Turn ends (ALLOW_TURN clears, ALLOW_UNTIL_IDLE persists)
+            Script message 2 -> Turn 2 -> Turn ends (ALLOW_TURN clears, ALLOW_UNTIL_IDLE persists)
+            No more messages -> IDLE (ALLOW_UNTIL_IDLE clears)
+    """
     ALLOW = "allow"
     DENY = "deny"
     ALLOW_ONCE = "allow_once"      # Execute but don't remember
     ALLOW_SESSION = "allow_session"  # Add to session whitelist
     DENY_SESSION = "deny_session"    # Add to session blacklist
     ALLOW_ALL = "allow_all"          # Pre-approve all future requests in session
+    ALLOW_TURN = "allow_turn"        # Allow all remaining tools this turn (clears on IDLE)
+    ALLOW_UNTIL_IDLE = "allow_until_idle"  # Allow until session goes idle (clears on IDLE)
     TIMEOUT = "timeout"              # Channel didn't respond in time
 
 
@@ -93,6 +124,8 @@ DEFAULT_PERMISSION_OPTIONS: List['PermissionResponseOption'] = [
     PermissionResponseOption("y", "yes", "Allow this tool execution", ChannelDecision.ALLOW),
     PermissionResponseOption("n", "no", "Deny this tool execution", ChannelDecision.DENY),
     PermissionResponseOption("a", "always", "Allow and whitelist for session", ChannelDecision.ALLOW_SESSION),
+    PermissionResponseOption("t", "turn", "Allow remaining tools this turn", ChannelDecision.ALLOW_TURN),
+    PermissionResponseOption("i", "idle", "Allow until session goes idle", ChannelDecision.ALLOW_UNTIL_IDLE),
     PermissionResponseOption("once", "once", "Allow once without remembering", ChannelDecision.ALLOW_ONCE),
     PermissionResponseOption("never", "never", "Deny and blacklist for session", ChannelDecision.DENY_SESSION),
     PermissionResponseOption("all", "all", "Allow all future requests in session", ChannelDecision.ALLOW_ALL),
@@ -523,6 +556,8 @@ class ConsoleChannel(Channel):
             ChannelDecision.DENY_SESSION: self.ANSI_YELLOW,
             ChannelDecision.ALLOW_ONCE: "",  # No special color
             ChannelDecision.ALLOW_ALL: "",   # No special color
+            ChannelDecision.ALLOW_TURN: self.ANSI_CYAN,  # Same as session-level
+            ChannelDecision.ALLOW_UNTIL_IDLE: self.ANSI_CYAN,  # Same as session-level
         }
 
         parts = ["Options: "]
