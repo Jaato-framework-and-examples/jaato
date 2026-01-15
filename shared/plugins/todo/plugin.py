@@ -208,6 +208,7 @@ class TodoPlugin:
                     "required": ["title", "steps"]
                 },
                 category="planning",
+                discoverability="core",
             ),
             ToolSchema(
                 name="startPlan",
@@ -226,6 +227,7 @@ class TodoPlugin:
                     "required": []
                 },
                 category="planning",
+                discoverability="core",
             ),
             ToolSchema(
                 name="updateStep",
@@ -255,6 +257,7 @@ class TodoPlugin:
                     "required": ["step_id", "status"]
                 },
                 category="planning",
+                discoverability="core",
             ),
             ToolSchema(
                 name="getPlanStatus",
@@ -270,6 +273,7 @@ class TodoPlugin:
                     "required": []
                 },
                 category="planning",
+                discoverability="core",
             ),
             ToolSchema(
                 name="completePlan",
@@ -292,6 +296,7 @@ class TodoPlugin:
                     "required": ["status"]
                 },
                 category="planning",
+                discoverability="core",
             ),
             ToolSchema(
                 name="addStep",
@@ -312,6 +317,7 @@ class TodoPlugin:
                     "required": ["description"]
                 },
                 category="planning",
+                discoverability="core",
             ),
         ]
 

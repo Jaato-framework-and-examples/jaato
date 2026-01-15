@@ -42,6 +42,21 @@ def _is_parallel_tools_enabled() -> bool:
     ).lower() not in ('false', '0', 'no')
 
 
+def _is_deferred_tools_enabled() -> bool:
+    """Check if deferred tool loading is enabled.
+
+    When enabled, only 'core' tools are loaded into the initial model context.
+    Other tools can be discovered via the introspection plugin (list_tools,
+    get_tool_schemas). This reduces initial context size significantly.
+
+    Default is 'false' for backwards compatibility. Set JAATO_DEFERRED_TOOLS=true
+    to enable.
+    """
+    return os.environ.get(
+        'JAATO_DEFERRED_TOOLS', 'false'
+    ).lower() in ('true', '1', 'yes')
+
+
 class JaatoRuntime:
     """Shared runtime environment for jaato agents.
 
@@ -172,6 +187,17 @@ class JaatoRuntime:
     def telemetry(self) -> TelemetryPlugin:
         """Get the telemetry plugin."""
         return self._telemetry
+
+    @property
+    def deferred_tools_enabled(self) -> bool:
+        """Check if deferred tool loading is enabled.
+
+        When True, only 'core' tools are loaded into the initial model context.
+        Other tools can be discovered via the introspection plugin.
+
+        Controlled by JAATO_DEFERRED_TOOLS environment variable.
+        """
+        return _is_deferred_tools_enabled()
 
     def set_telemetry_plugin(self, plugin: TelemetryPlugin) -> None:
         """Set a custom telemetry plugin.
@@ -334,13 +360,21 @@ class JaatoRuntime:
         """Cache tool schemas and executors from registry.
 
         Uses get_enabled_* methods to respect disabled tools set in the registry.
+        When JAATO_DEFERRED_TOOLS is enabled, only 'core' tools are included
+        in the schema cache (other tools can be discovered via introspection).
+
         Call refresh_tool_cache() after enabling/disabling tools to update the cache.
         """
         if not self._registry:
             return
 
-        # Get enabled tool schemas (respects disabled tools set)
-        self._all_tool_schemas = self._registry.get_enabled_tool_schemas()
+        # Get tool schemas based on deferred loading setting
+        if _is_deferred_tools_enabled():
+            # Deferred loading: only core tools in initial context
+            self._all_tool_schemas = self._registry.get_core_tool_schemas()
+        else:
+            # Traditional: all enabled tools in initial context
+            self._all_tool_schemas = self._registry.get_enabled_tool_schemas()
 
         # Add permission plugin schemas if available (but avoid duplicates)
         # Permission plugin may already be exposed via registry.expose_tool("permission")

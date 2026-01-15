@@ -97,18 +97,19 @@ class TestIntrospectionPlugin:
         assert plugin._initialized is False
 
     def test_get_tool_schemas(self):
-        """Test that plugin exposes list_tools and get_tool_schema."""
+        """Test that plugin exposes list_tools and get_tool_schemas."""
         plugin = create_plugin()
         schemas = plugin.get_tool_schemas()
 
         assert len(schemas) == 2
         schema_names = [s.name for s in schemas]
         assert "list_tools" in schema_names
-        assert "get_tool_schema" in schema_names
+        assert "get_tool_schemas" in schema_names
 
-        # Verify schemas have correct categories
+        # Verify schemas have correct categories and discoverability
         for schema in schemas:
             assert schema.category == "system"
+            assert schema.discoverability == "core"
 
     def test_get_executors(self):
         """Test that plugin provides executors for both tools."""
@@ -116,9 +117,9 @@ class TestIntrospectionPlugin:
         executors = plugin.get_executors()
 
         assert "list_tools" in executors
-        assert "get_tool_schema" in executors
+        assert "get_tool_schemas" in executors
         assert callable(executors["list_tools"])
-        assert callable(executors["get_tool_schema"])
+        assert callable(executors["get_tool_schemas"])
 
     def test_auto_approved_tools(self):
         """Test that introspection tools are auto-approved."""
@@ -126,7 +127,7 @@ class TestIntrospectionPlugin:
         auto_approved = plugin.get_auto_approved_tools()
 
         assert "list_tools" in auto_approved
-        assert "get_tool_schema" in auto_approved
+        assert "get_tool_schemas" in auto_approved
 
 
 class TestListTools:
@@ -281,8 +282,8 @@ class TestListTools:
         assert "error" in result
 
 
-class TestGetToolSchema:
-    """Tests for the get_tool_schema tool."""
+class TestGetToolSchemas:
+    """Tests for the get_tool_schemas tool."""
 
     def setup_method(self):
         """Set up test fixtures."""
@@ -323,28 +324,47 @@ class TestGetToolSchema:
                 },
                 category="code",
             ),
+            ToolSchema(
+                name="anotherTool",
+                description="Another test tool.",
+                parameters={"type": "object", "properties": {}},
+                category="code",
+            ),
         ])
         self.registry.register_plugin(test_plugin)
         self.plugin.set_plugin_registry(self.registry)
 
-    def test_get_tool_schema_returns_full_details(self):
-        """Test get_tool_schema returns complete tool information."""
+    def test_get_tool_schemas_returns_full_details(self):
+        """Test get_tool_schemas returns complete tool information."""
         executors = self.plugin.get_executors()
-        result = executors["get_tool_schema"]({"tool_name": "testTool"})
+        result = executors["get_tool_schemas"]({"names": ["testTool"]})
 
-        assert result["name"] == "testTool"
-        assert result["description"] == "A test tool for unit testing."
-        assert result["plugin_source"] == "test_plugin"
-        assert result["category"] == "code"
-        assert result["enabled"] is True
-        assert "parameters" in result
+        assert "schemas" in result
+        assert result["count"] == 1
+        schema = result["schemas"][0]
+        assert schema["name"] == "testTool"
+        assert schema["description"] == "A test tool for unit testing."
+        assert schema["plugin_source"] == "test_plugin"
+        assert schema["category"] == "code"
+        assert schema["enabled"] is True
+        assert "parameters" in schema
 
-    def test_get_tool_schema_formats_parameters(self):
-        """Test get_tool_schema formats parameters in readable structure."""
+    def test_get_tool_schemas_multiple_tools(self):
+        """Test get_tool_schemas handles multiple tool requests."""
         executors = self.plugin.get_executors()
-        result = executors["get_tool_schema"]({"tool_name": "testTool"})
+        result = executors["get_tool_schemas"]({"names": ["testTool", "anotherTool"]})
 
-        params = result["parameters"]
+        assert result["count"] == 2
+        names = [s["name"] for s in result["schemas"]]
+        assert "testTool" in names
+        assert "anotherTool" in names
+
+    def test_get_tool_schemas_formats_parameters(self):
+        """Test get_tool_schemas formats parameters in readable structure."""
+        executors = self.plugin.get_executors()
+        result = executors["get_tool_schemas"]({"names": ["testTool"]})
+
+        params = result["schemas"][0]["parameters"]
 
         # Check required arg
         assert "required_arg" in params
@@ -365,41 +385,69 @@ class TestGetToolSchema:
         assert "array_arg" in params
         assert params["array_arg"]["items_type"] == "string"
 
-    def test_get_tool_schema_not_found(self):
-        """Test get_tool_schema returns error for unknown tool."""
+    def test_get_tool_schemas_partial_not_found(self):
+        """Test get_tool_schemas handles mix of found and not found tools."""
         executors = self.plugin.get_executors()
-        result = executors["get_tool_schema"]({"tool_name": "nonExistentTool"})
+        result = executors["get_tool_schemas"]({"names": ["testTool", "nonExistent"]})
 
-        assert "error" in result
-        assert "not found" in result["error"].lower()
+        assert result["count"] == 1
+        assert "not_found" in result
+        assert "nonExistent" in result["not_found"]
 
-    def test_get_tool_schema_suggests_similar_tools(self):
-        """Test get_tool_schema suggests similar tools when not found."""
+    def test_get_tool_schemas_suggests_similar_tools(self):
+        """Test get_tool_schemas suggests similar tools when not found."""
         executors = self.plugin.get_executors()
-        result = executors["get_tool_schema"]({"tool_name": "test"})
+        result = executors["get_tool_schemas"]({"names": ["test"]})
 
-        assert "error" in result
+        assert "not_found" in result
+        assert "suggestions" in result
         # Should suggest testTool as it contains "test"
-        assert "testTool" in result["error"]
+        assert "testTool" in result["suggestions"]["test"]
 
-    def test_get_tool_schema_requires_tool_name(self):
-        """Test get_tool_schema returns error without tool_name."""
+    def test_get_tool_schemas_requires_names(self):
+        """Test get_tool_schemas returns error without names."""
         executors = self.plugin.get_executors()
-        result = executors["get_tool_schema"]({})
+        result = executors["get_tool_schemas"]({})
 
         assert "error" in result
         assert "required" in result["error"].lower()
 
-    def test_get_tool_schema_no_registry_error(self):
-        """Test get_tool_schema returns error when registry not set."""
+    def test_get_tool_schemas_no_registry_error(self):
+        """Test get_tool_schemas returns error when registry not set."""
         plugin = create_plugin()
         plugin.initialize({})
         # Don't set registry
 
         executors = plugin.get_executors()
-        result = executors["get_tool_schema"]({"tool_name": "testTool"})
+        result = executors["get_tool_schemas"]({"names": ["testTool"]})
 
         assert "error" in result
+
+    def test_get_tool_schemas_tracks_accessed_tools(self):
+        """Test that get_tool_schemas tracks which tools were accessed."""
+        executors = self.plugin.get_executors()
+
+        # Initially no tools accessed
+        assert len(self.plugin.get_accessed_tools()) == 0
+
+        # Access some tools
+        executors["get_tool_schemas"]({"names": ["testTool"]})
+        assert "testTool" in self.plugin.get_accessed_tools()
+
+        # Access more tools
+        executors["get_tool_schemas"]({"names": ["anotherTool"]})
+        accessed = self.plugin.get_accessed_tools()
+        assert "testTool" in accessed
+        assert "anotherTool" in accessed
+
+    def test_clear_accessed_tools(self):
+        """Test that accessed tools can be cleared."""
+        executors = self.plugin.get_executors()
+        executors["get_tool_schemas"]({"names": ["testTool"]})
+
+        assert len(self.plugin.get_accessed_tools()) == 1
+        self.plugin.clear_accessed_tools()
+        assert len(self.plugin.get_accessed_tools()) == 0
 
 
 class TestToolCategories:
@@ -434,3 +482,35 @@ class TestToolCategories:
             parameters={},
         )
         assert schema.category is None
+
+
+class TestToolDiscoverability:
+    """Tests for tool discoverability feature."""
+
+    def test_tool_schema_discoverability_default(self):
+        """Test that ToolSchema discoverability defaults to 'discoverable'."""
+        schema = ToolSchema(
+            name="test",
+            description="Test tool",
+            parameters={},
+        )
+        assert schema.discoverability == "discoverable"
+
+    def test_tool_schema_discoverability_core(self):
+        """Test that ToolSchema accepts 'core' discoverability."""
+        schema = ToolSchema(
+            name="test",
+            description="Test tool",
+            parameters={},
+            discoverability="core",
+        )
+        assert schema.discoverability == "core"
+
+    def test_introspection_tools_are_core(self):
+        """Test that introspection plugin tools are marked as core."""
+        plugin = create_plugin()
+        schemas = plugin.get_tool_schemas()
+
+        for schema in schemas:
+            assert schema.discoverability == "core", \
+                f"Tool {schema.name} should be core but is {schema.discoverability}"
