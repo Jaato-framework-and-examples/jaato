@@ -242,6 +242,68 @@ class TestCheckPathScope:
         result = check_path_scope("./foo/../../../etc/passwd", config)
         assert not result.is_safe
 
+    def test_tmp_path_allowed_by_default(self):
+        """Paths under /tmp should be allowed by default."""
+        config = PathScopeConfig(
+            allowed_roots=["."],
+            block_absolute=True,
+            allow_tmp=True  # Default
+        )
+        result = check_path_scope("/tmp/test.txt", config)
+        assert result.is_safe
+
+    def test_tmp_nested_path_allowed(self):
+        """Nested paths under /tmp should be allowed."""
+        config = PathScopeConfig(
+            allowed_roots=["."],
+            block_absolute=True,
+            allow_tmp=True
+        )
+        result = check_path_scope("/tmp/deep/nested/file.txt", config)
+        assert result.is_safe
+
+    def test_tmp_path_blocked_when_disabled(self):
+        """Paths under /tmp should be blocked when allow_tmp=False."""
+        config = PathScopeConfig(
+            allowed_roots=["."],
+            block_absolute=True,
+            allow_tmp=False
+        )
+        result = check_path_scope("/tmp/test.txt", config)
+        assert not result.is_safe
+        assert any("Absolute" in v for v in result.violations)
+
+    def test_tmp_exact_path_allowed(self):
+        """The /tmp directory itself should be allowed."""
+        config = PathScopeConfig(
+            allowed_roots=["."],
+            block_absolute=True,
+            allow_tmp=True
+        )
+        result = check_path_scope("/tmp", config)
+        assert result.is_safe
+
+    def test_tmp_similar_path_blocked(self):
+        """Paths like /tmpfoo should NOT be allowed (not actually /tmp)."""
+        config = PathScopeConfig(
+            allowed_roots=["."],
+            block_absolute=True,
+            allow_tmp=True
+        )
+        # /tmpfoo is not under /tmp, so it should be blocked
+        result = check_path_scope("/tmpfoo/test.txt", config)
+        assert not result.is_safe
+
+    def test_absolute_non_tmp_path_blocked(self):
+        """Other absolute paths should still be blocked even with allow_tmp=True."""
+        config = PathScopeConfig(
+            allowed_roots=["."],
+            block_absolute=True,
+            allow_tmp=True
+        )
+        result = check_path_scope("/etc/passwd", config)
+        assert not result.is_safe
+
 
 class TestSanitizeCommand:
     """Tests for full command sanitization."""
@@ -312,6 +374,16 @@ class TestCreateStrictConfig:
     def test_strict_config_allowed_root(self):
         config = create_strict_config("/my/workspace")
         assert "/my/workspace" in config.path_scope.allowed_roots
+
+    def test_strict_config_allows_tmp_by_default(self):
+        """Strict config should allow /tmp access by default."""
+        config = create_strict_config("/my/workspace")
+        assert config.path_scope.allow_tmp is True
+
+    def test_strict_config_tmp_can_be_disabled(self):
+        """Strict config can disable /tmp access when needed."""
+        config = create_strict_config("/my/workspace", allow_tmp=False)
+        assert config.path_scope.allow_tmp is False
 
 
 class TestCreatePermissiveConfig:
