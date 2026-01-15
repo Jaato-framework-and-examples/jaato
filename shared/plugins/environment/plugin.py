@@ -75,7 +75,9 @@ class EnvironmentPlugin:
                         }
                     },
                     "required": []
-                }
+                },
+                category="system",
+                discoverability="discoverable",
             )
         ]
 
