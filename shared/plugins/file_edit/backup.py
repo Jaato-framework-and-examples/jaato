@@ -11,11 +11,16 @@ Features:
 - Restore from any backup
 """
 
+import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+# Default waypoint ID (session start)
+DEFAULT_WAYPOINT_ID = "w0"
 
 
 # Default number of backups to keep per file
@@ -35,6 +40,7 @@ class BackupInfo:
     original_path: str  # The original file path this is a backup of
     timestamp: datetime
     size: int
+    diverged_from: str = "w0"  # Waypoint ID this backup diverged from
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API response."""
@@ -42,7 +48,8 @@ class BackupInfo:
             "backup_path": str(self.backup_path),
             "original_path": self.original_path,
             "timestamp": self.timestamp.isoformat(),
-            "size": self.size
+            "size": self.size,
+            "diverged_from": self.diverged_from,
         }
 
 
@@ -88,6 +95,11 @@ class BackupManager:
         self._session_operation_count = 0
         self._session_backups: List[Path] = []  # Backups created in this session
 
+        # Waypoint tracking - backups are tagged with the waypoint they diverged from
+        self._current_waypoint: str = DEFAULT_WAYPOINT_ID
+        self._backup_metadata: Dict[str, BackupInfo] = {}  # backup_path -> BackupInfo
+        self._load_metadata()
+
     @property
     def base_dir(self) -> Path:
         """Get the backup directory path."""
@@ -97,6 +109,108 @@ class BackupManager:
     def max_backups(self) -> int:
         """Get the maximum number of backups to keep per file."""
         return self._max_backups
+
+    @property
+    def current_waypoint(self) -> str:
+        """Get the current waypoint ID that new backups will be tagged with."""
+        return self._current_waypoint
+
+    @property
+    def _metadata_path(self) -> Path:
+        """Get the path to the metadata JSON file."""
+        return self._base_dir / "_backup_metadata.json"
+
+    def _load_metadata(self) -> None:
+        """Load backup metadata from disk."""
+        if not self._metadata_path.exists():
+            return
+
+        try:
+            with open(self._metadata_path, 'r') as f:
+                data = json.load(f)
+                for backup_path_str, info_dict in data.items():
+                    self._backup_metadata[backup_path_str] = BackupInfo(
+                        backup_path=Path(info_dict["backup_path"]),
+                        original_path=info_dict["original_path"],
+                        timestamp=datetime.fromisoformat(info_dict["timestamp"]),
+                        size=info_dict["size"],
+                        diverged_from=info_dict.get("diverged_from", DEFAULT_WAYPOINT_ID),
+                    )
+        except (json.JSONDecodeError, IOError, KeyError):
+            # If metadata is corrupted, start fresh
+            self._backup_metadata = {}
+
+    def _save_metadata(self) -> None:
+        """Save backup metadata to disk."""
+        self._base_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            data = {
+                str(bp): info.to_dict()
+                for bp, info in self._backup_metadata.items()
+            }
+            with open(self._metadata_path, 'w') as f:
+                json.dump(data, f, indent=2)
+        except IOError:
+            pass
+
+    def set_current_waypoint(self, waypoint_id: str) -> None:
+        """Set the current waypoint ID for tagging new backups.
+
+        All backups created after this call will be tagged as having
+        diverged from this waypoint. This is called by WaypointManager
+        when a new waypoint is created.
+
+        Args:
+            waypoint_id: The waypoint ID (e.g., "w0", "w1", "w2").
+        """
+        self._current_waypoint = waypoint_id
+
+    def get_backups_by_waypoint(self, waypoint_id: str) -> List[BackupInfo]:
+        """Get all backups that diverged from a specific waypoint.
+
+        These backups contain the file state that existed AT the waypoint,
+        before edits were made that diverged from it.
+
+        Args:
+            waypoint_id: The waypoint ID to query (e.g., "w0", "w1").
+
+        Returns:
+            List of BackupInfo objects for backups that diverged from this waypoint.
+        """
+        return [
+            info for info in self._backup_metadata.values()
+            if info.diverged_from == waypoint_id
+        ]
+
+    def get_first_backup_per_file_by_waypoint(
+        self,
+        waypoint_id: str
+    ) -> Dict[str, BackupInfo]:
+        """Get the first backup for each file that diverged from a waypoint.
+
+        When restoring to a waypoint, we need the FIRST backup of each file
+        that was created after the waypoint. This backup contains the file's
+        state AT the waypoint (before any divergent edits).
+
+        Args:
+            waypoint_id: The waypoint ID to query.
+
+        Returns:
+            Dict mapping original file paths to their first backup after the waypoint.
+        """
+        backups = self.get_backups_by_waypoint(waypoint_id)
+
+        # Sort by timestamp to get earliest first
+        backups.sort(key=lambda b: b.timestamp)
+
+        # Keep only the first backup per file
+        first_per_file: Dict[str, BackupInfo] = {}
+        for backup in backups:
+            if backup.original_path not in first_per_file:
+                first_per_file[backup.original_path] = backup
+
+        return first_per_file
 
     def _sanitize_path(self, file_path: Path) -> str:
         """Convert a file path to a safe backup filename prefix.
@@ -174,6 +288,17 @@ class BackupManager:
         backup_path = self._base_dir / self._backup_filename(file_path)
         backup_path.write_bytes(file_path.read_bytes())
 
+        # Record metadata with waypoint tagging
+        backup_info = BackupInfo(
+            backup_path=backup_path,
+            original_path=str(file_path.resolve()),
+            timestamp=datetime.now(),
+            size=backup_path.stat().st_size,
+            diverged_from=self._current_waypoint,
+        )
+        self._backup_metadata[str(backup_path)] = backup_info
+        self._save_metadata()
+
         # Track in session
         self._session_backups.append(backup_path)
         self._session_operation_count += 1
@@ -203,9 +328,14 @@ class BackupManager:
             oldest = backups.pop(0)
             try:
                 oldest.unlink()
+                # Also remove from metadata
+                self._backup_metadata.pop(str(oldest), None)
                 removed += 1
             except OSError:
                 pass
+
+        if removed > 0:
+            self._save_metadata()
 
         return removed
 
@@ -295,6 +425,10 @@ class BackupManager:
         # Reset session tracking
         self._session_backups = []
         self._session_operation_count = 0
+
+        # Clear all metadata
+        self._backup_metadata = {}
+        self._save_metadata()
 
         return removed
 
@@ -407,6 +541,8 @@ class BackupManager:
             if backup_path.exists():
                 try:
                     backup_path.unlink()
+                    # Also remove from metadata
+                    self._backup_metadata.pop(str(backup_path), None)
                     removed += 1
                 except OSError:
                     pass
@@ -414,6 +550,9 @@ class BackupManager:
         # Reset session tracking
         self._session_backups = []
         self._session_operation_count = 0
+
+        if removed > 0:
+            self._save_metadata()
 
         return removed
 
@@ -438,9 +577,14 @@ class BackupManager:
             if backup_path.exists():
                 try:
                     backup_path.unlink()
+                    # Also remove from metadata
+                    self._backup_metadata.pop(str(backup_path), None)
                     removed += 1
                 except OSError:
                     pass
+
+        if removed > 0:
+            self._save_metadata()
 
         return removed
 
