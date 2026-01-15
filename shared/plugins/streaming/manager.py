@@ -407,6 +407,90 @@ class StreamManager:
 
         return cleaned
 
+    # ==================== Core Tool Interface ====================
+
+    def get_tool_schemas(self) -> list:
+        """Return tool schemas for streaming control.
+
+        This allows the session to register dismiss_stream as a core tool
+        without needing a separate plugin.
+
+        Returns:
+            List containing the dismiss_stream ToolSchema.
+        """
+        from ..model_provider.types import ToolSchema
+
+        return [
+            ToolSchema(
+                name="dismiss_stream",
+                description=(
+                    "Stop receiving streaming updates from a tool. "
+                    "Call this when you have enough results from a streaming tool "
+                    "and don't need more updates. Use stream_id='*' to dismiss all active streams."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "stream_id": {
+                            "type": "string",
+                            "description": (
+                                "ID of the stream to dismiss (from the streaming tool response), "
+                                "or '*' to dismiss all active streams."
+                            ),
+                        },
+                    },
+                    "required": ["stream_id"],
+                },
+                category="system",
+                discoverability="discoverable",
+            ),
+        ]
+
+    def get_executors(self) -> dict:
+        """Return executor functions for streaming control tools.
+
+        Returns:
+            Dict mapping tool name to executor function.
+        """
+        return {
+            "dismiss_stream": self._execute_dismiss_stream,
+        }
+
+    def _execute_dismiss_stream(self, args: dict) -> dict:
+        """Execute the dismiss_stream tool.
+
+        Args:
+            args: Tool arguments containing stream_id.
+
+        Returns:
+            Dict with success status and message.
+        """
+        stream_id = args.get("stream_id", "")
+        if not stream_id:
+            return {
+                "success": False,
+                "error": "stream_id is required",
+            }
+
+        dismissed = self.dismiss_stream(stream_id)
+
+        if stream_id == "*":
+            return {
+                "success": True,
+                "message": "All active streams dismissed" if dismissed else "No active streams to dismiss",
+            }
+        else:
+            if dismissed:
+                return {
+                    "success": True,
+                    "message": f"Stream {stream_id} dismissed",
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Stream {stream_id} not found or already completed",
+                }
+
     def shutdown(self) -> None:
         """Shutdown the stream manager and clean up resources."""
         # Dismiss all active streams
