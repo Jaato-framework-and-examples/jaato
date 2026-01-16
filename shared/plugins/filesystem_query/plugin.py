@@ -7,6 +7,7 @@ This plugin provides fast, safe, auto-approved tools for:
 Both tools return structured JSON output and support:
 - Background execution for large searches
 - Streaming execution for incremental result delivery (via :stream suffix)
+- Workspace sandboxing with /tmp access support
 """
 
 import asyncio
@@ -75,6 +76,8 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
         self._initialized = False
         # Workspace root for path sandboxing
         self._workspace_root: Optional[str] = None
+        # Whether to allow /tmp paths
+        self._allow_tmp: bool = True
         # Plugin registry for checking external path authorization
         self._plugin_registry = None
 
@@ -91,6 +94,7 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
                 - workspace_root: Path to workspace root for sandboxing.
                                   Auto-detected from JAATO_WORKSPACE_ROOT or
                                   workspaceRoot env vars if not specified.
+                - allow_tmp: Whether to allow /tmp paths (default: True).
         """
         config = config or {}
         self._config = load_config(runtime_config=config)
@@ -102,12 +106,16 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
         else:
             self._workspace_root = _detect_workspace_root()
 
+        # Whether to allow /tmp paths (default: True)
+        self._allow_tmp = config.get("allow_tmp", True)
+
         self._initialized = True
         logger.info(
-            "FilesystemQueryPlugin initialized (max_results=%d, timeout=%ds, workspace=%s)",
+            "FilesystemQueryPlugin initialized (max_results=%d, timeout=%ds, workspace=%s, allow_tmp=%s)",
             self._config.max_results,
             self._config.timeout_seconds,
             self._workspace_root or "none",
+            self._allow_tmp,
         )
 
         # Log .jaato symlink detection for visibility
@@ -121,6 +129,7 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
         self._shutdown_bg_executor()
         self._initialized = False
         self._workspace_root = None
+        self._allow_tmp = True
         self._plugin_registry = None
         logger.info("FilesystemQueryPlugin shutdown")
 
@@ -186,11 +195,12 @@ class FilesystemQueryPlugin(BackgroundCapableMixin, StreamingCapable):
         resolved = self._resolve_path(path)
         abs_path = str(resolved.absolute())
 
-        # Use shared sandbox utility with .jaato containment support
+        # Use shared sandbox utility with .jaato containment support and /tmp access
         allowed = check_path_with_jaato_containment(
             abs_path,
             workspace,
-            self._plugin_registry
+            self._plugin_registry,
+            allow_tmp=getattr(self, '_allow_tmp', True)
         )
 
         if not allowed:
@@ -411,10 +421,10 @@ Tips:
         if not pattern:
             return {"error": "Pattern is required", "files": [], "total": 0}
 
-        # Sandbox check: ensure root path is within allowed workspace
+        # Sandbox check: ensure root path is within allowed workspace (with /tmp support)
         if not self._is_path_allowed(root):
             return {
-                "error": f"Root path does not exist: {root}",
+                "error": f"Path not allowed: {root}",
                 "files": [],
                 "total": 0,
             }
@@ -528,10 +538,10 @@ Tips:
         if not pattern:
             return {"error": "Pattern is required", "matches": [], "total_matches": 0}
 
-        # Sandbox check: ensure search path is within allowed workspace
+        # Sandbox check: ensure search path is within allowed workspace (with /tmp support)
         if not self._is_path_allowed(path):
             return {
-                "error": f"Path does not exist: {path}",
+                "error": f"Path not allowed: {path}",
                 "matches": [],
                 "total_matches": 0,
             }
