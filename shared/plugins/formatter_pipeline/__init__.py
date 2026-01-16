@@ -30,10 +30,14 @@ Example (batch):
 
 from .protocol import FormatterPlugin, ConfigurableFormatter
 from .pipeline import FormatterPipeline, create_pipeline
+from .registry import FormatterRegistry, create_registry, create_default_pipeline
 
 __all__ = [
     "FormatterPlugin",
     "ConfigurableFormatter",
     "FormatterPipeline",
     "create_pipeline",
+    "FormatterRegistry",
+    "create_registry",
+    "create_default_pipeline",
 ]

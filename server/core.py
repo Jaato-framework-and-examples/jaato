@@ -49,10 +49,7 @@ from shared.plugins.base import parse_command_args
 from shared.plugins.gc import load_gc_from_file
 
 # Formatter pipeline for server-side output formatting
-from shared.plugins.formatter_pipeline import create_pipeline as create_formatter_pipeline
-from shared.plugins.hidden_content_filter import create_plugin as create_hidden_filter
-from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter
-from shared.plugins.diff_formatter import create_plugin as create_diff_formatter
+from shared.plugins.formatter_pipeline import FormatterRegistry, create_registry
 from shared.plugins.code_validation_formatter import create_plugin as create_code_validation_formatter
 
 # Reuse input handling from simple-client
@@ -669,42 +666,40 @@ class JaatoServer:
     def _setup_formatter_pipeline(self) -> None:
         """Set up the formatter pipeline for server-side output formatting.
 
-        Creates the pipeline and registers formatters:
-        - HiddenContentFilter (priority 5): Strips <hidden>...</hidden> content
-        - DiffFormatter (priority 20): Colorizes diffs
-        - CodeValidationFormatter (priority 35): LSP diagnostics on code blocks
-        - CodeBlockFormatter (priority 40): Syntax highlighting
+        Uses FormatterRegistry for dynamic formatter discovery and configuration.
+        Loads config from .jaato/formatters.json if present, otherwise uses defaults.
 
-        The CodeValidationFormatter is wired with the LSP plugin from the registry.
+        Special handling:
+        - CodeValidationFormatter is wired with the LSP plugin from the tool registry
         """
-        self._formatter_pipeline = create_formatter_pipeline()
+        # Create formatter registry and discover available formatters
+        formatter_registry = create_registry()
+        formatter_registry.discover()
 
-        # Register formatters in priority order (lower = runs first)
-        self._formatter_pipeline.register(create_hidden_filter())  # priority 5
-        self._formatter_pipeline.register(create_diff_formatter())  # priority 20
+        # Try to load config from project or user directory
+        config_loaded = (
+            formatter_registry.load_config(".jaato/formatters.json") or
+            formatter_registry.load_config(os.path.expanduser("~/.jaato/formatters.json"))
+        )
 
-        # Set up code validation formatter with LSP plugin
+        if not config_loaded:
+            formatter_registry.use_defaults()
+            self._trace("Using default formatter configuration")
+        else:
+            self._trace("Loaded formatter configuration from file")
+
+        # Set up code validation formatter with LSP plugin (special wiring)
         lsp_plugin = self.registry.get_plugin("lsp") if self.registry else None
         if lsp_plugin:
             code_validator = create_code_validation_formatter()
             code_validator.set_lsp_plugin(lsp_plugin)
-            code_validator.initialize({
-                "enabled": True,
-                "max_errors_per_block": 5,
-                "max_warnings_per_block": 3,
-            })
-            self._formatter_pipeline.register(code_validator)  # priority 35
+            formatter_registry.register_custom("code_validation_formatter", code_validator)
             self._trace("Code validation formatter registered with LSP plugin")
         else:
             self._trace("Code validation formatter skipped - no LSP plugin available")
 
-        # Code block formatter with line numbers enabled
-        code_block_formatter = create_code_block_formatter()
-        code_block_formatter.initialize({"line_numbers": True})
-        self._formatter_pipeline.register(code_block_formatter)  # priority 40
-
-        # Set console width for proper rendering
-        self._formatter_pipeline.set_console_width(self._terminal_width)
+        # Create pipeline from registry
+        self._formatter_pipeline = formatter_registry.create_pipeline(self._terminal_width)
 
         self._trace(f"Formatter pipeline initialized with {len(self._formatter_pipeline.list_formatters())} formatters")
 
