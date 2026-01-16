@@ -7,6 +7,51 @@ import sys
 # OSC 52 size limit (base64 encoded) - some terminals cap at ~74KB
 OSC52_MAX_BYTES = 74994
 
+# Overhead for tmux/screen passthrough wrappers
+# tmux: \x1bPtmux;{inner}\x1b\\ + doubling 2 ESCs in inner = 12 bytes
+# screen: \x1bP{inner}\x1b\\ = 4 bytes
+_TMUX_OVERHEAD = 12
+_SCREEN_OVERHEAD = 4
+
+
+def _truncate_utf8_safe(text: str, max_bytes: int) -> str:
+    """Truncate text to fit within max_bytes when UTF-8 encoded.
+
+    Ensures truncation doesn't corrupt UTF-8 by splitting multi-byte characters.
+    Uses a safe approach that backs up past any incomplete sequences.
+
+    Args:
+        text: The text to truncate.
+        max_bytes: Maximum bytes for the UTF-8 encoded result.
+
+    Returns:
+        Truncated text that fits within max_bytes when UTF-8 encoded.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+
+    # Truncate at byte boundary
+    truncated = encoded[:max_bytes]
+
+    # Back up past any UTF-8 continuation bytes (10xxxxxx pattern)
+    # This handles the case where we cut in the middle of a multi-byte char
+    while truncated and (truncated[-1] & 0xC0) == 0x80:
+        truncated = truncated[:-1]
+
+    # If last byte is a multi-byte start (11xxxxxx), check if sequence is complete
+    if truncated:
+        last = truncated[-1]
+        if last >= 0xF0:  # 4-byte sequence start
+            # Would need 3 continuation bytes, but we backed up past them
+            truncated = truncated[:-1]
+        elif last >= 0xE0:  # 3-byte sequence start
+            truncated = truncated[:-1]
+        elif last >= 0xC0:  # 2-byte sequence start
+            truncated = truncated[:-1]
+
+    return truncated.decode("utf-8") if truncated else ""
+
 
 class OSC52Provider:
     """Clipboard provider using OSC 52 escape sequence.
@@ -44,14 +89,24 @@ class OSC52Provider:
         if not text:
             return False
 
-        encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        # Calculate effective limit accounting for tmux/screen wrapper overhead
+        max_encoded = OSC52_MAX_BYTES
+        if self._in_tmux:
+            max_encoded -= _TMUX_OVERHEAD
+        elif self._in_screen:
+            max_encoded -= _SCREEN_OVERHEAD
 
-        # Truncate if too large
-        if len(encoded) > OSC52_MAX_BYTES:
-            # Re-encode truncated text
-            max_text_bytes = (OSC52_MAX_BYTES * 3) // 4  # Approximate
-            truncated = text.encode("utf-8")[:max_text_bytes].decode("utf-8", errors="ignore")
-            encoded = base64.b64encode(truncated.encode("utf-8")).decode("ascii")
+        # Correct formula: (max_encoded // 4) * 3 ensures base64 output fits
+        # The old formula (max * 3) // 4 could overflow by up to 3 bytes due to
+        # base64 padding and integer division rounding
+        max_text_bytes = (max_encoded // 4) * 3
+
+        # Truncate if needed, preserving UTF-8 character boundaries
+        text_bytes = text.encode("utf-8")
+        if len(text_bytes) > max_text_bytes:
+            text = _truncate_utf8_safe(text, max_text_bytes)
+
+        encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
 
         # OSC 52: ESC ] 52 ; c ; <base64> ST
         # c = clipboard, ST = string terminator (ESC \ or BEL)
