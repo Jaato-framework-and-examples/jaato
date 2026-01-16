@@ -513,6 +513,7 @@ class WaypointPlugin:
             return {"error": "Manager not initialized"}
 
         waypoints = self._manager.list()
+        current_id = self._manager.current_waypoint
 
         if not waypoints:
             return {
@@ -533,11 +534,12 @@ class WaypointPlugin:
                 "created_at": wp.created_at.strftime("%H:%M"),
                 "messages": wp.message_count,
                 "is_implicit": wp.is_implicit,
+                "is_current": wp.id == current_id,
             })
 
         return {
             "waypoints": formatted,
-            "current": self._manager.current_waypoint,
+            "current": current_id,
         }
 
     def _create_waypoint(self, description: str) -> Dict[str, Any]:
