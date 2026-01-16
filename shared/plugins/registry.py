@@ -83,6 +83,22 @@ class PluginRegistry:
 
         # Clear authorizations from a specific plugin
         registry.clear_authorized_paths('references')
+
+    Auto-Wiring:
+        Plugins may implement optional methods for automatic dependency injection:
+
+        - set_plugin_registry(registry): Called during expose_tool() to give plugins
+          access to the registry for cross-plugin communication.
+
+        - set_workspace_path(path): Called when workspace changes to notify plugins
+          that need workspace-relative operations (sandboxing, relative paths, etc.).
+          The registry broadcasts to all exposed plugins implementing this method.
+
+        Example plugin implementation:
+            class MyPlugin:
+                def set_workspace_path(self, path: str) -> None:
+                    self._workspace_path = path
+                    self._sandbox.set_root(path)
     """
 
     def __init__(self, model_name: Optional[str] = None):
