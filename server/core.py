@@ -283,35 +283,17 @@ class JaatoServer:
     def _update_plugin_workspace(self, path: Optional[str]) -> None:
         """Update workspace-aware plugins with the new workspace path.
 
-        This notifies plugins like LSP and MCP that need to find config files
-        relative to the client's working directory.
+        This notifies plugins like LSP, MCP, file_edit, and CLI that need
+        to find config files relative to the client's working directory.
+
+        Uses registry.set_workspace_path() which broadcasts to all plugins
+        implementing set_workspace_path().
         """
         if not path or not hasattr(self, 'registry') or not self.registry:
             return
 
-        # Update LSP plugin if registered
-        lsp_plugin = self.registry.get_plugin('lsp')
-        if lsp_plugin and hasattr(lsp_plugin, 'set_workspace_path'):
-            lsp_plugin.set_workspace_path(path)
-            logger.debug(f"Updated LSP plugin workspace_path to {path}")
-
-        # Update MCP plugin if registered
-        mcp_plugin = self.registry.get_plugin('mcp')
-        if mcp_plugin and hasattr(mcp_plugin, 'set_workspace_path'):
-            mcp_plugin.set_workspace_path(path)
-            logger.debug(f"Updated MCP plugin workspace_path to {path}")
-
-        # Update file_edit plugin if registered
-        file_edit_plugin = self.registry.get_plugin('file_edit')
-        if file_edit_plugin and hasattr(file_edit_plugin, 'set_workspace_path'):
-            file_edit_plugin.set_workspace_path(path)
-            logger.debug(f"Updated file_edit plugin workspace_path to {path}")
-
-        # Update CLI plugin if registered
-        cli_plugin = self.registry.get_plugin('cli')
-        if cli_plugin and hasattr(cli_plugin, 'set_workspace_path'):
-            cli_plugin.set_workspace_path(path)
-            logger.debug(f"Updated CLI plugin workspace_path to {path}")
+        self.registry.set_workspace_path(path)
+        logger.debug(f"Broadcast workspace_path to plugins: {path}")
 
     # =========================================================================
     # Event Emission
