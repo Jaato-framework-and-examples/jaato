@@ -38,18 +38,29 @@ class WaypointManager:
         self,
         backup_manager: "BackupManager",
         storage_path: Optional[Path] = None,
+        session_id: Optional[str] = None,
     ):
         """Initialize the waypoint manager.
 
         Args:
             backup_manager: The backup manager for file state tracking.
-            storage_path: Path to store waypoint data. Defaults to
-                         .jaato/waypoints.json in the current directory.
+            storage_path: Path to store waypoint data. If not provided,
+                         uses .jaato/sessions/{session_id}/waypoints.json
+                         or .jaato/waypoints.json if no session_id.
+            session_id: Session identifier for scoping waypoints to a session.
         """
         self._backup_manager = backup_manager
-        self._storage_path = storage_path or Path(".jaato/waypoints.json").resolve()
+        self._session_id = session_id
+
+        # Determine storage path with session scoping
+        if storage_path:
+            self._storage_path = storage_path
+        elif session_id:
+            self._storage_path = Path(f".jaato/sessions/{session_id}/waypoints.json").resolve()
+        else:
+            self._storage_path = Path(".jaato/waypoints.json").resolve()
+
         self._waypoints: Dict[str, Waypoint] = {}
-        self._next_id: int = 1  # Next ID to assign (w1, w2, ...)
 
         # Callbacks for session manipulation (set by plugin)
         self._get_history: Optional[Callable[[], List["Message"]]] = None
@@ -109,8 +120,6 @@ class WaypointManager:
             with open(self._storage_path, 'r') as f:
                 data = json.load(f)
 
-            self._next_id = data.get("next_id", 1)
-
             for wp_data in data.get("waypoints", []):
                 waypoint = Waypoint.from_dict(wp_data)
                 self._waypoints[waypoint.id] = waypoint
@@ -118,7 +127,6 @@ class WaypointManager:
         except (json.JSONDecodeError, IOError, KeyError):
             # If storage is corrupted, start fresh (but keep w0)
             self._waypoints = {}
-            self._next_id = 1
 
     def _save(self) -> None:
         """Save waypoints to storage."""
@@ -126,7 +134,6 @@ class WaypointManager:
 
         try:
             data = {
-                "next_id": self._next_id,
                 "waypoints": [wp.to_dict() for wp in self._waypoints.values()],
             }
             with open(self._storage_path, 'w') as f:
@@ -135,10 +142,25 @@ class WaypointManager:
             pass
 
     def _generate_id(self) -> str:
-        """Generate the next waypoint ID."""
-        wp_id = f"w{self._next_id}"
-        self._next_id += 1
-        return wp_id
+        """Generate the lowest available waypoint ID.
+
+        IDs are reused after deletion to keep numbering compact.
+        For example, if w1 and w3 exist, the next ID will be w2.
+        """
+        # Find existing numeric IDs (excluding w0)
+        existing_nums = set()
+        for wp_id in self._waypoints.keys():
+            if wp_id.startswith("w") and wp_id[1:].isdigit():
+                num = int(wp_id[1:])
+                if num > 0:  # Skip w0
+                    existing_nums.add(num)
+
+        # Find lowest available ID starting from 1
+        next_num = 1
+        while next_num in existing_nums:
+            next_num += 1
+
+        return f"w{next_num}"
 
     def create(
         self,
@@ -257,7 +279,6 @@ class WaypointManager:
 
         # Reset BackupManager to initial waypoint
         self._backup_manager.set_current_waypoint(INITIAL_WAYPOINT_ID)
-        self._next_id = 1
 
         self._save()
 
