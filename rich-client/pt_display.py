@@ -7,7 +7,6 @@ This approach renders Rich content to ANSI strings, then wraps them with
 prompt_toolkit's ANSI() for display in FormattedTextControl windows.
 """
 
-import os
 import shutil
 import sys
 import time
@@ -43,8 +42,11 @@ from agent_tab_bar import AgentTabBar
 from clipboard import ClipboardConfig, ClipboardProvider, create_provider
 from keybindings import KeybindingConfig, load_keybindings
 from theme import ThemeConfig, load_theme
-from shared.plugins.formatter_pipeline import FormatterRegistry, create_registry
+from shared.plugins.formatter_pipeline import create_pipeline
+from shared.plugins.hidden_content_filter import create_plugin as create_hidden_filter
 from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter
+from shared.plugins.diff_formatter import create_plugin as create_diff_formatter
+from shared.plugins.table_formatter import create_plugin as create_table_formatter
 
 
 def consolidate_fragments(fragments):
@@ -466,30 +468,16 @@ class PTDisplay:
         self._formatter_pipeline = None
         self._code_block_formatter = None  # Keep reference for theme updates
         if not server_formatted:
-            # Use FormatterRegistry for dynamic formatter discovery
-            formatter_registry = create_registry()
-            formatter_registry.discover()
-
-            # Try to load config from project or user directory
-            config_loaded = (
-                formatter_registry.load_config(".jaato/formatters.json") or
-                formatter_registry.load_config(os.path.expanduser("~/.jaato/formatters.json"))
-            )
-            if not config_loaded:
-                formatter_registry.use_defaults()
-
-            # Create pipeline from registry
-            self._formatter_pipeline = formatter_registry.create_pipeline(output_width)
-
-            # Get reference to code block formatter for theme updates
-            for name in formatter_registry.list_available():
-                if name == "code_block_formatter":
-                    # The formatter is already in the pipeline, but we need a reference
-                    # for theme updates. Create a new one just for theme sync.
-                    self._code_block_formatter = create_code_block_formatter()
-                    self._code_block_formatter.set_syntax_theme(self._theme.name)
-                    break
-
+            self._formatter_pipeline = create_pipeline()
+            self._formatter_pipeline.register(create_hidden_filter())         # priority 5
+            self._formatter_pipeline.register(create_diff_formatter())        # priority 20
+            self._formatter_pipeline.register(create_table_formatter())       # priority 25
+            # Code block formatter with line numbers enabled
+            self._code_block_formatter = create_code_block_formatter()
+            self._code_block_formatter.initialize({"line_numbers": True})
+            self._code_block_formatter.set_syntax_theme(self._theme.name)  # Match UI theme
+            self._formatter_pipeline.register(self._code_block_formatter)     # priority 40
+            self._formatter_pipeline.set_console_width(output_width)
             self._output_buffer.set_formatter_pipeline(self._formatter_pipeline)
 
         # Set keybinding config and theme on agent registry buffers too
