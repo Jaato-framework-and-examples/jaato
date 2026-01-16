@@ -49,10 +49,12 @@ KNOWN_FORMATTERS: Dict[str, str] = {
 }
 
 # Default formatters to enable when no config is provided
+# Note: code_validation_formatter requires LSP plugin - will be skipped if unavailable
 DEFAULT_FORMATTERS = [
     {"name": "hidden_content_filter", "enabled": True},
     {"name": "diff_formatter", "enabled": True},
     {"name": "table_formatter", "enabled": True},
+    {"name": "code_validation_formatter", "enabled": True},
     {"name": "code_block_formatter", "enabled": True, "config": {"line_numbers": True}},
 ]
 
@@ -64,7 +66,7 @@ class FormatterRegistry:
     - Auto-discovery of formatter plugins from shared/plugins/
     - Configuration file loading for formatter settings
     - Dynamic pipeline creation based on enabled formatters
-    - Custom formatter registration for specialized formatters
+    - Automatic wiring of formatters with tool plugins they depend on
     """
 
     def __init__(self):
@@ -72,7 +74,7 @@ class FormatterRegistry:
         self._discovered: Dict[str, str] = {}  # name -> module path
         self._config: List[Dict[str, Any]] = []
         self._custom_formatters: Dict[str, FormatterPlugin] = {}
-        self._wiring_callbacks: Dict[str, Any] = {}  # For formatters needing external deps
+        self._tool_registry: Optional[Any] = None  # PluginRegistry for tool plugins
 
     def discover(self) -> List[str]:
         """Discover available formatter plugins.
@@ -135,6 +137,18 @@ class FormatterRegistry:
         """Use the default formatter configuration."""
         self._config = DEFAULT_FORMATTERS.copy()
 
+    def set_tool_registry(self, tool_registry: Any) -> None:
+        """Set the tool plugin registry for formatter dependency wiring.
+
+        Formatters that implement wire_dependencies(tool_registry) will
+        automatically receive the tool registry during creation, allowing
+        them to wire themselves with any tool plugins they need.
+
+        Args:
+            tool_registry: The PluginRegistry instance for tool plugins.
+        """
+        self._tool_registry = tool_registry
+
     def register_custom(self, name: str, formatter: FormatterPlugin) -> None:
         """Register a custom formatter instance.
 
@@ -146,18 +160,6 @@ class FormatterRegistry:
             formatter: Formatter instance implementing FormatterPlugin.
         """
         self._custom_formatters[name] = formatter
-
-    def set_wiring_callback(self, formatter_name: str, callback: Any) -> None:
-        """Set a callback for wiring a formatter with external dependencies.
-
-        Some formatters need external dependencies (like code_validation_formatter
-        needing the LSP plugin). This allows the caller to provide those deps.
-
-        Args:
-            formatter_name: Name of the formatter needing wiring.
-            callback: Callable that receives (formatter_instance) and wires it.
-        """
-        self._wiring_callbacks[formatter_name] = callback
 
     def create_pipeline(self, console_width: int = 120) -> FormatterPipeline:
         """Create a formatter pipeline based on current configuration.
@@ -222,7 +224,7 @@ class FormatterRegistry:
             config: Configuration dict for the formatter.
 
         Returns:
-            Formatter instance or None if creation failed.
+            Formatter instance or None if creation failed/skipped.
         """
         # Check custom formatters first
         if name in self._custom_formatters:
@@ -246,9 +248,15 @@ class FormatterRegistry:
 
             formatter = create_fn()
 
-            # Apply wiring callback if registered
-            if name in self._wiring_callbacks:
-                self._wiring_callbacks[name](formatter)
+            # Let formatter wire itself with tool plugins if it needs them
+            if hasattr(formatter, "wire_dependencies"):
+                if self._tool_registry:
+                    # Formatter returns False if it can't wire (missing deps)
+                    if formatter.wire_dependencies(self._tool_registry) is False:
+                        return None
+                else:
+                    # No tool registry available, skip formatters that need wiring
+                    return None
 
             # Initialize with config if formatter supports it
             if hasattr(formatter, "initialize"):
