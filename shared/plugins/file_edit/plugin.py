@@ -166,6 +166,18 @@ class FileEditPlugin:
         self._plugin_registry = registry
         self._trace("set_plugin_registry: registry set")
 
+    @property
+    def backup_manager(self) -> Optional[BackupManager]:
+        """Get the backup manager instance.
+
+        This provides access to the backup infrastructure for other plugins
+        that need to integrate with file backup functionality (e.g., waypoint).
+
+        Returns:
+            The BackupManager instance, or None if not initialized.
+        """
+        return self._backup_manager
+
     def set_workspace_path(self, path: Optional[str]) -> None:
         """Update the workspace root path.
 

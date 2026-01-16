@@ -58,11 +58,15 @@ class WaypointPlugin:
         self._manager: Optional[WaypointManager] = None
         self._suggester: Optional[DescriptionSuggester] = None
         self._backup_manager: Optional["BackupManager"] = None
+        self._plugin_registry = None
+        self._storage_path: Optional[Path] = None
         self._initialized = False
 
         # Session callbacks (set via set_session_callbacks)
         self._get_history: Optional[Callable[[], List["Message"]]] = None
         self._set_history: Optional[Callable[[List["Message"]], None]] = None
+        self._serialize_history: Optional[Callable[[List["Message"]], str]] = None
+        self._deserialize_history: Optional[Callable[[str], List["Message"]]] = None
         self._get_turn_index: Optional[Callable[[], int]] = None
 
     @property
@@ -73,41 +77,76 @@ class WaypointPlugin:
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the waypoint plugin.
 
+        Note: The manager is lazily created when first needed, after
+        set_plugin_registry() has been called by the registry.
+
         Args:
             config: Optional configuration dict:
-                - backup_manager: BackupManager instance (required)
+                - backup_manager: BackupManager instance (optional, can be
+                  obtained from file_edit plugin via registry)
                 - storage_path: Path for waypoint data storage
         """
         config = config or {}
 
+        # Store config for lazy initialization
         self._backup_manager = config.get("backup_manager")
-        if not self._backup_manager:
-            # Try to get from plugin registry if available
-            registry = config.get("plugin_registry")
-            if registry:
-                file_edit_plugin = registry.get_plugin("file_edit")
-                if file_edit_plugin and hasattr(file_edit_plugin, 'backup_manager'):
-                    self._backup_manager = file_edit_plugin.backup_manager
-
-        if not self._backup_manager:
-            raise ValueError("waypoint plugin requires backup_manager in config")
-
         storage_path = config.get("storage_path")
         if storage_path:
-            storage_path = Path(storage_path)
-
-        self._manager = WaypointManager(
-            backup_manager=self._backup_manager,
-            storage_path=storage_path,
-        )
+            self._storage_path = Path(storage_path)
 
         self._suggester = create_suggester()
         self._initialized = True
+
+    def set_plugin_registry(self, registry) -> None:
+        """Set the plugin registry for accessing backup_manager.
+
+        Called by PluginRegistry after initialize(). This is when we can
+        access the file_edit plugin's backup_manager.
+
+        Args:
+            registry: The PluginRegistry instance.
+        """
+        self._plugin_registry = registry
+
+    def _ensure_manager(self) -> bool:
+        """Ensure the manager is created, lazily initializing if needed.
+
+        Returns:
+            True if manager is available, False otherwise.
+        """
+        if self._manager is not None:
+            return True
+
+        # Get backup_manager from file_edit plugin if not directly configured
+        if not self._backup_manager and self._plugin_registry:
+            file_edit_plugin = self._plugin_registry.get_plugin("file_edit")
+            if file_edit_plugin and hasattr(file_edit_plugin, 'backup_manager'):
+                self._backup_manager = file_edit_plugin.backup_manager
+
+        if not self._backup_manager:
+            return False
+
+        self._manager = WaypointManager(
+            backup_manager=self._backup_manager,
+            storage_path=self._storage_path,
+        )
+
+        # Wire up history callbacks if they were set before manager was created
+        if self._get_history and self._set_history and self._serialize_history and self._deserialize_history:
+            self._manager.set_history_callbacks(
+                get_history=self._get_history,
+                set_history=self._set_history,
+                serialize_history=self._serialize_history,
+                deserialize_history=self._deserialize_history,
+            )
+
+        return True
 
     def shutdown(self) -> None:
         """Shutdown the plugin."""
         self._manager = None
         self._suggester = None
+        self._plugin_registry = None
         self._initialized = False
 
     def set_session_callbacks(
@@ -133,6 +172,10 @@ class WaypointPlugin:
         self._get_history = get_history
         self._set_history = set_history
         self._get_turn_index = get_turn_index
+
+        # Store for later use with manager (when lazily created)
+        self._serialize_history = serialize_history
+        self._deserialize_history = deserialize_history
 
         if self._manager:
             self._manager.set_history_callbacks(
@@ -197,10 +240,7 @@ class WaypointPlugin:
         if command != "waypoint":
             return []
 
-        if not self._manager:
-            return []
-
-        # No args yet - suggest actions
+        # No args yet - suggest actions (doesn't require manager)
         if not args:
             return [
                 CommandCompletion("create", "Create a new waypoint"),
@@ -211,13 +251,13 @@ class WaypointPlugin:
             ]
 
         action = args[0].lower() if args else ""
+        known_actions = ["create", "restore", "delete", "info", "list"]
 
-        # Completing first arg (action)
-        if len(args) == 1 and not args[0].startswith("w"):
-            actions = ["create", "restore", "delete", "info", "list"]
+        # Completing first arg (action) - only if not an exact match
+        if len(args) == 1 and not args[0].startswith("w") and action not in known_actions:
             return [
                 CommandCompletion(a, f"{a.capitalize()} waypoint(s)")
-                for a in actions
+                for a in known_actions
                 if a.startswith(action)
             ]
 
@@ -247,7 +287,9 @@ class WaypointPlugin:
                 return []
 
             elif action in ("restore", "delete", "info"):
-                # Suggest waypoint IDs
+                # Suggest waypoint IDs (requires manager)
+                if not self._ensure_manager():
+                    return []
                 waypoints = self._manager.list()
 
                 if action == "delete" and len(args) == 1:
@@ -312,8 +354,8 @@ class WaypointPlugin:
         Returns:
             Command result as dict.
         """
-        if not self._manager:
-            return {"error": "Waypoint plugin not initialized"}
+        if not self._ensure_manager():
+            return {"error": "Waypoint plugin not available (file_edit plugin not initialized)"}
 
         # Parse action from args
         action = args.get("action", "list")
