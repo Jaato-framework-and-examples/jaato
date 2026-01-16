@@ -914,7 +914,8 @@ The permission plugin includes sanitization features to help sandbox the model's
       "allowed_roots": ["."],
       "block_absolute": true,
       "block_parent_traversal": true,
-      "allow_home": false
+      "allow_home": false,
+      "allow_tmp": true
     }
   }
 }
@@ -987,19 +988,25 @@ Restricts file access to allowed directories:
       "allowed_roots": [".", "./data", "/tmp/workspace"],
       "block_absolute": true,
       "block_parent_traversal": true,
-      "allow_home": false
+      "allow_home": false,
+      "allow_tmp": true
     }
   }
 }
 ```
 
-| Path | `block_absolute` | `block_parent_traversal` | Result |
-|------|------------------|--------------------------|--------|
-| `./file.txt` | - | - | ALLOWED |
-| `/etc/passwd` | true | - | BLOCKED |
-| `../secret.txt` | - | true | BLOCKED |
-| `~/private.key` | - | - | BLOCKED (if `allow_home: false`) |
-| `./foo/../../../etc/passwd` | - | true | BLOCKED |
+| Path | `block_absolute` | `block_parent_traversal` | `allow_tmp` | Result |
+|------|------------------|--------------------------|-------------|--------|
+| `./file.txt` | - | - | - | ALLOWED |
+| `/tmp/test.txt` | true | - | true (default) | ALLOWED |
+| `/tmp/deep/nested/file` | true | - | true (default) | ALLOWED |
+| `/etc/passwd` | true | - | - | BLOCKED |
+| `../secret.txt` | - | true | - | BLOCKED |
+| `~/private.key` | - | - | - | BLOCKED (if `allow_home: false`) |
+| `./foo/../../../etc/passwd` | - | true | - | BLOCKED |
+| `/tmp/test.txt` | true | - | false | BLOCKED |
+
+**Note:** The `/tmp` directory is allowed by default (`allow_tmp: true`) to support common operations like temporary file creation. Set `allow_tmp: false` to block all `/tmp` access.
 
 ### What Sanitization Does NOT Prevent
 
