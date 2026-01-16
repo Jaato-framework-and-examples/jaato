@@ -60,6 +60,7 @@ class WaypointPlugin:
         self._backup_manager: Optional["BackupManager"] = None
         self._plugin_registry = None
         self._storage_path: Optional[Path] = None
+        self._session_id: Optional[str] = None
         self._initialized = False
 
         # Session callbacks (set via set_session_callbacks)
@@ -85,11 +86,13 @@ class WaypointPlugin:
                 - backup_manager: BackupManager instance (optional, can be
                   obtained from file_edit plugin via registry)
                 - storage_path: Path for waypoint data storage
+                - session_id: Session identifier for scoping waypoints
         """
         config = config or {}
 
         # Store config for lazy initialization
         self._backup_manager = config.get("backup_manager")
+        self._session_id = config.get("session_id")
         storage_path = config.get("storage_path")
         if storage_path:
             self._storage_path = Path(storage_path)
@@ -129,6 +132,7 @@ class WaypointPlugin:
         self._manager = WaypointManager(
             backup_manager=self._backup_manager,
             storage_path=self._storage_path,
+            session_id=self._session_id,
         )
 
         # Wire up history callbacks if they were set before manager was created

@@ -160,6 +160,33 @@ class TestWaypointDelete:
         assert waypoints[0].id == INITIAL_WAYPOINT_ID
         mock_backup_manager.set_current_waypoint.assert_called_with(INITIAL_WAYPOINT_ID)
 
+    def test_id_reused_after_delete(self, manager):
+        """Test that IDs are reused after deletion."""
+        # Create w1
+        wp1 = manager.create("first")
+        assert wp1.id == "w1"
+
+        # Delete w1
+        manager.delete("w1")
+
+        # Next create should reuse w1
+        wp1_again = manager.create("first again")
+        assert wp1_again.id == "w1"
+
+    def test_lowest_available_id_used(self, manager):
+        """Test that the lowest available ID is always used."""
+        # Create w1, w2, w3
+        manager.create("first")
+        manager.create("second")
+        manager.create("third")
+
+        # Delete w2 (middle one)
+        manager.delete("w2")
+
+        # Next create should be w2 (lowest available)
+        wp = manager.create("new")
+        assert wp.id == "w2"
+
 
 class TestWaypointRestore:
     """Test waypoint restoration."""
@@ -262,3 +289,46 @@ class TestWaypointInfo:
         """Test getting info for nonexistent waypoint."""
         info = manager.get_info("w999")
         assert info is None
+
+
+class TestSessionScoping:
+    """Test session-scoped waypoint storage."""
+
+    def test_session_id_creates_isolated_storage(self, temp_dir, mock_backup_manager):
+        """Test that different session_ids use different storage paths."""
+        # Create manager for session A
+        mgr_a = WaypointManager(
+            backup_manager=mock_backup_manager,
+            storage_path=temp_dir / "sessions" / "session-a" / "waypoints.json",
+            session_id="session-a",
+        )
+        mgr_a.create("session A waypoint")
+
+        # Create manager for session B
+        mgr_b = WaypointManager(
+            backup_manager=mock_backup_manager,
+            storage_path=temp_dir / "sessions" / "session-b" / "waypoints.json",
+            session_id="session-b",
+        )
+        mgr_b.create("session B waypoint")
+
+        # Each session should only see its own waypoints (plus w0)
+        assert len(mgr_a.list()) == 2  # w0 + w1
+        assert len(mgr_b.list()) == 2  # w0 + w1
+
+        # Verify content is different
+        assert mgr_a.get("w1").description == "session A waypoint"
+        assert mgr_b.get("w1").description == "session B waypoint"
+
+    def test_default_session_storage_path(self, temp_dir, mock_backup_manager):
+        """Test that session_id generates correct default storage path."""
+        # When session_id is provided without explicit storage_path,
+        # the manager should use .jaato/sessions/{session_id}/waypoints.json
+        mgr = WaypointManager(
+            backup_manager=mock_backup_manager,
+            session_id="test-session-123",
+        )
+
+        # The storage path should include the session ID
+        assert "sessions" in str(mgr._storage_path)
+        assert "test-session-123" in str(mgr._storage_path)
