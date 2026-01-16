@@ -7,11 +7,14 @@ import sys
 # OSC 52 size limit (base64 encoded) - some terminals cap at ~74KB
 OSC52_MAX_BYTES = 74994
 
-# Overhead for tmux/screen passthrough wrappers
-# tmux: \x1bPtmux;{inner}\x1b\\ + doubling 2 ESCs in inner = 12 bytes
-# screen: \x1bP{inner}\x1b\\ = 4 bytes
-_TMUX_OVERHEAD = 12
-_SCREEN_OVERHEAD = 4
+# Conservative limit for tmux passthrough to avoid terminal parsing failures.
+# tmux's OSC52 passthrough is fragile with large payloads - the outer terminal
+# may fail to parse the sequence and render raw base64 as visible text.
+# 16KB base64 (~12KB text) is a safe practical limit.
+OSC52_TMUX_MAX_BYTES = 16384
+
+# Screen has similar issues
+OSC52_SCREEN_MAX_BYTES = 16384
 
 
 def _truncate_utf8_safe(text: str, max_bytes: int) -> str:
@@ -89,16 +92,16 @@ class OSC52Provider:
         if not text:
             return False
 
-        # Calculate effective limit accounting for tmux/screen wrapper overhead
-        max_encoded = OSC52_MAX_BYTES
+        # Calculate effective limit - use conservative limits for tmux/screen
+        # to avoid terminal parsing failures with large sequences
         if self._in_tmux:
-            max_encoded -= _TMUX_OVERHEAD
+            max_encoded = OSC52_TMUX_MAX_BYTES
         elif self._in_screen:
-            max_encoded -= _SCREEN_OVERHEAD
+            max_encoded = OSC52_SCREEN_MAX_BYTES
+        else:
+            max_encoded = OSC52_MAX_BYTES
 
-        # Correct formula: (max_encoded // 4) * 3 ensures base64 output fits
-        # The old formula (max * 3) // 4 could overflow by up to 3 bytes due to
-        # base64 padding and integer division rounding
+        # Formula: (max_encoded // 4) * 3 ensures base64 output never exceeds limit
         max_text_bytes = (max_encoded // 4) * 3
 
         # Truncate if needed, preserving UTF-8 character boundaries
