@@ -193,7 +193,11 @@ class FormatterRegistry:
             if entry.get("enabled") is False:
                 continue
 
-            formatter = self._create_formatter(name, entry.get("config", {}))
+            formatter = self._create_formatter(
+                name,
+                entry.get("config", {}),
+                priority_override=entry.get("priority"),
+            )
             if formatter:
                 pipeline.register(formatter)
                 added_names.add(name)
@@ -215,13 +219,17 @@ class FormatterRegistry:
         return pipeline
 
     def _create_formatter(
-        self, name: str, config: Dict[str, Any]
+        self,
+        name: str,
+        config: Dict[str, Any],
+        priority_override: Optional[int] = None,
     ) -> Optional[FormatterPlugin]:
         """Create a formatter instance by name.
 
         Args:
             name: Formatter name.
             config: Configuration dict for the formatter.
+            priority_override: Optional priority to override the formatter's default.
 
         Returns:
             Formatter instance or None if creation failed/skipped.
@@ -231,6 +239,8 @@ class FormatterRegistry:
             formatter = self._custom_formatters[name]
             if hasattr(formatter, "initialize"):
                 formatter.initialize(config)
+            if priority_override is not None:
+                self._apply_priority(formatter, priority_override)
             return formatter
 
         # Check discovered formatters
@@ -262,10 +272,25 @@ class FormatterRegistry:
             if hasattr(formatter, "initialize"):
                 formatter.initialize(config)
 
+            # Apply priority override if specified
+            if priority_override is not None:
+                self._apply_priority(formatter, priority_override)
+
             return formatter
 
         except (ImportError, AttributeError):
             return None
+
+    def _apply_priority(self, formatter: FormatterPlugin, priority: int) -> None:
+        """Apply a priority override to a formatter.
+
+        Args:
+            formatter: The formatter instance.
+            priority: The priority value to set.
+        """
+        # Most formatters store priority in _priority attribute
+        if hasattr(formatter, "_priority"):
+            formatter._priority = priority
 
     def get_formatter_info(self) -> List[Dict[str, Any]]:
         """Get information about available formatters.
