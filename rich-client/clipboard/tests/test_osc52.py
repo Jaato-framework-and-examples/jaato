@@ -12,8 +12,8 @@ sys.path.insert(0, str(_repo_root / "rich-client"))
 
 from clipboard.osc52 import (
     OSC52_MAX_BYTES,
-    _TMUX_OVERHEAD,
-    _SCREEN_OVERHEAD,
+    OSC52_TMUX_MAX_BYTES,
+    OSC52_SCREEN_MAX_BYTES,
     _truncate_utf8_safe,
     OSC52Provider,
 )
@@ -121,21 +121,22 @@ class TestBufferSizeCalculation:
         # This would exceed the limit!
         assert len(encoded) > OSC52_MAX_BYTES
 
-    def test_tmux_overhead_accounted(self):
-        """Tmux overhead is correctly accounted for."""
-        max_encoded = OSC52_MAX_BYTES - _TMUX_OVERHEAD
-        max_text_bytes = (max_encoded // 4) * 3
+    def test_tmux_uses_conservative_limit(self):
+        """Tmux uses a conservative 16KB limit to avoid display corruption."""
+        # tmux passthrough is fragile - large sequences cause terminal parsing failures
+        max_text_bytes = (OSC52_TMUX_MAX_BYTES // 4) * 3
         text = "a" * max_text_bytes
         encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
-        assert len(encoded) <= max_encoded
+        assert len(encoded) <= OSC52_TMUX_MAX_BYTES
+        # Verify it's much smaller than the standard limit
+        assert OSC52_TMUX_MAX_BYTES < OSC52_MAX_BYTES / 4
 
-    def test_screen_overhead_accounted(self):
-        """Screen overhead is correctly accounted for."""
-        max_encoded = OSC52_MAX_BYTES - _SCREEN_OVERHEAD
-        max_text_bytes = (max_encoded // 4) * 3
+    def test_screen_uses_conservative_limit(self):
+        """Screen uses a conservative limit similar to tmux."""
+        max_text_bytes = (OSC52_SCREEN_MAX_BYTES // 4) * 3
         text = "a" * max_text_bytes
         encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
-        assert len(encoded) <= max_encoded
+        assert len(encoded) <= OSC52_SCREEN_MAX_BYTES
 
 
 class TestOSC52Provider:
