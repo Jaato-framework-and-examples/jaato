@@ -1220,6 +1220,10 @@ class OutputBuffer:
         # Clear active tools so they don't render separately anymore
         self._active_tools.clear()
 
+        # Auto-scroll to bottom to show finalized content
+        # This ensures enrichment notifications and tool results are visible
+        self.scroll_to_bottom()
+
     @property
     def active_tools(self) -> List[ActiveToolCall]:
         """Get list of currently active tools."""
