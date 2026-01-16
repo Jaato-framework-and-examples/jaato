@@ -469,9 +469,8 @@ class JaatoServer:
             "clarification": {
                 "channel_type": "queue",
             },
-            # Pass workspace_path and session_id to LSP and MCP plugins so they:
-            # 1. Load config files from the client's workspace, not the server's cwd
-            # 2. Include session_id in log messages for multi-session debugging
+            # LSP and MCP need workspace_path during initialize() to find config files
+            # Also include session_id for log disambiguation in multi-session mode
             "lsp": {
                 "workspace_path": self._workspace_path,
                 "session_id": self._session_id,
@@ -480,15 +479,10 @@ class JaatoServer:
                 "workspace_path": self._workspace_path,
                 "session_id": self._session_id,
             },
-            # Pass workspace_root to file_edit and CLI plugins for path sandboxing
-            # Without this, they fall back to global env vars which are process-wide
-            # Also pass session_id to file_edit for session-scoped backup storage
+            # Pass session_id to file_edit for session-scoped backup storage
+            # workspace_root is handled by set_workspace_path() broadcast
             "file_edit": {
-                "workspace_root": self._workspace_path,
                 "session_id": self._session_id,
-            },
-            "cli": {
-                "workspace_root": self._workspace_path,
             },
             # Pass session_id to waypoint plugin for session-scoped waypoint storage
             "waypoint": {
@@ -497,6 +491,11 @@ class JaatoServer:
         }
         self.registry.expose_all(plugin_configs)
         self.todo_plugin = self.registry.get_plugin("todo")
+
+        # Broadcast workspace path to all plugins implementing set_workspace_path()
+        # This covers: file_edit, cli, filesystem_query, lsp, mcp, and any future plugins
+        if self._workspace_path:
+            self.registry.set_workspace_path(self._workspace_path)
 
         # Note: Plugins with set_plugin_registry() are auto-wired during expose_all()
         # No manual wiring needed for artifact_tracker, file_edit, cli, references, etc.
