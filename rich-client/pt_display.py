@@ -1374,8 +1374,10 @@ class PTDisplay:
                 buffer.expand_selected_tool()
                 self._app.invalidate()
             else:
-                # Move cursor right by one character in input buffer
-                event.current_buffer.cursor_right()
+                # Move cursor right by one character, wrapping to next line if needed
+                buf = event.current_buffer
+                if buf.cursor_position < len(buf.text):
+                    buf.cursor_position += 1
 
         @kb.add(*keys.get_key_args("tool_collapse"), eager=True)
         def handle_tool_collapse(event):
@@ -1385,8 +1387,10 @@ class PTDisplay:
                 buffer.collapse_selected_tool()
                 self._app.invalidate()
             else:
-                # Move cursor left by one character in input buffer
-                event.current_buffer.cursor_left()
+                # Move cursor left by one character, wrapping to previous line if needed
+                buf = event.current_buffer
+                if buf.cursor_position > 0:
+                    buf.cursor_position -= 1
 
         @kb.add(*keys.get_key_args("yank"))
         def handle_ctrl_y(event):
