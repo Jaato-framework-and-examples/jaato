@@ -33,6 +33,30 @@ class TestFileEditPluginInitialization:
         assert plugin._initialized is True
         assert plugin._backup_manager._base_dir == backup_dir
 
+    def test_initialize_with_session_id(self, tmp_path, monkeypatch):
+        """Test that session_id creates session-scoped backup directory."""
+        # Change to tmp_path so relative paths work
+        monkeypatch.chdir(tmp_path)
+
+        plugin = FileEditPlugin()
+        plugin.initialize({"session_id": "test-session-123"})
+        assert plugin._initialized is True
+        # Should use session-scoped path
+        expected_path = (tmp_path / ".jaato/sessions/test-session-123/backups").resolve()
+        assert plugin._backup_manager._base_dir == expected_path
+
+    def test_initialize_backup_dir_takes_precedence_over_session_id(self, tmp_path):
+        """Test that explicit backup_dir takes precedence over session_id."""
+        plugin = FileEditPlugin()
+        custom_dir = tmp_path / "explicit_backups"
+        plugin.initialize({
+            "backup_dir": str(custom_dir),
+            "session_id": "should-be-ignored"
+        })
+        assert plugin._initialized is True
+        # Explicit backup_dir should win
+        assert plugin._backup_manager._base_dir == custom_dir
+
     def test_shutdown(self):
         plugin = FileEditPlugin()
         plugin.initialize()
