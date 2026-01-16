@@ -66,6 +66,7 @@ class TestEnvironmentPluginToolSchemas:
         assert "cwd" in aspect_enum
         assert "terminal" in aspect_enum
         assert "context" in aspect_enum
+        assert "session" in aspect_enum
         assert "all" in aspect_enum
 
 
@@ -436,6 +437,75 @@ class TestEnvironmentPluginContextInfo:
         result = json.loads(plugin._get_environment({"aspect": "context"}))
 
         assert result["gc"]["max_turns"] == 100
+
+
+class TestEnvironmentPluginSessionInfo:
+    """Tests for session identifier information."""
+
+    def test_session_aspect_without_session(self):
+        """Test getting session info without session returns error."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "session"}))
+
+        # Without session, should return error
+        assert "error" in result
+        assert "Session not available" in result["error"]
+
+    def test_session_aspect_with_session(self):
+        """Test getting session info with a mocked session."""
+        plugin = EnvironmentPlugin()
+
+        class MockSession:
+            _agent_id = "main"
+            _agent_type = "main"
+            _agent_name = None
+
+        plugin.set_session(MockSession())
+        result = json.loads(plugin._get_environment({"aspect": "session"}))
+
+        assert result["session_id"] == "main"
+        assert result["agent_type"] == "main"
+        assert "agent_name" not in result  # None is not included
+
+    def test_session_aspect_with_subagent(self):
+        """Test getting session info for a subagent."""
+        plugin = EnvironmentPlugin()
+
+        class MockSession:
+            _agent_id = "subagent_1"
+            _agent_type = "subagent"
+            _agent_name = "researcher"
+
+        plugin.set_session(MockSession())
+        result = json.loads(plugin._get_environment({"aspect": "session"}))
+
+        assert result["session_id"] == "subagent_1"
+        assert result["agent_type"] == "subagent"
+        assert result["agent_name"] == "researcher"
+
+    def test_session_aspect_with_env_variable(self, monkeypatch):
+        """Test that JAATO_SESSION_ID env var is included when set."""
+        monkeypatch.setenv("JAATO_SESSION_ID", "env-session-123")
+        plugin = EnvironmentPlugin()
+
+        class MockSession:
+            _agent_id = "main"
+            _agent_type = "main"
+            _agent_name = None
+
+        plugin.set_session(MockSession())
+        result = json.loads(plugin._get_environment({"aspect": "session"}))
+
+        assert result["session_id"] == "main"
+        assert result["env_session_id"] == "env-session-123"
+
+    def test_all_aspect_includes_session(self):
+        """Test that 'all' includes session key."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "all"}))
+
+        # Session should be in result (even if it's an error without session)
+        assert "session" in result
 
 
 class TestEnvironmentPluginProtocol:

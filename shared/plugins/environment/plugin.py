@@ -18,7 +18,7 @@ class EnvironmentPlugin:
     and internal context (token usage, GC thresholds) when a session is set.
     """
 
-    VALID_ASPECTS = ["os", "shell", "arch", "cwd", "terminal", "context", "all"]
+    VALID_ASPECTS = ["os", "shell", "arch", "cwd", "terminal", "context", "session", "all"]
 
     @property
     def name(self) -> str:
@@ -70,6 +70,7 @@ class EnvironmentPlugin:
                                 "'cwd' = current working directory, "
                                 "'terminal' = terminal emulation and capabilities, "
                                 "'context' = token usage and GC thresholds, "
+                                "'session' = current session identifier and agent info, "
                                 "'all' = everything (default)"
                             )
                         }
@@ -123,6 +124,9 @@ class EnvironmentPlugin:
 
         if aspect in ("context", "all"):
             result["context"] = self._get_context_info()
+
+        if aspect in ("session", "all"):
+            result["session"] = self._get_session_info()
 
         # For single aspect (not "all"), flatten the response
         if aspect != "all" and len(result) == 1:
@@ -292,6 +296,42 @@ class EnvironmentPlugin:
                 result["gc"]["max_turns"] = gc_config.max_turns
         else:
             result["gc"] = None
+
+        return result
+
+    def _get_session_info(self) -> Dict[str, Any]:
+        """Get session identifier and agent information.
+
+        Returns session ID, agent type, and agent name.
+        Requires a session to be set via set_session().
+        """
+        if self._session is None:
+            return {
+                "error": "Session not available. Session info requires session injection.",
+                "hint": "Use set_session_plugin() or ensure plugin is properly registered."
+            }
+
+        result: Dict[str, Any] = {}
+
+        # Get agent/session identifier
+        agent_id = getattr(self._session, '_agent_id', None)
+        if agent_id:
+            result["session_id"] = agent_id
+
+        # Get agent type (main, subagent, etc.)
+        agent_type = getattr(self._session, '_agent_type', None)
+        if agent_type:
+            result["agent_type"] = agent_type
+
+        # Get agent name if set
+        agent_name = getattr(self._session, '_agent_name', None)
+        if agent_name:
+            result["agent_name"] = agent_name
+
+        # Also expose via environment variable if set
+        env_session_id = os.environ.get("JAATO_SESSION_ID")
+        if env_session_id:
+            result["env_session_id"] = env_session_id
 
         return result
 
