@@ -111,7 +111,11 @@ class FileEditPlugin:
 
         Args:
             config: Optional configuration dict with:
-                - backup_dir: Custom backup directory (default: .jaato/backups)
+                - backup_dir: Custom backup directory (default: .jaato/backups
+                              or .jaato/sessions/{session_id}/backups if session_id provided)
+                - session_id: Session identifier for session-scoped backup storage.
+                              When provided, backups are stored per-session to align
+                              with waypoint session scoping.
                 - workspace_root: Path to workspace root for sandboxing.
                                   Auto-detected from JAATO_WORKSPACE_ROOT or
                                   workspaceRoot env vars if not specified.
@@ -129,9 +133,15 @@ class FileEditPlugin:
             self._workspace_root = _detect_workspace_root()
 
         # Initialize backup manager
+        # Priority: explicit backup_dir > session-scoped path > global default
         backup_dir = config.get("backup_dir")
+        session_id = config.get("session_id")
         if backup_dir:
             self._backup_manager = BackupManager(Path(backup_dir))
+        elif session_id:
+            # Session-scoped backups align with session-scoped waypoints
+            session_backup_dir = Path(f".jaato/sessions/{session_id}/backups")
+            self._backup_manager = BackupManager(session_backup_dir)
         else:
             self._backup_manager = BackupManager()
 
@@ -165,6 +175,18 @@ class FileEditPlugin:
         """
         self._plugin_registry = registry
         self._trace("set_plugin_registry: registry set")
+
+    @property
+    def backup_manager(self) -> Optional[BackupManager]:
+        """Get the backup manager instance.
+
+        This provides access to the backup infrastructure for other plugins
+        that need to integrate with file backup functionality (e.g., waypoint).
+
+        Returns:
+            The BackupManager instance, or None if not initialized.
+        """
+        return self._backup_manager
 
     def set_workspace_path(self, path: Optional[str]) -> None:
         """Update the workspace root path.

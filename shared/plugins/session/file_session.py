@@ -6,6 +6,7 @@ with support for model-generated session descriptions.
 
 import json
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -203,7 +204,10 @@ class FileSessionPlugin:
         return sessions
 
     def delete(self, session_id: str) -> bool:
-        """Delete a session file.
+        """Delete a session and its associated data.
+
+        Removes both the session JSON file and the session subdirectory
+        (which may contain waypoints and other session-scoped data).
 
         Args:
             session_id: The session ID to delete.
@@ -212,13 +216,24 @@ class FileSessionPlugin:
             True if deleted, False if session didn't exist.
         """
         file_path = self._storage_path / f"{session_id}.json"
+        session_dir = self._storage_path / session_id
 
+        deleted = False
+
+        # Delete the session JSON file
         if file_path.exists():
             file_path.unlink()
-            if self._current_session_id == session_id:
-                self._current_session_id = None
-            return True
-        return False
+            deleted = True
+
+        # Delete the session subdirectory (waypoints, etc.)
+        if session_dir.exists() and session_dir.is_dir():
+            shutil.rmtree(session_dir)
+            deleted = True
+
+        if deleted and self._current_session_id == session_id:
+            self._current_session_id = None
+
+        return deleted
 
     def get_latest(self) -> Optional[SessionInfo]:
         """Get the most recently updated session.

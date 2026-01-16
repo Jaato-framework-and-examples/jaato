@@ -621,6 +621,9 @@ class OutputBuffer:
             style: Rich style for the message.
         """
         self._flush_current_block()
+        # Handle None or empty messages gracefully
+        if not message:
+            return
         # Handle multi-line messages
         for line in message.split('\n'):
             self._add_line("system", line, style)
@@ -1216,6 +1219,10 @@ class OutputBuffer:
 
         # Clear active tools so they don't render separately anymore
         self._active_tools.clear()
+
+        # Auto-scroll to bottom to show finalized content
+        # This ensures enrichment notifications and tool results are visible
+        self.scroll_to_bottom()
 
     @property
     def active_tools(self) -> List[ActiveToolCall]:
