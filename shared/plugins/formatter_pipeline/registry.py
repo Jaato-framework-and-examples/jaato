@@ -162,7 +162,9 @@ class FormatterRegistry:
     def create_pipeline(self, console_width: int = 120) -> FormatterPipeline:
         """Create a formatter pipeline based on current configuration.
 
-        If no configuration is loaded, uses defaults.
+        If no configuration is loaded, uses defaults. Custom formatters
+        registered via register_custom() are always included unless
+        explicitly disabled in config.
 
         Args:
             console_width: Console width for formatters that need it.
@@ -177,6 +179,9 @@ class FormatterRegistry:
         # Use defaults if no config loaded
         config = self._config if self._config else DEFAULT_FORMATTERS
 
+        # Track which formatters we've added from config
+        added_names = set()
+
         for entry in config:
             name = entry.get("name")
             if not name:
@@ -188,6 +193,20 @@ class FormatterRegistry:
 
             formatter = self._create_formatter(name, entry.get("config", {}))
             if formatter:
+                pipeline.register(formatter)
+                added_names.add(name)
+
+        # Build set of explicitly disabled formatters
+        disabled_names = {
+            entry.get("name")
+            for entry in config
+            if entry.get("enabled") is False
+        }
+
+        # Add any custom formatters not already in config and not disabled
+        # (e.g., code_validation_formatter wired by server)
+        for name, formatter in self._custom_formatters.items():
+            if name not in added_names and name not in disabled_names:
                 pipeline.register(formatter)
 
         pipeline.set_console_width(console_width)
