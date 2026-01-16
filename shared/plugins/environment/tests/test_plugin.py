@@ -459,13 +459,36 @@ class TestEnvironmentPluginSessionInfo:
             _agent_id = "main"
             _agent_type = "main"
             _agent_name = None
+            _session_plugin = None
 
         plugin.set_session(MockSession())
         result = json.loads(plugin._get_environment({"aspect": "session"}))
 
-        assert result["session_id"] == "main"
+        assert result["agent_id"] == "main"
         assert result["agent_type"] == "main"
         assert "agent_name" not in result  # None is not included
+        assert "session_id" not in result  # No session plugin
+
+    def test_session_aspect_with_session_plugin(self):
+        """Test getting session info with session plugin providing session ID."""
+        plugin = EnvironmentPlugin()
+
+        class MockSessionPlugin:
+            def get_current_session_id(self):
+                return "20251207_143022"
+
+        class MockSession:
+            _agent_id = "main"
+            _agent_type = "main"
+            _agent_name = None
+            _session_plugin = MockSessionPlugin()
+
+        plugin.set_session(MockSession())
+        result = json.loads(plugin._get_environment({"aspect": "session"}))
+
+        assert result["session_id"] == "20251207_143022"
+        assert result["agent_id"] == "main"
+        assert result["agent_type"] == "main"
 
     def test_session_aspect_with_subagent(self):
         """Test getting session info for a subagent."""
@@ -475,11 +498,12 @@ class TestEnvironmentPluginSessionInfo:
             _agent_id = "subagent_1"
             _agent_type = "subagent"
             _agent_name = "researcher"
+            _session_plugin = None
 
         plugin.set_session(MockSession())
         result = json.loads(plugin._get_environment({"aspect": "session"}))
 
-        assert result["session_id"] == "subagent_1"
+        assert result["agent_id"] == "subagent_1"
         assert result["agent_type"] == "subagent"
         assert result["agent_name"] == "researcher"
 
@@ -492,11 +516,12 @@ class TestEnvironmentPluginSessionInfo:
             _agent_id = "main"
             _agent_type = "main"
             _agent_name = None
+            _session_plugin = None
 
         plugin.set_session(MockSession())
         result = json.loads(plugin._get_environment({"aspect": "session"}))
 
-        assert result["session_id"] == "main"
+        assert result["agent_id"] == "main"
         assert result["env_session_id"] == "env-session-123"
 
     def test_all_aspect_includes_session(self):

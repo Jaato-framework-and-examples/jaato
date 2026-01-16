@@ -313,10 +313,17 @@ class EnvironmentPlugin:
 
         result: Dict[str, Any] = {}
 
-        # Get agent/session identifier
+        # Get actual session ID from session plugin (e.g., "20251207_143022")
+        session_plugin = getattr(self._session, '_session_plugin', None)
+        if session_plugin and hasattr(session_plugin, 'get_current_session_id'):
+            current_session_id = session_plugin.get_current_session_id()
+            if current_session_id:
+                result["session_id"] = current_session_id
+
+        # Get agent identifier within the session (e.g., "main", "subagent_1")
         agent_id = getattr(self._session, '_agent_id', None)
         if agent_id:
-            result["session_id"] = agent_id
+            result["agent_id"] = agent_id
 
         # Get agent type (main, subagent, etc.)
         agent_type = getattr(self._session, '_agent_type', None)
