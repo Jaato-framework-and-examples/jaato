@@ -149,6 +149,9 @@ class ActiveToolCall:
     success: bool = True  # Whether the tool succeeded (only valid when completed)
     duration_seconds: Optional[float] = None  # Execution time (only valid when completed)
     error_message: Optional[str] = None  # Error message if tool failed
+    # Display override (e.g., show "writeFile" instead of "askPermission")
+    display_name: Optional[str] = None  # If set, display this instead of name
+    display_args_summary: Optional[str] = None  # If set, display this instead of args_summary
     # Permission tracking
     permission_state: Optional[str] = None  # None, "pending", "granted", "denied"
     permission_method: Optional[str] = None  # "yes", "always", "once", "never", "whitelist", "blacklist"
@@ -1254,6 +1257,12 @@ class OutputBuffer:
                 tool.permission_state = "pending"
                 tool.permission_prompt_lines = prompt_lines
                 tool.permission_format_hint = format_hint
+                # If the requested tool is different from the active tool (e.g., askPermission
+                # checking permission for writeNewFile), show the actual tool name being checked
+                if tool.name != tool_name:
+                    tool.display_name = tool_name
+                    # Clear the args summary since it contains askPermission's args, not the target tool's
+                    tool.display_args_summary = ""
                 self._scroll_offset = 0
                 _trace(f"set_tool_permission_pending: FALLBACK attached to {tool.name} (requested: {tool_name})")
                 return
@@ -1713,9 +1722,13 @@ class OutputBuffer:
 
                 output.append("\n")
                 output.append(f"  {expand_icon} {connector} ", style=row_style)
-                output.append(tool.name, style=row_style)
-                if tool.args_summary:
-                    output.append(f"({tool.args_summary})", style=row_style)
+                # Use display_name if set (e.g., showing actual tool instead of askPermission)
+                tool_display_name = tool.display_name or tool.name
+                output.append(tool_display_name, style=row_style)
+                # Use display_args_summary if set, otherwise fall back to args_summary
+                args_to_show = tool.display_args_summary if tool.display_args_summary is not None else tool.args_summary
+                if args_to_show:
+                    output.append(f"({args_to_show})", style=row_style)
                 output.append(f" {status_icon}", style=status_style)
 
                 # Approval indicator
@@ -1773,7 +1786,8 @@ class OutputBuffer:
             tool_summaries = []
             for tool in block.tools:
                 status_icon = "✓" if tool.success else "✗"
-                summary = f"{tool.name} {status_icon}"
+                tool_display_name = tool.display_name or tool.name
+                summary = f"{tool_display_name} {status_icon}"
                 if tool.permission_state == "granted" and tool.permission_method:
                     indicator = self._get_approval_indicator(tool.permission_method)
                     if indicator:
@@ -2260,9 +2274,13 @@ class OutputBuffer:
                         output.append(f"  {expand_icon} {connector} ", style=row_style)
                     else:
                         output.append(f"    {connector} ", style=row_style)
-                    output.append(tool.name, style=row_style)
-                    if tool.args_summary:
-                        output.append(f"({tool.args_summary})", style=row_style)
+                    # Use display_name if set (e.g., showing actual tool instead of askPermission)
+                    tool_display_name = tool.display_name or tool.name
+                    output.append(tool_display_name, style=row_style)
+                    # Use display_args_summary if set, otherwise fall back to args_summary
+                    args_to_show = tool.display_args_summary if tool.display_args_summary is not None else tool.args_summary
+                    if args_to_show:
+                        output.append(f"({args_to_show})", style=row_style)
                     output.append(f" {status_icon}", style=status_style)
 
                     # Show approval indicator for granted permissions
@@ -2361,7 +2379,8 @@ class OutputBuffer:
                         status_icon = "✓" if tool.success else "✗"
                     else:
                         status_icon = "○"
-                    summary = f"{tool.name} {status_icon}"
+                    tool_display_name = tool.display_name or tool.name
+                    summary = f"{tool_display_name} {status_icon}"
                     # Add approval indicator for granted permissions
                     if tool.permission_state == "granted" and tool.permission_method:
                         indicator = self._get_approval_indicator(tool.permission_method)
