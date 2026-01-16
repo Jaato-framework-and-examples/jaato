@@ -504,11 +504,17 @@ class JaatoServer:
             },
             # Pass workspace_root to file_edit and CLI plugins for path sandboxing
             # Without this, they fall back to global env vars which are process-wide
+            # Also pass session_id to file_edit for session-scoped backup storage
             "file_edit": {
                 "workspace_root": self._workspace_path,
+                "session_id": self._session_id,
             },
             "cli": {
                 "workspace_root": self._workspace_path,
+            },
+            # Pass session_id to waypoint plugin for session-scoped waypoint storage
+            "waypoint": {
+                "session_id": self._session_id,
             },
         }
         self.registry.expose_all(plugin_configs)
