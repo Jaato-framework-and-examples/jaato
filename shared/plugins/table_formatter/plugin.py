@@ -71,6 +71,9 @@ class TableFormatterPlugin:
         self._in_table = False
         self._table_type: Optional[str] = None  # "markdown" or "ascii_grid"
 
+        # Buffer for incomplete lines (no trailing newline yet)
+        self._line_buffer: str = ""
+
     # ==================== FormatterPlugin Protocol ====================
 
     @property
@@ -89,19 +92,39 @@ class TableFormatterPlugin:
         Lines that appear to be part of a table are buffered until
         the table is complete (detected by a non-table line or flush).
 
+        Handles partial lines from streaming by buffering until a
+        complete line (ending with newline) is received.
+
         Args:
             chunk: Incoming text chunk.
 
         Yields:
             Formatted output when appropriate.
         """
-        # Process line by line for streaming mode
-        lines = chunk.split("\n")
+        # Prepend any buffered partial line
+        text = self._line_buffer + chunk
+        self._line_buffer = ""
+
+        # Check if the last part is incomplete (no trailing newline)
+        if text and not text.endswith("\n"):
+            # Find the last newline
+            last_newline = text.rfind("\n")
+            if last_newline == -1:
+                # No complete lines yet, buffer everything
+                self._line_buffer = text
+                return
+            else:
+                # Buffer the incomplete part, process complete lines
+                self._line_buffer = text[last_newline + 1:]
+                text = text[:last_newline + 1]
+
+        # Process complete lines
+        lines = text.split("\n")
         for i, line in enumerate(lines):
             is_last_line = i == len(lines) - 1
 
             # Skip empty string from trailing newline
-            if is_last_line and line == "" and chunk.endswith("\n"):
+            if is_last_line and line == "":
                 continue
 
             table_line_type = self._classify_line(line)
@@ -118,9 +141,8 @@ class TableFormatterPlugin:
                     for output in self._flush_buffer():
                         yield output
 
-                # Pass through non-table content
-                has_trailing_newline = not is_last_line or chunk.endswith("\n")
-                yield line + ("\n" if has_trailing_newline else "")
+                # Pass through non-table content with newline
+                yield line + "\n"
 
     def _classify_line(self, line: str) -> Optional[str]:
         """Classify a line as table content or not.
@@ -178,7 +200,24 @@ class TableFormatterPlugin:
         return False
 
     def flush(self) -> Iterator[str]:
-        """Flush any remaining buffered table content."""
+        """Flush any remaining buffered content."""
+        # First, handle any incomplete line in the line buffer
+        if self._line_buffer:
+            # Try to classify it as a table line
+            table_line_type = self._classify_line(self._line_buffer)
+            if table_line_type:
+                if not self._in_table:
+                    self._in_table = True
+                    self._table_type = table_line_type
+                self._buffer.append(self._line_buffer)
+            else:
+                # Flush table buffer first, then output the incomplete line
+                for output in self._flush_buffer():
+                    yield output
+                yield self._line_buffer
+            self._line_buffer = ""
+
+        # Flush any remaining table content
         for output in self._flush_buffer():
             yield output
 
@@ -187,6 +226,7 @@ class TableFormatterPlugin:
         self._buffer = []
         self._in_table = False
         self._table_type = None
+        self._line_buffer = ""
 
     # ==================== Table Parsing ====================
 
