@@ -1368,23 +1368,25 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("tool_expand"), eager=True)
         def handle_tool_expand(event):
-            """Handle right arrow - expand selected tool's output."""
+            """Handle right arrow - expand selected tool's output or move cursor."""
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
                 buffer.expand_selected_tool()
                 self._app.invalidate()
-            # If not in tool nav mode, let the default right arrow behavior happen
-            # (cursor movement in input buffer)
+            else:
+                # Move cursor right by one character in input buffer
+                event.current_buffer.cursor_right()
 
         @kb.add(*keys.get_key_args("tool_collapse"), eager=True)
         def handle_tool_collapse(event):
-            """Handle left arrow - collapse selected tool's output."""
+            """Handle left arrow - collapse selected tool's output or move cursor."""
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
                 buffer.collapse_selected_tool()
                 self._app.invalidate()
-            # If not in tool nav mode, let the default left arrow behavior happen
-            # (cursor movement in input buffer)
+            else:
+                # Move cursor left by one character in input buffer
+                event.current_buffer.cursor_left()
 
         @kb.add(*keys.get_key_args("yank"))
         def handle_ctrl_y(event):
