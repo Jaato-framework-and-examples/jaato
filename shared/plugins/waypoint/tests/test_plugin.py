@@ -20,7 +20,10 @@ def temp_dir():
 def mock_backup_manager():
     """Create a mock BackupManager."""
     mock = MagicMock()
-    mock.current_waypoint = INITIAL_WAYPOINT_ID
+    # Use a mutable container to track current_waypoint state
+    state = {"current": INITIAL_WAYPOINT_ID}
+    type(mock).current_waypoint = property(lambda self: state["current"])
+    mock.set_current_waypoint.side_effect = lambda wp_id: state.update({"current": wp_id})
     mock.get_backups_by_waypoint.return_value = []
     mock.get_first_backup_per_file_by_waypoint.return_value = {}
     mock.restore_from_backup.return_value = True
@@ -72,6 +75,33 @@ class TestCommandExecution:
         result = plugin._execute_waypoint({"action": "list"})
         assert "waypoints" in result
         assert len(result["waypoints"]) == 1
+
+    def test_list_shows_current_waypoint(self, plugin, mock_backup_manager):
+        """Test that list shows which waypoint is current."""
+        # Initially w0 is current
+        result = plugin._execute_waypoint({"action": "list"})
+        assert result["current"] == "w0"
+        assert result["waypoints"][0]["is_current"] is True
+
+        # Create a new waypoint - it becomes current
+        plugin._execute_waypoint({"action": "create", "target": '"first"'})
+        result = plugin._execute_waypoint({"action": "list"})
+        assert result["current"] == "w1"
+        # w0 should no longer be current
+        w0 = next(wp for wp in result["waypoints"] if wp["id"] == "w0")
+        w1 = next(wp for wp in result["waypoints"] if wp["id"] == "w1")
+        assert w0["is_current"] is False
+        assert w1["is_current"] is True
+
+        # Restore to w0 - current should change back
+        mock_backup_manager.get_first_backup_per_file_by_waypoint.return_value = {}
+        plugin._execute_waypoint({"action": "restore", "target": "w0", "option": "code"})
+        result = plugin._execute_waypoint({"action": "list"})
+        assert result["current"] == "w0"
+        w0 = next(wp for wp in result["waypoints"] if wp["id"] == "w0")
+        w1 = next(wp for wp in result["waypoints"] if wp["id"] == "w1")
+        assert w0["is_current"] is True
+        assert w1["is_current"] is False
 
     def test_create_with_description(self, plugin):
         """Test creating waypoint with description."""
