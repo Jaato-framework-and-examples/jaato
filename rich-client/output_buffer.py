@@ -621,6 +621,9 @@ class OutputBuffer:
             style: Rich style for the message.
         """
         self._flush_current_block()
+        # Handle None or empty messages gracefully
+        if not message:
+            return
         # Handle multi-line messages
         for line in message.split('\n'):
             self._add_line("system", line, style)

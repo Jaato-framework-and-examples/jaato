@@ -27,6 +27,7 @@ from ..base import (
     UserCommand,
     CommandCompletion,
     CommandParameter,
+    PromptEnrichmentResult,
 )
 from ..model_provider.types import ToolSchema
 
@@ -69,6 +70,25 @@ class WaypointPlugin:
         self._serialize_history: Optional[Callable[[List["Message"]], str]] = None
         self._deserialize_history: Optional[Callable[[str], List["Message"]]] = None
         self._get_turn_index: Optional[Callable[[], int]] = None
+
+        # Pending restore notification for prompt enrichment
+        self._pending_restore_notification: Optional[Dict[str, Any]] = None
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        import os
+        import tempfile
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    f.write(f"[{ts}] [WAYPOINT] {msg}\n")
+            except Exception:
+                pass
 
     @property
     def name(self) -> str:
@@ -118,15 +138,21 @@ class WaypointPlugin:
             True if manager is available, False otherwise.
         """
         if self._manager is not None:
+            self._trace("_ensure_manager: manager already exists")
             return True
+
+        self._trace(f"_ensure_manager: creating manager, backup_manager={self._backup_manager}, registry={self._plugin_registry}")
 
         # Get backup_manager from file_edit plugin if not directly configured
         if not self._backup_manager and self._plugin_registry:
             file_edit_plugin = self._plugin_registry.get_plugin("file_edit")
+            self._trace(f"_ensure_manager: got file_edit_plugin={file_edit_plugin}")
             if file_edit_plugin and hasattr(file_edit_plugin, 'backup_manager'):
                 self._backup_manager = file_edit_plugin.backup_manager
+                self._trace(f"_ensure_manager: got backup_manager={self._backup_manager}")
 
         if not self._backup_manager:
+            self._trace("_ensure_manager: no backup_manager, returning False")
             return False
 
         self._manager = WaypointManager(
@@ -134,6 +160,7 @@ class WaypointPlugin:
             storage_path=self._storage_path,
             session_id=self._session_id,
         )
+        self._trace(f"_ensure_manager: created manager={self._manager}")
 
         # Wire up history callbacks if they were set before manager was created
         if self._get_history and self._set_history and self._serialize_history and self._deserialize_history:
@@ -206,6 +233,69 @@ class WaypointPlugin:
     def get_auto_approved_tools(self) -> List[str]:
         """Return waypoint command as auto-approved."""
         return ["waypoint"]
+
+    # ==================== Prompt Enrichment Protocol ====================
+
+    def subscribes_to_prompt_enrichment(self) -> bool:
+        """Subscribe to prompt enrichment to notify model of waypoint restores."""
+        return True
+
+    def enrich_prompt(self, prompt: str) -> PromptEnrichmentResult:
+        """Add waypoint restore notification to the prompt if a restore occurred.
+
+        When the user restores files to a previous waypoint, this informs the model
+        that file state has changed since its last actions. This prevents the model
+        from having stale context about files it previously modified.
+
+        Args:
+            prompt: The user's original prompt text.
+
+        Returns:
+            PromptEnrichmentResult with restore notification prepended if applicable.
+        """
+        if not self._pending_restore_notification:
+            return PromptEnrichmentResult(prompt=prompt)
+
+        # Consume the pending notification
+        notification = self._pending_restore_notification
+        self._pending_restore_notification = None
+
+        # Build the notification message
+        waypoint_id = notification["waypoint_id"]
+        description = notification["description"]
+        mode = notification["mode"]
+        files_restored = notification.get("files_restored", [])
+
+        if files_restored:
+            files_list = ", ".join(files_restored)
+            restore_info = (
+                f"<hidden><waypoint-restore>\n"
+                f"The user has restored files to waypoint {waypoint_id} ({description}).\n"
+                f"Files restored to their previous state: {files_list}\n"
+                f"Any changes you made to these files after this waypoint have been undone.\n"
+                f"</waypoint-restore></hidden>\n\n"
+            )
+        else:
+            restore_info = (
+                f"<hidden><waypoint-restore>\n"
+                f"The user has restored to waypoint {waypoint_id} ({description}).\n"
+                f"File state has been reverted to this waypoint.\n"
+                f"</waypoint-restore></hidden>\n\n"
+            )
+
+        self._trace(f"enrich_prompt: adding waypoint restore notification")
+
+        return PromptEnrichmentResult(
+            prompt=restore_info + prompt,
+            metadata={
+                "waypoint_restore": {
+                    "waypoint_id": waypoint_id,
+                    "description": description,
+                    "mode": mode,
+                    "files_restored": files_restored,
+                }
+            }
+        )
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing waypoint commands."""
@@ -358,7 +448,10 @@ class WaypointPlugin:
         Returns:
             Command result as dict.
         """
+        self._trace(f"_execute_waypoint: args={args}")
+
         if not self._ensure_manager():
+            self._trace("_execute_waypoint: manager not available")
             return {"error": "Waypoint plugin not available (file_edit plugin not initialized)"}
 
         # Parse action from args
@@ -370,6 +463,8 @@ class WaypointPlugin:
 
         target = args.get("target", "")
         option = args.get("option", "")
+
+        self._trace(f"_execute_waypoint: action={action}, target={target}, option={option}")
 
         # Handle list action (or no action)
         if action in ("list", "") or action is None:
@@ -491,7 +586,10 @@ class WaypointPlugin:
 
     def _restore_waypoint(self, waypoint_id: str, mode_str: str) -> Dict[str, Any]:
         """Restore to a waypoint."""
+        self._trace(f"_restore_waypoint: waypoint_id={waypoint_id}, mode_str={mode_str}")
+
         if not self._manager:
+            self._trace("_restore_waypoint: manager is None")
             return {"error": "Manager not initialized"}
 
         # Parse restore mode
@@ -503,9 +601,26 @@ class WaypointPlugin:
             elif mode_str in ("conversation", "conv", "history"):
                 mode = RestoreMode.CONVERSATION
 
+        self._trace(f"_restore_waypoint: calling manager.restore with mode={mode}")
         result = self._manager.restore(waypoint_id, mode)
+        self._trace(f"_restore_waypoint: result={result}")
 
-        return result.to_dict()
+        result_dict = result.to_dict()
+
+        # Store pending notification for successful restores (code-only or both)
+        # so the model is informed on the next prompt
+        if result.success and mode in (RestoreMode.CODE, RestoreMode.BOTH):
+            waypoint = self._manager.get(waypoint_id)
+            self._pending_restore_notification = {
+                "waypoint_id": waypoint_id,
+                "description": waypoint.description if waypoint else waypoint_id,
+                "mode": mode.value,
+                "files_restored": result.files_restored,
+            }
+            self._trace(f"_restore_waypoint: stored pending notification: {self._pending_restore_notification}")
+
+        self._trace(f"_restore_waypoint: returning {result_dict}")
+        return result_dict
 
     def _delete_waypoint(self, target: str) -> Dict[str, Any]:
         """Delete waypoint(s)."""

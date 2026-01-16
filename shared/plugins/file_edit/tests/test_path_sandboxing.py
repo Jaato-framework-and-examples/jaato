@@ -87,11 +87,20 @@ class TestFileEditPluginPathSandboxing:
         assert plugin._is_path_allowed(workspace) is True
 
     def test_path_blocked_outside_workspace(self, plugin_with_workspace, tmp_path):
-        """Test that paths outside workspace are blocked."""
+        """Test that paths outside workspace (and /tmp) are blocked."""
         plugin, workspace = plugin_with_workspace
 
-        outside_path = str(tmp_path / "other" / "file.txt")
+        # Path outside both workspace and /tmp - should be blocked
+        outside_path = "/etc/passwd"
         assert plugin._is_path_allowed(outside_path) is False
+
+    def test_path_allowed_within_tmp(self, plugin_with_workspace, tmp_path):
+        """Test that paths under /tmp are allowed even if outside workspace."""
+        plugin, workspace = plugin_with_workspace
+
+        # Path under /tmp but outside workspace - now ALLOWED
+        tmp_other_path = str(tmp_path / "other" / "file.txt")
+        assert plugin._is_path_allowed(tmp_other_path) is True
 
     def test_all_paths_allowed_without_workspace(self, plugin_no_workspace, tmp_path):
         """Test that all paths are allowed when workspace is not configured."""
@@ -101,7 +110,7 @@ class TestFileEditPluginPathSandboxing:
         assert plugin._is_path_allowed(str(tmp_path / "any/file.txt")) is True
 
     def test_authorized_external_path_allowed(self, plugin_with_workspace, tmp_path):
-        """Test that externally authorized paths are allowed."""
+        """Test that externally authorized paths (outside /tmp) are allowed via registry."""
         plugin, workspace = plugin_with_workspace
 
         # Create mock registry
@@ -109,14 +118,15 @@ class TestFileEditPluginPathSandboxing:
         mock_registry.is_path_authorized.return_value = True
         plugin.set_plugin_registry(mock_registry)
 
-        outside_path = str(tmp_path / "external" / "doc.md")
+        # Use a path outside /tmp so registry is actually consulted
+        outside_path = "/home/external/doc.md"
         assert plugin._is_path_allowed(outside_path) is True
 
         # Verify registry was consulted
         mock_registry.is_path_authorized.assert_called()
 
     def test_unauthorized_external_path_blocked(self, plugin_with_workspace, tmp_path):
-        """Test that unauthorized external paths are blocked."""
+        """Test that unauthorized external paths (outside /tmp) are blocked."""
         plugin, workspace = plugin_with_workspace
 
         # Create mock registry that returns False
@@ -124,7 +134,8 @@ class TestFileEditPluginPathSandboxing:
         mock_registry.is_path_authorized.return_value = False
         plugin.set_plugin_registry(mock_registry)
 
-        outside_path = str(tmp_path / "external" / "secret.txt")
+        # Use a path outside /tmp so it's actually blocked
+        outside_path = "/home/external/secret.txt"
         assert plugin._is_path_allowed(outside_path) is False
 
 
@@ -167,16 +178,29 @@ class TestReadFileSandboxing:
         assert "error" not in result
         assert result["content"] == "workspace file content"
 
-    def test_read_file_outside_workspace_blocked(self, plugin_with_workspace):
-        """Test reading a file outside workspace returns not found."""
-        plugin, workspace, outside_file = plugin_with_workspace
+    def test_read_file_outside_tmp_blocked(self, plugin_with_workspace):
+        """Test reading a file outside /tmp returns not found."""
+        plugin, workspace, _ = plugin_with_workspace
 
+        # Try to read a file outside /tmp - should be blocked
         result = plugin._execute_read_file({
-            "path": outside_file,
+            "path": "/etc/passwd",
         })
 
         assert "error" in result
         assert "not found" in result["error"].lower()
+
+    def test_read_file_tmp_outside_workspace_allowed(self, plugin_with_workspace):
+        """Test reading a file under /tmp but outside workspace is allowed."""
+        plugin, workspace, outside_file = plugin_with_workspace
+
+        # The outside_file is under /tmp so it should be allowed
+        result = plugin._execute_read_file({
+            "path": outside_file,
+        })
+
+        assert "error" not in result
+        assert result["content"] == "external file content"
 
     def test_read_file_outside_workspace_authorized(self, plugin_with_workspace):
         """Test reading an authorized external file succeeds."""

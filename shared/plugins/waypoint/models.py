@@ -106,15 +106,18 @@ class RestoreResult:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API response."""
-        return {
+        result = {
             "success": self.success,
             "waypoint_id": self.waypoint_id,
             "mode": self.mode.value,
             "files_restored": self.files_restored,
             "conversation_restored": self.conversation_restored,
             "message": self.message,
-            "error": self.error,
         }
+        # Only include error key if there's an actual error
+        if self.error:
+            result["error"] = self.error
+        return result
 
 
 # Initial waypoint ID - represents the state at session start

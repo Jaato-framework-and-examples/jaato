@@ -131,6 +131,57 @@ class TestFileSessionPlugin:
         result = plugin.delete("nonexistent")
         assert result is False
 
+    def test_delete_session_with_subdirectory(self, plugin, temp_dir):
+        """Test that deleting a session also removes its subdirectory."""
+        session_id = "session_with_subdir"
+
+        # Create session file
+        state = SessionState(
+            session_id=session_id,
+            history=[],
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+        plugin.save(state)
+
+        # Create session subdirectory with waypoints (simulating waypoint plugin)
+        session_dir = Path(temp_dir) / session_id
+        session_dir.mkdir(exist_ok=True)
+        waypoints_file = session_dir / "waypoints.json"
+        waypoints_file.write_text('{"waypoints": []}')
+
+        # Verify both exist
+        session_file = Path(temp_dir) / f"{session_id}.json"
+        assert session_file.exists()
+        assert session_dir.exists()
+        assert waypoints_file.exists()
+
+        # Delete session
+        result = plugin.delete(session_id)
+        assert result is True
+
+        # Verify both are gone
+        assert not session_file.exists()
+        assert not session_dir.exists()
+
+    def test_delete_orphaned_subdirectory(self, plugin, temp_dir):
+        """Test that delete removes orphaned subdirectory even without JSON file."""
+        session_id = "orphaned_session"
+
+        # Create only the subdirectory (no JSON file - simulates orphan)
+        session_dir = Path(temp_dir) / session_id
+        session_dir.mkdir(exist_ok=True)
+        (session_dir / "waypoints.json").write_text('{}')
+
+        # Verify subdirectory exists but no JSON
+        assert session_dir.exists()
+        assert not (Path(temp_dir) / f"{session_id}.json").exists()
+
+        # Delete should still clean up the subdirectory
+        result = plugin.delete(session_id)
+        assert result is True
+        assert not session_dir.exists()
+
     def test_get_latest(self, plugin):
         """Test getting the most recent session."""
         # No sessions yet
@@ -175,8 +226,6 @@ class TestFileSessionPlugin:
         command_names = [cmd.name for cmd in commands]
         assert "save" in command_names
         assert "resume" in command_names
-        assert "sessions" in command_names
-        assert "delete-session" in command_names
         assert "backtoturn" in command_names
 
     def test_get_tool_schemas(self, plugin):
@@ -324,7 +373,7 @@ class TestFileSessionPluginWithClient:
         """Test backtoturn with non-numeric turn ID."""
         plugin, _ = plugin_with_client
 
-        result = plugin._execute_backtoturn({"turn_id": "abc"})
+        result = plugin._execute_backtoturn({"args": ["abc"]})
 
         assert result["status"] == "error"
         assert "Invalid turn ID" in result["message"]
@@ -339,7 +388,7 @@ class TestFileSessionPluginWithClient:
             "message": "Reverted to turn 3 (removed 2 turn(s))."
         }
 
-        result = plugin._execute_backtoturn({"turn_id": "3"})
+        result = plugin._execute_backtoturn({"args": ["3"]})
 
         assert result["status"] == "ok"
         assert "Reverted to turn 3" in result["message"]
@@ -350,7 +399,7 @@ class TestFileSessionPluginWithClient:
         plugin, mock_client = plugin_with_client
         mock_client.revert_to_turn.side_effect = ValueError("Turn 10 does not exist.")
 
-        result = plugin._execute_backtoturn({"turn_id": "10"})
+        result = plugin._execute_backtoturn({"args": ["10"]})
 
         assert result["status"] == "error"
         assert "Turn 10 does not exist" in result["message"]

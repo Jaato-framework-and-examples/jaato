@@ -154,3 +154,81 @@ class TestCommandCompletions:
         """Test no completions for wrong command."""
         completions = plugin.get_command_completions("other", [])
         assert completions == []
+
+
+class TestPromptEnrichment:
+    """Test prompt enrichment for waypoint restore notifications."""
+
+    def test_subscribes_to_prompt_enrichment(self, plugin):
+        """Test that plugin subscribes to prompt enrichment."""
+        assert plugin.subscribes_to_prompt_enrichment() is True
+
+    def test_no_enrichment_without_restore(self, plugin):
+        """Test that prompt is unchanged when no restore has occurred."""
+        result = plugin.enrich_prompt("Hello, world!")
+        assert result.prompt == "Hello, world!"
+        assert "waypoint_restore" not in result.metadata
+
+    def test_enrichment_after_code_restore(self, plugin, mock_backup_manager):
+        """Test that prompt is enriched after a code restore."""
+        # Create a waypoint
+        plugin._execute_waypoint({"action": "create", "target": '"test waypoint"'})
+
+        # Mock that files were restored
+        mock_backup_manager.get_first_backup_per_file_by_waypoint.return_value = {
+            "/path/to/file.py": MagicMock(backup_path=Path("/backup/file.py"))
+        }
+
+        # Restore to the waypoint
+        result = plugin._execute_waypoint({
+            "action": "restore",
+            "target": "w1",
+            "option": "code"
+        })
+        assert result.get("success") is True
+
+        # Now enrich a prompt - should include restore notification
+        enrich_result = plugin.enrich_prompt("What's in the file?")
+
+        # Check for hidden-wrapped waypoint-restore notification
+        assert "<hidden>" in enrich_result.prompt
+        assert "<waypoint-restore>" in enrich_result.prompt
+        assert "w1" in enrich_result.prompt
+        assert "test waypoint" in enrich_result.prompt
+        assert "What's in the file?" in enrich_result.prompt
+        assert enrich_result.metadata.get("waypoint_restore") is not None
+
+    def test_enrichment_consumed_after_use(self, plugin, mock_backup_manager):
+        """Test that the restore notification is only shown once."""
+        # Create and restore
+        plugin._execute_waypoint({"action": "create", "target": '"test"'})
+        plugin._execute_waypoint({
+            "action": "restore",
+            "target": "w1",
+            "option": "code"
+        })
+
+        # First enrichment includes notification (hidden-wrapped)
+        result1 = plugin.enrich_prompt("First prompt")
+        assert "<hidden>" in result1.prompt
+        assert "<waypoint-restore>" in result1.prompt
+
+        # Second enrichment should NOT include notification (consumed)
+        result2 = plugin.enrich_prompt("Second prompt")
+        assert "<hidden>" not in result2.prompt
+        assert result2.prompt == "Second prompt"
+
+    def test_no_enrichment_for_conversation_only_restore(self, plugin):
+        """Test that conversation-only restore doesn't trigger enrichment."""
+        plugin._execute_waypoint({"action": "create", "target": '"test"'})
+
+        # Restore conversation only (not files)
+        plugin._execute_waypoint({
+            "action": "restore",
+            "target": "w1",
+            "option": "conversation"
+        })
+
+        # Should not have pending notification
+        result = plugin.enrich_prompt("Hello")
+        assert "<hidden>" not in result.prompt
