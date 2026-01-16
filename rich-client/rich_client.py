@@ -1622,7 +1622,7 @@ class RichClient:
         )
         if self._input_handler.has_completion:
             self._display.add_system_message(
-                "Tab completion enabled. Use @file to reference files, /command for slash commands.",
+                "Tab completion enabled. Use @file to reference files, Tab for command suggestions.",
                 style="system_info"
             )
         self._display.add_system_message(
@@ -3221,7 +3221,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     display.add_system_message(release_name, style="system_version")
                     if input_handler.has_completion:
                         display.add_system_message(
-                            "Tab completion enabled. Use @file to reference files, /command for slash commands.",
+                            "Tab completion enabled. Use @file to reference files, Tab for command suggestions.",
                             style="system_info"
                         )
                     display.add_system_message(
