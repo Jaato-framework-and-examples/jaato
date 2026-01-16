@@ -95,7 +95,7 @@ class TestCommandExecution:
 
         # Restore to w0 - current should change back
         mock_backup_manager.get_first_backup_per_file_by_waypoint.return_value = {}
-        plugin._execute_waypoint({"action": "restore", "target": "w0", "option": "code"})
+        plugin._execute_waypoint({"action": "restore", "target": "w0"})
         result = plugin._execute_waypoint({"action": "list"})
         assert result["current"] == "w0"
         w0 = next(wp for wp in result["waypoints"] if wp["id"] == "w0")
@@ -112,11 +112,11 @@ class TestCommandExecution:
         assert result["success"] is True
         assert result["id"] == "w1"
 
-    def test_create_auto_description(self, plugin):
-        """Test creating waypoint with auto-generated description."""
+    def test_create_without_description_returns_error(self, plugin):
+        """Test that creating waypoint without description returns error."""
         result = plugin._execute_waypoint({"action": "create"})
-        assert result["success"] is True
-        assert result["description"]  # Should have some description
+        assert "error" in result
+        assert "Description required" in result["error"]
 
     def test_delete(self, plugin):
         """Test deleting a waypoint."""
@@ -199,8 +199,8 @@ class TestPromptEnrichment:
         assert result.prompt == "Hello, world!"
         assert "waypoint_restore" not in result.metadata
 
-    def test_enrichment_after_code_restore(self, plugin, mock_backup_manager):
-        """Test that prompt is enriched after a code restore."""
+    def test_enrichment_after_restore(self, plugin, mock_backup_manager):
+        """Test that prompt is enriched after a restore."""
         # Create a waypoint
         plugin._execute_waypoint({"action": "create", "target": '"test waypoint"'})
 
@@ -213,7 +213,6 @@ class TestPromptEnrichment:
         result = plugin._execute_waypoint({
             "action": "restore",
             "target": "w1",
-            "option": "code"
         })
         assert result.get("success") is True
 
@@ -235,7 +234,6 @@ class TestPromptEnrichment:
         plugin._execute_waypoint({
             "action": "restore",
             "target": "w1",
-            "option": "code"
         })
 
         # First enrichment includes notification (hidden-wrapped)
@@ -247,18 +245,3 @@ class TestPromptEnrichment:
         result2 = plugin.enrich_prompt("Second prompt")
         assert "<hidden>" not in result2.prompt
         assert result2.prompt == "Second prompt"
-
-    def test_no_enrichment_for_conversation_only_restore(self, plugin):
-        """Test that conversation-only restore doesn't trigger enrichment."""
-        plugin._execute_waypoint({"action": "create", "target": '"test"'})
-
-        # Restore conversation only (not files)
-        plugin._execute_waypoint({
-            "action": "restore",
-            "target": "w1",
-            "option": "conversation"
-        })
-
-        # Should not have pending notification
-        result = plugin.enrich_prompt("Hello")
-        assert "<hidden>" not in result.prompt

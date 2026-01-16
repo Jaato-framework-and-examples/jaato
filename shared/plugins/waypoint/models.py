@@ -10,21 +10,7 @@ that led to them.
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
 from typing import Any, Dict, List, Optional
-
-
-class RestoreMode(Enum):
-    """How to restore when returning to a waypoint."""
-
-    CODE = "code"
-    """Restore only file changes, keep current conversation."""
-
-    CONVERSATION = "conversation"
-    """Restore only conversation history, keep current file changes."""
-
-    BOTH = "both"
-    """Restore both files and conversation to the waypoint state."""
 
 
 @dataclass
@@ -89,18 +75,14 @@ class RestoreResult:
     Attributes:
         success: Whether the restore operation succeeded.
         waypoint_id: The waypoint that was restored to.
-        mode: Which restore mode was used.
-        files_restored: List of files that were restored (for CODE/BOTH modes).
-        conversation_restored: Whether conversation was restored.
+        files_restored: List of files that were restored.
         message: Human-readable summary of what was restored.
         error: Error message if success is False.
     """
 
     success: bool
     waypoint_id: str
-    mode: RestoreMode
     files_restored: List[str] = field(default_factory=list)
-    conversation_restored: bool = False
     message: str = ""
     error: Optional[str] = None
 
@@ -109,9 +91,7 @@ class RestoreResult:
         result = {
             "success": self.success,
             "waypoint_id": self.waypoint_id,
-            "mode": self.mode.value,
             "files_restored": self.files_restored,
-            "conversation_restored": self.conversation_restored,
             "message": self.message,
         }
         # Only include error key if there's an actual error

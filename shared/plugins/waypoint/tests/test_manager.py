@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from ..models import Waypoint, RestoreMode, RestoreResult, INITIAL_WAYPOINT_ID
+from ..models import Waypoint, RestoreResult, INITIAL_WAYPOINT_ID
 from ..manager import WaypointManager
 
 
@@ -197,8 +197,8 @@ class TestWaypointRestore:
         assert result.success is False
         assert "not found" in result.error
 
-    def test_restore_code_only(self, manager, mock_backup_manager):
-        """Test restoring code only."""
+    def test_restore_files(self, manager, mock_backup_manager):
+        """Test restoring files to waypoint state."""
         manager.create("checkpoint")
 
         # Setup mock backups
@@ -206,12 +206,10 @@ class TestWaypointRestore:
             "/path/to/file.py": MagicMock(backup_path=Path("/backup/file.py"))
         }
 
-        result = manager.restore("w1", mode=RestoreMode.CODE)
+        result = manager.restore("w1")
 
         assert result.success is True
-        assert result.mode == RestoreMode.CODE
         assert len(result.files_restored) == 1
-        assert result.conversation_restored is False
 
     def test_restore_updates_current_waypoint(self, manager, mock_backup_manager):
         """Test that restore updates current waypoint."""
