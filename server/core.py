@@ -510,6 +510,10 @@ class JaatoServer:
             "cli": {
                 "workspace_root": self._workspace_path,
             },
+            # Pass session_id to waypoint plugin for session-scoped waypoint storage
+            "waypoint": {
+                "session_id": self._session_id,
+            },
         }
         self.registry.expose_all(plugin_configs)
         self.todo_plugin = self.registry.get_plugin("todo")
