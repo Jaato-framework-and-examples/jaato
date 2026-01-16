@@ -16,22 +16,18 @@ of your collaboration - both the code changes *and* the conversation that led to
 
 When you create a waypoint, jaato captures:
 - **Code state**: All files that have been modified are tracked via backups
-- **Conversation state**: The full conversation history at that moment
+- **Conversation metadata**: Message count and preview for reference
 
-When you restore to a waypoint, you can choose to restore:
-- **Code only**: Revert files while keeping the current conversation
-- **Conversation only**: Rewind the conversation while keeping file changes
-- **Both**: Return completely to the waypoint state
+When you restore to a waypoint:
+- Files are reverted to their state at that waypoint
+- The model is automatically notified via prompt enrichment, so it knows the file state has changed
 
 ## Usage
 
 ```
 waypoint                         # List all waypoints
-waypoint create                  # Create with auto-generated description
-waypoint create "before refactor" # Create with custom description
-waypoint restore w1              # Restore both code and conversation
-waypoint restore w1 code         # Restore code only
-waypoint restore w1 conversation # Restore conversation only
+waypoint create "before refactor" # Create with description
+waypoint restore w1              # Restore files to waypoint state
 waypoint delete w1               # Delete a waypoint
 waypoint delete all              # Delete all user waypoints
 waypoint info w1                 # Show detailed waypoint info
@@ -75,14 +71,12 @@ plugin.initialize({
 })
 ```
 
-For conversation restoration, session callbacks must be set:
+For capturing conversation metadata (message counts, previews), set callbacks:
 
 ```python
 plugin.set_session_callbacks(
     get_history=session.get_history,
-    set_history=session.reset_session,
     serialize_history=serialize_history,
-    deserialize_history=deserialize_history,
 )
 ```
 
@@ -93,22 +87,11 @@ plugin.set_session_callbacks(
 | Command | Description |
 |---------|-------------|
 | `waypoint` | List all waypoints with their IDs and descriptions |
-| `waypoint create` | Create a new waypoint (auto-generates description) |
-| `waypoint create "desc"` | Create with custom description |
-| `waypoint restore <id>` | Restore to waypoint (both code and conversation) |
-| `waypoint restore <id> code` | Restore code only |
-| `waypoint restore <id> conversation` | Restore conversation only |
+| `waypoint create "desc"` | Create with description |
+| `waypoint restore <id>` | Restore files to waypoint state |
 | `waypoint delete <id>` | Delete a specific waypoint |
 | `waypoint delete all` | Delete all user-created waypoints |
 | `waypoint info <id>` | Show detailed information about a waypoint |
-
-### Restore Modes
-
-| Mode | Behavior |
-|------|----------|
-| Both (default) | Restores files and rewinds conversation |
-| Code | Reverts files, keeps current conversation |
-| Conversation | Rewinds conversation, keeps current files |
 
 ## Best Practices
 
@@ -120,9 +103,6 @@ plugin.set_session_callbacks(
 3. **Combine with git**: Waypoints are for session-level undo, git is for
    permanent history. Create git commits for stable states, waypoints for
    exploration
-
-4. **Code-only restore for iteration**: If the model's approach is right but
-   execution is wrong, use `restore code` to keep the good conversation context
 
 ## Limitations
 

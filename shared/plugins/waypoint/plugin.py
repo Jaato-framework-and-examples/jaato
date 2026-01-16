@@ -20,9 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
-from .models import RestoreMode, INITIAL_WAYPOINT_ID
+from .models import INITIAL_WAYPOINT_ID
 from .manager import WaypointManager
-from .suggester import DescriptionSuggester, create_suggester
 from ..base import (
     UserCommand,
     CommandCompletion,
@@ -44,11 +43,8 @@ class WaypointPlugin:
 
     Commands:
         waypoint              - List all waypoints
-        waypoint create       - Create a new waypoint
         waypoint create "desc" - Create with description
-        waypoint restore N    - Restore to waypoint N (both code + conversation)
-        waypoint restore N code - Restore code only
-        waypoint restore N conversation - Restore conversation only
+        waypoint restore N    - Restore files to waypoint N
         waypoint delete N     - Delete waypoint N
         waypoint delete all   - Delete all user waypoints
         waypoint info N       - Show detailed info about waypoint N
@@ -57,7 +53,6 @@ class WaypointPlugin:
     def __init__(self):
         """Initialize the waypoint plugin."""
         self._manager: Optional[WaypointManager] = None
-        self._suggester: Optional[DescriptionSuggester] = None
         self._backup_manager: Optional["BackupManager"] = None
         self._plugin_registry = None
         self._storage_path: Optional[Path] = None
@@ -66,9 +61,7 @@ class WaypointPlugin:
 
         # Session callbacks (set via set_session_callbacks)
         self._get_history: Optional[Callable[[], List["Message"]]] = None
-        self._set_history: Optional[Callable[[List["Message"]], None]] = None
         self._serialize_history: Optional[Callable[[List["Message"]], str]] = None
-        self._deserialize_history: Optional[Callable[[str], List["Message"]]] = None
         self._get_turn_index: Optional[Callable[[], int]] = None
 
         # Pending restore notification for prompt enrichment
@@ -117,7 +110,6 @@ class WaypointPlugin:
         if storage_path:
             self._storage_path = Path(storage_path)
 
-        self._suggester = create_suggester()
         self._initialized = True
 
     def set_plugin_registry(self, registry) -> None:
@@ -163,12 +155,10 @@ class WaypointPlugin:
         self._trace(f"_ensure_manager: created manager={self._manager}")
 
         # Wire up history callbacks if they were set before manager was created
-        if self._get_history and self._set_history and self._serialize_history and self._deserialize_history:
+        if self._get_history and self._serialize_history:
             self._manager.set_history_callbacks(
                 get_history=self._get_history,
-                set_history=self._set_history,
                 serialize_history=self._serialize_history,
-                deserialize_history=self._deserialize_history,
             )
 
         return True
@@ -176,44 +166,33 @@ class WaypointPlugin:
     def shutdown(self) -> None:
         """Shutdown the plugin."""
         self._manager = None
-        self._suggester = None
         self._plugin_registry = None
         self._initialized = False
 
     def set_session_callbacks(
         self,
         get_history: Callable[[], List["Message"]],
-        set_history: Callable[[List["Message"]], None],
         serialize_history: Callable[[List["Message"]], str],
-        deserialize_history: Callable[[str], List["Message"]],
         get_turn_index: Optional[Callable[[], int]] = None,
     ) -> None:
         """Set callbacks for session state access.
 
-        This must be called after initialize() to enable conversation
-        restoration functionality.
+        This must be called after initialize() to enable capturing
+        conversation metadata when creating waypoints.
 
         Args:
             get_history: Returns current conversation history.
-            set_history: Replaces conversation history.
             serialize_history: Converts history to JSON string.
-            deserialize_history: Converts JSON string to history.
             get_turn_index: Returns current turn index (optional).
         """
         self._get_history = get_history
-        self._set_history = set_history
-        self._get_turn_index = get_turn_index
-
-        # Store for later use with manager (when lazily created)
         self._serialize_history = serialize_history
-        self._deserialize_history = deserialize_history
+        self._get_turn_index = get_turn_index
 
         if self._manager:
             self._manager.set_history_callbacks(
                 get_history=get_history,
-                set_history=set_history,
                 serialize_history=serialize_history,
-                deserialize_history=deserialize_history,
             )
 
     def get_tool_schemas(self) -> List[ToolSchema]:
@@ -263,7 +242,6 @@ class WaypointPlugin:
         # Build the notification message
         waypoint_id = notification["waypoint_id"]
         description = notification["description"]
-        mode = notification["mode"]
         files_restored = notification.get("files_restored", [])
 
         if files_restored:
@@ -291,7 +269,6 @@ class WaypointPlugin:
                 "waypoint_restore": {
                     "waypoint_id": waypoint_id,
                     "description": description,
-                    "mode": mode,
                     "files_restored": files_restored,
                 }
             }
@@ -312,12 +289,7 @@ class WaypointPlugin:
                     ),
                     CommandParameter(
                         name="target",
-                        description="Waypoint ID (e.g., w1) or 'all' for delete",
-                        required=False,
-                    ),
-                    CommandParameter(
-                        name="option",
-                        description="For restore: 'code', 'conversation', or omit for both. For create: description",
+                        description="Waypoint ID (e.g., w1), 'all' for delete, or description for create (required)",
                         required=False,
                         capture_rest=True,
                     ),
@@ -360,22 +332,12 @@ class WaypointPlugin:
             action = args[0].lower()
 
             if action == "create":
-                # For create, suggest a description from the model
+                # Description is required for create
                 if len(args) == 1:
-                    # Return ghost text suggestion
-                    if self._suggester:
-                        suggestion = self._suggester.get_cached_suggestion()
-                        if suggestion:
-                            return [
-                                CommandCompletion(
-                                    f'"{suggestion}"',
-                                    "Suggested description"
-                                )
-                            ]
                     return [
                         CommandCompletion(
                             '"',
-                            "Enter description in quotes"
+                            "Enter description (required)"
                         )
                     ]
                 return []
@@ -406,38 +368,9 @@ class WaypointPlugin:
                             CommandCompletion(wp.id, desc)
                         )
 
-                # For restore, also suggest mode after waypoint ID
-                if action == "restore" and len(args) == 2:
-                    return completions
-
-                if action == "restore" and len(args) == 3:
-                    option = args[2].lower() if len(args) > 2 else ""
-                    modes = [
-                        ("code", "Restore files only"),
-                        ("conversation", "Restore conversation only"),
-                    ]
-                    return [
-                        CommandCompletion(m, desc)
-                        for m, desc in modes
-                        if m.startswith(option)
-                    ]
-
                 return completions
 
         return []
-
-    def get_description_suggestion(self) -> Optional[str]:
-        """Get a model-generated description suggestion for ghost text.
-
-        This is called asynchronously by the client when the user is
-        entering the description for a new waypoint.
-
-        Returns:
-            Suggested description, or None if unavailable.
-        """
-        if self._suggester:
-            return self._suggester.suggest()
-        return None
 
     def _execute_waypoint(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the waypoint command.
@@ -462,9 +395,8 @@ class WaypointPlugin:
             action = "list"
 
         target = args.get("target", "")
-        option = args.get("option", "")
 
-        self._trace(f"_execute_waypoint: action={action}, target={target}, option={option}")
+        self._trace(f"_execute_waypoint: action={action}, target={target}")
 
         # Handle list action (or no action)
         if action in ("list", "") or action is None:
@@ -472,26 +404,15 @@ class WaypointPlugin:
 
         # Handle create action
         if action == "create":
-            description = ""
-            # Check if target is actually a description (starts with quote)
-            if target and (target.startswith('"') or target.startswith("'")):
-                description = target.strip('"\'')
-                if option:
-                    description += " " + option.strip('"\'')
-            elif option:
-                description = option.strip('"\'')
-            elif target and not target.startswith("w"):
-                description = target
-                if option:
-                    description += " " + option
-
+            # Target contains the description (with capture_rest)
+            description = target.strip('"\'') if target else ""
             return self._create_waypoint(description)
 
         # Handle restore action
         if action == "restore":
             if not target:
-                return {"error": "Usage: waypoint restore <id> [code|conversation]"}
-            return self._restore_waypoint(target, option)
+                return {"error": "Usage: waypoint restore <id>"}
+            return self._restore_waypoint(target)
 
         # Handle delete action
         if action == "delete":
@@ -543,20 +464,20 @@ class WaypointPlugin:
         }
 
     def _create_waypoint(self, description: str) -> Dict[str, Any]:
-        """Create a new waypoint."""
+        """Create a new waypoint.
+
+        Args:
+            description: Required description for the waypoint.
+
+        Returns:
+            Result dict with success/error status.
+        """
         if not self._manager:
             return {"error": "Manager not initialized"}
 
-        # Generate description if not provided
+        # Description is required
         if not description:
-            if self._suggester:
-                suggestion = self._suggester.suggest()
-                if suggestion:
-                    description = suggestion
-                else:
-                    description = datetime.now().strftime("checkpoint %H:%M")
-            else:
-                description = datetime.now().strftime("checkpoint %H:%M")
+            return {"error": "Description required. Usage: waypoint create \"your description\""}
 
         # Get current turn index if available
         turn_index = 0
@@ -586,37 +507,27 @@ class WaypointPlugin:
             "message": f"Waypoint {waypoint.id} created: {waypoint.description}",
         }
 
-    def _restore_waypoint(self, waypoint_id: str, mode_str: str) -> Dict[str, Any]:
-        """Restore to a waypoint."""
-        self._trace(f"_restore_waypoint: waypoint_id={waypoint_id}, mode_str={mode_str}")
+    def _restore_waypoint(self, waypoint_id: str) -> Dict[str, Any]:
+        """Restore files to a waypoint state."""
+        self._trace(f"_restore_waypoint: waypoint_id={waypoint_id}")
 
         if not self._manager:
             self._trace("_restore_waypoint: manager is None")
             return {"error": "Manager not initialized"}
 
-        # Parse restore mode
-        mode = RestoreMode.BOTH
-        if mode_str:
-            mode_str = mode_str.lower().strip()
-            if mode_str in ("code", "files"):
-                mode = RestoreMode.CODE
-            elif mode_str in ("conversation", "conv", "history"):
-                mode = RestoreMode.CONVERSATION
-
-        self._trace(f"_restore_waypoint: calling manager.restore with mode={mode}")
-        result = self._manager.restore(waypoint_id, mode)
+        self._trace(f"_restore_waypoint: calling manager.restore")
+        result = self._manager.restore(waypoint_id)
         self._trace(f"_restore_waypoint: result={result}")
 
         result_dict = result.to_dict()
 
-        # Store pending notification for successful restores (code-only or both)
+        # Store pending notification for prompt enrichment
         # so the model is informed on the next prompt
-        if result.success and mode in (RestoreMode.CODE, RestoreMode.BOTH):
+        if result.success:
             waypoint = self._manager.get(waypoint_id)
             self._pending_restore_notification = {
                 "waypoint_id": waypoint_id,
                 "description": waypoint.description if waypoint else waypoint_id,
-                "mode": mode.value,
                 "files_restored": result.files_restored,
             }
             self._trace(f"_restore_waypoint: stored pending notification: {self._pending_restore_notification}")

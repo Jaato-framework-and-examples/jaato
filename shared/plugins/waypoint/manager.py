@@ -13,7 +13,6 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .models import (
     Waypoint,
-    RestoreMode,
     RestoreResult,
     INITIAL_WAYPOINT_ID,
     INITIAL_WAYPOINT_DESCRIPTION,
@@ -62,11 +61,10 @@ class WaypointManager:
 
         self._waypoints: Dict[str, Waypoint] = {}
 
-        # Callbacks for session manipulation (set by plugin)
+        # Callbacks for session info (set by plugin)
+        # Used to capture history snapshots for waypoint metadata
         self._get_history: Optional[Callable[[], List["Message"]]] = None
-        self._set_history: Optional[Callable[[List["Message"]], None]] = None
         self._serialize_history: Optional[Callable[[List["Message"]], str]] = None
-        self._deserialize_history: Optional[Callable[[str], List["Message"]]] = None
 
         # Load existing waypoints
         self._load()
@@ -77,25 +75,20 @@ class WaypointManager:
     def set_history_callbacks(
         self,
         get_history: Callable[[], List["Message"]],
-        set_history: Callable[[List["Message"]], None],
         serialize_history: Callable[[List["Message"]], str],
-        deserialize_history: Callable[[str], List["Message"]],
     ) -> None:
-        """Set callbacks for accessing and manipulating session history.
+        """Set callbacks for capturing session history snapshots.
 
-        These callbacks are provided by the plugin to enable conversation
-        restoration without tight coupling to session internals.
+        These callbacks enable capturing conversation metadata when creating
+        waypoints (message count, preview). The snapshots are stored for
+        informational purposes but not used for restoration.
 
         Args:
             get_history: Returns current conversation history.
-            set_history: Replaces conversation history.
             serialize_history: Converts history to JSON string.
-            deserialize_history: Converts JSON string to history.
         """
         self._get_history = get_history
-        self._set_history = set_history
         self._serialize_history = serialize_history
-        self._deserialize_history = deserialize_history
 
     def _ensure_initial_waypoint(self) -> None:
         """Ensure the implicit initial waypoint (w0) exists."""
@@ -284,16 +277,14 @@ class WaypointManager:
 
         return len(to_delete)
 
-    def restore(
-        self,
-        waypoint_id: str,
-        mode: RestoreMode = RestoreMode.BOTH,
-    ) -> RestoreResult:
-        """Restore to a waypoint.
+    def restore(self, waypoint_id: str) -> RestoreResult:
+        """Restore files to their state at a waypoint.
+
+        Restores only file changes. The model is notified of the restoration
+        through prompt enrichment, so conversation history is not modified.
 
         Args:
             waypoint_id: The waypoint ID to restore to.
-            mode: What to restore (CODE, CONVERSATION, or BOTH).
 
         Returns:
             RestoreResult with details of what was restored.
@@ -304,42 +295,26 @@ class WaypointManager:
             return RestoreResult(
                 success=False,
                 waypoint_id=waypoint_id,
-                mode=mode,
                 error=f"Waypoint not found: {waypoint_id}",
             )
 
-        files_restored: List[str] = []
-        conversation_restored = False
-
-        # Restore code if requested
-        if mode in (RestoreMode.CODE, RestoreMode.BOTH):
-            files_restored = self._restore_code(waypoint_id)
-
-        # Restore conversation if requested
-        if mode in (RestoreMode.CONVERSATION, RestoreMode.BOTH):
-            conversation_restored = self._restore_conversation(waypoint)
+        # Restore files to their state at the waypoint
+        files_restored = self._restore_code(waypoint_id)
 
         # After restoration, set BackupManager to tag future backups
         # with this waypoint (we're now diverging from it again)
         self._backup_manager.set_current_waypoint(waypoint_id)
 
         # Build result message
-        parts = []
         if files_restored:
-            parts.append(f"restored {len(files_restored)} file(s)")
-        if conversation_restored:
-            parts.append(f"restored conversation to {waypoint.message_count} messages")
-
-        message = f"Returned to waypoint {waypoint_id}"
-        if parts:
-            message += f": {', '.join(parts)}"
+            message = f"Returned to waypoint {waypoint_id}: restored {len(files_restored)} file(s)"
+        else:
+            message = f"Returned to waypoint {waypoint_id}: no files to restore"
 
         return RestoreResult(
             success=True,
             waypoint_id=waypoint_id,
-            mode=mode,
             files_restored=files_restored,
-            conversation_restored=conversation_restored,
             message=message,
         )
 
@@ -372,30 +347,6 @@ class WaypointManager:
                 restored_files.append(original_path)
 
         return restored_files
-
-    def _restore_conversation(self, waypoint: Waypoint) -> bool:
-        """Restore conversation history to the waypoint state.
-
-        Args:
-            waypoint: The waypoint to restore conversation from.
-
-        Returns:
-            True if conversation was restored, False otherwise.
-        """
-        if not self._set_history or not self._deserialize_history:
-            return False
-
-        if waypoint.history_snapshot is None:
-            # Empty history at this waypoint (e.g., w0)
-            self._set_history([])
-            return True
-
-        try:
-            history = self._deserialize_history(waypoint.history_snapshot)
-            self._set_history(history)
-            return True
-        except (json.JSONDecodeError, ValueError):
-            return False
 
     def get_info(self, waypoint_id: str) -> Optional[Dict[str, Any]]:
         """Get detailed information about a waypoint.
