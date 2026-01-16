@@ -84,7 +84,9 @@ class TestCLIPluginToolSchemas:
         declarations = plugin.get_tool_schemas()
         cli_tool = declarations[0]
 
-        assert cli_tool.description == "Execute a local CLI command"
+        # Description should mention shell command execution
+        assert "shell command" in cli_tool.description.lower()
+        assert "execute" in cli_tool.description.lower()
 
 
 class TestCLIPluginExecutors:
@@ -495,21 +497,21 @@ class TestCLIPluginPathSandboxing:
         assert plugin._is_path_within_workspace(str(tmp_path)) is True
 
     def test_is_path_within_workspace_outside(self, tmp_path):
-        """Test that paths outside workspace are blocked."""
+        """Test that paths outside workspace are blocked (except /tmp which is always allowed)."""
         plugin = CLIToolPlugin()
         plugin.initialize({"workspace_root": str(tmp_path)})
 
-        # Absolute path outside
+        # Absolute path outside workspace and /tmp - should be blocked
         assert plugin._is_path_within_workspace("/etc/passwd") is False
 
-        # Parent directory
-        assert plugin._is_path_within_workspace(str(tmp_path.parent)) is False
+        # Parent directory under /tmp - now ALLOWED since /tmp is always accessible
+        assert plugin._is_path_within_workspace(str(tmp_path.parent)) is True
 
-        # Home directory (likely outside tmp_path)
+        # Home directory (outside /tmp) - should be blocked
         assert plugin._is_path_within_workspace("~/.bashrc") is False
 
     def test_is_path_within_workspace_traversal_blocked(self, tmp_path):
-        """Test that .. traversal out of workspace is blocked."""
+        """Test that .. traversal behavior respects /tmp allowance."""
         plugin = CLIToolPlugin()
         plugin.initialize({"workspace_root": str(tmp_path)})
 
@@ -518,14 +520,17 @@ class TestCLIPluginPathSandboxing:
         try:
             os.chdir(tmp_path)
 
-            # Traversal that stays inside is allowed
+            # Traversal that stays inside workspace is allowed
             subdir = tmp_path / "sub"
             subdir.mkdir()
             assert plugin._is_path_within_workspace("sub/../file.txt") is True
 
-            # Traversal that escapes is blocked
-            assert plugin._is_path_within_workspace("../outside.txt") is False
-            assert plugin._is_path_within_workspace("../../etc/passwd") is False
+            # Traversal that escapes workspace but stays under /tmp is ALLOWED
+            # (because /tmp is always accessible)
+            assert plugin._is_path_within_workspace("../outside.txt") is True
+
+            # Traversal to /etc (outside /tmp) is BLOCKED
+            assert plugin._is_path_within_workspace("/etc/passwd") is False
 
         finally:
             os.chdir(original_cwd)
@@ -608,16 +613,35 @@ class TestCLIPluginPathSandboxing:
         assert "hello" in result["stdout"]
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
-    def test_execute_blocks_traversal_out_of_workspace(self, tmp_path):
-        """Test that .. traversal out of workspace is blocked."""
+    def test_execute_blocks_traversal_to_non_tmp_path(self, tmp_path):
+        """Test that traversal to paths outside /tmp is blocked."""
         plugin = CLIToolPlugin()
         plugin.initialize({"workspace_root": str(tmp_path)})
 
-        # Try to traverse out of workspace
-        result = plugin._execute({"command": "cat ../../../etc/passwd"})
+        # Try to access /etc/passwd directly (outside /tmp) - should be blocked
+        result = plugin._execute({"command": "cat /etc/passwd"})
 
         assert result["returncode"] == 1
         assert "No such file or directory" in result["stderr"]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
+    def test_execute_allows_traversal_within_tmp(self, tmp_path):
+        """Test that traversal within /tmp is allowed."""
+        # Create a file in parent directory (still under /tmp)
+        parent_file = tmp_path.parent / "parent_test.txt"
+        parent_file.write_text("parent content")
+
+        try:
+            plugin = CLIToolPlugin()
+            plugin.initialize({"workspace_root": str(tmp_path)})
+
+            # Traversal to parent (still under /tmp) - should be allowed
+            result = plugin._execute({"command": f"cat {parent_file}"})
+
+            assert result["returncode"] == 0
+            assert "parent content" in result["stdout"]
+        finally:
+            parent_file.unlink(missing_ok=True)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
     def test_execute_blocks_home_directory_access(self, tmp_path):

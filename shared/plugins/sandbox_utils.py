@@ -29,6 +29,7 @@ temporary file operations. This can be disabled via the allow_tmp parameter.
 """
 
 import os
+import tempfile
 from typing import Optional, Tuple
 
 
@@ -36,7 +37,7 @@ from typing import Optional, Tuple
 JAATO_CONFIG_DIR = ".jaato"
 
 # System temp directories that are allowed by default
-SYSTEM_TEMP_PATHS = ["/tmp"]
+SYSTEM_TEMP_PATHS = ["/tmp", tempfile.gettempdir()]
 
 
 def is_jaato_path(path: str, workspace_root: str) -> bool:
@@ -193,18 +194,19 @@ def is_path_within_jaato_boundary(
     return True
 
 
-def is_temp_path(path: str) -> bool:
+def is_under_temp_path(path: str) -> bool:
     """Check if a path is under a system temp directory.
 
     Args:
-        path: Path to check (should be absolute/normalized).
+        path: Path to check (should be absolute or normalized).
 
     Returns:
-        True if path is under /tmp or another system temp directory.
+        True if path is under /tmp or system temp directory.
     """
     normalized = os.path.normpath(path)
     for temp_path in SYSTEM_TEMP_PATHS:
-        if normalized == temp_path or normalized.startswith(temp_path + os.sep):
+        temp_normalized = os.path.normpath(temp_path)
+        if normalized == temp_normalized or normalized.startswith(temp_normalized + os.sep):
             return True
     return False
 
@@ -221,13 +223,13 @@ def check_path_with_jaato_containment(
     1. Standard workspace sandboxing (paths must be within workspace)
     2. Special .jaato handling (symlink allowed, but contained)
     3. Plugin registry authorization (for external paths)
-    4. /tmp access (allowed by default)
+    4. System temp directories (/tmp) when allow_tmp=True
 
     Args:
         path: Path to check (absolute or will be made absolute).
         workspace_root: The workspace root directory.
         plugin_registry: Optional PluginRegistry for external path authorization.
-        allow_tmp: Whether to allow /tmp paths (default: True).
+        allow_tmp: Whether to allow /tmp/** access (default: True).
 
     Returns:
         True if path is allowed, False otherwise.
@@ -236,10 +238,11 @@ def check_path_with_jaato_containment(
         # No sandboxing configured
         return True
 
-    # Check if path is under /tmp (allowed by default)
+    # Make path absolute
     abs_path = os.path.abspath(path)
-    real_path = os.path.realpath(abs_path)
-    if allow_tmp and is_temp_path(real_path):
+
+    # Check if path is under /tmp (allowed by default)
+    if allow_tmp and is_under_temp_path(abs_path):
         return True
 
     # IMPORTANT: Check if path references .jaato BEFORE normalizing
@@ -260,6 +263,7 @@ def check_path_with_jaato_containment(
         return is_path_within_jaato_boundary(abs_path, workspace_root, jaato_boundary)
 
     # Standard workspace check - resolve symlinks
+    real_path = os.path.realpath(abs_path)
     workspace_prefix = workspace_root.rstrip(os.sep) + os.sep
     if real_path == workspace_root or real_path.startswith(workspace_prefix):
         return True
