@@ -238,8 +238,28 @@ class CodeValidationFormatterPlugin:
 
     # ==================== LSP Integration ====================
 
+    def wire_dependencies(self, tool_registry: Any) -> bool:
+        """Wire this formatter with the LSP plugin from the tool registry.
+
+        Called automatically by FormatterRegistry during pipeline creation.
+
+        Args:
+            tool_registry: The PluginRegistry containing tool plugins.
+
+        Returns:
+            True if wiring succeeded, False if LSP plugin not available.
+        """
+        lsp_plugin = tool_registry.get_plugin("lsp") if tool_registry else None
+        if lsp_plugin:
+            self._lsp_plugin = lsp_plugin
+            _trace("wire_dependencies: LSP plugin wired")
+            return True
+        else:
+            _trace("wire_dependencies: LSP plugin not available")
+            return False
+
     def set_lsp_plugin(self, lsp_plugin: Any) -> None:
-        """Set the LSP plugin for validation."""
+        """Set the LSP plugin for validation (manual wiring)."""
         self._lsp_plugin = lsp_plugin
         _trace(f"set_lsp_plugin: plugin set")
 

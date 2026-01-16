@@ -46,6 +46,7 @@ from shared.plugins.formatter_pipeline import create_pipeline
 from shared.plugins.hidden_content_filter import create_plugin as create_hidden_filter
 from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter
 from shared.plugins.diff_formatter import create_plugin as create_diff_formatter
+from shared.plugins.table_formatter import create_plugin as create_table_formatter
 
 
 def consolidate_fragments(fragments):
@@ -470,6 +471,7 @@ class PTDisplay:
             self._formatter_pipeline = create_pipeline()
             self._formatter_pipeline.register(create_hidden_filter())         # priority 5
             self._formatter_pipeline.register(create_diff_formatter())        # priority 20
+            self._formatter_pipeline.register(create_table_formatter())       # priority 25
             # Code block formatter with line numbers enabled
             self._code_block_formatter = create_code_block_formatter()
             self._code_block_formatter.initialize({"line_numbers": True})

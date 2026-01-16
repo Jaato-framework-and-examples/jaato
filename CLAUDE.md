@@ -513,6 +513,7 @@ Plugins are automatically wired during initialization - no manual wiring needed:
 |--------|-------------|-----|
 | `set_plugin_registry(registry)` | During `expose_tool()` | PluginRegistry |
 | `set_session(session)` | During `configure()` | JaatoSession |
+| `set_workspace_path(path)` | After `expose_all()` or when workspace changes | PluginRegistry |
 
 This enables plugins to access shared resources without explicit setup in client code:
 
@@ -527,11 +528,54 @@ for plugin_name in self._runtime.registry._exposed:
     plugin = self._runtime.registry.get_plugin(plugin_name)
     if plugin and hasattr(plugin, 'set_session'):
         plugin.set_session(self)
+
+# In PluginRegistry.set_workspace_path():
+for name in self._exposed:
+    plugin = self._plugins.get(name)
+    if plugin and hasattr(plugin, 'set_workspace_path'):
+        plugin.set_workspace_path(path)
 ```
 
 Plugins implementing these methods receive automatic wiring:
 - **`set_plugin_registry()`**: Used by `background`, `file_edit`, `cli`, `references`, `artifact_tracker` for cross-plugin access
 - **`set_session()`**: Used by `thinking` plugin for applying thinking configuration to the session
+- **`set_workspace_path()`**: Used by `lsp`, `mcp`, `file_edit`, `cli`, `filesystem_query` for workspace-relative operations and sandboxing
+
+### Formatter Auto-Wiring
+
+Formatter plugins (in the output pipeline) use a similar pattern for dependency injection:
+
+| Method | When Called | By |
+|--------|-------------|-----|
+| `wire_dependencies(tool_registry)` | During `create_pipeline()` | FormatterRegistry |
+| `initialize(config)` | After wiring, during pipeline creation | FormatterRegistry |
+
+Formatters that need access to tool plugins (e.g., `code_validation_formatter` needs `lsp`) implement `wire_dependencies()`:
+
+```python
+class CodeValidationFormatter:
+    def wire_dependencies(self, tool_registry: Any) -> bool:
+        """Wire formatter with tool plugins it depends on.
+
+        Args:
+            tool_registry: The PluginRegistry instance for tool plugins.
+
+        Returns:
+            True if wiring succeeded, False to skip this formatter.
+        """
+        lsp_plugin = tool_registry.get_plugin("lsp") if tool_registry else None
+        if lsp_plugin:
+            self._lsp_plugin = lsp_plugin
+            return True
+        return False  # Skip formatter if LSP not available
+```
+
+The FormatterRegistry automatically:
+1. Calls `wire_dependencies(tool_registry)` for formatters that implement it
+2. Skips the formatter if wiring returns `False` (missing dependencies)
+3. Calls `initialize(config)` after successful wiring
+
+This pattern eliminates hardcoded wiring in the server - formatters declare their own dependencies.
 
 ## Key Environment Variables
 

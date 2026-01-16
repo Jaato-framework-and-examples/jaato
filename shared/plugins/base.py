@@ -598,3 +598,50 @@ class ToolPlugin(Protocol):
     #         ValueError: If channel_type is not supported
     #     """
     #     ...
+    #
+    # Auto-Wiring (Dependency Injection):
+    #
+    # The PluginRegistry automatically calls these methods on plugins that
+    # implement them, providing dependency injection without explicit wiring
+    # in client code.
+    #
+    # def set_plugin_registry(self, registry: 'PluginRegistry') -> None:
+    #     """Receive the plugin registry for cross-plugin access.
+    #
+    #     Called by PluginRegistry.expose_tool() after initialization.
+    #     Plugins that need to access other plugins (e.g., background plugin
+    #     checking if a tool supports streaming) should implement this method.
+    #
+    #     Args:
+    #         registry: The PluginRegistry instance managing all plugins.
+    #
+    #     Example:
+    #         def set_plugin_registry(self, registry: 'PluginRegistry') -> None:
+    #             self._registry = registry
+    #
+    #         def execute_tool(self, args):
+    #             file_edit = self._registry.get_plugin("file_edit")
+    #             if file_edit:
+    #                 # Use file_edit plugin
+    #     """
+    #     ...
+    #
+    # def set_workspace_path(self, path: str) -> None:
+    #     """Receive the workspace root path.
+    #
+    #     Called by PluginRegistry.set_workspace_path() when the workspace
+    #     changes. Plugins that need workspace-relative operations (sandboxing,
+    #     relative path resolution, etc.) should implement this method.
+    #
+    #     The PluginRegistry broadcasts to all exposed plugins implementing
+    #     this method, so plugins don't need to register for updates.
+    #
+    #     Args:
+    #         path: Absolute path to the workspace root directory.
+    #
+    #     Example:
+    #         def set_workspace_path(self, path: str) -> None:
+    #             self._workspace_path = path
+    #             self._sandbox.set_allowed_root(path)
+    #     """
+    #     ...

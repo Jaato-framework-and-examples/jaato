@@ -49,11 +49,7 @@ from shared.plugins.base import parse_command_args
 from shared.plugins.gc import load_gc_from_file
 
 # Formatter pipeline for server-side output formatting
-from shared.plugins.formatter_pipeline import create_pipeline as create_formatter_pipeline
-from shared.plugins.hidden_content_filter import create_plugin as create_hidden_filter
-from shared.plugins.code_block_formatter import create_plugin as create_code_block_formatter
-from shared.plugins.diff_formatter import create_plugin as create_diff_formatter
-from shared.plugins.code_validation_formatter import create_plugin as create_code_validation_formatter
+from shared.plugins.formatter_pipeline import FormatterRegistry, create_registry
 
 # Reuse input handling from simple-client
 from input_handler import InputHandler
@@ -287,35 +283,17 @@ class JaatoServer:
     def _update_plugin_workspace(self, path: Optional[str]) -> None:
         """Update workspace-aware plugins with the new workspace path.
 
-        This notifies plugins like LSP and MCP that need to find config files
-        relative to the client's working directory.
+        This notifies plugins like LSP, MCP, file_edit, and CLI that need
+        to find config files relative to the client's working directory.
+
+        Uses registry.set_workspace_path() which broadcasts to all plugins
+        implementing set_workspace_path().
         """
         if not path or not hasattr(self, 'registry') or not self.registry:
             return
 
-        # Update LSP plugin if registered
-        lsp_plugin = self.registry.get_plugin('lsp')
-        if lsp_plugin and hasattr(lsp_plugin, 'set_workspace_path'):
-            lsp_plugin.set_workspace_path(path)
-            logger.debug(f"Updated LSP plugin workspace_path to {path}")
-
-        # Update MCP plugin if registered
-        mcp_plugin = self.registry.get_plugin('mcp')
-        if mcp_plugin and hasattr(mcp_plugin, 'set_workspace_path'):
-            mcp_plugin.set_workspace_path(path)
-            logger.debug(f"Updated MCP plugin workspace_path to {path}")
-
-        # Update file_edit plugin if registered
-        file_edit_plugin = self.registry.get_plugin('file_edit')
-        if file_edit_plugin and hasattr(file_edit_plugin, 'set_workspace_path'):
-            file_edit_plugin.set_workspace_path(path)
-            logger.debug(f"Updated file_edit plugin workspace_path to {path}")
-
-        # Update CLI plugin if registered
-        cli_plugin = self.registry.get_plugin('cli')
-        if cli_plugin and hasattr(cli_plugin, 'set_workspace_path'):
-            cli_plugin.set_workspace_path(path)
-            logger.debug(f"Updated CLI plugin workspace_path to {path}")
+        self.registry.set_workspace_path(path)
+        logger.debug(f"Broadcast workspace_path to plugins: {path}")
 
     # =========================================================================
     # Event Emission
@@ -491,9 +469,8 @@ class JaatoServer:
             "clarification": {
                 "channel_type": "queue",
             },
-            # Pass workspace_path and session_id to LSP and MCP plugins so they:
-            # 1. Load config files from the client's workspace, not the server's cwd
-            # 2. Include session_id in log messages for multi-session debugging
+            # LSP and MCP need workspace_path during initialize() to find config files
+            # Also include session_id for log disambiguation in multi-session mode
             "lsp": {
                 "workspace_path": self._workspace_path,
                 "session_id": self._session_id,
@@ -502,15 +479,10 @@ class JaatoServer:
                 "workspace_path": self._workspace_path,
                 "session_id": self._session_id,
             },
-            # Pass workspace_root to file_edit and CLI plugins for path sandboxing
-            # Without this, they fall back to global env vars which are process-wide
-            # Also pass session_id to file_edit for session-scoped backup storage
+            # Pass session_id to file_edit for session-scoped backup storage
+            # workspace_root is handled by set_workspace_path() broadcast
             "file_edit": {
-                "workspace_root": self._workspace_path,
                 "session_id": self._session_id,
-            },
-            "cli": {
-                "workspace_root": self._workspace_path,
             },
             # Pass session_id to waypoint plugin for session-scoped waypoint storage
             "waypoint": {
@@ -519,6 +491,11 @@ class JaatoServer:
         }
         self.registry.expose_all(plugin_configs)
         self.todo_plugin = self.registry.get_plugin("todo")
+
+        # Broadcast workspace path to all plugins implementing set_workspace_path()
+        # This covers: file_edit, cli, filesystem_query, lsp, mcp, and any future plugins
+        if self._workspace_path:
+            self.registry.set_workspace_path(self._workspace_path)
 
         # Note: Plugins with set_plugin_registry() are auto-wired during expose_all()
         # No manual wiring needed for artifact_tracker, file_edit, cli, references, etc.
@@ -669,42 +646,34 @@ class JaatoServer:
     def _setup_formatter_pipeline(self) -> None:
         """Set up the formatter pipeline for server-side output formatting.
 
-        Creates the pipeline and registers formatters:
-        - HiddenContentFilter (priority 5): Strips <hidden>...</hidden> content
-        - DiffFormatter (priority 20): Colorizes diffs
-        - CodeValidationFormatter (priority 35): LSP diagnostics on code blocks
-        - CodeBlockFormatter (priority 40): Syntax highlighting
+        Uses FormatterRegistry for dynamic formatter discovery and configuration.
+        Loads config from .jaato/formatters.json if present, otherwise uses defaults.
 
-        The CodeValidationFormatter is wired with the LSP plugin from the registry.
+        Formatters that need tool plugins (like code_validation_formatter needing
+        LSP) will wire themselves automatically via wire_dependencies().
         """
-        self._formatter_pipeline = create_formatter_pipeline()
+        # Create formatter registry and discover available formatters
+        formatter_registry = create_registry()
+        formatter_registry.discover()
 
-        # Register formatters in priority order (lower = runs first)
-        self._formatter_pipeline.register(create_hidden_filter())  # priority 5
-        self._formatter_pipeline.register(create_diff_formatter())  # priority 20
+        # Give formatters access to tool plugins for self-wiring
+        if self.registry:
+            formatter_registry.set_tool_registry(self.registry)
 
-        # Set up code validation formatter with LSP plugin
-        lsp_plugin = self.registry.get_plugin("lsp") if self.registry else None
-        if lsp_plugin:
-            code_validator = create_code_validation_formatter()
-            code_validator.set_lsp_plugin(lsp_plugin)
-            code_validator.initialize({
-                "enabled": True,
-                "max_errors_per_block": 5,
-                "max_warnings_per_block": 3,
-            })
-            self._formatter_pipeline.register(code_validator)  # priority 35
-            self._trace("Code validation formatter registered with LSP plugin")
+        # Try to load config from project or user directory
+        config_loaded = (
+            formatter_registry.load_config(".jaato/formatters.json") or
+            formatter_registry.load_config(os.path.expanduser("~/.jaato/formatters.json"))
+        )
+
+        if not config_loaded:
+            formatter_registry.use_defaults()
+            self._trace("Using default formatter configuration")
         else:
-            self._trace("Code validation formatter skipped - no LSP plugin available")
+            self._trace("Loaded formatter configuration from file")
 
-        # Code block formatter with line numbers enabled
-        code_block_formatter = create_code_block_formatter()
-        code_block_formatter.initialize({"line_numbers": True})
-        self._formatter_pipeline.register(code_block_formatter)  # priority 40
-
-        # Set console width for proper rendering
-        self._formatter_pipeline.set_console_width(self._terminal_width)
+        # Create pipeline from registry (formatters wire themselves)
+        self._formatter_pipeline = formatter_registry.create_pipeline(self._terminal_width)
 
         self._trace(f"Formatter pipeline initialized with {len(self._formatter_pipeline.list_formatters())} formatters")
 
