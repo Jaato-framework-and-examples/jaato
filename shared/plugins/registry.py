@@ -83,6 +83,22 @@ class PluginRegistry:
 
         # Clear authorizations from a specific plugin
         registry.clear_authorized_paths('references')
+
+    Auto-Wiring:
+        Plugins may implement optional methods for automatic dependency injection:
+
+        - set_plugin_registry(registry): Called during expose_tool() to give plugins
+          access to the registry for cross-plugin communication.
+
+        - set_workspace_path(path): Called when workspace changes to notify plugins
+          that need workspace-relative operations (sandboxing, relative paths, etc.).
+          The registry broadcasts to all exposed plugins implementing this method.
+
+        Example plugin implementation:
+            class MyPlugin:
+                def set_workspace_path(self, path: str) -> None:
+                    self._workspace_path = path
+                    self._sandbox.set_root(path)
     """
 
     def __init__(self, model_name: Optional[str] = None):
@@ -108,6 +124,8 @@ class PluginRegistry:
         self._core_tools: Dict[str, ToolSchema] = {}
         self._core_executors: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
         self._core_auto_approved: Set[str] = set()  # Auto-approved core tools
+        # Workspace path for plugins that need it
+        self._workspace_path: Optional[str] = None
 
     def set_output_callback(
         self,
@@ -603,6 +621,37 @@ class PluginRegistry:
         """Stop exposing all plugins' tools."""
         for name in list(self._exposed):
             self.unexpose_tool(name)
+
+    def set_workspace_path(self, path: str) -> None:
+        """Set workspace path and broadcast to all plugins that support it.
+
+        Plugins implementing set_workspace_path(path) will be notified.
+        This includes: lsp, mcp, file_edit, cli, and any other plugins
+        that need to know the workspace root.
+
+        Args:
+            path: Absolute path to the workspace root directory.
+        """
+        self._workspace_path = path
+        _trace(f"set_workspace_path: {path}")
+
+        # Broadcast to all exposed plugins that support it
+        for name in self._exposed:
+            plugin = self._plugins.get(name)
+            if plugin and hasattr(plugin, 'set_workspace_path'):
+                try:
+                    plugin.set_workspace_path(path)
+                    _trace(f"  -> {name}.set_workspace_path()")
+                except Exception as exc:
+                    _trace(f"  -> {name}.set_workspace_path() failed: {exc}")
+
+    def get_workspace_path(self) -> Optional[str]:
+        """Get the current workspace path.
+
+        Returns:
+            The workspace path, or None if not set.
+        """
+        return self._workspace_path
 
     def get_exposed_tool_schemas(self) -> List[ToolSchema]:
         """Get ToolSchemas from all exposed plugins and core tools."""

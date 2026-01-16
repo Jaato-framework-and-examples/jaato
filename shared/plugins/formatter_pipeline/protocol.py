@@ -118,3 +118,37 @@ class ConfigurableFormatter(FormatterPlugin, Protocol):
             width: Console width in characters.
         """
         ...
+
+
+# Optional auto-wiring methods for formatters
+#
+# Formatters may implement these methods to receive automatic dependency injection
+# from the FormatterRegistry during pipeline creation. These are not part of the
+# protocol but are recognized by the registry's auto-wiring mechanism.
+#
+# wire_dependencies(tool_registry: Any) -> bool:
+#     """Wire formatter with tool plugins it depends on.
+#
+#     Called by FormatterRegistry during create_pipeline() before initialize().
+#     Formatters that need access to tool plugins (e.g., code_validation_formatter
+#     needs the LSP plugin) should implement this method.
+#
+#     The FormatterRegistry provides access to the PluginRegistry containing
+#     all tool plugins, allowing formatters to retrieve plugins they depend on.
+#
+#     Args:
+#         tool_registry: The PluginRegistry instance containing tool plugins.
+#                       Use tool_registry.get_plugin("name") to retrieve plugins.
+#
+#     Returns:
+#         True if wiring succeeded and formatter should be included in pipeline.
+#         False if required dependencies are unavailable - formatter will be skipped.
+#
+#     Example:
+#         def wire_dependencies(self, tool_registry: Any) -> bool:
+#             lsp = tool_registry.get_plugin("lsp") if tool_registry else None
+#             if lsp:
+#                 self._lsp_plugin = lsp
+#                 return True
+#             return False  # Skip this formatter - LSP not available
+#     """
