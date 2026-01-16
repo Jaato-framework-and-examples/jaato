@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from ..plugin import FilesystemQueryPlugin, create_plugin
+from ...permission.sanitization import PathScopeConfig
 
 
 class TestFilesystemQueryPluginBasics:
@@ -534,3 +535,189 @@ class TestBinaryFileDetection:
 
             assert plugin._is_binary_file(text_file) is False
             assert plugin._is_binary_file(binary_file) is True
+
+
+class TestPathScopeValidation:
+    """Tests for path scope validation in filesystem query tools."""
+
+    def test_glob_files_without_path_scope(self):
+        """Test that glob_files works without path scope config."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "test.txt").write_text("content")
+
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize()  # No path_scope config
+
+            result = plugin._execute_glob_files({
+                "pattern": "*.txt",
+                "root": tmpdir,
+            })
+
+            assert "error" not in result
+            assert result["total"] == 1
+
+    def test_glob_files_path_scope_blocks_absolute(self):
+        """Test that glob_files respects block_absolute."""
+        plugin = FilesystemQueryPlugin()
+        plugin.initialize(config={
+            "path_scope": {
+                "allowed_roots": ["."],
+                "block_absolute": True,
+                "allow_tmp": False,
+            }
+        })
+
+        result = plugin._execute_glob_files({
+            "pattern": "*.txt",
+            "root": "/etc",
+        })
+
+        assert "error" in result
+        assert "not allowed" in result["error"].lower()
+
+    def test_glob_files_path_scope_allows_tmp(self):
+        """Test that glob_files allows /tmp when allow_tmp=True."""
+        plugin = FilesystemQueryPlugin()
+        plugin.initialize(config={
+            "path_scope": {
+                "allowed_roots": ["."],
+                "block_absolute": True,
+                "allow_tmp": True,
+            }
+        })
+
+        # Create a test file in /tmp
+        with tempfile.NamedTemporaryFile(dir="/tmp", suffix=".txt", delete=False) as f:
+            f.write(b"test content")
+            tmp_file = f.name
+
+        try:
+            result = plugin._execute_glob_files({
+                "pattern": "*.txt",
+                "root": "/tmp",
+            })
+
+            # Should be allowed, not blocked
+            assert "violations" not in result
+        finally:
+            os.unlink(tmp_file)
+
+    def test_grep_content_path_scope_blocks_absolute(self):
+        """Test that grep_content respects block_absolute."""
+        plugin = FilesystemQueryPlugin()
+        plugin.initialize(config={
+            "path_scope": {
+                "allowed_roots": ["."],
+                "block_absolute": True,
+                "allow_tmp": False,
+            }
+        })
+
+        result = plugin._execute_grep_content({
+            "pattern": "test",
+            "path": "/etc/passwd",
+        })
+
+        assert "error" in result
+        assert "not allowed" in result["error"].lower()
+
+    def test_grep_content_path_scope_allows_tmp(self):
+        """Test that grep_content allows /tmp when allow_tmp=True."""
+        plugin = FilesystemQueryPlugin()
+        plugin.initialize(config={
+            "path_scope": {
+                "allowed_roots": ["."],
+                "block_absolute": True,
+                "allow_tmp": True,
+            }
+        })
+
+        # Create a test file in /tmp
+        with tempfile.NamedTemporaryFile(dir="/tmp", suffix=".txt", delete=False, mode="w") as f:
+            f.write("searchable content here")
+            tmp_file = f.name
+
+        try:
+            result = plugin._execute_grep_content({
+                "pattern": "searchable",
+                "path": tmp_file,
+            })
+
+            # Should be allowed and find the content
+            assert "violations" not in result
+            assert result["total_matches"] == 1
+        finally:
+            os.unlink(tmp_file)
+
+    def test_set_path_scope_after_init(self):
+        """Test setting path scope after initialization."""
+        plugin = FilesystemQueryPlugin()
+        plugin.initialize()
+
+        # Initially no path scope
+        assert plugin._path_scope_config is None
+
+        # Set path scope
+        config = PathScopeConfig(
+            allowed_roots=["."],
+            block_absolute=True,
+            allow_tmp=True,
+        )
+        plugin.set_path_scope(config)
+
+        assert plugin._path_scope_config is config
+
+        # Now absolute paths should be blocked (except /tmp)
+        result = plugin._execute_glob_files({
+            "pattern": "*.txt",
+            "root": "/etc",
+        })
+        assert "error" in result
+
+    def test_path_scope_cleared_on_shutdown(self):
+        """Test that path scope is cleared on shutdown."""
+        plugin = FilesystemQueryPlugin()
+        plugin.initialize(config={
+            "path_scope": {
+                "allowed_roots": ["."],
+                "block_absolute": True,
+            }
+        })
+
+        assert plugin._path_scope_config is not None
+
+        plugin.shutdown()
+
+        assert plugin._path_scope_config is None
+
+    def test_path_scope_blocks_parent_traversal(self):
+        """Test that parent traversal is blocked when configured."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin = FilesystemQueryPlugin()
+            plugin.initialize(config={
+                "path_scope": {
+                    "allowed_roots": [tmpdir],
+                    "block_absolute": False,
+                    "block_parent_traversal": True,
+                }
+            })
+
+            result = plugin._execute_glob_files({
+                "pattern": "*.txt",
+                "root": f"{tmpdir}/../",
+            })
+
+            assert "error" in result
+            assert "traversal" in result["error"].lower()
+
+    def test_path_scope_with_pathscopeconfig_instance(self):
+        """Test passing PathScopeConfig instance directly."""
+        plugin = FilesystemQueryPlugin()
+        config = PathScopeConfig(
+            allowed_roots=["/tmp"],
+            block_absolute=False,
+            allow_tmp=True,
+        )
+        plugin.initialize(config={"path_scope": config})
+
+        assert plugin._path_scope_config is config
