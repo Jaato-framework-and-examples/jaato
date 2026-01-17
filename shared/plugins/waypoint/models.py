@@ -10,7 +10,11 @@ that led to them.
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
+
+
+# Waypoint ownership types
+WaypointOwner = Literal["user", "model"]
 
 
 @dataclass
@@ -21,7 +25,9 @@ class Waypoint:
     specific moment, allowing you to return if the path ahead leads astray.
 
     Attributes:
-        id: Short identifier (w0, w1, w2, ...). w0 is the implicit initial state.
+        id: Short identifier. User waypoints use w-prefix (w0, w1, w2, ...),
+            model waypoints use m-prefix (m1, m2, ...). w0 is the implicit
+            initial state (owned by user).
         description: User or model-provided description of this waypoint.
         created_at: When the waypoint was created.
         turn_index: Which conversation turn this waypoint was created at.
@@ -29,6 +35,8 @@ class Waypoint:
         history_snapshot: Serialized conversation history at this point.
         message_count: Number of messages in the conversation at this point.
         user_message_preview: Preview of the last user message for context.
+        owner: Who created this waypoint - "user" or "model". Determines
+            what operations are permitted without user approval.
     """
 
     id: str
@@ -39,6 +47,7 @@ class Waypoint:
     history_snapshot: Optional[str] = None  # JSON serialized history
     message_count: int = 0
     user_message_preview: Optional[str] = None
+    owner: WaypointOwner = "user"
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -51,6 +60,7 @@ class Waypoint:
             "history_snapshot": self.history_snapshot,
             "message_count": self.message_count,
             "user_message_preview": self.user_message_preview,
+            "owner": self.owner,
         }
 
     @classmethod
@@ -65,6 +75,7 @@ class Waypoint:
             history_snapshot=data.get("history_snapshot"),
             message_count=data.get("message_count", 0),
             user_message_preview=data.get("user_message_preview"),
+            owner=data.get("owner", "user"),  # Default to user for backwards compat
         )
 
 
