@@ -128,9 +128,9 @@ class SideBySideRenderer:
         """Render diff in two-column side-by-side format for modifications."""
         # Calculate column widths
         # Layout: │ ln │ content_old │ content_new │
-        # That's 4 separators + 1 line number column + 2 content columns
+        # That's 4 separators + 1 line number column + 2 content columns + 2 spaces around middle separator
         line_no_width = 6  # "  123 " - space for up to 4-digit line numbers
-        separator_count = 4
+        separator_count = 6  # 4 box chars + 2 spaces around middle separator
 
         # Use content-based width calculation
         content_width = self._calculate_content_width(diff, width, is_two_column=True)
@@ -246,7 +246,7 @@ class SideBySideRenderer:
             f"{colors.line_numbers}{ln_col}{colors.reset}"
             f"{colors.box}{BOX_V}{colors.reset}"
             f"{colors.header_old}{old_header}{colors.reset}"
-            f"{colors.box}{BOX_V}{colors.reset}"
+            f" {colors.box}{BOX_V}{colors.reset} "
             f"{colors.header_new}{new_header}{colors.reset}"
             f"{colors.box}{BOX_V}{colors.reset}"
         )
@@ -267,7 +267,8 @@ class SideBySideRenderer:
             f"{colors.box}"
             f"{left}{BOX_H * line_no_width}"
             f"{cross}{BOX_H * content_width}"
-            f"{cross}{BOX_H * content_width}"
+            f"{BOX_H}{cross}{BOX_H}"  # Extra horizontal lines around middle separator
+            f"{BOX_H * content_width}"
             f"{right}"
             f"{colors.reset}"
         )
@@ -280,7 +281,8 @@ class SideBySideRenderer:
             f"{colors.box}"
             f"{BOX_BL}{BOX_H * line_no_width}"
             f"{BOX_T_UP}{BOX_H * content_width}"
-            f"{BOX_T_UP}{BOX_H * content_width}"
+            f"{BOX_H}{BOX_T_UP}{BOX_H}"  # Extra horizontal lines around middle separator
+            f"{BOX_H * content_width}"
             f"{BOX_BR}"
             f"{colors.reset}"
         )
@@ -397,8 +399,8 @@ class SideBySideRenderer:
         else:
             parts.append(old_content_fmt)
 
-        # Separator between OLD and NEW content (no line number)
-        parts.append(f"{colors.box}{BOX_V}{colors.reset}")
+        # Separator between OLD and NEW content (with space padding)
+        parts.append(f" {colors.box}{BOX_V}{colors.reset} ")
 
         # New content with color
         if new_color:
