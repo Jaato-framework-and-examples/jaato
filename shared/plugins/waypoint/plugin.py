@@ -353,11 +353,13 @@ restoration if changes don't work out.
 - **Model waypoints (m-prefix)**: Created by you. You have full control - create,
   restore, and delete without needing permission.
 
-**Restore Behavior:**
-- Restoring reverts file **contents** to their state at the waypoint
-- Files **created after** the waypoint are NOT deleted (to avoid data loss)
-- Files **deleted after** the waypoint are NOT recreated
-- Only files that were modified and had backups are restored
+**Critical Limitations:**
+- **Rollback only, no time-travel**: You can restore to an older waypoint, but you
+  cannot "go forward" again. If you restore to m1, content captured at m2/m3 is lost.
+- **File existence not tracked**: Waypoints capture file contents, not creation/deletion.
+  New files created after a waypoint persist after restore; deleted files aren't recreated.
+- **ID recycling**: If you delete m2 and create a new waypoint, it becomes the new m2.
+  Use descriptions to distinguish waypoints, and be careful with ID references.
 
 **When to use waypoints:**
 - Before attempting risky refactoring or experimental changes
