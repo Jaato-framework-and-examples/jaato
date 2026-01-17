@@ -1,0 +1,665 @@
+"""Web fetch plugin for retrieving and parsing web page content."""
+
+import os
+import re
+import tempfile
+from datetime import datetime
+from typing import Dict, List, Any, Callable, Optional
+from urllib.parse import urljoin, urlparse
+
+from ..base import UserCommand
+from ..model_provider.types import ToolSchema
+
+
+DEFAULT_TIMEOUT = 30  # seconds
+DEFAULT_MAX_LENGTH = 100000  # max characters to return
+DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; JaatoBot/1.0; +https://github.com/apanoia/jaato)"
+
+
+class WebFetchPlugin:
+    """Plugin that fetches and parses web page content.
+
+    Supports multiple output modes:
+        - markdown: Clean markdown conversion (default, best for reading)
+        - structured: JSON with extracted components (links, images, tables, etc.)
+        - raw: Raw HTML content
+
+    Configuration:
+        timeout: Request timeout in seconds (default: 30).
+        max_length: Maximum content length to return (default: 100000).
+        user_agent: Custom User-Agent string.
+        follow_redirects: Whether to follow redirects (default: True).
+    """
+
+    def __init__(self):
+        self._timeout: int = DEFAULT_TIMEOUT
+        self._max_length: int = DEFAULT_MAX_LENGTH
+        self._user_agent: str = DEFAULT_USER_AGENT
+        self._follow_redirects: bool = True
+        self._initialized = False
+        # Cache for recently fetched pages (simple in-memory cache)
+        self._cache: Dict[str, tuple] = {}  # url -> (content, timestamp)
+        self._cache_ttl: int = 300  # 5 minutes
+        # Agent context for trace logging
+        self._agent_name: Optional[str] = None
+
+    @property
+    def name(self) -> str:
+        return "web_fetch"
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get(
+            'JAATO_TRACE_LOG',
+            os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+        )
+        if trace_path:
+            try:
+                with open(trace_path, "a") as f:
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    f.write(f"[{ts}] [WEB_FETCH{agent_prefix}] {msg}\n")
+                    f.flush()
+            except (IOError, OSError):
+                pass
+
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
+        """Initialize the web fetch plugin.
+
+        Args:
+            config: Optional dict with:
+                - timeout: Request timeout in seconds (default: 30)
+                - max_length: Max content length to return (default: 100000)
+                - user_agent: Custom User-Agent string
+                - follow_redirects: Whether to follow redirects (default: True)
+                - cache_ttl: Cache TTL in seconds (default: 300)
+        """
+        if config:
+            self._agent_name = config.get("agent_name")
+            if 'timeout' in config:
+                self._timeout = config['timeout']
+            if 'max_length' in config:
+                self._max_length = config['max_length']
+            if 'user_agent' in config:
+                self._user_agent = config['user_agent']
+            if 'follow_redirects' in config:
+                self._follow_redirects = config['follow_redirects']
+            if 'cache_ttl' in config:
+                self._cache_ttl = config['cache_ttl']
+        self._initialized = True
+        self._trace(f"initialize: timeout={self._timeout}, max_length={self._max_length}")
+
+    def shutdown(self) -> None:
+        """Shutdown the web fetch plugin."""
+        self._trace("shutdown: clearing cache")
+        self._cache.clear()
+        self._initialized = False
+
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Return the ToolSchema for the web fetch tool."""
+        return [ToolSchema(
+            name='web_fetch',
+            description='Fetch a web page and return its content in a readable format. '
+                       'Supports markdown conversion, structured data extraction, and CSS selectors.',
+            parameters={
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to fetch"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["markdown", "structured", "raw"],
+                        "description": "Output format: 'markdown' (clean text, default), "
+                                      "'structured' (JSON with components), 'raw' (HTML)"
+                    },
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector to extract specific element(s). "
+                                      "Example: 'main', '.content', '#article'"
+                    },
+                    "extract": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["links", "images", "tables", "forms", "headings", "metadata"]
+                        },
+                        "description": "Specific components to extract (used with structured mode)"
+                    },
+                    "include_links": {
+                        "type": "boolean",
+                        "description": "Include a list of links found on the page (default: false)"
+                    }
+                },
+                "required": ["url"]
+            },
+            category="web",
+        )]
+
+    def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
+        """Return the executor mapping."""
+        return {'web_fetch': self._execute}
+
+    def get_system_instructions(self) -> Optional[str]:
+        """Return system instructions for the web fetch tool."""
+        return """You have access to `web_fetch` which retrieves and parses web page content.
+
+**Modes:**
+- `markdown` (default): Returns clean, readable text converted from HTML
+- `structured`: Returns JSON with extracted components (links, images, tables, etc.)
+- `raw`: Returns the raw HTML (use sparingly, token-heavy)
+
+**Examples:**
+```
+# Read an article as markdown
+web_fetch(url="https://example.com/article")
+
+# Extract just the main content area
+web_fetch(url="https://example.com", selector=".main-content")
+
+# Get structured data about the page
+web_fetch(url="https://example.com", mode="structured", extract=["links", "images"])
+
+# Get page content with links list
+web_fetch(url="https://example.com", include_links=true)
+```
+
+**Tips:**
+- Use `selector` to focus on specific page sections and reduce noise
+- Use `structured` mode when you need to analyze page components
+- The tool follows redirects and handles common encodings
+- Results are cached briefly to avoid redundant requests"""
+
+    def get_auto_approved_tools(self) -> List[str]:
+        """Web fetch is read-only and safe - auto-approve it."""
+        return ['web_fetch']
+
+    def get_user_commands(self) -> List[UserCommand]:
+        """Web fetch plugin provides model tools only, no user commands."""
+        return []
+
+    def _get_cached(self, url: str) -> Optional[str]:
+        """Get cached content if still valid."""
+        if url in self._cache:
+            content, timestamp = self._cache[url]
+            age = (datetime.now() - timestamp).total_seconds()
+            if age < self._cache_ttl:
+                self._trace(f"cache hit: {url} (age={age:.1f}s)")
+                return content
+            else:
+                del self._cache[url]
+        return None
+
+    def _set_cached(self, url: str, content: str) -> None:
+        """Cache content for URL."""
+        # Simple LRU: remove oldest if cache too large
+        if len(self._cache) > 50:
+            oldest_url = min(self._cache.keys(), key=lambda u: self._cache[u][1])
+            del self._cache[oldest_url]
+        self._cache[url] = (content, datetime.now())
+
+    def _fetch_url(self, url: str) -> tuple[str, str, Optional[str]]:
+        """Fetch URL and return (html, final_url, error).
+
+        Returns:
+            Tuple of (html_content, final_url, error_message)
+            On success, error_message is None.
+        """
+        try:
+            import httpx
+        except ImportError:
+            try:
+                import requests
+                # Fallback to requests if httpx not available
+                response = requests.get(
+                    url,
+                    timeout=self._timeout,
+                    headers={'User-Agent': self._user_agent},
+                    allow_redirects=self._follow_redirects,
+                )
+                response.raise_for_status()
+                return response.text, response.url, None
+            except ImportError:
+                return "", url, "Neither httpx nor requests package installed. Install with: pip install httpx"
+            except Exception as e:
+                return "", url, f"Request failed: {str(e)}"
+
+        try:
+            with httpx.Client(
+                timeout=self._timeout,
+                follow_redirects=self._follow_redirects,
+                headers={'User-Agent': self._user_agent},
+            ) as client:
+                response = client.get(url)
+                response.raise_for_status()
+                return response.text, str(response.url), None
+        except httpx.TimeoutException:
+            return "", url, f"Request timed out after {self._timeout}s"
+        except httpx.HTTPStatusError as e:
+            return "", url, f"HTTP {e.response.status_code}: {e.response.reason_phrase}"
+        except Exception as e:
+            return "", url, f"Request failed: {str(e)}"
+
+    def _html_to_markdown(self, html: str, base_url: str) -> str:
+        """Convert HTML to clean markdown.
+
+        Uses trafilatura for content extraction with html2text fallback.
+        """
+        # Try trafilatura first (best for article extraction)
+        try:
+            import trafilatura
+            # Extract with trafilatura - it handles boilerplate removal
+            result = trafilatura.extract(
+                html,
+                include_links=True,
+                include_images=True,
+                include_tables=True,
+                output_format='markdown',
+                favor_recall=True,  # Get more content rather than less
+            )
+            if result and len(result.strip()) > 100:
+                return result
+        except ImportError:
+            pass
+        except Exception as e:
+            self._trace(f"trafilatura failed: {e}")
+
+        # Fallback to html2text
+        try:
+            import html2text
+            h = html2text.HTML2Text()
+            h.ignore_links = False
+            h.ignore_images = False
+            h.ignore_tables = False
+            h.body_width = 0  # Don't wrap lines
+            h.skip_internal_links = True
+            h.inline_links = True
+            h.protect_links = True
+            h.baseurl = base_url
+            return h.handle(html)
+        except ImportError:
+            pass
+        except Exception as e:
+            self._trace(f"html2text failed: {e}")
+
+        # Last resort: basic regex stripping
+        return self._basic_html_strip(html)
+
+    def _basic_html_strip(self, html: str) -> str:
+        """Basic HTML to text conversion (fallback)."""
+        # Remove script and style elements
+        html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        # Remove HTML comments
+        html = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL)
+        # Remove tags but keep content
+        html = re.sub(r'<[^>]+>', ' ', html)
+        # Decode common entities
+        html = html.replace('&nbsp;', ' ')
+        html = html.replace('&amp;', '&')
+        html = html.replace('&lt;', '<')
+        html = html.replace('&gt;', '>')
+        html = html.replace('&quot;', '"')
+        # Collapse whitespace
+        html = re.sub(r'\s+', ' ', html)
+        return html.strip()
+
+    def _extract_with_selector(self, html: str, selector: str, base_url: str) -> tuple[str, Optional[str]]:
+        """Extract content matching CSS selector.
+
+        Returns:
+            Tuple of (extracted_html, error_message)
+        """
+        try:
+            from bs4 import BeautifulSoup
+        except ImportError:
+            return html, "beautifulsoup4 not installed for selector support"
+
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            elements = soup.select(selector)
+            if not elements:
+                return "", f"No elements found matching selector: {selector}"
+
+            # Combine all matching elements
+            combined = '\n'.join(str(el) for el in elements)
+            return combined, None
+        except Exception as e:
+            return html, f"Selector error: {str(e)}"
+
+    def _extract_structured(
+        self,
+        html: str,
+        base_url: str,
+        components: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Extract structured data from HTML.
+
+        Args:
+            html: The HTML content
+            base_url: Base URL for resolving relative links
+            components: List of components to extract, or None for all
+
+        Returns:
+            Dict with extracted components
+        """
+        try:
+            from bs4 import BeautifulSoup
+        except ImportError:
+            return {'error': 'beautifulsoup4 not installed for structured extraction'}
+
+        soup = BeautifulSoup(html, 'html.parser')
+        result: Dict[str, Any] = {}
+
+        # Default: extract common components
+        if components is None:
+            components = ['metadata', 'headings', 'links', 'images']
+
+        if 'metadata' in components:
+            result['metadata'] = self._extract_metadata(soup)
+
+        if 'headings' in components:
+            result['headings'] = self._extract_headings(soup)
+
+        if 'links' in components:
+            result['links'] = self._extract_links(soup, base_url)
+
+        if 'images' in components:
+            result['images'] = self._extract_images(soup, base_url)
+
+        if 'tables' in components:
+            result['tables'] = self._extract_tables(soup)
+
+        if 'forms' in components:
+            result['forms'] = self._extract_forms(soup, base_url)
+
+        return result
+
+    def _extract_metadata(self, soup) -> Dict[str, Any]:
+        """Extract page metadata."""
+        metadata = {}
+
+        # Title
+        title_tag = soup.find('title')
+        if title_tag:
+            metadata['title'] = title_tag.get_text(strip=True)
+
+        # Meta tags
+        for meta in soup.find_all('meta'):
+            name = meta.get('name', meta.get('property', ''))
+            content = meta.get('content', '')
+            if name and content:
+                # Common useful meta tags
+                if name in ['description', 'og:description', 'twitter:description']:
+                    metadata['description'] = content
+                elif name in ['og:title', 'twitter:title']:
+                    metadata.setdefault('title', content)
+                elif name in ['author', 'og:author']:
+                    metadata['author'] = content
+                elif name in ['keywords']:
+                    metadata['keywords'] = content
+                elif name in ['og:image', 'twitter:image']:
+                    metadata['image'] = content
+                elif name in ['og:type']:
+                    metadata['type'] = content
+
+        # Canonical URL
+        canonical = soup.find('link', rel='canonical')
+        if canonical and canonical.get('href'):
+            metadata['canonical_url'] = canonical['href']
+
+        return metadata
+
+    def _extract_headings(self, soup) -> List[Dict[str, str]]:
+        """Extract headings hierarchy."""
+        headings = []
+        for level in range(1, 7):
+            for h in soup.find_all(f'h{level}'):
+                text = h.get_text(strip=True)
+                if text:
+                    headings.append({
+                        'level': level,
+                        'text': text[:200]  # Truncate long headings
+                    })
+        return headings
+
+    def _extract_links(self, soup, base_url: str) -> List[Dict[str, str]]:
+        """Extract links from page."""
+        links = []
+        seen_urls = set()
+
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            # Skip anchors and javascript
+            if href.startswith('#') or href.startswith('javascript:'):
+                continue
+
+            # Resolve relative URLs
+            full_url = urljoin(base_url, href)
+
+            # Deduplicate
+            if full_url in seen_urls:
+                continue
+            seen_urls.add(full_url)
+
+            text = a.get_text(strip=True)
+            link_data = {'url': full_url}
+            if text:
+                link_data['text'] = text[:100]  # Truncate long link text
+
+            links.append(link_data)
+
+        return links[:100]  # Limit to 100 links
+
+    def _extract_images(self, soup, base_url: str) -> List[Dict[str, str]]:
+        """Extract images from page."""
+        images = []
+        seen_urls = set()
+
+        for img in soup.find_all('img', src=True):
+            src = img['src']
+            # Skip data URIs and tracking pixels
+            if src.startswith('data:') or '1x1' in src:
+                continue
+
+            full_url = urljoin(base_url, src)
+
+            if full_url in seen_urls:
+                continue
+            seen_urls.add(full_url)
+
+            img_data = {'src': full_url}
+            if img.get('alt'):
+                img_data['alt'] = img['alt'][:200]
+            if img.get('title'):
+                img_data['title'] = img['title'][:200]
+
+            images.append(img_data)
+
+        return images[:50]  # Limit to 50 images
+
+    def _extract_tables(self, soup) -> List[Dict[str, Any]]:
+        """Extract tables from page."""
+        tables = []
+
+        for table in soup.find_all('table')[:10]:  # Limit to 10 tables
+            table_data = {'rows': []}
+
+            # Extract headers
+            headers = []
+            for th in table.find_all('th'):
+                headers.append(th.get_text(strip=True))
+            if headers:
+                table_data['headers'] = headers
+
+            # Extract rows
+            for tr in table.find_all('tr')[:50]:  # Limit rows
+                cells = []
+                for td in tr.find_all(['td', 'th']):
+                    cells.append(td.get_text(strip=True)[:200])
+                if cells and cells != headers:
+                    table_data['rows'].append(cells)
+
+            if table_data['rows'] or headers:
+                tables.append(table_data)
+
+        return tables
+
+    def _extract_forms(self, soup, base_url: str) -> List[Dict[str, Any]]:
+        """Extract forms from page."""
+        forms = []
+
+        for form in soup.find_all('form')[:5]:  # Limit to 5 forms
+            form_data = {}
+
+            if form.get('action'):
+                form_data['action'] = urljoin(base_url, form['action'])
+            if form.get('method'):
+                form_data['method'] = form['method'].upper()
+
+            # Extract fields
+            fields = []
+            for inp in form.find_all(['input', 'textarea', 'select']):
+                field = {}
+                if inp.name == 'input':
+                    field['type'] = inp.get('type', 'text')
+                elif inp.name == 'textarea':
+                    field['type'] = 'textarea'
+                elif inp.name == 'select':
+                    field['type'] = 'select'
+                    # Get options
+                    options = [opt.get_text(strip=True) for opt in inp.find_all('option')[:10]]
+                    if options:
+                        field['options'] = options
+
+                if inp.get('name'):
+                    field['name'] = inp['name']
+                if inp.get('placeholder'):
+                    field['placeholder'] = inp['placeholder']
+                if inp.get('required'):
+                    field['required'] = True
+
+                if field.get('name') or field.get('type') not in ['hidden', 'submit']:
+                    fields.append(field)
+
+            if fields:
+                form_data['fields'] = fields
+
+            if form_data:
+                forms.append(form_data)
+
+        return forms
+
+    def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute web fetch.
+
+        Args:
+            args: Dict containing:
+                - url: The URL to fetch (required)
+                - mode: Output format ('markdown', 'structured', 'raw')
+                - selector: CSS selector for targeted extraction
+                - extract: List of components to extract (for structured mode)
+                - include_links: Whether to include links list
+
+        Returns:
+            Dict containing fetched content or error.
+        """
+        url = args.get('url', '').strip()
+        mode = args.get('mode', 'markdown')
+        selector = args.get('selector')
+        extract_components = args.get('extract')
+        include_links = args.get('include_links', False)
+
+        self._trace(f"web_fetch: url={url!r}, mode={mode}, selector={selector}")
+
+        # Validate URL
+        if not url:
+            return {'error': 'web_fetch: url must be provided'}
+
+        # Basic URL validation
+        parsed = urlparse(url)
+        if not parsed.scheme:
+            url = 'https://' + url
+            parsed = urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            return {'error': f'web_fetch: unsupported URL scheme: {parsed.scheme}'}
+        if not parsed.netloc:
+            return {'error': 'web_fetch: invalid URL'}
+
+        # Check cache
+        cache_key = f"{url}|{selector or ''}"
+        cached_html = self._get_cached(cache_key)
+
+        if cached_html:
+            html = cached_html
+            final_url = url
+        else:
+            # Fetch the URL
+            html, final_url, error = self._fetch_url(url)
+            if error:
+                return {'error': error, 'url': url}
+
+            # Cache the result
+            self._set_cached(cache_key, html)
+
+        # Apply CSS selector if provided
+        if selector:
+            html, selector_error = self._extract_with_selector(html, selector, final_url)
+            if selector_error:
+                return {'error': selector_error, 'url': final_url}
+            if not html:
+                return {
+                    'error': f'No content found for selector: {selector}',
+                    'url': final_url
+                }
+
+        # Build response based on mode
+        result: Dict[str, Any] = {'url': final_url}
+
+        if final_url != url:
+            result['original_url'] = url
+            result['redirected'] = True
+
+        if mode == 'raw':
+            # Return raw HTML (truncated if too long)
+            content = html[:self._max_length]
+            if len(html) > self._max_length:
+                result['truncated'] = True
+                result['original_length'] = len(html)
+            result['content'] = content
+            result['content_type'] = 'html'
+
+        elif mode == 'structured':
+            # Extract structured components
+            structured = self._extract_structured(html, final_url, extract_components)
+            result.update(structured)
+            result['content_type'] = 'structured'
+
+        else:  # markdown (default)
+            # Convert to markdown
+            markdown = self._html_to_markdown(html, final_url)
+
+            # Truncate if needed
+            if len(markdown) > self._max_length:
+                markdown = markdown[:self._max_length]
+                result['truncated'] = True
+
+            result['content'] = markdown
+            result['content_type'] = 'markdown'
+
+            # Optionally include links
+            if include_links:
+                try:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(html, 'html.parser')
+                    result['links'] = self._extract_links(soup, final_url)
+                except ImportError:
+                    result['links_error'] = 'beautifulsoup4 not installed'
+
+        return result
+
+
+def create_plugin() -> WebFetchPlugin:
+    """Factory function to create the web fetch plugin instance."""
+    return WebFetchPlugin()
