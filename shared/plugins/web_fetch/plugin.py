@@ -135,6 +135,14 @@ class WebFetchPlugin:
                         "type": "object",
                         "description": "Custom HTTP headers to send with the request (e.g., for authentication). "
                                       "Example: {\"Authorization\": \"Bearer token\"}"
+                    },
+                    "no_cache": {
+                        "type": "boolean",
+                        "description": "Bypass the cache and fetch fresh content (default: false)"
+                    },
+                    "include_headers": {
+                        "type": "boolean",
+                        "description": "Include response headers in the result (default: false)"
                     }
                 },
                 "required": ["url"]
@@ -152,8 +160,13 @@ class WebFetchPlugin:
 
 **Modes:**
 - `markdown` (default): Returns clean, readable text converted from HTML
-- `structured`: Returns JSON with extracted components (links, images, tables, etc.)
-- `raw`: Returns the raw HTML (use sparingly, token-heavy)
+- `structured`: Returns JSON with extracted components (links, images, tables, etc.) or parsed JSON data
+- `raw`: Returns the raw content (use sparingly, token-heavy)
+
+**Content-Type Detection:** The tool automatically detects JSON, XML, and plain text content:
+- JSON APIs return pretty-printed JSON (markdown mode) or parsed data (structured mode)
+- XML feeds are returned as-is in readable format
+- HTML is converted to clean markdown
 
 **Examples:**
 ```
@@ -171,15 +184,22 @@ web_fetch(url="https://example.com", include_links=true)
 
 # Fetch with authentication
 web_fetch(url="https://api.example.com/data", headers={"Authorization": "Bearer token"})
+
+# Bypass cache for fresh content
+web_fetch(url="https://example.com/live-data", no_cache=true)
+
+# Include response headers (for debugging or cache inspection)
+web_fetch(url="https://example.com", include_headers=true)
 ```
 
 **Tips:**
-- Use `selector` to focus on specific page sections and reduce noise
-- Use `structured` mode when you need to analyze page components
+- Use `selector` to focus on specific page sections (server-rendered HTML only, no JS execution)
+- Use `structured` mode when you need to analyze page components or JSON API data
 - The tool follows redirects and handles common encodings
-- Results are cached briefly to avoid redundant requests
+- Results are cached briefly; use `no_cache=true` to bypass
 - Binary content (images, PDFs, etc.) returns metadata instead of garbled text
-- Use `headers` parameter for authentication (Bearer tokens, API keys, etc.)"""
+- Use `headers` parameter for authentication (Bearer tokens, API keys, etc.)
+- Use `include_headers=true` to see response headers like Last-Modified, ETag, Cache-Control"""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Web fetch is read-only and safe - auto-approve it."""
@@ -261,7 +281,7 @@ web_fetch(url="https://api.example.com/data", headers={"Authorization": "Bearer 
 
         Returns:
             Tuple of (content, final_url, error_message, metadata)
-            - For text content: (html_content, final_url, None, None)
+            - For text content: (html_content, final_url, None, {"response_content_type": "...", "response_headers": {...}})
             - For binary content: ("", final_url, None, {"is_binary": True, ...})
             - On error: ("", url, error_message, None)
         """
@@ -299,8 +319,12 @@ web_fetch(url="https://api.example.com/data", headers={"Authorization": "Bearer 
                     response.close()
                     return "", str(final_url), None, metadata
 
-                # Read text content
-                return response.text, str(final_url), None, None
+                # Read text content - include content_type and headers in metadata
+                response_headers = dict(response.headers)
+                return response.text, str(final_url), None, {
+                    'response_content_type': content_type,
+                    'response_headers': response_headers
+                }
             except ImportError:
                 return "", url, "Neither httpx nor requests package installed. Install with: pip install httpx", None
             except Exception as e:
@@ -348,7 +372,12 @@ web_fetch(url="https://api.example.com/data", headers={"Authorization": "Bearer 
                     }
                     return "", final_url, None, metadata
 
-                return response.text, final_url, None, None
+                # Return text content with content_type and headers in metadata
+                response_headers = dict(response.headers)
+                return response.text, final_url, None, {
+                    'response_content_type': content_type,
+                    'response_headers': response_headers
+                }
         except httpx.TimeoutException:
             return "", url, f"Request timed out after {self._timeout}s", None
         except httpx.HTTPStatusError as e:
@@ -359,13 +388,20 @@ web_fetch(url="https://api.example.com/data", headers={"Authorization": "Bearer 
     def _html_to_markdown(self, html: str, base_url: str) -> str:
         """Convert HTML to clean markdown.
 
-        Uses trafilatura for content extraction with html2text fallback.
+        Uses a tiered approach:
+        1. trafilatura for article extraction (best for news/blog content)
+        2. html2text for general HTML conversion
+        3. BeautifulSoup text extraction as fallback
+        4. Basic regex stripping as last resort
         """
+        trafilatura_result = None
+        html2text_result = None
+
         # Try trafilatura first (best for article extraction)
         try:
             import trafilatura
             # Extract with trafilatura - it handles boilerplate removal
-            result = trafilatura.extract(
+            trafilatura_result = trafilatura.extract(
                 html,
                 include_links=True,
                 include_images=True,
@@ -373,14 +409,14 @@ web_fetch(url="https://api.example.com/data", headers={"Authorization": "Bearer 
                 output_format='markdown',
                 favor_recall=True,  # Get more content rather than less
             )
-            if result and len(result.strip()) > 100:
-                return result
+            if trafilatura_result and len(trafilatura_result.strip()) > 100:
+                return trafilatura_result
         except ImportError:
             pass
         except Exception as e:
             self._trace(f"trafilatura failed: {e}")
 
-        # Fallback to html2text
+        # Try html2text for general conversion
         try:
             import html2text
             h = html2text.HTML2Text()
@@ -392,11 +428,73 @@ web_fetch(url="https://api.example.com/data", headers={"Authorization": "Bearer 
             h.inline_links = True
             h.protect_links = True
             h.baseurl = base_url
-            return h.handle(html)
+            html2text_result = h.handle(html)
+            if html2text_result and len(html2text_result.strip()) > 50:
+                return html2text_result
         except ImportError:
             pass
         except Exception as e:
             self._trace(f"html2text failed: {e}")
+
+        # BeautifulSoup text extraction fallback (handles JS-heavy sites better)
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
+
+            # Remove script, style, nav, header, footer elements
+            for tag in soup.find_all(['script', 'style', 'nav', 'header', 'footer', 'aside', 'noscript']):
+                tag.decompose()
+
+            # Try to find main content areas
+            main_content = (
+                soup.find('main') or
+                soup.find('article') or
+                soup.find(id='content') or
+                soup.find(id='main-content') or
+                soup.find(class_='content') or
+                soup.find(id='mw-content-text') or  # Wikipedia
+                soup.find(id='bodyContent') or      # Wikipedia alternate
+                soup.body or
+                soup
+            )
+
+            # Extract text with some structure preservation
+            text_parts = []
+            for element in main_content.descendants:
+                if element.name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+                    level = int(element.name[1])
+                    text = element.get_text(strip=True)
+                    if text:
+                        text_parts.append(f"\n{'#' * level} {text}\n")
+                elif element.name == 'p':
+                    text = element.get_text(strip=True)
+                    if text:
+                        text_parts.append(f"{text}\n")
+                elif element.name == 'li':
+                    text = element.get_text(strip=True)
+                    if text:
+                        text_parts.append(f"- {text}\n")
+                elif element.name == 'br':
+                    text_parts.append("\n")
+
+            bs_result = ''.join(text_parts).strip()
+            if bs_result and len(bs_result) > 50:
+                return bs_result
+
+            # Fallback: just get all text
+            all_text = main_content.get_text(separator='\n', strip=True)
+            if all_text and len(all_text) > 50:
+                return all_text
+        except ImportError:
+            pass
+        except Exception as e:
+            self._trace(f"beautifulsoup fallback failed: {e}")
+
+        # Return best available result even if short
+        if html2text_result and html2text_result.strip():
+            return html2text_result
+        if trafilatura_result and trafilatura_result.strip():
+            return trafilatura_result
 
         # Last resort: basic regex stripping
         return self._basic_html_strip(html)
@@ -666,6 +764,50 @@ web_fetch(url="https://api.example.com/data", headers={"Authorization": "Bearer 
 
         return forms
 
+    def _detect_content_type(self, response_content_type: str, content: str) -> str:
+        """Detect the actual content type from response header and content.
+
+        Returns one of: 'html', 'json', 'xml', 'text'
+        """
+        # Normalize the content type header
+        ct = response_content_type.lower().split(';')[0].strip() if response_content_type else ''
+
+        # Check by content-type header first
+        if 'json' in ct or ct == 'application/json':
+            return 'json'
+        if 'xml' in ct or ct in ('application/xml', 'text/xml'):
+            return 'xml'
+        if ct == 'text/plain':
+            return 'text'
+        if 'html' in ct:
+            return 'html'
+
+        # Fall back to content inspection
+        content_stripped = content.strip() if content else ''
+        if content_stripped:
+            # Check for JSON (starts with { or [)
+            if (content_stripped.startswith('{') and content_stripped.endswith('}')) or \
+               (content_stripped.startswith('[') and content_stripped.endswith(']')):
+                try:
+                    import json
+                    json.loads(content_stripped)
+                    return 'json'
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+            # Check for XML (starts with < and has xml declaration or root element)
+            if content_stripped.startswith('<?xml') or \
+               (content_stripped.startswith('<') and not content_stripped.startswith('<!DOCTYPE html') and
+                not content_stripped.startswith('<html')):
+                return 'xml'
+
+            # Check for HTML
+            if '<!DOCTYPE html' in content_stripped[:100].lower() or \
+               '<html' in content_stripped[:100].lower():
+                return 'html'
+
+        return 'html'  # Default to html
+
     def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute web fetch.
 
@@ -677,6 +819,8 @@ web_fetch(url="https://api.example.com/data", headers={"Authorization": "Bearer 
                 - extract: List of components to extract (for structured mode)
                 - include_links: Whether to include links list
                 - headers: Custom HTTP headers (e.g., for authentication)
+                - no_cache: Bypass cache and fetch fresh content
+                - include_headers: Include response headers in result
 
         Returns:
             Dict containing fetched content or error.
@@ -687,8 +831,10 @@ web_fetch(url="https://api.example.com/data", headers={"Authorization": "Bearer 
         extract_components = args.get('extract')
         include_links = args.get('include_links', False)
         custom_headers = args.get('headers')
+        no_cache = args.get('no_cache', False)
+        include_headers = args.get('include_headers', False)
 
-        self._trace(f"web_fetch: url={url!r}, mode={mode}, selector={selector}")
+        self._trace(f"web_fetch: url={url!r}, mode={mode}, selector={selector}, no_cache={no_cache}")
 
         # Validate URL
         if not url:
@@ -704,37 +850,47 @@ web_fetch(url="https://api.example.com/data", headers={"Authorization": "Bearer 
         if not parsed.netloc:
             return {'error': 'web_fetch: invalid URL'}
 
-        # Check cache (skip if custom headers are provided - auth may vary)
+        # Check cache (skip if custom headers are provided, or no_cache is True)
         cache_key = f"{url}|{selector or ''}"
         cached_html = None
-        if not custom_headers:
+        if not custom_headers and not no_cache:
             cached_html = self._get_cached(cache_key)
 
+        response_content_type = ''
+        response_headers = {}
         if cached_html:
             html = cached_html
             final_url = url
-            binary_metadata = None
+            fetch_metadata = None
         else:
             # Fetch the URL
-            html, final_url, error, binary_metadata = self._fetch_url(url, custom_headers)
+            html, final_url, error, fetch_metadata = self._fetch_url(url, custom_headers)
             if error:
                 return {'error': error, 'url': url}
 
             # Handle binary content - return metadata instead of garbled text
-            if binary_metadata:
+            if fetch_metadata and fetch_metadata.get('is_binary'):
                 return {
                     'url': final_url,
                     'is_binary': True,
-                    'content_type': binary_metadata.get('content_type', 'unknown'),
-                    'size_bytes': binary_metadata.get('size_bytes'),
+                    'content_type': fetch_metadata.get('content_type', 'unknown'),
+                    'size_bytes': fetch_metadata.get('size_bytes'),
                     'message': 'Binary content detected. Cannot parse as text.',
                     'hint': 'This URL points to a binary file (image, PDF, etc.). '
                            'Use a download tool or check the content_type for more info.'
                 }
 
-            # Cache the result (only for non-authenticated requests)
-            if not custom_headers:
+            # Extract response content type and headers for later use
+            if fetch_metadata:
+                response_content_type = fetch_metadata.get('response_content_type', '')
+                response_headers = fetch_metadata.get('response_headers', {})
+
+            # Cache the result (only for non-authenticated requests and when caching is enabled)
+            if not custom_headers and not no_cache:
                 self._set_cached(cache_key, html)
+
+        # Determine the actual content type from response
+        actual_type = self._detect_content_type(response_content_type, html)
 
         # Apply CSS selector if provided
         if selector:
@@ -755,40 +911,93 @@ web_fetch(url="https://api.example.com/data", headers={"Authorization": "Bearer 
             result['redirected'] = True
 
         if mode == 'raw':
-            # Return raw HTML (truncated if too long)
+            # Return raw content (truncated if too long)
             content = html[:self._max_length]
             if len(html) > self._max_length:
                 result['truncated'] = True
                 result['original_length'] = len(html)
             result['content'] = content
-            result['content_type'] = 'html'
+            # Use detected content type instead of always 'html'
+            result['content_type'] = actual_type
 
         elif mode == 'structured':
-            # Extract structured components
-            structured = self._extract_structured(html, final_url, extract_components)
-            result.update(structured)
-            result['content_type'] = 'structured'
+            # Handle JSON content specially - parse and return as structured data
+            if actual_type == 'json':
+                try:
+                    import json
+                    parsed_json = json.loads(html)
+                    result['data'] = parsed_json
+                    result['content_type'] = 'json'
+                except (json.JSONDecodeError, ValueError) as e:
+                    result['error'] = f'Failed to parse JSON: {e}'
+                    result['content'] = html[:self._max_length]
+                    result['content_type'] = 'json'
+            else:
+                # Extract structured components from HTML
+                structured = self._extract_structured(html, final_url, extract_components)
+                result.update(structured)
+                result['content_type'] = 'structured'
 
         else:  # markdown (default)
-            # Convert to markdown
-            markdown = self._html_to_markdown(html, final_url)
+            # Handle JSON content specially - format it nicely
+            if actual_type == 'json':
+                try:
+                    import json
+                    parsed_json = json.loads(html)
+                    # Pretty-print JSON as content
+                    result['content'] = json.dumps(parsed_json, indent=2)
+                    result['content_type'] = 'json'
+                except (json.JSONDecodeError, ValueError):
+                    result['content'] = html[:self._max_length]
+                    result['content_type'] = 'json'
+            elif actual_type == 'xml':
+                # Return XML as-is (it's already readable)
+                content = html[:self._max_length]
+                if len(html) > self._max_length:
+                    result['truncated'] = True
+                result['content'] = content
+                result['content_type'] = 'xml'
+            elif actual_type == 'text':
+                # Plain text - return as-is
+                content = html[:self._max_length]
+                if len(html) > self._max_length:
+                    result['truncated'] = True
+                result['content'] = content
+                result['content_type'] = 'text'
+            else:
+                # Convert HTML to markdown
+                markdown = self._html_to_markdown(html, final_url)
 
-            # Truncate if needed
-            if len(markdown) > self._max_length:
-                markdown = markdown[:self._max_length]
-                result['truncated'] = True
+                # Truncate if needed
+                if len(markdown) > self._max_length:
+                    markdown = markdown[:self._max_length]
+                    result['truncated'] = True
 
-            result['content'] = markdown
-            result['content_type'] = 'markdown'
+                result['content'] = markdown
+                result['content_type'] = 'markdown'
 
-            # Optionally include links
-            if include_links:
+            # Optionally include links (only for HTML content)
+            if include_links and actual_type == 'html':
                 try:
                     from bs4 import BeautifulSoup
                     soup = BeautifulSoup(html, 'html.parser')
                     result['links'] = self._extract_links(soup, final_url)
                 except ImportError:
                     result['links_error'] = 'beautifulsoup4 not installed'
+
+        # Optionally include response headers
+        if include_headers and response_headers:
+            # Filter to useful headers (exclude internal/sensitive ones)
+            useful_headers = {
+                k: v for k, v in response_headers.items()
+                if k.lower() in (
+                    'content-type', 'content-length', 'last-modified', 'etag',
+                    'cache-control', 'expires', 'date', 'server', 'x-powered-by',
+                    'content-encoding', 'content-language', 'vary', 'age',
+                    'x-cache', 'x-cache-hits', 'cf-cache-status', 'x-request-id'
+                )
+            }
+            result['response_headers'] = useful_headers
 
         return result
 

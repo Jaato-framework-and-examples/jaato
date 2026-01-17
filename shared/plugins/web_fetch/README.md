@@ -48,6 +48,41 @@ web_fetch(url="https://example.com", selector=".main-content")
 web_fetch(url="https://example.com", selector="article")
 ```
 
+> **Note:** CSS selectors work on server-rendered HTML only. The plugin does not
+> execute JavaScript, so content loaded dynamically via JS won't be available.
+> For JS-heavy single-page applications, consider the initial HTML structure
+> or use selectors that match server-rendered content.
+
+### Authenticated Requests
+
+```python
+# Bearer token (OAuth, JWT)
+web_fetch(
+    url="https://api.example.com/data",
+    headers={"Authorization": "Bearer eyJhbGciOiJIUzI1NiIs..."}
+)
+
+# Basic authentication
+import base64
+credentials = base64.b64encode(b"username:password").decode()
+web_fetch(
+    url="https://example.com/protected",
+    headers={"Authorization": f"Basic {credentials}"}
+)
+
+# API key in header
+web_fetch(
+    url="https://api.example.com/data",
+    headers={"X-API-Key": "your-api-key-here"}
+)
+
+# API key in custom header
+web_fetch(
+    url="https://api.example.com/data",
+    headers={"Api-Token": "your-token"}
+)
+```
+
 ### Structured Mode
 
 ```python
@@ -67,6 +102,24 @@ web_fetch(
 ```python
 # Markdown content plus a list of all links
 web_fetch(url="https://example.com", include_links=True)
+```
+
+### Cache Control
+
+```python
+# Bypass cache for fresh content
+web_fetch(url="https://example.com/live-data", no_cache=True)
+
+# Cached results are used by default (5-minute TTL)
+# Cache is also bypassed when custom headers are provided
+```
+
+### Response Headers
+
+```python
+# Include response headers in the result
+result = web_fetch(url="https://example.com", include_headers=True)
+# result['response_headers'] contains: Content-Type, Last-Modified, ETag, Cache-Control, etc.
 ```
 
 ## Output Modes
@@ -114,6 +167,38 @@ Returns the raw HTML content. Use sparingly as it's token-heavy. Best for:
 - Debugging extraction issues
 - When you need exact HTML structure
 - Custom parsing requirements
+
+## Automatic Content-Type Detection
+
+The plugin automatically detects the content type from the HTTP response headers
+and content inspection, then handles each type appropriately:
+
+| Content Type | Detection | Behavior |
+|--------------|-----------|----------|
+| **HTML** | `text/html` header or `<html>` tag | Converted to markdown (default mode) |
+| **JSON** | `application/json` header or `{}`/`[]` structure | Pretty-printed in markdown mode; parsed in structured mode |
+| **XML** | `application/xml`/`text/xml` header or `<?xml` declaration | Returned as-is (readable format) |
+| **Plain Text** | `text/plain` header | Returned as-is |
+
+### JSON API Example
+
+```python
+# Fetching a JSON API endpoint
+result = web_fetch(url="https://api.example.com/posts/1")
+# Returns: {"content": "{\n  \"id\": 1,\n  \"title\": \"...\"\n}", "content_type": "json"}
+
+# Structured mode parses JSON into data field
+result = web_fetch(url="https://api.example.com/posts/1", mode="structured")
+# Returns: {"data": {"id": 1, "title": "..."}, "content_type": "json"}
+```
+
+### XML Feed Example
+
+```python
+# Fetching an RSS/Atom feed
+result = web_fetch(url="https://example.com/feed.xml")
+# Returns: {"content": "<?xml version=\"1.0\"?>...", "content_type": "xml"}
+```
 
 ## Configuration
 
