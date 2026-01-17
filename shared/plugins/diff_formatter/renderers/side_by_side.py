@@ -22,6 +22,10 @@ from .base import ColorScheme
 # Minimum width for side-by-side display
 MIN_SIDE_BY_SIDE_WIDTH = 120
 
+# Constraints for content-based column sizing
+MIN_CONTENT_WIDTH = 20  # Minimum width per content column
+MAX_CONTENT_WIDTH = 120  # Maximum width per content column (avoid overly wide boxes)
+
 
 class SideBySideRenderer:
     """Renders diff in side-by-side format with box drawing.
@@ -40,6 +44,66 @@ class SideBySideRenderer:
     def min_width(self) -> int:
         """Minimum width for side-by-side display."""
         return MIN_SIDE_BY_SIDE_WIDTH
+
+    def _measure_max_content_width(self, diff: ParsedDiff) -> int:
+        """Measure the maximum content width across all lines in the diff.
+
+        Scans all hunks to find the widest line (in either old or new content).
+        This is used to size columns based on actual content rather than
+        terminal width.
+
+        Args:
+            diff: Parsed diff structure.
+
+        Returns:
+            Maximum content width found (0 if no content).
+        """
+        max_width = 0
+
+        for hunk in diff.hunks:
+            for line in hunk.lines:
+                # Measure raw content (before any highlighting/word-diff)
+                content_len = len(line.content)
+                if content_len > max_width:
+                    max_width = content_len
+
+        return max_width
+
+    def _calculate_content_width(
+        self, diff: ParsedDiff, terminal_width: int, is_two_column: bool
+    ) -> int:
+        """Calculate optimal content column width based on diff content.
+
+        Sizes columns to fit the widest line, with constraints:
+        - Minimum: MIN_CONTENT_WIDTH (avoid tiny columns)
+        - Maximum: Either MAX_CONTENT_WIDTH or what terminal allows
+
+        Args:
+            diff: Parsed diff structure.
+            terminal_width: Available terminal width.
+            is_two_column: True for two-column layout, False for single.
+
+        Returns:
+            Optimal content width per column.
+        """
+        line_no_width = 6
+        separator_count = 4 if is_two_column else 3
+
+        # Calculate max width terminal allows
+        available_for_content = terminal_width - line_no_width - separator_count
+        if is_two_column:
+            max_from_terminal = available_for_content // 2
+        else:
+            max_from_terminal = available_for_content
+
+        # Measure actual content width needed
+        content_needed = self._measure_max_content_width(diff)
+
+        # Apply constraints: min <= width <= min(max_from_terminal, MAX_CONTENT_WIDTH)
+        content_width = max(MIN_CONTENT_WIDTH, content_needed)
+        content_width = min(content_width, max_from_terminal, MAX_CONTENT_WIDTH)
+
+        return content_width
 
     def render(self, diff: ParsedDiff, width: int, colors: ColorScheme) -> str:
         """Render diff in side-by-side format.
@@ -67,13 +131,17 @@ class SideBySideRenderer:
         # That's 4 separators + 1 line number column + 2 content columns
         line_no_width = 6  # "  123 " - space for up to 4-digit line numbers
         separator_count = 4
-        available_for_content = width - line_no_width - separator_count
-        content_width = available_for_content // 2
+
+        # Use content-based width calculation
+        content_width = self._calculate_content_width(diff, width, is_two_column=True)
+
+        # Calculate actual box width (may be narrower than terminal)
+        box_width = line_no_width + separator_count + (content_width * 2)
 
         lines = []
 
-        # Top border with file path
-        lines.append(self._render_top_border(diff, width, colors))
+        # Top border with file path (use actual box width, not terminal width)
+        lines.append(self._render_top_border(diff, box_width, colors))
 
         # Column headers
         lines.append(self._render_column_headers(
@@ -109,13 +177,18 @@ class SideBySideRenderer:
         # That's 3 separators + 1 line number column + 1 content column
         line_no_width = 6
         separator_count = 3
-        content_width = width - line_no_width - separator_count
+
+        # Use content-based width calculation
+        content_width = self._calculate_content_width(diff, width, is_two_column=False)
+
+        # Calculate actual box width (may be narrower than terminal)
+        box_width = line_no_width + separator_count + content_width
 
         is_new = diff.is_new_file
         lines = []
 
-        # Top border with file path
-        lines.append(self._render_top_border(diff, width, colors))
+        # Top border with file path (use actual box width, not terminal width)
+        lines.append(self._render_top_border(diff, box_width, colors))
 
         # Single column header (no header row for cleaner look)
         # Just go straight to the separator
