@@ -553,13 +553,16 @@ class TestEdgeCases:
     def test_render_while_tools_active_vs_finalized(self):
         """Compare render output when tools are active vs finalized.
 
-        Active tools render at the bottom. Finalized tools (ToolBlock) render
-        inline at their buffer position. Both should show model text first.
+        Active tools now render inline at their placeholder position (not at bottom).
+        Finalized tools (ToolBlock) also render inline. Both should show model text first.
         """
         # Setup
         self.buffer.append("model", "Working on it...", "write")
         self.buffer.add_active_tool("myTool", {"arg": 1}, call_id="c1")
         self.buffer.mark_tool_completed("myTool", success=True, call_id="c1")
+
+        # Expand tools so tool names are visible
+        self.buffer._tools_expanded = True
 
         # Render while tools are still "active" (not yet finalized)
         render_active = str(self.buffer.render(height=50, width=80))
@@ -569,10 +572,9 @@ class TestEdgeCases:
         tool_pos_active = render_active.find("myTool")
 
         assert model_pos_active >= 0, "Should find model text in active render"
-        assert tool_pos_active >= 0, "Should find tool in active render"
+        assert tool_pos_active >= 0, "Should find tool in active render (expanded view)"
 
-        # In active mode, tools render at the bottom but model text should still be visible
-        # and appear before the tool tree separator
+        # Tools render inline at their position - model text should appear before tool section
         model_header_pos = render_active.find("Model")
         assert model_header_pos < tool_pos_active or model_pos_active < tool_pos_active, (
             "Model content should appear before tool section"
