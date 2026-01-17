@@ -785,9 +785,21 @@ class JaatoServer:
                     # Non-model output: strip <hidden>...</hidden> content
                     # These are mid-turn prompts that may contain internal tags
                     filtered_text = re.sub(r'<hidden>.*?</hidden>', '', text, flags=re.DOTALL)
-                    # Always pass through flush events (mode="flush") even with empty text
-                    # Flush events are critical for tool tree positioning
-                    if filtered_text.strip() or mode == "flush":
+
+                    # Flush mode: flush the formatter pipeline to emit buffered content
+                    # BEFORE tool events, ensuring text appears in correct order
+                    if mode == "flush" and server._formatter_pipeline:
+                        for output in server._formatter_pipeline.flush():
+                            if output:
+                                server.emit(AgentOutputEvent(
+                                    agent_id=agent_id,
+                                    source="model",
+                                    text=output,
+                                    mode="append",
+                                ))
+
+                    # For other modes, only emit if content remains after filtering
+                    if filtered_text.strip():
                         server.emit(AgentOutputEvent(
                             agent_id=agent_id,
                             source=source,
