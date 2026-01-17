@@ -1883,6 +1883,83 @@ class OutputBuffer:
             scroll_down_key = self._format_key_hint("nav_down")
             output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
 
+    def _render_permission_prompt(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
+        """Render permission prompt for a tool awaiting approval."""
+        continuation = "   " if is_last else "│  "
+        prefix = "    "
+        prompt_lines = tool.permission_prompt_lines or []
+
+        # Header
+        output.append("\n")
+        output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
+        output.append("  🔒 Permission required", style=self._style("permission_header", "bold yellow"))
+
+        if tool.permission_format_hint == "diff":
+            # Pre-formatted content (diff) - render lines directly without box
+            for line in prompt_lines:
+                output.append("\n")
+                output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
+                output.append(line)
+        else:
+            # Standard box format
+            max_prompt_lines = 18
+            max_box_width = max(60, self._console_width - 22) if self._console_width > 40 else 60
+            box_width = min(max_box_width, max(len(line) for line in prompt_lines) + 4) if prompt_lines else 40
+            content_width = box_width - 4
+
+            # Wrap and potentially truncate lines
+            wrapped_lines: list[str] = []
+            for line in prompt_lines:
+                if len(line) > content_width:
+                    wrapped = textwrap.wrap(line, width=content_width, break_long_words=True)
+                    wrapped_lines.extend(wrapped if wrapped else [line])
+                else:
+                    wrapped_lines.append(line)
+
+            # Check if truncation needed
+            if len(wrapped_lines) > max_prompt_lines:
+                max_before = max_prompt_lines - 3
+                truncated_count = len(wrapped_lines) - max_before - 1
+                display_lines = wrapped_lines[:max_before]
+                display_lines.append(f"... ({truncated_count} more lines)")
+                display_lines.append(wrapped_lines[-1])
+            else:
+                display_lines = wrapped_lines
+
+            # Top border
+            output.append("\n")
+            output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
+            output.append("┌" + "─" * (box_width - 2) + "┐", style=self._style("permission_box", "yellow"))
+
+            # Content lines
+            for line in display_lines:
+                output.append("\n")
+                output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
+                padded = line.ljust(content_width)
+                output.append("│ " + padded + " │", style=self._style("permission_box", "yellow"))
+
+            # Bottom border
+            output.append("\n")
+            output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
+            output.append("└" + "─" * (box_width - 2) + "┘", style=self._style("permission_box", "yellow"))
+
+    def _render_clarification_prompt(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
+        """Render clarification prompt for a tool awaiting user input."""
+        continuation = "   " if is_last else "│  "
+        prefix = "    "
+        prompt_lines = tool.clarification_prompt_lines or []
+
+        # Header
+        output.append("\n")
+        output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
+        output.append("  ❓ Clarification needed", style=self._style("clarification_header", "bold cyan"))
+
+        # Render prompt lines
+        for line in prompt_lines:
+            output.append("\n")
+            output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
+            output.append(line, style=self._style("clarification_text", "cyan"))
+
     def _render_tool_block(self, block: ToolBlock, output: Text, wrap_width: int) -> None:
         """Render a ToolBlock inline in the output."""
         tool_count = len(block.tools)
