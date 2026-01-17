@@ -929,6 +929,20 @@ class JaatoServer:
             def on_tool_call_start(self, agent_id, tool_name, tool_args, call_id=None):
                 # Track current agent for permission/clarification routing
                 server._current_tool_agent_id = agent_id
+
+                # Flush any buffered model output before starting the tool
+                # This ensures model text appears BEFORE the tool tree
+                if server._formatter_pipeline:
+                    for output in server._formatter_pipeline.flush():
+                        if output:
+                            server.emit(AgentOutputEvent(
+                                agent_id=agent_id,
+                                source="model",
+                                text=output,
+                                mode="append",
+                            ))
+                    server._formatter_pipeline.reset()
+
                 server.emit(ToolCallStartEvent(
                     agent_id=agent_id,
                     tool_name=tool_name,
@@ -1008,11 +1022,24 @@ class JaatoServer:
                     # Format through the pipeline - the diff formatter buffers lines
                     # internally and renders when complete
                     if prompt_lines and server._formatter_pipeline:
+                        # First, flush any buffered model output and emit it separately
+                        # This prevents model text from leaking into the permission prompt
+                        for output in server._formatter_pipeline.flush():
+                            if output:
+                                server.emit(AgentOutputEvent(
+                                    agent_id=server._current_tool_agent_id,
+                                    source="model",
+                                    text=output,
+                                    mode="append",
+                                ))
+                        server._formatter_pipeline.reset()
+
+                        # Now format the permission prompt with a clean pipeline
                         formatted_lines = []
                         for line in prompt_lines:
                             for output in server._formatter_pipeline.process_chunk(line + "\n"):
                                 formatted_lines.extend(output.rstrip("\n").split("\n"))
-                        # Flush any remaining buffered content
+                        # Flush any remaining buffered content from the prompt
                         for output in server._formatter_pipeline.flush():
                             formatted_lines.extend(output.rstrip("\n").split("\n"))
                         server._formatter_pipeline.reset()
