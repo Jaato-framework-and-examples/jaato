@@ -130,6 +130,11 @@ class WebFetchPlugin:
                     "include_links": {
                         "type": "boolean",
                         "description": "Include a list of links found on the page (default: false)"
+                    },
+                    "headers": {
+                        "type": "object",
+                        "description": "Custom HTTP headers to send with the request (e.g., for authentication). "
+                                      "Example: {\"Authorization\": \"Bearer token\"}"
                     }
                 },
                 "required": ["url"]
@@ -163,13 +168,18 @@ web_fetch(url="https://example.com", mode="structured", extract=["links", "image
 
 # Get page content with links list
 web_fetch(url="https://example.com", include_links=true)
+
+# Fetch with authentication
+web_fetch(url="https://api.example.com/data", headers={"Authorization": "Bearer token"})
 ```
 
 **Tips:**
 - Use `selector` to focus on specific page sections and reduce noise
 - Use `structured` mode when you need to analyze page components
 - The tool follows redirects and handles common encodings
-- Results are cached briefly to avoid redundant requests"""
+- Results are cached briefly to avoid redundant requests
+- Binary content (images, PDFs, etc.) returns metadata instead of garbled text
+- Use `headers` parameter for authentication (Bearer tokens, API keys, etc.)"""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Web fetch is read-only and safe - auto-approve it."""
@@ -199,13 +209,67 @@ web_fetch(url="https://example.com", include_links=true)
             del self._cache[oldest_url]
         self._cache[url] = (content, datetime.now())
 
-    def _fetch_url(self, url: str) -> tuple[str, str, Optional[str]]:
-        """Fetch URL and return (html, final_url, error).
+    # Content types that should be treated as binary (return metadata only)
+    BINARY_CONTENT_TYPES = {
+        'image/', 'audio/', 'video/', 'application/octet-stream',
+        'application/pdf', 'application/zip', 'application/gzip',
+        'application/x-tar', 'application/x-rar', 'application/x-7z',
+        'application/vnd.', 'application/x-executable',
+        'font/', 'model/',
+    }
+
+    # File extensions that indicate binary content
+    BINARY_EXTENSIONS = {
+        '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.svg',
+        '.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a',
+        '.mp4', '.webm', '.avi', '.mov', '.mkv',
+        '.pdf', '.zip', '.gz', '.tar', '.rar', '.7z',
+        '.exe', '.dll', '.so', '.dylib',
+        '.woff', '.woff2', '.ttf', '.otf', '.eot',
+        '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    }
+
+    def _is_binary_content_type(self, content_type: str) -> bool:
+        """Check if content type indicates binary content."""
+        if not content_type:
+            return False
+        content_type = content_type.lower().split(';')[0].strip()
+        for binary_prefix in self.BINARY_CONTENT_TYPES:
+            if content_type.startswith(binary_prefix):
+                return True
+        return False
+
+    def _is_binary_url(self, url: str) -> bool:
+        """Check if URL extension indicates binary content."""
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        for ext in self.BINARY_EXTENSIONS:
+            if path.endswith(ext):
+                return True
+        return False
+
+    def _fetch_url(
+        self,
+        url: str,
+        custom_headers: Optional[Dict[str, str]] = None
+    ) -> tuple[str, str, Optional[str], Optional[Dict[str, Any]]]:
+        """Fetch URL and return (content, final_url, error, metadata).
+
+        Args:
+            url: The URL to fetch
+            custom_headers: Optional dict of custom HTTP headers (e.g., for auth)
 
         Returns:
-            Tuple of (html_content, final_url, error_message)
-            On success, error_message is None.
+            Tuple of (content, final_url, error_message, metadata)
+            - For text content: (html_content, final_url, None, None)
+            - For binary content: ("", final_url, None, {"is_binary": True, ...})
+            - On error: ("", url, error_message, None)
         """
+        # Build headers with User-Agent and any custom headers
+        headers = {'User-Agent': self._user_agent}
+        if custom_headers:
+            headers.update(custom_headers)
+
         try:
             import httpx
         except ImportError:
@@ -215,31 +279,82 @@ web_fetch(url="https://example.com", include_links=true)
                 response = requests.get(
                     url,
                     timeout=self._timeout,
-                    headers={'User-Agent': self._user_agent},
+                    headers=headers,
                     allow_redirects=self._follow_redirects,
+                    stream=True,  # Don't download body yet
                 )
                 response.raise_for_status()
-                return response.text, response.url, None
+
+                content_type = response.headers.get('Content-Type', '')
+                content_length = response.headers.get('Content-Length')
+                final_url = response.url
+
+                # Check for binary content
+                if self._is_binary_content_type(content_type) or self._is_binary_url(str(final_url)):
+                    metadata = {
+                        'is_binary': True,
+                        'content_type': content_type,
+                        'size_bytes': int(content_length) if content_length else None,
+                    }
+                    response.close()
+                    return "", str(final_url), None, metadata
+
+                # Read text content
+                return response.text, str(final_url), None, None
             except ImportError:
-                return "", url, "Neither httpx nor requests package installed. Install with: pip install httpx"
+                return "", url, "Neither httpx nor requests package installed. Install with: pip install httpx", None
             except Exception as e:
-                return "", url, f"Request failed: {str(e)}"
+                return "", url, f"Request failed: {str(e)}", None
 
         try:
             with httpx.Client(
                 timeout=self._timeout,
                 follow_redirects=self._follow_redirects,
-                headers={'User-Agent': self._user_agent},
+                headers=headers,
             ) as client:
+                # First, do a HEAD request to check content type (if supported)
+                # Fall back to GET with stream if HEAD fails
+                try:
+                    head_response = client.head(url)
+                    content_type = head_response.headers.get('Content-Type', '')
+                    content_length = head_response.headers.get('Content-Length')
+                    final_url = str(head_response.url)
+
+                    if self._is_binary_content_type(content_type) or self._is_binary_url(final_url):
+                        metadata = {
+                            'is_binary': True,
+                            'content_type': content_type,
+                            'size_bytes': int(content_length) if content_length else None,
+                        }
+                        return "", final_url, None, metadata
+                except httpx.HTTPStatusError:
+                    # HEAD not supported, continue with GET
+                    pass
+
+                # Fetch the content
                 response = client.get(url)
                 response.raise_for_status()
-                return response.text, str(response.url), None
+
+                content_type = response.headers.get('Content-Type', '')
+                content_length = response.headers.get('Content-Length')
+                final_url = str(response.url)
+
+                # Check for binary content
+                if self._is_binary_content_type(content_type) or self._is_binary_url(final_url):
+                    metadata = {
+                        'is_binary': True,
+                        'content_type': content_type,
+                        'size_bytes': int(content_length) if content_length else len(response.content),
+                    }
+                    return "", final_url, None, metadata
+
+                return response.text, final_url, None, None
         except httpx.TimeoutException:
-            return "", url, f"Request timed out after {self._timeout}s"
+            return "", url, f"Request timed out after {self._timeout}s", None
         except httpx.HTTPStatusError as e:
-            return "", url, f"HTTP {e.response.status_code}: {e.response.reason_phrase}"
+            return "", url, f"HTTP {e.response.status_code}: {e.response.reason_phrase}", None
         except Exception as e:
-            return "", url, f"Request failed: {str(e)}"
+            return "", url, f"Request failed: {str(e)}", None
 
     def _html_to_markdown(self, html: str, base_url: str) -> str:
         """Convert HTML to clean markdown.
@@ -561,6 +676,7 @@ web_fetch(url="https://example.com", include_links=true)
                 - selector: CSS selector for targeted extraction
                 - extract: List of components to extract (for structured mode)
                 - include_links: Whether to include links list
+                - headers: Custom HTTP headers (e.g., for authentication)
 
         Returns:
             Dict containing fetched content or error.
@@ -570,6 +686,7 @@ web_fetch(url="https://example.com", include_links=true)
         selector = args.get('selector')
         extract_components = args.get('extract')
         include_links = args.get('include_links', False)
+        custom_headers = args.get('headers')
 
         self._trace(f"web_fetch: url={url!r}, mode={mode}, selector={selector}")
 
@@ -587,21 +704,37 @@ web_fetch(url="https://example.com", include_links=true)
         if not parsed.netloc:
             return {'error': 'web_fetch: invalid URL'}
 
-        # Check cache
+        # Check cache (skip if custom headers are provided - auth may vary)
         cache_key = f"{url}|{selector or ''}"
-        cached_html = self._get_cached(cache_key)
+        cached_html = None
+        if not custom_headers:
+            cached_html = self._get_cached(cache_key)
 
         if cached_html:
             html = cached_html
             final_url = url
+            binary_metadata = None
         else:
             # Fetch the URL
-            html, final_url, error = self._fetch_url(url)
+            html, final_url, error, binary_metadata = self._fetch_url(url, custom_headers)
             if error:
                 return {'error': error, 'url': url}
 
-            # Cache the result
-            self._set_cached(cache_key, html)
+            # Handle binary content - return metadata instead of garbled text
+            if binary_metadata:
+                return {
+                    'url': final_url,
+                    'is_binary': True,
+                    'content_type': binary_metadata.get('content_type', 'unknown'),
+                    'size_bytes': binary_metadata.get('size_bytes'),
+                    'message': 'Binary content detected. Cannot parse as text.',
+                    'hint': 'This URL points to a binary file (image, PDF, etc.). '
+                           'Use a download tool or check the content_type for more info.'
+                }
+
+            # Cache the result (only for non-authenticated requests)
+            if not custom_headers:
+                self._set_cached(cache_key, html)
 
         # Apply CSS selector if provided
         if selector:
