@@ -1892,7 +1892,7 @@ class OutputBuffer:
         # Header
         output.append("\n")
         output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
-        output.append("  🔒 Permission required", style=self._style("permission_header", "bold yellow"))
+        output.append("  🔒 Permission required", style=self._style("permission_prompt", "bold yellow"))
 
         if tool.permission_format_hint == "diff":
             # Pre-formatted content (diff) - render lines directly without box
@@ -1929,19 +1929,19 @@ class OutputBuffer:
             # Top border
             output.append("\n")
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-            output.append("┌" + "─" * (box_width - 2) + "┐", style=self._style("permission_box", "yellow"))
+            output.append("┌" + "─" * (box_width - 2) + "┐", style=self._style("permission_text", "yellow"))
 
             # Content lines
             for line in display_lines:
                 output.append("\n")
                 output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
                 padded = line.ljust(content_width)
-                output.append("│ " + padded + " │", style=self._style("permission_box", "yellow"))
+                output.append("│ " + padded + " │", style=self._style("permission_text", "yellow"))
 
             # Bottom border
             output.append("\n")
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-            output.append("└" + "─" * (box_width - 2) + "┘", style=self._style("permission_box", "yellow"))
+            output.append("└" + "─" * (box_width - 2) + "┘", style=self._style("permission_text", "yellow"))
 
     def _render_clarification_prompt(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
         """Render clarification prompt for a tool awaiting user input."""
@@ -1952,13 +1952,13 @@ class OutputBuffer:
         # Header
         output.append("\n")
         output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
-        output.append("  ❓ Clarification needed", style=self._style("clarification_header", "bold cyan"))
+        output.append("  ❓ Clarification needed", style=self._style("clarification_required", "bold cyan"))
 
         # Render prompt lines
         for line in prompt_lines:
             output.append("\n")
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-            output.append(line, style=self._style("clarification_text", "cyan"))
+            output.append(line, style=self._style("clarification_label", "cyan"))
 
     def _render_tool_block(self, block: ToolBlock, output: Text, wrap_width: int) -> None:
         """Render a ToolBlock inline in the output."""
