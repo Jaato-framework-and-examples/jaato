@@ -1228,25 +1228,13 @@ class OutputBuffer:
         # Insert at placeholder position (set when first tool was added)
         insert_pos = self._tool_placeholder_index
 
-        # Create separator and trailing separator lines
-        separator_line = OutputLine(
-            source="system", text="", style="",
-            display_lines=1, is_turn_start=False
-        )
-        trailing_line = OutputLine(
-            source="system", text="", style="",
-            display_lines=1, is_turn_start=False
-        )
-
-        # Insert: separator, tool_block, trailing separator
-        self._lines.insert(insert_pos, separator_line)
-        self._lines.insert(insert_pos + 1, tool_block)
-        self._lines.insert(insert_pos + 2, trailing_line)
+        # Insert just the tool_block - it renders its own separator (───)
+        self._lines.insert(insert_pos, tool_block)
 
         # Flush any pending enrichment notifications
         # These were queued while tools were active so they appear AFTER the tool tree
         if self._pending_enrichments:
-            enrich_pos = insert_pos + 3
+            enrich_pos = insert_pos + 1
             for enrich_source, enrich_text, enrich_mode in self._pending_enrichments:
                 for line in enrich_text.split('\n'):
                     display_lines = self._measure_display_lines(enrich_source, line, False)
