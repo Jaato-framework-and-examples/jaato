@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .models import (
     Waypoint,
+    WaypointOwner,
     RestoreResult,
     INITIAL_WAYPOINT_ID,
     INITIAL_WAYPOINT_DESCRIPTION,
@@ -134,18 +135,27 @@ class WaypointManager:
         except IOError:
             pass
 
-    def _generate_id(self) -> str:
-        """Generate the lowest available waypoint ID.
+    def _generate_id(self, owner: WaypointOwner = "user") -> str:
+        """Generate the lowest available waypoint ID for the given owner.
 
         IDs are reused after deletion to keep numbering compact.
-        For example, if w1 and w3 exist, the next ID will be w2.
+        User waypoints use w-prefix (w1, w2, ...), model waypoints use
+        m-prefix (m1, m2, ...).
+
+        Args:
+            owner: Who will own the waypoint - "user" or "model".
+
+        Returns:
+            The next available ID for the owner type.
         """
-        # Find existing numeric IDs (excluding w0)
+        prefix = "w" if owner == "user" else "m"
+
+        # Find existing numeric IDs with this prefix
         existing_nums = set()
         for wp_id in self._waypoints.keys():
-            if wp_id.startswith("w") and wp_id[1:].isdigit():
+            if wp_id.startswith(prefix) and wp_id[1:].isdigit():
                 num = int(wp_id[1:])
-                if num > 0:  # Skip w0
+                if num > 0:  # Skip w0 (implicit initial)
                     existing_nums.add(num)
 
         # Find lowest available ID starting from 1
@@ -153,13 +163,14 @@ class WaypointManager:
         while next_num in existing_nums:
             next_num += 1
 
-        return f"w{next_num}"
+        return f"{prefix}{next_num}"
 
     def create(
         self,
         description: str,
         turn_index: Optional[int] = None,
         user_message_preview: Optional[str] = None,
+        owner: WaypointOwner = "user",
     ) -> Waypoint:
         """Create a new waypoint marking the current state.
 
@@ -167,11 +178,13 @@ class WaypointManager:
             description: User or model-provided description.
             turn_index: Current turn in the conversation (optional).
             user_message_preview: Preview of recent user message (optional).
+            owner: Who is creating this waypoint - "user" or "model".
+                   Determines the ID prefix and permission rules.
 
         Returns:
             The newly created Waypoint.
         """
-        wp_id = self._generate_id()
+        wp_id = self._generate_id(owner)
 
         # Capture conversation history snapshot
         history_snapshot = None
@@ -191,6 +204,7 @@ class WaypointManager:
             history_snapshot=history_snapshot,
             message_count=message_count,
             user_message_preview=user_message_preview,
+            owner=owner,
         )
 
         self._waypoints[wp_id] = waypoint
@@ -373,6 +387,7 @@ class WaypointManager:
             "is_implicit": waypoint.is_implicit,
             "message_count": waypoint.message_count,
             "user_message_preview": waypoint.user_message_preview,
+            "owner": waypoint.owner,
             "files_changed_since": list(unique_files),
             "total_backups_since": len(backups),
         }

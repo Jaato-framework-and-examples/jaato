@@ -330,3 +330,101 @@ class TestSessionScoping:
         # The storage path should include the session ID
         assert "sessions" in str(mgr._storage_path)
         assert "test-session-123" in str(mgr._storage_path)
+
+
+class TestWaypointOwnership:
+    """Test waypoint ownership model."""
+
+    def test_default_owner_is_user(self, manager):
+        """Test that default owner is 'user'."""
+        wp = manager.create("test")
+        assert wp.owner == "user"
+
+    def test_create_model_owned(self, manager):
+        """Test creating model-owned waypoint."""
+        wp = manager.create("model checkpoint", owner="model")
+        assert wp.owner == "model"
+
+    def test_model_waypoint_gets_m_prefix(self, manager):
+        """Test model waypoints get m-prefix IDs."""
+        wp = manager.create("model checkpoint", owner="model")
+        assert wp.id == "m1"
+
+    def test_user_waypoint_gets_w_prefix(self, manager):
+        """Test user waypoints get w-prefix IDs."""
+        wp = manager.create("user checkpoint", owner="user")
+        assert wp.id == "w1"
+
+    def test_independent_id_counters(self, manager):
+        """Test user and model have independent ID counters."""
+        user_wp1 = manager.create("user 1", owner="user")
+        model_wp1 = manager.create("model 1", owner="model")
+        user_wp2 = manager.create("user 2", owner="user")
+        model_wp2 = manager.create("model 2", owner="model")
+
+        assert user_wp1.id == "w1"
+        assert user_wp2.id == "w2"
+        assert model_wp1.id == "m1"
+        assert model_wp2.id == "m2"
+
+    def test_ownership_persisted(self, temp_dir, mock_backup_manager):
+        """Test that ownership is persisted to storage."""
+        storage_path = temp_dir / "waypoints.json"
+
+        mgr1 = WaypointManager(
+            backup_manager=mock_backup_manager,
+            storage_path=storage_path,
+        )
+        mgr1.create("user wp", owner="user")
+        mgr1.create("model wp", owner="model")
+
+        # Create new manager from same storage
+        mgr2 = WaypointManager(
+            backup_manager=mock_backup_manager,
+            storage_path=storage_path,
+        )
+
+        user_wp = mgr2.get("w1")
+        model_wp = mgr2.get("m1")
+
+        assert user_wp.owner == "user"
+        assert model_wp.owner == "model"
+
+    def test_get_info_includes_ownership(self, manager, mock_backup_manager):
+        """Test get_info includes ownership field."""
+        manager.create("model checkpoint", owner="model")
+
+        mock_backup_manager.get_backups_by_waypoint.return_value = []
+
+        info = manager.get_info("m1")
+
+        assert info["owner"] == "model"
+
+    def test_initial_waypoint_is_user_owned(self, manager):
+        """Test that implicit w0 is user-owned."""
+        wp = manager.get(INITIAL_WAYPOINT_ID)
+        assert wp.owner == "user"
+
+    def test_delete_model_waypoint(self, manager):
+        """Test deleting model-owned waypoint."""
+        manager.create("model wp", owner="model")
+        assert manager.delete("m1") is True
+        assert manager.get("m1") is None
+
+    def test_model_id_reused_after_delete(self, manager):
+        """Test that model IDs are reused after deletion."""
+        manager.create("first", owner="model")
+        manager.delete("m1")
+        wp = manager.create("second", owner="model")
+        assert wp.id == "m1"
+
+    def test_lowest_model_id_used(self, manager):
+        """Test that the lowest available model ID is used."""
+        manager.create("m1", owner="model")
+        manager.create("m2", owner="model")
+        manager.create("m3", owner="model")
+
+        manager.delete("m2")
+
+        wp = manager.create("new", owner="model")
+        assert wp.id == "m2"
