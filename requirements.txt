@@ -17,3 +17,9 @@ websockets>=12.0  # WebSocket server for headless mode
 anthropic>=0.40.0  # Anthropic Claude API
 pybars3>=0.9.7  # Handlebars template rendering (supports {{#if}}, {{#each}}, etc.)
 
+# web_fetch plugin dependencies
+httpx>=0.27.0  # Modern HTTP client (recommended over requests for web_fetch)
+trafilatura>=1.6.0  # Content extraction for articles/docs (removes boilerplate)
+html2text>=2024.2.26  # HTML to markdown conversion (fallback)
+beautifulsoup4>=4.12.0  # HTML parsing for structured extraction
+lxml>=5.0.0  # Fast HTML parser backend for BeautifulSoup
