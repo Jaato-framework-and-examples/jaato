@@ -17,28 +17,6 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-### Running the CLI vs MCP Harness
-```bash
-.venv/bin/python cli_vs_mcp/cli_mcp_harness.py \
-  --env-file .env \
-  --scenarios get_page \
-  --page-id 12345 \
-  --trace --verbose
-```
-
-### Running the ModLog Training Set Generator
-```bash
-.venv/bin/python modlog-training-set-test/generate_training_set.py \
-  --source modlog-training-set-test/sample_cobol.cbl \
-  --out training_data.jsonl \
-  --mode full-stream
-```
-
-### Running the Vertex AI Connectivity Test
-```bash
-.venv/bin/python test_vertex.py
-```
-
 ### Running the Server (Multi-Client Mode)
 ```bash
 # Start server as daemon with IPC socket
@@ -57,235 +35,113 @@ python3 -m venv .venv
 .venv/bin/python rich-client/rich_client.py --connect /tmp/jaato.sock
 ```
 
+### Running Tests
+```bash
+.venv/bin/pytest                          # All tests
+.venv/bin/pytest shared/tests/            # Core tests
+.venv/bin/pytest shared/plugins/cli/tests/ # Plugin tests
+.venv/bin/pytest -v                       # Verbose output
+```
+
+Test organization:
+- Core tests: `shared/tests/`
+- Plugin tests: `shared/plugins/<plugin>/tests/`
+- Provider tests: `shared/plugins/model_provider/<provider>/tests/`
+
 ## Architecture
 
-### Server-First Architecture (`server/`)
+See [docs/architecture.md](docs/architecture.md) for detailed diagrams and component interactions.
 
-The framework uses a server-first architecture where the server runs as a daemon and clients connect via IPC or WebSocket:
+### Server Components (`server/`)
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         JaatoDaemon                                  │
-│  python -m server --ipc-socket /tmp/jaato.sock --web-socket :8080   │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────────┐  │
-│  │ IPC Server  │    │  WS Server  │    │    SessionManager       │  │
-│  │ (Unix sock) │    │ (WebSocket) │    │  ┌─────────────────┐    │  │
-│  └──────┬──────┘    └──────┬──────┘    │  │ Session "main"  │    │  │
-│         │                  │           │  │ ┌─────────────┐ │    │  │
-│         └──────────────────┴───────────│  │ │ JaatoServer │ │    │  │
-│                    │                   │  │ └─────────────┘ │    │  │
-│                    ▼                   │  └─────────────────┘    │  │
-│         ┌──────────────────────┐       │  ┌─────────────────┐    │  │
-│         │    Event Router      │◄──────┤  │ Session "dev"   │    │  │
-│         │  (broadcast events)  │       │  └─────────────────┘    │  │
-│         └──────────────────────┘       └─────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
-         ▲              ▲              ▲
-         │              │              │
-    ┌────┴────┐    ┌────┴────┐    ┌────┴────┐
-    │   TUI   │    │   Web   │    │   IDE   │
-    │ Client  │    │ Client  │    │ Plugin  │
-    └─────────┘    └─────────┘    └─────────┘
-```
-
-**Server Components:**
+The framework uses a server-first architecture where the server runs as a daemon and clients connect via IPC or WebSocket.
 
 - **`server/__main__.py`**: Entry point with daemon mode, PID management
   - `--ipc-socket PATH`: Unix domain socket for local clients
   - `--web-socket [HOST:]PORT`: WebSocket for remote clients
   - `--daemon`: Run as background process
-  - `--status`: Check if server is running
-  - `--stop`: Stop running daemon
+  - `--status`/`--stop`: Server management
 
 - **`server/core.py`**: `JaatoServer` - UI-agnostic core logic
   - Wraps `JaatoClient` with event emission instead of callbacks
-  - Emits typed events for all UI interactions
   - Handles permission requests, tool execution, streaming
 
 - **`server/events.py`**: Event protocol (25+ typed events)
   - Server→Client: `AgentOutputEvent`, `PermissionRequestedEvent`, `PlanUpdatedEvent`, etc.
   - Client→Server: `SendMessageRequest`, `PermissionResponseRequest`, `StopRequest`, etc.
-  - `serialize_event()`, `deserialize_event()` for JSON transport
 
-- **`server/session_manager.py`**: Multi-session orchestration
-  - Manages multiple named sessions with on-demand loading
-  - Integrates with `SessionPlugin` for disk persistence
-  - Tracks client→session mappings for event routing
-
-- **`server/ipc.py`**: Unix domain socket server
-  - Length-prefixed framing (4-byte header + JSON)
-  - Fast, secure local communication
-
-- **`server/websocket.py`**: WebSocket server
-  - Remote client support via `websockets` library
-  - Same event protocol as IPC
-
-**Client Connection:**
-
-```python
-from rich_client.ipc_client import IPCClient
-
-client = IPCClient("/tmp/jaato.sock", auto_start=True)
-await client.connect()
-
-# Send message
-await client.send_message("Hello, world!")
-
-# Receive events
-async for event in client.events():
-    if isinstance(event, AgentOutputEvent):
-        print(event.text)
-```
+- **`server/session_manager.py`**: Multi-session orchestration with disk persistence
+- **`server/ipc.py`**: Unix domain socket server (length-prefixed framing)
+- **`server/websocket.py`**: WebSocket server for remote clients
 
 ### Core Components (`shared/`)
 
-- **jaato_client.py**: Core client (facade) for the framework
-  - `JaatoClient`: Backwards-compatible facade wrapping `JaatoRuntime` + `JaatoSession`
-  - `connect()`, `configure_tools()`, `send_message()` - core methods (unchanged API)
-  - `get_runtime()` - access shared runtime for subagent session creation
-  - `get_session()` - access main session for direct manipulation
+- **jaato_client.py**: `JaatoClient` - Backwards-compatible facade wrapping `JaatoRuntime` + `JaatoSession`
+  - `connect()`, `configure_tools()`, `send_message()` - core methods
+  - `get_runtime()` - access shared runtime for subagent creation
+  - `get_session()` - access main session
 
-- **jaato_runtime.py**: Shared environment (resources used across agents)
-  - `JaatoRuntime`: Manages provider config, plugin registry, permissions, ledger
-  - `connect(project, location)` - establish provider configuration
-  - `configure_plugins(registry, permission_plugin, ledger)` - setup shared resources
+- **jaato_runtime.py**: `JaatoRuntime` - Shared environment
+  - Manages provider config, plugin registry, permissions, ledger
   - `create_session(model, tools, system_instructions)` - spawn lightweight sessions
 
-- **jaato_session.py**: Per-agent conversation state
-  - `JaatoSession`: Isolated session with history, model, tool subset
+- **jaato_session.py**: `JaatoSession` - Per-agent conversation state
   - `send_message()`, `get_history()`, `reset_session()` - conversation methods
-  - `set_agent_context(agent_type, agent_name)` - for permission context
-  - Sessions share runtime resources but maintain isolated conversation state
+  - Sessions share runtime resources but maintain isolated state
 
-- **ai_tool_runner.py**: Tool execution infrastructure
-  - `ToolExecutor`: Registry mapping tool names to callables with permission checking and auto-backgrounding
+- **ai_tool_runner.py**: `ToolExecutor` - Registry mapping tool names to callables with permission checking
 
-- **plugins/**: Plugin system with three plugin types:
-  - **Tool Plugins**: Provide tools the model can invoke
-    - `PluginRegistry`: Discovers and manages tool plugins
-    - `cli/`: CLI tool plugin for shell commands
-    - `mcp/`: MCP tool plugin for Model Context Protocol servers
-    - `permission/`: Permission control for tool execution
-    - `file_edit/`, `todo/`, `web_search/`, etc.
-  - **GC Plugins**: Garbage collection strategies for context management
-    - `gc_truncate/`: Simple truncation strategy
-    - `gc_summarize/`: Summarization-based strategy
-    - `gc_hybrid/`: Combined approach
-  - **Model Provider Plugins**: SDK abstraction for multi-provider support
-    - `model_provider/`: Provider-agnostic types and protocol
-    - `model_provider/google_genai/`: Google GenAI/Vertex AI implementation
-    - `model_provider/github_models/`: GitHub Models API (GPT, Claude, Gemini via GitHub)
-    - `model_provider/anthropic/`: Anthropic Claude API implementation
-    - `model_provider/claude_cli/`: Claude Code CLI wrapper (uses subscription, not API credits)
-
-- **plugins/model_provider/**: Provider abstraction layer
-  - `types.py`: Provider-agnostic types (`ToolSchema`, `Message`, `ProviderResponse`)
-  - `base.py`: `ModelProviderPlugin` protocol definition
-  - `google_genai/`: Google GenAI/Vertex AI implementation
-  - `github_models/`: GitHub Models API implementation (uses `azure-ai-inference` SDK)
-  - `anthropic/`: Anthropic Claude implementation (uses `anthropic` SDK)
-  - `claude_cli/`: Claude Code CLI wrapper (subprocess + stream-json protocol)
-  - `antigravity/`: Google Antigravity IDE backend (Gemini 3, Claude via Google OAuth)
-
-- **mcp_context_manager.py**: Multi-server MCP client manager
-  - `MCPClientManager`: Manages persistent connections to multiple MCP servers
+- **mcp_context_manager.py**: `MCPClientManager` - Multi-server MCP client manager
   - Auto-discovers tools from connected servers
   - Supports `call_tool_auto()` to find which server has a tool
 
-- **token_accounting.py**: Token usage tracking and retry logic
-  - `TokenLedger`: Records prompt/output tokens, handles rate-limit retries with exponential backoff
-  - Writes events to JSONL ledger files
+- **token_accounting.py**: `TokenLedger` - Token usage tracking with rate-limit retries
+
+### Plugin System (`shared/plugins/`)
+
+Three plugin types:
+
+**Tool Plugins** - Provide tools the model can invoke:
+- `PluginRegistry`: Discovers and manages tool plugins
+- `cli/`: Shell commands | `mcp/`: MCP servers | `permission/`: Permission control
+- `file_edit/`, `todo/`, `web_search/`, `filesystem_query/`, etc.
+
+**GC Plugins** - Context garbage collection strategies:
+- `gc_truncate/`: Simple truncation
+- `gc_summarize/`: Summarization-based
+- `gc_hybrid/`: Combined approach (recent preserved, middle summarized, ancient truncated)
+
+**Model Provider Plugins** - SDK abstraction for multi-provider support:
+- `model_provider/types.py`: Provider-agnostic types (`ToolSchema`, `Message`, `ProviderResponse`)
+- `model_provider/google_genai/`: Google GenAI/Vertex AI
+- `model_provider/anthropic/`: Anthropic Claude API
+- `model_provider/claude_cli/`: Claude Code CLI wrapper (uses subscription, not API credits)
+- `model_provider/github_models/`: GitHub Models API (uses `azure-ai-inference` SDK)
+- `model_provider/antigravity/`: Google Antigravity IDE backend (Gemini 3, Claude via Google OAuth)
 
 ### Tool Execution Flow
 
 1. Create `JaatoClient` and connect: `jaato.connect(project, location, model)`
-2. Configure tools from plugin registry: `jaato.configure_tools(registry, permission_plugin)`
-3. Send message with callback for real-time output:
+2. Configure tools: `jaato.configure_tools(registry, permission_plugin)`
+3. Send message with callback:
    ```python
    response = jaato.send_message(prompt, on_output=lambda source, text, mode: print(f"[{source}]: {text}"))
    ```
-   The callback receives `(source, text, mode)` for each output:
-   - `source`: "model" for model responses, plugin name for plugin output
-   - `text`: The output text
-   - `mode`: "write" for new block, "append" to continue
-   Returns only the final response text.
-4. Internally, SDK chat API handles function calling loop:
-   - Model returns function calls → executor runs them → results fed back
-   - Intermediate text responses trigger the callback
-   - Loop continues until model returns text without function calls
-5. Access history when needed: `history = jaato.get_history()`
-6. Reset session: `jaato.reset_session()` or `jaato.reset_session(modified_history)`
+   Callback receives `(source, text, mode)` for each output chunk.
+4. SDK chat API handles function calling loop until model returns text without function calls
+5. Access history: `jaato.get_history()` | Reset: `jaato.reset_session()`
 
 ### Parallel Tool Execution
 
-When a model returns multiple function calls in a single response, jaato executes them
-in parallel using a thread pool. This significantly reduces latency for turns with
-multiple independent tool calls.
-
-```
-Model Response: [read_file(a.py), read_file(b.py), grep(pattern)]
-                              │
-              ┌───────────────┼───────────────┐
-              ▼               ▼               ▼
-        ┌─────────┐     ┌─────────┐     ┌─────────┐
-        │Thread 1 │     │Thread 2 │     │Thread 3 │
-        │read a.py│     │read b.py│     │  grep   │
-        └────┬────┘     └────┬────┘     └────┬────┘
-              │               │               │
-              └───────────────┴───────────────┘
-                              │
-                      [All results]
-                              │
-                              ▼
-                    Send to model together
-```
-
-**Configuration:**
+When model returns multiple function calls, jaato executes them in parallel using a thread pool.
 - Enabled by default (`JAATO_PARALLEL_TOOLS=true`)
 - Set `JAATO_PARALLEL_TOOLS=false` to disable
-- Single tool calls always execute sequentially (no thread pool overhead)
 - Maximum 8 concurrent tools per turn
-
-**Thread-safe callbacks:**
-- Each parallel tool gets its own output callback via thread-local storage
-- UI hooks (`on_tool_call_start`, `on_tool_output`, `on_tool_call_end`) are thread-safe
-- Telemetry spans are created per-tool with `jaato.tool.parallel=True` attribute
+- Thread-safe callbacks via thread-local storage
 
 ### Subagent Architecture
 
 Subagents share the parent's `JaatoRuntime` but get their own `JaatoSession`:
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    JaatoClient (facade)                 │
-│  • Backwards-compatible API for existing code           │
-│  • get_runtime() → access shared environment            │
-└─────────────────────────────────────────────────────────┘
-                          │
-          ┌───────────────┴───────────────┐
-          ▼                               ▼
-┌──────────────────┐           ┌──────────────────┐
-│   JaatoRuntime   │           │   JaatoSession   │
-│  • Provider cfg  │◄─────────►│  (main agent)    │
-│  • Registry      │           │  • History       │
-│  • Permissions   │           │  • Model         │
-│  • Ledger        │           │  • Tools         │
-└──────────────────┘           └──────────────────┘
-          │
-          │ create_session() - lightweight
-          ▼
-┌──────────────────┐
-│   JaatoSession   │
-│   (subagent)     │
-│  • Own history   │
-│  • Own model     │
-│  • Tool subset   │
-└──────────────────┘
-```
-
-Benefits:
 - **No redundant connections** - subagents share provider config
 - **Fast spawning** - `create_session()` is lightweight
 - **Resource sharing** - registry, permissions, ledger shared
@@ -296,214 +152,45 @@ MCP servers are configured in `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "Atlassian": {
-      "type": "stdio",
-      "command": "mcp-atlassian"
-    }
+    "Atlassian": { "type": "stdio", "command": "mcp-atlassian" }
   }
 }
 ```
 
 ### Streaming & Cancellation
 
-The framework supports streaming responses and mid-turn cancellation:
-
-```python
-import threading
-
-# Streaming is enabled by default
-client.set_streaming_enabled(True)  # or False for batched
-
-# Start message in background
-def run():
-    response = client.send_message("Tell me a long story")
-
-thread = threading.Thread(target=run)
-thread.start()
-
-# Cancel mid-response
-if client.is_processing:
-    client.stop()  # Returns partial text + "[Generation cancelled]"
-
-thread.join()
-```
-
-Key cancellation types in `shared/plugins/model_provider/types.py`:
+Key types in `shared/plugins/model_provider/types.py`:
 - `CancelToken`: Thread-safe cancellation signaling
 - `CancelledException`: Raised when operation is cancelled
 - `FinishReason.CANCELLED`: Indicates cancelled generation
 
-Provider streaming methods:
-- `supports_streaming()`: Check if provider supports streaming
-- `supports_stop()`: Check if provider supports mid-turn cancellation
-- `send_message_streaming(message, on_chunk, cancel_token)`: Stream with cancellation
-- `send_tool_results_streaming(results, on_chunk, cancel_token)`: Stream tool responses
-
 Session/client methods:
 - `client.stop()` / `session.request_stop()`: Request cancellation
 - `client.is_processing` / `session.is_running`: Check if message in progress
-- `client.supports_stop` / `session.supports_stop`: Check if stop is supported
 - `client.set_streaming_enabled(bool)`: Toggle streaming mode
-- `session.set_retry_callback(callback)`: Route retry notifications through custom handler
-
-Retry callback signature: `(message: str, attempt: int, max_attempts: int, delay: float) -> None`
-
-When using subagents, the retry callback is automatically propagated to subagent sessions
-via `SubagentPlugin.set_retry_callback()`, ensuring retry messages from all agents route
-through the same channel (e.g., rich client's output panel) instead of printing to console.
 
 ### Proactive Garbage Collection
 
-The framework supports proactive context garbage collection that monitors token usage
-during streaming and automatically triggers GC when thresholds are exceeded:
+The framework monitors token usage during streaming and automatically triggers GC when thresholds are exceeded:
 
 ```python
-from shared.plugins.gc_truncate import create_plugin
 from shared.plugins.gc import GCConfig
-
-# Setup GC plugin with threshold
-gc_plugin = create_plugin()
-gc_plugin.initialize({"preserve_recent_turns": 5, "notify_on_gc": True})
 
 gc_config = GCConfig(
     threshold_percent=80.0,    # Trigger when context is 80% full
     preserve_recent_turns=5,   # Keep last 5 turns
-    auto_trigger=True,         # Enable automatic triggering
-    check_before_send=True     # Check before each send_message()
+    auto_trigger=True,
 )
-
 client.set_gc_plugin(gc_plugin, gc_config)
-
-# Optional: Get notified when threshold is crossed during streaming
-def on_gc_threshold(percent_used: float, threshold: float) -> None:
-    print(f"Warning: Context at {percent_used:.1f}%, GC will run after turn")
-
-response = client.send_message(
-    "Long prompt...",
-    on_gc_threshold=on_gc_threshold  # Optional callback
-)
-# GC automatically runs after turn if threshold was crossed
 ```
-
-Key GC types in `shared/plugins/gc/`:
-- `GCConfig`: Configuration for GC behavior (thresholds, triggers)
-- `GCPlugin`: Protocol for GC strategy plugins
-- `GCResult`: Result of a GC operation (tokens freed, items collected)
-- `GCTriggerReason`: Why GC was triggered (THRESHOLD, MANUAL, TURN_LIMIT)
-
-GC strategies:
-- `gc_truncate`: Simple removal of oldest turns
-- `gc_summarize`: Compress old turns via summarization
-- `gc_hybrid`: Generational approach (recent preserved, middle summarized, ancient truncated)
-
-Proactive GC flow:
-1. Token usage is monitored during streaming via `on_usage_update` callback
-2. When usage crosses `threshold_percent`, a flag is set
-3. After the turn completes, GC is automatically triggered
-4. Optional `on_gc_threshold` callback notifies the application
-
-### Plugin Type System
-
-The project uses provider-agnostic types throughout the plugin system:
-
-```python
-# Tool declarations use ToolSchema (not SDK-specific types)
-from shared.plugins.model_provider.types import ToolSchema
-
-class MyPlugin:
-    def get_tool_schemas(self) -> List[ToolSchema]:
-        return [ToolSchema(
-            name='my_tool',
-            description='Does something useful',
-            parameters={
-                "type": "object",
-                "properties": {"arg": {"type": "string"}},
-                "required": ["arg"]
-            }
-        )]
-```
-
-```python
-# Conversation history uses Message (not types.Content)
-from shared.plugins.model_provider.types import Message, Role
-
-history: List[Message] = client.get_history()
-for msg in history:
-    print(f"{msg.role}: {msg.text}")
-```
-
-Key types in `shared/plugins/model_provider/types.py`:
-- `ToolSchema`: Provider-agnostic function declaration
-- `Message`: Conversation message with role and parts
-- `Part`: Message content (text, function_call, function_response)
-- `ProviderResponse`: Unified response from any provider
-- `FunctionCall`, `ToolResult`: Function calling types
 
 ### Deferred Tool Loading
 
-The framework supports deferred/lazy tool loading to reduce initial context size:
+Tools have a `discoverability` attribute: `"core"` (always loaded) or `"discoverable"` (on-demand).
+Model uses `list_tools()` → `get_tool_schemas()` workflow to discover tools.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  TRADITIONAL: All tools loaded initially (~3000-8000 tokens)        │
-├─────────────────────────────────────────────────────────────────────┤
-│  DEFERRED: Only core tools loaded, others discovered on-demand      │
-│            Initial context: ~200 tokens (introspection tools)       │
-│            Model uses list_tools → get_tool_schemas workflow        │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-**Tool Discoverability:**
-
-Tools have a `discoverability` attribute that controls when they're loaded:
-- `"core"`: Always present in initial context (essential tools)
-- `"discoverable"`: Loaded on-demand via introspection (default)
-
-```python
-ToolSchema(
-    name="readFile",
-    description="Read a file from disk",
-    parameters={...},
-    category="filesystem",
-    discoverability="core",  # Always loaded
-)
-
-ToolSchema(
-    name="web_search",
-    description="Search the web",
-    parameters={...},
-    category="search",
-    discoverability="discoverable",  # Loaded on-demand (default)
-)
-```
-
-**Model Discovery Workflow:**
-
-1. Model calls `list_tools(category="search")` to discover available tools
-2. Model calls `get_tool_schemas(names=["web_search"])` to get full schema
-3. Model can now call `web_search(...)` with knowledge of parameters
-
-**Core Tools (always loaded when deferred mode enabled):**
-- `introspection`: list_tools, get_tool_schemas
-- `file_edit`: readFile, writeFile, updateFile, etc.
-- `cli`: cli_based_tool
-- `filesystem_query`: glob_files, grep_content
-- `todo`: createPlan, updateStep, etc.
-- `clarification`: request_clarification
-
-**Configuration:**
-
-Deferred loading is enabled by default. Set `JAATO_DEFERRED_TOOLS=false` to disable and load all tools upfront.
-
-```bash
-export JAATO_DEFERRED_TOOLS=false  # Disable deferred loading
-```
-
-**Programmatic Check:**
-```python
-if runtime.deferred_tools_enabled:
-    print("Using deferred tool loading")
-```
+- Enabled by default (`JAATO_DEFERRED_TOOLS=true`)
+- Core tools: introspection, file_edit, cli, filesystem_query, todo, clarification
 
 ### Plugin Auto-Wiring
 
@@ -513,69 +200,7 @@ Plugins are automatically wired during initialization - no manual wiring needed:
 |--------|-------------|-----|
 | `set_plugin_registry(registry)` | During `expose_tool()` | PluginRegistry |
 | `set_session(session)` | During `configure()` | JaatoSession |
-| `set_workspace_path(path)` | After `expose_all()` or when workspace changes | PluginRegistry |
-
-This enables plugins to access shared resources without explicit setup in client code:
-
-```python
-# In PluginRegistry.expose_tool():
-plugin = self.get_plugin(name)
-if hasattr(plugin, 'set_plugin_registry'):
-    plugin.set_plugin_registry(self)
-
-# In JaatoSession.configure():
-for plugin_name in self._runtime.registry._exposed:
-    plugin = self._runtime.registry.get_plugin(plugin_name)
-    if plugin and hasattr(plugin, 'set_session'):
-        plugin.set_session(self)
-
-# In PluginRegistry.set_workspace_path():
-for name in self._exposed:
-    plugin = self._plugins.get(name)
-    if plugin and hasattr(plugin, 'set_workspace_path'):
-        plugin.set_workspace_path(path)
-```
-
-Plugins implementing these methods receive automatic wiring:
-- **`set_plugin_registry()`**: Used by `background`, `file_edit`, `cli`, `references`, `artifact_tracker` for cross-plugin access
-- **`set_session()`**: Used by `thinking` plugin for applying thinking configuration to the session
-- **`set_workspace_path()`**: Used by `lsp`, `mcp`, `file_edit`, `cli`, `filesystem_query` for workspace-relative operations and sandboxing
-
-### Formatter Auto-Wiring
-
-Formatter plugins (in the output pipeline) use a similar pattern for dependency injection:
-
-| Method | When Called | By |
-|--------|-------------|-----|
-| `wire_dependencies(tool_registry)` | During `create_pipeline()` | FormatterRegistry |
-| `initialize(config)` | After wiring, during pipeline creation | FormatterRegistry |
-
-Formatters that need access to tool plugins (e.g., `code_validation_formatter` needs `lsp`) implement `wire_dependencies()`:
-
-```python
-class CodeValidationFormatter:
-    def wire_dependencies(self, tool_registry: Any) -> bool:
-        """Wire formatter with tool plugins it depends on.
-
-        Args:
-            tool_registry: The PluginRegistry instance for tool plugins.
-
-        Returns:
-            True if wiring succeeded, False to skip this formatter.
-        """
-        lsp_plugin = tool_registry.get_plugin("lsp") if tool_registry else None
-        if lsp_plugin:
-            self._lsp_plugin = lsp_plugin
-            return True
-        return False  # Skip formatter if LSP not available
-```
-
-The FormatterRegistry automatically:
-1. Calls `wire_dependencies(tool_registry)` for formatters that implement it
-2. Skips the formatter if wiring returns `False` (missing dependencies)
-3. Calls `initialize(config)` after successful wiring
-
-This pattern eliminates hardcoded wiring in the server - formatters declare their own dependencies.
+| `set_workspace_path(path)` | After `expose_all()` | PluginRegistry |
 
 ## Key Environment Variables
 
@@ -592,244 +217,80 @@ This pattern eliminates hardcoded wiring in the server - formatters declare thei
 |----------|---------|
 | `GITHUB_TOKEN` | GitHub PAT with `models: read` permission |
 | `JAATO_GITHUB_ORGANIZATION` | Organization for billing attribution |
-| `JAATO_GITHUB_ENTERPRISE` | Enterprise name (for context) |
-| `JAATO_GITHUB_ENDPOINT` | Override API endpoint URL |
 
 ### Anthropic Claude
 | Variable | Purpose |
 |----------|---------|
 | `ANTHROPIC_API_KEY` | Anthropic API key (uses API credits) |
 | `ANTHROPIC_AUTH_TOKEN` | OAuth token for Claude Pro/Max subscription |
-| `CLAUDE_CODE_OAUTH_TOKEN` | Alternative OAuth token env var (Claude Code CLI) |
 
 **Authentication Options (in priority order):**
-
-1. **PKCE OAuth Login** (recommended for subscription): Interactive browser-based OAuth
+1. **PKCE OAuth Login** (recommended for subscription): `oauth_login()` from `shared.plugins.model_provider.anthropic`
 2. **OAuth Token** (`sk-ant-oat01-...`): From `claude setup-token`
-3. **API Key** (`sk-ant-api03-...`): Uses API credits from console.anthropic.com
-
-**Option 1: PKCE OAuth Login (Interactive)**
-```python
-from shared.plugins.model_provider.anthropic import oauth_login
-
-# Run once - opens browser for Claude Pro/Max login
-oauth_login()
-
-# Tokens are stored in ~/.config/jaato/anthropic_oauth.json
-# Provider will automatically use stored tokens
-```
-
-**Option 2: OAuth Token from claude setup-token**
-```bash
-# Install Claude Code CLI
-npm install -g @anthropic/claude-code
-
-# Generate OAuth token (valid for 1 year)
-claude setup-token
-
-# Set the token
-export ANTHROPIC_AUTH_TOKEN='sk-ant-oat01-...'
-```
-
-> **⚠️ OAuth Warning:** OAuth tokens may be restricted by Anthropic to official
-> Claude Code clients. If you see "This credential is only authorized for use
-> with Claude Code", try the PKCE OAuth login option above.
-
-**Option 3: API Key**
-```bash
-export ANTHROPIC_API_KEY='sk-ant-api03-...'
-```
+3. **API Key** (`sk-ant-api03-...`): Uses API credits
 
 Configuration options via `ProviderConfig.extra`:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `oauth_token` | str | None | OAuth token (alternative to env var) |
 | `enable_caching` | bool | False | Enable prompt caching (90% cost reduction) |
-| `enable_thinking` | bool | False | Enable extended thinking (reasoning traces) |
+| `enable_thinking` | bool | False | Enable extended thinking |
 | `thinking_budget` | int | 10000 | Max thinking tokens when enabled |
-| `cache_history` | bool | True | Cache historical messages (when caching enabled) |
-| `cache_exclude_recent_turns` | int | 2 | Number of recent turns to exclude from history caching |
-| `cache_min_tokens` | bool | True | Enforce minimum token threshold for caching |
-
-**Cache Optimization Strategy:**
-
-When `enable_caching` is True, the provider uses up to 3 cache breakpoints:
-1. **System instruction** - Most stable, cached first
-2. **Tool definitions** - Sorted alphabetically for consistent ordering
-3. **Historical messages** - Older turns cached, recent turns excluded
-
-Cache behavior notes:
-- Tools are sorted by name to ensure consistent ordering (prevents cache invalidation)
-- Content smaller than the minimum threshold (1024-2048 tokens) won't be cached
-- The `cache_exclude_recent_turns` setting controls how many recent turns remain uncached
-- Set `cache_history: false` to disable history caching while keeping system/tools cached
+| `cache_history` | bool | True | Cache historical messages |
 
 ### Claude CLI Provider
 | Variable | Purpose |
 |----------|---------|
-| `JAATO_CLAUDE_CLI_PATH` | Path to claude CLI executable (default: `claude` from PATH) |
-| `JAATO_CLAUDE_CLI_MODE` | Operating mode: `delegated` or `passthrough` (default: `delegated`) |
-| `JAATO_CLAUDE_CLI_MAX_TURNS` | Maximum agentic turns (default: unlimited) |
-| `JAATO_CLAUDE_CLI_PERMISSION_MODE` | CLI permission mode (default: CLI default) |
+| `JAATO_CLAUDE_CLI_PATH` | Path to claude CLI (default: from PATH) |
+| `JAATO_CLAUDE_CLI_MODE` | `delegated` (CLI handles tools) or `passthrough` (jaato handles) |
+| `JAATO_CLAUDE_CLI_MAX_TURNS` | Maximum agentic turns |
 
-**Operating Modes:**
+Requirements: `npm install -g @anthropic-ai/claude-code` + `claude login`
 
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `delegated` | CLI handles tool execution (Read, Write, Bash, etc.) | Simple setup, leverage CLI's mature tools |
-| `passthrough` | jaato handles tools via PluginRegistry | Custom tools, MCP servers, fine-grained control |
-
-**Example Usage:**
-```python
-from shared.plugins.model_provider.claude_cli import ClaudeCLIProvider
-from shared.plugins.model_provider.base import ProviderConfig
-
-provider = ClaudeCLIProvider()
-provider.initialize(ProviderConfig(
-    extra={
-        "cli_mode": "delegated",      # or "passthrough"
-        "cli_path": "/usr/local/bin/claude",
-        "max_turns": 10,
-        "permission_mode": "acceptEdits",
-    }
-))
-provider.connect("sonnet")  # or "opus", or full model name
-
-provider.create_session(system_instruction="You are a helpful assistant.")
-response = provider.send_message("Hello!")
-```
-
-**Requirements:**
-- Claude Code CLI installed: `npm install -g @anthropic-ai/claude-code`
-- CLI authenticated: `claude login` or API key configured in CLI
-
-**Benefits:**
+Benefits:
 - Uses Claude Pro/Max subscription without API credits
-- Leverages CLI's built-in tools (Read, Write, Edit, Bash, WebFetch, etc.)
-- Automatic prompt caching and session management by CLI
-- No Anthropic SDK dependency (pure subprocess + JSON)
-
-**Note:** This provider has separate authentication from the `anthropic` provider.
-The CLI manages its own auth in `~/.claude/`, while the API provider uses
-`ANTHROPIC_API_KEY` or jaato's PKCE OAuth flow.
+- Leverages CLI's built-in tools (Read, Write, Edit, Bash, etc.)
+- Automatic prompt caching by CLI
 
 ### Antigravity (Google IDE Backend)
 | Variable | Purpose |
 |----------|---------|
-| `JAATO_ANTIGRAVITY_PROJECT_ID` | Override Antigravity project ID |
-| `JAATO_ANTIGRAVITY_ENDPOINT` | Override API endpoint URL |
-| `JAATO_ANTIGRAVITY_QUOTA` | Preferred quota: `antigravity` (default) or `gemini-cli` |
-| `JAATO_ANTIGRAVITY_THINKING_LEVEL` | Gemini 3 thinking level (`minimal`/`low`/`medium`/`high`) |
-| `JAATO_ANTIGRAVITY_THINKING_BUDGET` | Claude thinking budget in tokens (default: 8192) |
+| `JAATO_ANTIGRAVITY_QUOTA` | `antigravity` (default) or `gemini-cli` |
+| `JAATO_ANTIGRAVITY_THINKING_LEVEL` | Gemini 3: `minimal`/`low`/`medium`/`high` |
+| `JAATO_ANTIGRAVITY_THINKING_BUDGET` | Claude thinking budget (default: 8192) |
 | `JAATO_ANTIGRAVITY_AUTO_ROTATE` | Enable multi-account rotation (default: `true`) |
 
-**Authentication: Google OAuth with PKCE**
+Auth: `oauth_login()` from `shared.plugins.model_provider.antigravity`
 
-Antigravity uses Google OAuth to access models through Google's IDE backend.
-This provides access to Gemini 3 and Claude models via your Google account.
-
-```python
-from shared.plugins.model_provider.antigravity import oauth_login
-
-# Run once - opens browser for Google authentication
-oauth_login()
-
-# Tokens are stored in ~/.config/jaato/antigravity_accounts.json
-# Provider will automatically use stored tokens
-```
-
-**Available Models:**
-
-| Quota | Model | Features |
-|-------|-------|----------|
-| Antigravity | `antigravity-gemini-3-pro` | 1M context, thinking levels |
-| Antigravity | `antigravity-gemini-3-flash` | 1M context, thinking levels |
-| Antigravity | `antigravity-claude-sonnet-4-5` | 200K context |
-| Antigravity | `antigravity-claude-sonnet-4-5-thinking` | Extended thinking |
-| Antigravity | `antigravity-claude-opus-4-5-thinking` | Extended thinking |
-| Gemini CLI | `gemini-2.5-flash` | 1M context |
-| Gemini CLI | `gemini-2.5-pro` | 1M context |
-| Gemini CLI | `gemini-3-flash-preview` | Preview model |
-| Gemini CLI | `gemini-3-pro-preview` | Preview model |
-
-**Usage Example:**
-```python
-from shared.plugins.model_provider.antigravity import AntigravityProvider
-
-provider = AntigravityProvider()
-provider.initialize()  # Uses stored OAuth tokens
-provider.connect('antigravity-gemini-3-flash')
-provider.create_session(system_instruction="You are a helpful assistant.")
-response = provider.send_message("Hello!")
-print(response.get_text())
-```
-
-**Multi-Account Support:**
-
-Antigravity supports multiple Google accounts for load balancing.
-Run `oauth_login()` multiple times to add accounts. The provider
-automatically rotates between accounts when rate limits are hit.
-
-Configuration options via `ProviderConfig.extra`:
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `endpoint` | str | None | Override API endpoint |
-| `quota_type` | str | `antigravity` | Quota pool to use |
-| `project_id` | str | None | Override project ID |
-| `auto_rotate` | bool | True | Enable account rotation on rate limit |
-| `thinking_level` | str | None | Gemini 3 thinking level |
-| `thinking_budget` | int | 8192 | Claude thinking token budget |
+Available Models:
+- Antigravity quota: `antigravity-gemini-3-pro/flash`, `antigravity-claude-sonnet-4-5[-thinking]`
+- Gemini CLI quota: `gemini-2.5-flash/pro`, `gemini-3-flash/pro-preview`
 
 ### General
 | Variable | Purpose |
 |----------|---------|
 | `AI_USE_CHAT_FUNCTIONS` | Enable function calling mode (`1`/`true`) |
-| `AI_EXECUTE_TOOLS` | Allow generic tool execution (`1`/`true`) |
 | `LEDGER_PATH` | Output path for token accounting JSONL |
-| `JAATO_GC_THRESHOLD` | GC trigger threshold percentage (default: 80.0) |
+| `JAATO_GC_THRESHOLD` | GC trigger threshold % (default: 80.0) |
 | `JAATO_PARALLEL_TOOLS` | Enable parallel tool execution (default: `true`) |
 | `JAATO_DEFERRED_TOOLS` | Enable deferred tool loading (default: `true`) |
 
 ### Rate Limiting
 | Variable | Purpose |
 |----------|---------|
-| `AI_REQUEST_INTERVAL` | Minimum seconds between API requests (default: 0 = disabled) |
-| `AI_RETRY_ATTEMPTS` | Max retry attempts for rate limits (default: 5) |
-| `AI_RETRY_BASE_DELAY` | Initial retry delay in seconds (default: 1.0) |
-| `AI_RETRY_MAX_DELAY` | Maximum retry delay in seconds (default: 30.0) |
-| `AI_RETRY_LOG_SILENT` | Suppress retry logging (`1`/`true`/`yes`) |
-
-### Clipboard
-| Variable | Purpose |
-|----------|---------|
-| `JAATO_COPY_MECHANISM` | Clipboard provider: `osc52` (default) |
-| `JAATO_COPY_SOURCES` | Sources to include: `model` (default), or `model&user&tool` |
+| `AI_REQUEST_INTERVAL` | Minimum seconds between requests (default: 0) |
+| `AI_RETRY_ATTEMPTS` | Max retry attempts (default: 5) |
+| `AI_RETRY_BASE_DELAY` | Initial retry delay seconds (default: 1.0) |
+| `AI_RETRY_MAX_DELAY` | Maximum retry delay seconds (default: 30.0) |
 
 ## Rich Client Commands
 
 ### Authentication Commands
-
-The TUI client provides commands for managing provider authentication:
-
-**Anthropic Claude:**
 ```
-anthropic-auth login        # Open browser for OAuth authentication
-anthropic-auth code <code>  # Complete login with authorization code
-anthropic-auth logout       # Clear stored OAuth tokens
-anthropic-auth status       # Show current authentication status
-```
-
-**Antigravity (Google IDE Backend):**
-```
-antigravity-auth login      # Open browser for Google OAuth
-antigravity-auth code <code> # Complete login with authorization code
-antigravity-auth logout     # Clear stored accounts
-antigravity-auth status     # Show current authentication status
-antigravity-auth accounts   # List all authenticated accounts
+anthropic-auth login/logout/status     # Anthropic OAuth
+antigravity-auth login/logout/status   # Google OAuth
 ```
 
 ### Session Commands
-
 ```
 reset                       # Reset conversation history
 model <name>                # Switch to a different model
@@ -837,334 +298,56 @@ keybindings reload          # Reload keybindings from config
 ```
 
 ### Permission Commands
-
-The permission system controls which tools the model can execute. When a tool requires
-permission, the user is prompted before execution.
-
 ```
-permissions                 # Show current permission state
-permissions show            # Same as above
-permissions whitelist       # Show whitelisted tools
-permissions blacklist       # Show blacklisted tools
-permissions suspend         # Suspend prompts until session goes idle
-permissions suspend turn    # Suspend prompts for remainder of this turn
-permissions resume          # Resume normal permission prompting
-permissions status          # Show detailed suspension status
+permissions [show|whitelist|blacklist|suspend|resume|status]
 ```
 
-**Permission Response Options:**
+Permission responses: `y`(yes), `n`(no), `a`(always), `t`(turn), `i`(idle), `once`, `never`, `all`
 
-When prompted for permission, these responses are available:
-
-| Key | Full | Description |
-|-----|------|-------------|
-| `y` | `yes` | Allow this tool execution |
-| `n` | `no` | Deny this tool execution |
-| `a` | `always` | Allow and whitelist for session |
-| `t` | `turn` | Allow remaining tools this turn |
-| `i` | `idle` | Allow until session goes idle |
-| `once` | `once` | Allow once without remembering |
-| `never` | `never` | Deny and blacklist for session |
-| `all` | `all` | Allow all future requests in session |
-
-**Turn-Scoped vs Idle-Scoped Approval:**
-
-Understanding the difference between `turn` and `idle` scoped approvals:
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  TYPICAL INTERACTIVE SESSION                                        │
-│                                                                     │
-│  User sends message ──► Turn starts                                 │
-│         │                  │                                        │
-│         │           Model processes, makes tool calls               │
-│         │                  │                                        │
-│         │           Model responds ──► Turn ends                    │
-│         │                  │                                        │
-│         │           Session goes IDLE ◄── Both suspensions clear   │
-│         │                  │                                        │
-│  User sends next message ──► New turn starts                        │
-│                                                                     │
-│  In this flow, "turn" and "idle" behave identically because         │
-│  the session goes IDLE immediately after each turn ends.            │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  AUTOMATED PIPELINE (where the difference matters)                  │
-│                                                                     │
-│  Script sends message 1 ──► Turn 1 starts                          │
-│         │                      │                                    │
-│         │               Tool calls (approved via "turn")            │
-│         │                      │                                    │
-│         │               Turn 1 ends ──► Turn suspension clears     │
-│         │                      │                                    │
-│  Script sends message 2 ──► Turn 2 starts (no IDLE between)        │
-│         │                      │                                    │
-│         │               Tool calls (need new approval!)             │
-│         │                      │         ▲                          │
-│         │                      │    "idle" would still be active   │
-│         │                      │                                    │
-│         │               Turn 2 ends                                 │
-│         │                      │                                    │
-│         │               Session goes IDLE ◄── Idle suspension clears│
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-**When to use which:**
-
-| Scope | Use Case |
-|-------|----------|
-| `turn` | Interactive use - approval lasts until model finishes responding |
-| `idle` | Automated pipelines - approval persists across multiple consecutive turns |
-
-**Note:** In typical interactive sessions where the user sends one message at a time,
-both options behave identically. The distinction only matters for automated multi-turn
-scenarios where messages are sent programmatically without user interaction between them.
+- **turn**: Approval lasts until model finishes responding
+- **idle**: Approval persists across consecutive turns until session goes idle
 
 ### Vision Capture (TUI Screenshots)
-
-The rich client supports capturing TUI screenshots. The command itself is intercepted
-client-side, but by default a system hint is sent to the model about the capture path.
-
 ```
-screenshot              # Capture and send hint to model
-screenshot nosend       # Capture only, no hint to model
-screenshot format F     # Set output format (svg, png, html)
-screenshot auto         # Toggle auto-capture on turn end
-screenshot interval N   # Capture every N ms during streaming (0=off)
-screenshot help         # Show help
+screenshot [nosend|format F|auto|interval N|help]
 ```
-
-**How it works:**
-1. User runs `screenshot` command
-2. TUI is captured as SVG (or PNG with cairosvg) to `/tmp/jaato_vision/`
-3. A system hint is sent to the model with the capture path (unless `nosend`)
-4. Model can read the image file to analyze the TUI state
-
-**Pipeline Integration:**
-
-The vision capture uses a `VisionCaptureFormatter` registered in the output pipeline:
-- `screenshot auto` - Capture at turn end (after model finishes responding)
-- `screenshot interval 500` - Capture every 500ms during streaming to see evolution
-
-**Environment Variables:**
-| Variable | Purpose |
-|----------|---------|
-| `JAATO_VISION_DIR` | Output directory (default: `/tmp/jaato_vision`) |
-| `JAATO_VISION_FORMAT` | Format: `svg` (default), `png`, `html` |
-
-**Note:** PNG format requires `cairosvg` package for SVG→PNG conversion.
+Captures TUI as SVG/PNG to `$JAATO_VISION_DIR` (default: `/tmp/jaato_vision`).
 
 ## Rich Client Keybindings
 
-The rich client supports customizable keybindings via:
-1. **Project config**: `.jaato/keybindings.json`
-2. **User config**: `~/.jaato/keybindings.json`
-3. **Environment variables**: `JAATO_KEY_<ACTION>=<key>`
+Config files: `.jaato/keybindings.json` (project) or `~/.jaato/keybindings.json` (user)
 
-Priority: Environment variables > Project config > User config > Defaults
+Key syntax (prompt_toolkit): `enter`, `c-c` (Ctrl+C), `f1`, `pageup`, `["escape", "enter"]`
 
-### Configuration File Format
-
-```json
-{
-  "submit": "enter",
-  "newline": ["escape", "enter"],
-  "clear_input": ["escape", "escape"],
-  "cancel": "c-c",
-  "exit": "c-d",
-  "scroll_up": "pageup",
-  "scroll_down": "pagedown",
-  "scroll_top": "home",
-  "scroll_bottom": "end",
-  "nav_up": "up",
-  "nav_down": "down",
-  "pager_quit": "q",
-  "pager_next": "space",
-  "toggle_plan": "c-p",
-  "toggle_tools": "c-t",
-  "cycle_agents": "c-a",
-  "yank": "c-y",
-  "view_full": "v"
-}
-```
-
-### Key Syntax (prompt_toolkit)
-
-- Simple keys: `enter`, `space`, `tab`, `q`, `v`
-- Control: `c-c`, `c-d`, `c-p` (Ctrl+C, Ctrl+D, Ctrl+P)
-- Function keys: `f1`, `f2`, `f12`
-- Special: `pageup`, `pagedown`, `home`, `end`, `up`, `down`
-- Multi-key sequences: `["escape", "enter"]` or `"escape enter"`
-
-### Reloading Keybindings
-
-Use the `keybindings reload` command to reload keybindings without restarting:
-```
-keybindings reload
-```
+Default keybindings: `submit`=enter, `cancel`=c-c, `exit`=c-d, `toggle_plan`=c-p, `toggle_tools`=c-t
 
 ## Rich Client Theming
 
-The rich client supports theme customization with three built-in presets and automatic persistence.
+Built-in themes: `dark` (default), `light`, `high-contrast`
 
-### Built-in Themes
+Switch: `/theme [dark|light|high-contrast|reload]`
 
-- `dark` (default) - Dark background with cyan/green accents
-- `light` - Light background for bright terminals
-- `high-contrast` - High contrast for accessibility
+Custom theme: Create `theme.json` in `.jaato/` or `~/.jaato/` with `colors` object containing: `primary`, `secondary`, `success`, `warning`, `error`, `muted`, `background`, `surface`, `text`, `text_muted`
 
-### Switching Themes
+## Telemetry (OpenTelemetry)
 
-Use the `/theme` command:
-```
-/theme              # Show current theme info
-/theme dark         # Switch to dark theme
-/theme light        # Switch to light theme
-/theme high-contrast # Switch to high-contrast theme
-/theme reload       # Reload from config files
-```
-
-Theme selection is automatically persisted to `~/.jaato/preferences.json` and restored on next startup.
-
-### Theme Priority
-
-1. `JAATO_THEME` environment variable (temporary override)
-2. Saved user preference (`~/.jaato/preferences.json`)
-3. Project-level custom theme (`.jaato/theme.json`)
-4. User-level custom theme (`~/.jaato/theme.json`)
-5. Default "dark" theme
-
-### Custom Themes
-
-Create a custom theme by placing a `theme.json` file in `.jaato/` (project) or `~/.jaato/` (user):
-
-```json
-{
-  "name": "my-theme",
-  "version": "1.0",
-  "colors": {
-    "primary": "#5fd7ff",
-    "secondary": "#87d787",
-    "success": "#5fd75f",
-    "warning": "#ffff5f",
-    "error": "#ff5f5f",
-    "muted": "#808080",
-    "background": "#1a1a1a",
-    "surface": "#333333",
-    "text": "#ffffff",
-    "text_muted": "#aaaaaa"
-  }
-}
-```
-
-## Testing
-
-### Install Dev Dependencies
-```bash
-.venv/bin/pip install -e ".[dev]"
-```
-
-### Running Tests
-```bash
-# Run all tests
-.venv/bin/pytest
-
-# Run tests for a specific module
-.venv/bin/pytest shared/tests/
-
-# Run tests for a specific plugin
-.venv/bin/pytest shared/plugins/cli/tests/
-
-# Run a single test file
-.venv/bin/pytest shared/plugins/file_edit/tests/test_diff_utils.py
-
-# Run a single test function
-.venv/bin/pytest shared/plugins/cli/tests/test_plugin.py::test_cli_execute -v
-
-# Run with verbose output
-.venv/bin/pytest -v
-```
-
-### Test Organization
-- Core tests: `shared/tests/`
-- Plugin tests: `shared/plugins/<plugin>/tests/`
-- Provider tests: `shared/plugins/model_provider/<provider>/tests/`
-
-## Telemetry (OpenTelemetry Integration)
-
-jaato supports optional OpenTelemetry tracing for observability. When enabled, it exports traces to any OTel-compatible backend (Langfuse, Arize Phoenix, Helicone, etc.).
-
-### Installation
+See [docs/opentelemetry-design.md](docs/opentelemetry-design.md) for comprehensive design.
 
 ```bash
-# Install telemetry dependencies
 .venv/bin/pip install -r requirements-telemetry.txt
+export JAATO_TELEMETRY_ENABLED=true
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
 ```
 
-### Configuration
+Span hierarchy: `jaato.turn` → `jaato.tool` → `jaato.permission`
 
-**Environment Variables:**
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `JAATO_TELEMETRY_ENABLED` | Enable telemetry | `false` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint URL | None |
-| `OTEL_EXPORTER_OTLP_HEADERS` | Auth headers (key=value,key2=value2) | None |
-| `OTEL_SERVICE_NAME` | Service name | `jaato` |
-| `JAATO_TELEMETRY_REDACT_CONTENT` | Redact prompts/responses | `true` |
-
-**Programmatic Configuration:**
-
-```python
-from shared.plugins.telemetry import create_otel_plugin
-
-# Create and configure telemetry
-telemetry = create_otel_plugin()
-telemetry.initialize({
-    "enabled": True,
-    "exporter": "otlp",
-    "endpoint": "http://localhost:4317",
-    "headers": {"Authorization": "Bearer xxx"},
-    "redact_content": True,
-})
-
-# Set on runtime
-runtime.set_telemetry_plugin(telemetry)
-```
-
-### Span Hierarchy
-
-```
-jaato.turn                    # Root span for send_message()
-├── jaato.tool                # Tool execution (per tool)
-│   └── jaato.permission      # Permission check (if needed)
-└── jaato.gc                  # GC operation (if triggered)
-```
-
-### Telemetry Attributes
-
-**Turn Span (`jaato.turn`):**
-- `jaato.session_id`: Session identifier
-- `jaato.agent_type`: "main" or "subagent"
-- `jaato.agent_name`: Agent name (if set)
-- `jaato.turn_index`: Turn number in session
-- `jaato.streaming`: Whether streaming was used
-- `jaato.cancelled`: Whether turn was cancelled
-
-**Tool Span (`jaato.tool`):**
-- `jaato.tool.name`: Tool name
-- `jaato.tool.call_id`: Function call ID
-- `jaato.tool.plugin_type`: Plugin type (cli, mcp, etc.)
-- `jaato.tool.success`: Execution success
-- `jaato.tool.duration_seconds`: Execution time
-- `jaato.tool.error`: Error message (if failed)
+Key attributes:
+- Turn: `session_id`, `agent_type`, `turn_index`, `streaming`, `cancelled`
+- Tool: `tool.name`, `tool.plugin_type`, `tool.success`, `tool.duration_seconds`
 
 ## Additional Documentation
 
 - [Architecture Overview](docs/architecture.md) - Server-first architecture, event protocol, component diagrams
-- [Sequence Diagram Architecture](docs/sequence-diagram-architecture.md) - Detailed sequence diagrams for client-server interaction, tool execution, and output rendering
-- [OpenTelemetry Design](docs/opentelemetry-design.md) - Comprehensive design for OTel tracing integration
+- [Sequence Diagrams](docs/sequence-diagram-architecture.md) - Client-server interaction, tool execution flows
+- [OpenTelemetry Design](docs/opentelemetry-design.md) - Comprehensive OTel tracing integration
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI
-- [ModLog Training README](modlog-training-set-test/README.md) - COBOL training set generation
