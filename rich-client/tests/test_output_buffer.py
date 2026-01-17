@@ -609,18 +609,18 @@ class TestEdgeCases:
         # More model text (should NOT have turn header - same turn)
         self.buffer.append("model", "Continuing", "write")
 
-        # Check is_turn_start flags
+        # The continuation is still in _current_block, not _lines yet
+        # Check that it has is_new_turn=False
+        assert self.buffer._current_block is not None, "Should have current block"
+        source, parts, is_new_turn = self.buffer._current_block
+        assert source == "model", "Current block should be model"
+        assert is_new_turn is False, "Continuation should NOT be a new turn"
+
+        # Also verify the first model text in _lines has is_turn_start=True
         model_lines = [item for item in self.buffer._lines
                        if isinstance(item, OutputLine) and item.source == "model"]
-
-        turn_starts = [line for line in model_lines if line.is_turn_start]
-        non_turn_starts = [line for line in model_lines if not line.is_turn_start]
-
-        # Should have exactly one turn start (the first model message after user)
-        assert len(turn_starts) == 1, f"Expected 1 turn start, got {len(turn_starts)}"
-
-        # The continuation should NOT be a turn start
-        assert len(non_turn_starts) >= 1, "Should have non-turn-start model lines"
+        assert len(model_lines) == 1, f"Expected 1 model line in _lines, got {len(model_lines)}"
+        assert model_lines[0].is_turn_start is True, "First model line should be turn start"
 
 
 if __name__ == "__main__":
