@@ -119,7 +119,7 @@ class TestUrlValidation:
 
         # Mock the fetch to avoid actual network call
         with patch.object(plugin, '_fetch_url') as mock_fetch:
-            mock_fetch.return_value = ("<html></html>", "https://example.com", None)
+            mock_fetch.return_value = ("<html></html>", "https://example.com", None, {'response_content_type': 'text/html'})
             result = plugin._execute({"url": "example.com"})
 
             # Should have called with https
@@ -311,7 +311,7 @@ class TestCaching:
         )
 
         with patch.object(plugin, '_fetch_url') as mock_fetch:
-            mock_fetch.return_value = ("<html>new</html>", "https://example.com", None)
+            mock_fetch.return_value = ("<html>new</html>", "https://example.com", None, {'response_content_type': 'text/html'})
             with patch.object(plugin, '_html_to_markdown') as mock_convert:
                 mock_convert.return_value = "new content"
                 result = plugin._execute({"url": "https://example.com"})
@@ -329,7 +329,7 @@ class TestModes:
         plugin.initialize()
 
         with patch.object(plugin, '_fetch_url') as mock_fetch:
-            mock_fetch.return_value = ("<html><body><p>Hello</p></body></html>", "https://example.com", None)
+            mock_fetch.return_value = ("<html><body><p>Hello</p></body></html>", "https://example.com", None, {'response_content_type': 'text/html'})
             with patch.object(plugin, '_html_to_markdown') as mock_convert:
                 mock_convert.return_value = "Hello"
                 result = plugin._execute({"url": "https://example.com"})
@@ -344,11 +344,24 @@ class TestModes:
 
         html = "<html><body><p>Hello</p></body></html>"
         with patch.object(plugin, '_fetch_url') as mock_fetch:
-            mock_fetch.return_value = (html, "https://example.com", None)
+            mock_fetch.return_value = (html, "https://example.com", None, {'response_content_type': 'text/html'})
             result = plugin._execute({"url": "https://example.com", "mode": "raw"})
 
             assert result["content_type"] == "html"
             assert result["content"] == html
+
+    def test_raw_mode_xml_content_type(self):
+        """Test raw mode returns xml content type for XML content."""
+        plugin = WebFetchPlugin()
+        plugin.initialize()
+
+        xml = '<?xml version="1.0"?><root><item>Hello</item></root>'
+        with patch.object(plugin, '_fetch_url') as mock_fetch:
+            mock_fetch.return_value = (xml, "https://example.com/feed.xml", None, {'response_content_type': 'application/xml'})
+            result = plugin._execute({"url": "https://example.com/feed.xml", "mode": "raw"})
+
+            assert result["content_type"] == "xml"
+            assert result["content"] == xml
 
     def test_structured_mode(self):
         """Test structured extraction mode."""
@@ -364,7 +377,7 @@ class TestModes:
         </html>
         """
         with patch.object(plugin, '_fetch_url') as mock_fetch:
-            mock_fetch.return_value = (html, "https://example.com", None)
+            mock_fetch.return_value = (html, "https://example.com", None, {'response_content_type': 'text/html'})
             result = plugin._execute({
                 "url": "https://example.com",
                 "mode": "structured",
@@ -375,6 +388,39 @@ class TestModes:
             assert "metadata" in result
             assert "headings" in result
             assert "links" in result
+
+    def test_structured_mode_json(self):
+        """Test structured mode parses JSON content."""
+        plugin = WebFetchPlugin()
+        plugin.initialize()
+
+        json_content = '{"id": 1, "title": "Test Post", "body": "Content"}'
+        with patch.object(plugin, '_fetch_url') as mock_fetch:
+            mock_fetch.return_value = (json_content, "https://api.example.com/posts/1", None, {'response_content_type': 'application/json'})
+            result = plugin._execute({
+                "url": "https://api.example.com/posts/1",
+                "mode": "structured"
+            })
+
+            assert result["content_type"] == "json"
+            assert "data" in result
+            assert result["data"]["id"] == 1
+            assert result["data"]["title"] == "Test Post"
+
+    def test_markdown_mode_json(self):
+        """Test markdown mode pretty-prints JSON content."""
+        plugin = WebFetchPlugin()
+        plugin.initialize()
+
+        json_content = '{"id":1,"title":"Test"}'
+        with patch.object(plugin, '_fetch_url') as mock_fetch:
+            mock_fetch.return_value = (json_content, "https://api.example.com/data", None, {'response_content_type': 'application/json'})
+            result = plugin._execute({"url": "https://api.example.com/data"})
+
+            assert result["content_type"] == "json"
+            # Should be pretty-printed with indentation
+            assert '"id": 1' in result["content"]
+            assert '"title": "Test"' in result["content"]
 
 
 class TestSelector:
@@ -397,7 +443,7 @@ class TestSelector:
         </html>
         """
         with patch.object(plugin, '_fetch_url') as mock_fetch:
-            mock_fetch.return_value = (html, "https://example.com", None)
+            mock_fetch.return_value = (html, "https://example.com", None, {'response_content_type': 'text/html'})
             with patch.object(plugin, '_html_to_markdown') as mock_convert:
                 mock_convert.return_value = "Main content here"
                 result = plugin._execute({
@@ -418,7 +464,7 @@ class TestSelector:
 
         html = "<html><body><p>Content</p></body></html>"
         with patch.object(plugin, '_fetch_url') as mock_fetch:
-            mock_fetch.return_value = (html, "https://example.com", None)
+            mock_fetch.return_value = (html, "https://example.com", None, {'response_content_type': 'text/html'})
             result = plugin._execute({
                 "url": "https://example.com",
                 "selector": ".nonexistent"
@@ -426,3 +472,151 @@ class TestSelector:
 
             assert "error" in result
             assert "No elements found" in result["error"]
+
+
+class TestCacheControl:
+    """Test cache control features."""
+
+    def test_no_cache_bypasses_cache(self):
+        """Test that no_cache=True bypasses the cache."""
+        plugin = WebFetchPlugin()
+        plugin.initialize()
+
+        # Pre-populate cache
+        from datetime import datetime
+        plugin._cache["https://example.com|"] = ("<html>cached</html>", datetime.now())
+
+        with patch.object(plugin, '_fetch_url') as mock_fetch:
+            mock_fetch.return_value = ("<html>fresh</html>", "https://example.com", None, {'response_content_type': 'text/html', 'response_headers': {}})
+            with patch.object(plugin, '_html_to_markdown') as mock_convert:
+                mock_convert.return_value = "fresh content"
+                result = plugin._execute({"url": "https://example.com", "no_cache": True})
+
+                # Should have called fetch despite cache existing
+                mock_fetch.assert_called_once()
+
+    def test_no_cache_prevents_caching(self):
+        """Test that no_cache=True prevents storing in cache."""
+        plugin = WebFetchPlugin()
+        plugin.initialize()
+
+        with patch.object(plugin, '_fetch_url') as mock_fetch:
+            mock_fetch.return_value = ("<html>content</html>", "https://example.com", None, {'response_content_type': 'text/html', 'response_headers': {}})
+            with patch.object(plugin, '_html_to_markdown') as mock_convert:
+                mock_convert.return_value = "content"
+                result = plugin._execute({"url": "https://example.com", "no_cache": True})
+
+                # Cache should remain empty
+                assert len(plugin._cache) == 0
+
+
+class TestResponseHeaders:
+    """Test response headers feature."""
+
+    def test_include_headers_false_by_default(self):
+        """Test that headers are not included by default."""
+        plugin = WebFetchPlugin()
+        plugin.initialize()
+
+        with patch.object(plugin, '_fetch_url') as mock_fetch:
+            mock_fetch.return_value = ("<html>test</html>", "https://example.com", None, {
+                'response_content_type': 'text/html',
+                'response_headers': {'Content-Type': 'text/html', 'Server': 'nginx'}
+            })
+            with patch.object(plugin, '_html_to_markdown') as mock_convert:
+                mock_convert.return_value = "test"
+                result = plugin._execute({"url": "https://example.com"})
+
+                assert 'response_headers' not in result
+
+    def test_include_headers_returns_filtered_headers(self):
+        """Test that include_headers=True returns filtered headers."""
+        plugin = WebFetchPlugin()
+        plugin.initialize()
+
+        with patch.object(plugin, '_fetch_url') as mock_fetch:
+            mock_fetch.return_value = ("<html>test</html>", "https://example.com", None, {
+                'response_content_type': 'text/html',
+                'response_headers': {
+                    'Content-Type': 'text/html; charset=utf-8',
+                    'Last-Modified': 'Wed, 15 Jan 2025 10:00:00 GMT',
+                    'ETag': '"abc123"',
+                    'Cache-Control': 'max-age=3600',
+                    'Server': 'nginx',
+                    'Set-Cookie': 'session=xyz',  # Should be filtered out
+                    'X-Internal-Id': '12345',     # Should be filtered out
+                }
+            })
+            with patch.object(plugin, '_html_to_markdown') as mock_convert:
+                mock_convert.return_value = "test"
+                result = plugin._execute({"url": "https://example.com", "include_headers": True})
+
+                assert 'response_headers' in result
+                headers = result['response_headers']
+                # These should be included
+                assert 'Content-Type' in headers
+                assert 'Last-Modified' in headers
+                assert 'ETag' in headers
+                assert 'Cache-Control' in headers
+                assert 'Server' in headers
+                # These should be filtered out
+                assert 'Set-Cookie' not in headers
+                assert 'X-Internal-Id' not in headers
+
+
+class TestContentTypeDetection:
+    """Test content type detection."""
+
+    def test_detect_json_from_header(self):
+        """Test JSON detection from content-type header."""
+        plugin = WebFetchPlugin()
+
+        assert plugin._detect_content_type('application/json', '{}') == 'json'
+        assert plugin._detect_content_type('application/json; charset=utf-8', '{}') == 'json'
+
+    def test_detect_xml_from_header(self):
+        """Test XML detection from content-type header."""
+        plugin = WebFetchPlugin()
+
+        assert plugin._detect_content_type('application/xml', '<root/>') == 'xml'
+        assert plugin._detect_content_type('text/xml', '<root/>') == 'xml'
+
+    def test_detect_html_from_header(self):
+        """Test HTML detection from content-type header."""
+        plugin = WebFetchPlugin()
+
+        assert plugin._detect_content_type('text/html', '<html></html>') == 'html'
+        assert plugin._detect_content_type('text/html; charset=utf-8', '<html></html>') == 'html'
+
+    def test_detect_text_from_header(self):
+        """Test plain text detection from content-type header."""
+        plugin = WebFetchPlugin()
+
+        assert plugin._detect_content_type('text/plain', 'Hello world') == 'text'
+
+    def test_detect_json_from_content(self):
+        """Test JSON detection from content inspection."""
+        plugin = WebFetchPlugin()
+
+        # Empty header, valid JSON content
+        assert plugin._detect_content_type('', '{"key": "value"}') == 'json'
+        assert plugin._detect_content_type('', '[1, 2, 3]') == 'json'
+
+    def test_detect_xml_from_content(self):
+        """Test XML detection from content inspection."""
+        plugin = WebFetchPlugin()
+
+        assert plugin._detect_content_type('', '<?xml version="1.0"?><root/>') == 'xml'
+
+    def test_detect_html_from_content(self):
+        """Test HTML detection from content inspection."""
+        plugin = WebFetchPlugin()
+
+        assert plugin._detect_content_type('', '<!DOCTYPE html><html></html>') == 'html'
+        assert plugin._detect_content_type('', '<html><body></body></html>') == 'html'
+
+    def test_default_to_html(self):
+        """Test that unknown content defaults to HTML."""
+        plugin = WebFetchPlugin()
+
+        assert plugin._detect_content_type('', 'Some random text') == 'html'
