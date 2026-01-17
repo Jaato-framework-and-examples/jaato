@@ -219,6 +219,7 @@ class OutputBuffer:
         self._spinner_index: int = 0
         self._active_tools: List[ActiveToolCall] = []  # Currently executing tools
         self._tools_expanded: bool = False  # Toggle between collapsed/expanded tool view
+        self._tools_expanded_before_prompt: Optional[bool] = None  # Saved state before permission/clarification forced expansion
         self._rendering: bool = False  # Guard against flushes during render
         self._tool_placeholder_index: Optional[int] = None  # Position in _lines where tools render
         self._agent_type: str = agent_type  # "main" or "subagent" for user label
@@ -1236,21 +1237,30 @@ class OutputBuffer:
 
         # Insert just the tool_block - it renders its own separator (───)
         self._lines.insert(insert_pos, tool_block)
+        next_pos = insert_pos + 1
 
         # Flush any pending enrichment notifications
         # These were queued while tools were active so they appear AFTER the tool tree
         if self._pending_enrichments:
-            enrich_pos = insert_pos + 1
             for enrich_source, enrich_text, enrich_mode in self._pending_enrichments:
                 for line in enrich_text.split('\n'):
                     display_lines = self._measure_display_lines(enrich_source, line, False)
+                    # Use "dim" as style - it's a valid Rich style primitive
                     enrich_line = OutputLine(
-                        source=enrich_source, text=line, style="line",
+                        source=enrich_source, text=line, style="dim",
                         display_lines=display_lines, is_turn_start=False
                     )
-                    self._lines.insert(enrich_pos, enrich_line)
-                    enrich_pos += 1
+                    self._lines.insert(next_pos, enrich_line)
+                    next_pos += 1
             self._pending_enrichments.clear()
+
+        # Add trailing blank line after tool block (and enrichments)
+        # Use empty style since it's just spacing
+        trailing_line = OutputLine(
+            source="model", text="", style="",
+            display_lines=1, is_turn_start=False
+        )
+        self._lines.insert(next_pos, trailing_line)
 
         # Clear placeholder and active tools
         self._tool_placeholder_index = None
@@ -1264,6 +1274,22 @@ class OutputBuffer:
     def active_tools(self) -> List[ActiveToolCall]:
         """Get list of currently active tools."""
         return list(self._active_tools)
+
+    def _maybe_restore_expanded_state(self) -> None:
+        """Restore expanded state if no more pending prompts require expansion.
+
+        Called after permission/clarification is resolved to check if we can
+        restore the user's previous collapsed state.
+        """
+        # Check if any tool still has a pending prompt
+        for tool in self._active_tools:
+            if tool.permission_state == "pending" or tool.clarification_state == "pending":
+                return  # Still have pending prompts, keep expanded
+
+        # No more pending prompts, restore saved state if we have one
+        if self._tools_expanded_before_prompt is not None:
+            self._tools_expanded = self._tools_expanded_before_prompt
+            self._tools_expanded_before_prompt = None
 
     def set_tool_permission_pending(
         self,
@@ -1290,6 +1316,10 @@ class OutputBuffer:
                 tool.permission_format_hint = format_hint
                 # Scroll to bottom to show the prompt
                 self._scroll_offset = 0
+                # Save current state and force expanded view so user can see the permission prompt
+                if self._tools_expanded_before_prompt is None:
+                    self._tools_expanded_before_prompt = self._tools_expanded
+                self._tools_expanded = True
                 _trace(f"set_tool_permission_pending: FOUND exact match for {tool_name}")
                 return
 
@@ -1307,6 +1337,10 @@ class OutputBuffer:
                     # Clear the args summary since it contains askPermission's args, not the target tool's
                     tool.display_args_summary = ""
                 self._scroll_offset = 0
+                # Save current state and force expanded view so user can see the permission prompt
+                if self._tools_expanded_before_prompt is None:
+                    self._tools_expanded_before_prompt = self._tools_expanded
+                self._tools_expanded = True
                 _trace(f"set_tool_permission_pending: FALLBACK attached to {tool.name} (requested: {tool_name})")
                 return
 
@@ -1323,6 +1357,8 @@ class OutputBuffer:
         """
         _trace(f"set_tool_permission_resolved: looking for tool={tool_name}, granted={granted}")
 
+        resolved = False
+
         # First try exact match by tool name with pending permission
         for tool in self._active_tools:
             if tool.name == tool_name and tool.permission_state == "pending":
@@ -1330,19 +1366,26 @@ class OutputBuffer:
                 tool.permission_method = method
                 tool.permission_prompt_lines = None  # Clear expanded prompt
                 _trace(f"set_tool_permission_resolved: FOUND exact match for {tool_name}")
-                return
+                resolved = True
+                break
 
         # Fallback: find any tool with pending permission state
-        # This handles askPermission checking other tools (permission attached to askPermission)
-        for tool in self._active_tools:
-            if tool.permission_state == "pending":
-                tool.permission_state = "granted" if granted else "denied"
-                tool.permission_method = method
-                tool.permission_prompt_lines = None  # Clear expanded prompt
-                _trace(f"set_tool_permission_resolved: FALLBACK resolved {tool.name} (requested: {tool_name})")
-                return
+        if not resolved:
+            for tool in self._active_tools:
+                if tool.permission_state == "pending":
+                    tool.permission_state = "granted" if granted else "denied"
+                    tool.permission_method = method
+                    tool.permission_prompt_lines = None  # Clear expanded prompt
+                    _trace(f"set_tool_permission_resolved: FALLBACK resolved {tool.name} (requested: {tool_name})")
+                    resolved = True
+                    break
 
-        _trace(f"set_tool_permission_resolved: NO PENDING TOOL for {tool_name}")
+        if not resolved:
+            _trace(f"set_tool_permission_resolved: NO PENDING TOOL for {tool_name}")
+            return
+
+        # Restore expanded state if no more pending prompts
+        self._maybe_restore_expanded_state()
 
     def set_tool_clarification_pending(self, tool_name: str, prompt_lines: List[str]) -> None:
         """Mark a tool as awaiting clarification (initial context only).
@@ -1358,6 +1401,10 @@ class OutputBuffer:
                 tool.clarification_answered = []  # Initialize answered list
                 # Scroll to bottom to show the prompt
                 self._scroll_offset = 0
+                # Save current state and force expanded view so user can see the prompt
+                if self._tools_expanded_before_prompt is None:
+                    self._tools_expanded_before_prompt = self._tools_expanded
+                self._tools_expanded = True
                 return
 
     def set_tool_clarification_question(
@@ -1385,6 +1432,10 @@ class OutputBuffer:
                     tool.clarification_answered = []
                 # Scroll to bottom to show the question
                 self._scroll_offset = 0
+                # Save current state and force expanded view so user can see the prompt
+                if self._tools_expanded_before_prompt is None:
+                    self._tools_expanded_before_prompt = self._tools_expanded
+                self._tools_expanded = True
                 return
 
     def set_tool_question_answered(
@@ -1420,6 +1471,7 @@ class OutputBuffer:
             tool_name: Name of the tool.
             qa_pairs: Optional list of (question, answer) tuples for overview display.
         """
+        resolved = False
         for tool in self._active_tools:
             if tool.name == tool_name:
                 tool.clarification_state = "resolved"
@@ -1427,7 +1479,12 @@ class OutputBuffer:
                 tool.clarification_current_question = 0
                 tool.clarification_total_questions = 0
                 tool.clarification_summary = qa_pairs
-                return
+                resolved = True
+                break
+
+        if resolved:
+            # Restore expanded state if no more pending prompts
+            self._maybe_restore_expanded_state()
 
     def get_pending_prompt_for_pager(self) -> Optional[Tuple[str, List[str]]]:
         """Get the pending prompt that's awaiting user input for pager display.
@@ -1574,8 +1631,11 @@ class OutputBuffer:
                     prompt_lines = tool.permission_prompt_lines
 
                     # Pre-formatted content (e.g., diff) - no box, just lines
+                    # Count actual visual lines (diff lines may contain embedded newlines)
                     if tool.permission_format_hint == "diff":
-                        height += len(prompt_lines)
+                        for line in prompt_lines:
+                            # Count newlines within each line + 1 for the line itself
+                            height += line.count('\n') + 1
                     else:
                         # Box calculation
                         max_prompt_lines = 18
@@ -1837,11 +1897,19 @@ class OutputBuffer:
             else:
                 output.append("  ▸ ", style=self._style("tool_border", "dim"))
 
-            completed = sum(1 for t in self._active_tools if t.completed)
-            if completed == tool_count:
-                output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''} ✓", style=self._style("tool_border", "dim"))
-            else:
-                output.append(f"{completed}/{tool_count} tools", style=self._style("tool_border", "dim"))
+            # Build tool summaries with names (like finalized tools do)
+            tool_summaries = []
+            for tool in self._active_tools:
+                tool_display_name = tool.display_name or tool.name
+                if tool.completed:
+                    status_icon = "✓" if tool.success else "✗"
+                    summary = f"{tool_display_name} {status_icon}"
+                else:
+                    summary = f"{tool_display_name}..."
+                tool_summaries.append(summary)
+
+            output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style=self._style("tool_border", "dim"))
+            output.append(" ".join(tool_summaries), style=self._style("tool_border", "dim"))
 
     def _render_tool_output_lines(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
         """Render output lines for a tool (shared helper)."""
@@ -1890,10 +1958,14 @@ class OutputBuffer:
 
         if tool.permission_format_hint == "diff":
             # Pre-formatted content (diff) - render lines directly without box
+            # Handle embedded newlines by splitting and prefixing each visual line
             for line in prompt_lines:
-                output.append("\n")
-                output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-                output.append(line)
+                # Split on newlines to properly prefix each visual line
+                visual_lines = line.split('\n')
+                for visual_line in visual_lines:
+                    output.append("\n")
+                    output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
+                    output.append(visual_line)
         else:
             # Standard box format
             max_prompt_lines = 18
