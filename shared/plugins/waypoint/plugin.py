@@ -233,6 +233,7 @@ class WaypointPlugin:
                     "properties": {},
                     "required": [],
                 },
+                category="planning",
             ),
             ToolSchema(
                 name="waypoint_info",
@@ -253,6 +254,7 @@ class WaypointPlugin:
                     },
                     "required": ["waypoint_id"],
                 },
+                category="planning",
             ),
             ToolSchema(
                 name="create_waypoint",
@@ -276,6 +278,7 @@ class WaypointPlugin:
                     },
                     "required": ["description"],
                 },
+                category="planning",
             ),
             ToolSchema(
                 name="restore_waypoint",
@@ -298,6 +301,7 @@ class WaypointPlugin:
                     },
                     "required": ["waypoint_id"],
                 },
+                category="planning",
             ),
             ToolSchema(
                 name="delete_waypoint",
@@ -319,6 +323,7 @@ class WaypointPlugin:
                     },
                     "required": ["waypoint_id"],
                 },
+                category="planning",
             ),
         ]
 
@@ -347,6 +352,12 @@ restoration if changes don't work out.
   (with user permission), but cannot delete them.
 - **Model waypoints (m-prefix)**: Created by you. You have full control - create,
   restore, and delete without needing permission.
+
+**Restore Behavior:**
+- Restoring reverts file **contents** to their state at the waypoint
+- Files **created after** the waypoint are NOT deleted (to avoid data loss)
+- Files **deleted after** the waypoint are NOT recreated
+- Only files that were modified and had backups are restored
 
 **When to use waypoints:**
 - Before attempting risky refactoring or experimental changes
