@@ -735,6 +735,12 @@ class OutputBuffer:
         # Flush current block first so tools appear AFTER preceding text
         if not self._active_tools:
             self._flush_current_block()
+            # If this is a new model turn (last source was user/parent), add model header
+            # This ensures "── Model ──" appears before tool trees even when
+            # the model makes tool calls without sending text first
+            if self._last_turn_source in ("user", "parent", None):
+                self._add_line("model", "", "line", is_turn_start=True)
+                self._last_turn_source = "model"
             self._tool_placeholder_index = len(self._lines)
 
         self._active_tools.append(ActiveToolCall(
