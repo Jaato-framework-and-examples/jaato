@@ -785,7 +785,9 @@ class JaatoServer:
                     # Non-model output: strip <hidden>...</hidden> content
                     # These are mid-turn prompts that may contain internal tags
                     filtered_text = re.sub(r'<hidden>.*?</hidden>', '', text, flags=re.DOTALL)
-                    if filtered_text.strip():  # Only emit if content remains after filtering
+                    # Always pass through flush events (mode="flush") even with empty text
+                    # Flush events are critical for tool tree positioning
+                    if filtered_text.strip() or mode == "flush":
                         server.emit(AgentOutputEvent(
                             agent_id=agent_id,
                             source=source,
