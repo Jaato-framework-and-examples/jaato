@@ -41,7 +41,14 @@ if TYPE_CHECKING:
     )
     from azure.core.credentials import AzureKeyCredential
 
-from ..base import ModelProviderPlugin, ProviderConfig, StreamingCallback, UsageUpdateCallback
+from ..base import (
+    FunctionCallDetectedCallback,
+    ModelProviderPlugin,
+    ProviderConfig,
+    StreamingCallback,
+    ThinkingCallback,
+    UsageUpdateCallback,
+)
 from ..types import (
     CancelledException,
     CancelToken,
@@ -843,7 +850,9 @@ class GitHubModelsProvider:
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
         response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None
     ) -> ProviderResponse:
         """Send a message with streaming response and optional cancellation.
 
@@ -995,7 +1004,9 @@ class GitHubModelsProvider:
         on_chunk: StreamingCallback,
         cancel_token: Optional[CancelToken] = None,
         response_schema: Optional[Dict[str, Any]] = None,
-        on_usage_update: Optional[UsageUpdateCallback] = None
+        on_usage_update: Optional[UsageUpdateCallback] = None,
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None
     ) -> ProviderResponse:
         """Send tool results with streaming response and optional cancellation.
 

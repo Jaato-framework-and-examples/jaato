@@ -24,6 +24,7 @@ from ..base import (
     ModelProviderPlugin,
     ProviderConfig,
     StreamingCallback,
+    ThinkingCallback,
     UsageUpdateCallback,
 )
 from ..types import (
@@ -1056,7 +1057,8 @@ class AnthropicProvider:
         cancel_token: Optional[CancelToken] = None,
         response_schema: Optional[Dict[str, Any]] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_function_call: Optional[FunctionCallDetectedCallback] = None
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None
     ) -> ProviderResponse:
         """Send a message with streaming response and optional cancellation.
 
@@ -1127,7 +1129,8 @@ class AnthropicProvider:
         cancel_token: Optional[CancelToken] = None,
         response_schema: Optional[Dict[str, Any]] = None,
         on_usage_update: Optional[UsageUpdateCallback] = None,
-        on_function_call: Optional[FunctionCallDetectedCallback] = None
+        on_function_call: Optional[FunctionCallDetectedCallback] = None,
+        on_thinking: Optional[ThinkingCallback] = None
     ) -> ProviderResponse:
         """Send tool results with streaming response and optional cancellation.
 
