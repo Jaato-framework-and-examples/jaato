@@ -1764,6 +1764,10 @@ class OutputBuffer:
                 # Error message
                 if not tool.success and tool.error_message:
                     height += 1
+                # Clarification summary (Q&A table when expanded)
+                if tool.expanded and tool.clarification_summary:
+                    height += 1  # header ("Answers (N)")
+                    height += len(tool.clarification_summary)  # One line per Q&A pair
         else:
             height += 1  # Collapsed summary line
         return height
@@ -1887,6 +1891,11 @@ class OutputBuffer:
                 # Clarification prompt
                 if tool.clarification_state == "pending" and tool.clarification_prompt_lines:
                     self._render_clarification_prompt(output, tool, is_last)
+
+                # Clarification summary table (Q&A pairs when expanded)
+                show_summary = tool.expanded if self._tool_nav_active else True
+                if show_summary and tool.completed and tool.clarification_summary:
+                    self._render_clarification_summary(output, tool, is_last)
         else:
             # Collapsed view
             if pending_tool:
@@ -2026,6 +2035,35 @@ class OutputBuffer:
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
             output.append(line, style=self._style("clarification_label", "cyan"))
 
+    def _render_clarification_summary(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
+        """Render clarification summary table (Q&A pairs) for a completed tool."""
+        continuation = "   " if is_last else "│  "
+        prefix = "    "
+        qa_pairs = tool.clarification_summary or []
+
+        if not qa_pairs:
+            return
+
+        # Header
+        output.append("\n")
+        output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
+        output.append(f"  📋 Answers ({len(qa_pairs)})", style=self._style("clarification_resolved", "bold green"))
+
+        # Render Q&A table
+        max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
+        for i, (question, answer) in enumerate(qa_pairs):
+            output.append("\n")
+            output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
+
+            # Truncate question if needed
+            q_display = question if len(question) <= 30 else question[:27] + "..."
+            # Truncate answer if needed
+            a_display = answer if len(answer) <= (max_line_width - 35) else answer[:max_line_width - 38] + "..."
+
+            output.append(f"{q_display}", style=self._style("clarification_question", "cyan"))
+            output.append(" → ", style=self._style("muted", "dim"))
+            output.append(f"{a_display}", style=self._style("clarification_answer", "green"))
+
     def _render_tool_block(self, block: ToolBlock, output: Text, wrap_width: int) -> None:
         """Render a ToolBlock inline in the output."""
         tool_count = len(block.tools)
@@ -2145,6 +2183,10 @@ class OutputBuffer:
                     output.append("\n")
                     continuation = "   " if is_last else "│  "
                     output.append(f"    {continuation}   ⚠ {tool.error_message}", style=self._style("tool_error", "red dim"))
+
+                # Clarification summary table (Q&A pairs when expanded)
+                if tool.expanded and tool.clarification_summary:
+                    self._render_clarification_summary(output, tool, is_last)
         else:
             # Collapsed view
             tool_summaries = []
