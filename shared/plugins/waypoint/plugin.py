@@ -343,8 +343,13 @@ class WaypointPlugin:
         """Return system instructions explaining waypoint ownership model."""
         return """## Waypoints
 
-Waypoints are checkpoints that capture file state at significant moments, allowing
-restoration if changes don't work out.
+Waypoints are checkpoints that capture file state at significant moments, forming
+a tree structure that allows bidirectional navigation through different timelines.
+
+**Tree Structure:**
+Waypoints form a tree where each waypoint has a parent (except w0, the root).
+Use `list_waypoints` to see the tree visualization with the current position marked.
+You can navigate backward to ancestors and forward to descendants.
 
 **Ownership Model:**
 All waypoints use sequential IDs (w1, w2, w3...). Ownership is tracked separately:
@@ -353,15 +358,16 @@ All waypoints use sequential IDs (w1, w2, w3...). Ownership is tracked separatel
 - **Model-owned**: Created by you. You have full control - create, restore, and
   delete without needing permission.
 
-Use `list_waypoints` to see ownership of each waypoint.
+**Auto-save on restore:**
+When restoring to a previous waypoint with uncommitted file changes, a "ceiling"
+waypoint is automatically created to preserve your work. This ensures you can
+always navigate back to where you were.
 
-**Critical Limitations:**
-- **Rollback only, no time-travel**: You can restore to an older waypoint, but you
-  cannot "go forward" again. If you restore to w1, content captured at w2/w3 is lost.
+**Limitations:**
 - **File existence not tracked**: Waypoints capture file contents, not creation/deletion.
   New files created after a waypoint persist after restore; deleted files aren't recreated.
 - **ID recycling**: If you delete w2 and create a new waypoint, it becomes the new w2.
-  Use descriptions to distinguish waypoints, and be careful with ID references.
+  Use descriptions to distinguish waypoints.
 
 **When to use waypoints:**
 - Before attempting risky refactoring or experimental changes
