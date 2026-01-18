@@ -1750,7 +1750,7 @@ class OutputBuffer:
 
                     # Unified flow: no prompt_lines means content is in main output
                     if not tool.permission_prompt_lines:
-                        height += 1  # "(see prompt above)" indicator
+                        height += 1  # "(see details below)" indicator
                         continue
 
                     prompt_lines = tool.permission_prompt_lines
@@ -1807,7 +1807,7 @@ class OutputBuffer:
 
                     # Unified flow: no prompt_lines means content is in main output
                     if not tool.clarification_prompt_lines:
-                        height += 1  # "(see prompt above)" indicator
+                        height += 1  # "(see details below)" indicator
                         continue
 
                     # Previously answered questions
@@ -2100,7 +2100,7 @@ class OutputBuffer:
         if not prompt_lines:
             output.append("\n")
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-            output.append("(see prompt above)", style=self._style("muted", "dim"))
+            output.append("(see details below)", style=self._style("muted", "dim"))
             return
 
         if tool.permission_format_hint == "diff":
@@ -2175,7 +2175,7 @@ class OutputBuffer:
         if not prompt_lines:
             output.append("\n")
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-            output.append("(see prompt above)", style=self._style("muted", "dim"))
+            output.append("(see details below)", style=self._style("muted", "dim"))
             return
 
         # Render prompt lines
@@ -2613,12 +2613,22 @@ class OutputBuffer:
                     output.append(wrapped_line, style=self._style("muted", "dim"))
             elif line.source == "permission":
                 # Permission content - may contain multi-line text with ANSI codes
-                # Render using Text.from_ansi to preserve formatting
-                output.append_text(Text.from_ansi(line.text))
+                # Render using Text.from_ansi to preserve formatting, with indentation
+                indent = "       "  # Align with tool tree details
+                for j, content_line in enumerate(line.text.split('\n')):
+                    if j > 0:
+                        output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(Text.from_ansi(content_line))
             elif line.source == "clarification":
                 # Clarification content - may contain multi-line text with ANSI codes
-                # Render using Text.from_ansi to preserve formatting
-                output.append_text(Text.from_ansi(line.text))
+                # Render using Text.from_ansi to preserve formatting, with indentation
+                indent = "       "  # Align with tool tree details
+                for j, content_line in enumerate(line.text.split('\n')):
+                    if j > 0:
+                        output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(Text.from_ansi(content_line))
             elif line.source == "enrichment":
                 # Enrichment notifications - render dimmed with proper wrapping
                 # The formatter pre-aligns continuation lines, so we wrap each line
