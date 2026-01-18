@@ -1483,6 +1483,34 @@ class OutputBuffer:
         # Restore expanded state if no more pending prompts
         self._maybe_restore_expanded_state()
 
+        # Clear permission content from the buffer since it's now resolved
+        self._clear_content_by_source("permission")
+
+    def _clear_content_by_source(self, source: str) -> None:
+        """Remove all OutputLine entries with the given source from the buffer.
+
+        Used to clean up permission/clarification content after resolution.
+
+        Args:
+            source: The source type to remove ("permission" or "clarification").
+        """
+        # Filter out lines with the matching source
+        original_count = len(self._lines)
+        self._lines = [
+            line for line in self._lines
+            if not (isinstance(line, OutputLine) and line.source == source)
+        ]
+        removed_count = original_count - len(self._lines)
+        if removed_count > 0:
+            _trace(f"_clear_content_by_source: removed {removed_count} {source} lines")
+
+        # Recalculate tool placeholder index if it was affected
+        if self._tool_placeholder_index is not None and removed_count > 0:
+            # Count how many permission/clarification lines were before the placeholder
+            # Since they were inserted AT the placeholder position, just decrement by removed count
+            self._tool_placeholder_index = max(0, self._tool_placeholder_index - removed_count)
+            _trace(f"_clear_content_by_source: adjusted placeholder to {self._tool_placeholder_index}")
+
     def set_tool_clarification_pending(self, tool_name: str, prompt_lines: List[str]) -> None:
         """Mark a tool as awaiting clarification (initial context only).
 
@@ -1581,6 +1609,9 @@ class OutputBuffer:
         if resolved:
             # Restore expanded state if no more pending prompts
             self._maybe_restore_expanded_state()
+
+            # Clear clarification content from the buffer since it's now resolved
+            self._clear_content_by_source("clarification")
 
     def get_pending_prompt_for_pager(self) -> Optional[Tuple[str, List[str]]]:
         """Get the pending prompt that's awaiting user input for pager display.
