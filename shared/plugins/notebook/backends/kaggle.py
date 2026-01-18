@@ -89,22 +89,34 @@ class KaggleBackend(NotebookBackend):
         """Initialize the Kaggle backend.
 
         Requires kaggle package and valid credentials.
+
+        Credentials are resolved in this order:
+        1. Environment variables: KAGGLE_USERNAME and KAGGLE_KEY
+           (these can be set in .env file, loaded by the client)
+        2. Config file: ~/.kaggle/kaggle.json
         """
         try:
             from kaggle.api.kaggle_api_extended import KaggleApi
             self._api = KaggleApi()
             self._api.authenticate()
 
-            # Get username from authenticated config
-            kaggle_config = Path.home() / ".kaggle" / "kaggle.json"
-            if kaggle_config.exists():
-                with open(kaggle_config) as f:
-                    creds = json.load(f)
-                    self._username = creds.get("username")
+            # Resolve username - prefer environment variable (supports .env)
+            self._username = os.environ.get("KAGGLE_USERNAME")
 
-            # Also check environment variable
+            # Fall back to kaggle.json if not in environment
             if not self._username:
-                self._username = os.environ.get("KAGGLE_USERNAME")
+                kaggle_config = Path.home() / ".kaggle" / "kaggle.json"
+                if kaggle_config.exists():
+                    with open(kaggle_config) as f:
+                        creds = json.load(f)
+                        self._username = creds.get("username")
+
+            # Validate we have a username
+            if not self._username:
+                raise RuntimeError(
+                    "Kaggle username not found. Set KAGGLE_USERNAME in .env or "
+                    "create ~/.kaggle/kaggle.json"
+                )
 
             self._initialized = True
 
@@ -112,8 +124,21 @@ class KaggleBackend(NotebookBackend):
             raise RuntimeError(
                 "kaggle package not installed. Install with: pip install kaggle"
             )
+        except RuntimeError:
+            raise  # Re-raise our custom errors
         except Exception as e:
-            raise RuntimeError(f"Failed to authenticate with Kaggle: {e}")
+            # Provide helpful message for common auth failures
+            hint = ""
+            if "Could not find kaggle.json" in str(e):
+                hint = (
+                    "\n\nSet credentials via:\n"
+                    "  1. Environment variables in .env:\n"
+                    "     KAGGLE_USERNAME=your_username\n"
+                    "     KAGGLE_KEY=your_api_key\n"
+                    "  2. Or create ~/.kaggle/kaggle.json with your credentials\n"
+                    "     (download from https://www.kaggle.com/settings -> 'Create New Token')"
+                )
+            raise RuntimeError(f"Failed to authenticate with Kaggle: {e}{hint}")
 
     def shutdown(self) -> None:
         """Cleanup temporary directories."""
