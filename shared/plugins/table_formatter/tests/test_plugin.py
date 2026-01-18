@@ -3,6 +3,7 @@
 
 import pytest
 from shared.plugins.table_formatter import create_plugin, TableFormatterPlugin
+from shared.plugins.table_formatter.plugin import _display_width, _pad_to_width
 
 
 class TestTableDetection:
@@ -225,3 +226,65 @@ class TestConfiguration:
         """Should return correct plugin name."""
         plugin = create_plugin()
         assert plugin.name == "table_formatter"
+
+
+class TestDisplayWidth:
+    """Tests for display width calculation with wide characters."""
+
+    def test_display_width_ascii(self):
+        """ASCII characters should have width 1."""
+        assert _display_width("hello") == 5
+        assert _display_width("test") == 4
+        assert _display_width("") == 0
+
+    def test_display_width_emoji(self):
+        """Emojis should have width 2."""
+        assert _display_width("✅") == 2
+        assert _display_width("❌") == 2
+        assert _display_width("✅ Pass") == 7  # 2 + 1 + 4
+
+    def test_display_width_mixed(self):
+        """Mixed content should sum correctly."""
+        assert _display_width("OK ✅") == 5  # 2 + 1 + 2
+        assert _display_width("A✅B") == 4  # 1 + 2 + 1
+
+    def test_pad_to_width_left(self):
+        """Left padding should add spaces on right."""
+        result = _pad_to_width("hi", 5, "left")
+        assert result == "hi   "
+        assert _display_width(result) == 5
+
+    def test_pad_to_width_right(self):
+        """Right padding should add spaces on left."""
+        result = _pad_to_width("hi", 5, "right")
+        assert result == "   hi"
+        assert _display_width(result) == 5
+
+    def test_pad_to_width_center(self):
+        """Center padding should add spaces on both sides."""
+        result = _pad_to_width("hi", 6, "center")
+        assert result == "  hi  "
+        assert _display_width(result) == 6
+
+    def test_pad_to_width_emoji(self):
+        """Padding should account for emoji width."""
+        # ✅ has display width 2, so "✅ Pass" has width 7
+        # Padding to 10 should add 3 spaces
+        result = _pad_to_width("✅ Pass", 10, "left")
+        assert result == "✅ Pass   "
+        assert _display_width(result) == 10
+
+    def test_render_table_with_emoji(self):
+        """Tables with emojis should have aligned columns."""
+        plugin = create_plugin()
+        text = """| Test | Result |
+|------|--------|
+| Basic | ✅ Pass |
+| Other | ❌ Fail |"""
+
+        result = plugin._render_markdown_table(text)
+        lines = result.strip().split("\n")
+
+        # All lines should have the same display width
+        widths = [_display_width(line) for line in lines]
+        assert len(set(widths)) == 1, f"Lines have different widths: {widths}"
