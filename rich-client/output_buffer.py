@@ -481,9 +481,9 @@ class OutputBuffer:
         if source == "plan":
             return
 
-        # Permission and clarification content should render BEFORE the tool tree
-        # Insert at the tool placeholder position so it appears above the tool status
-        if source in ("permission", "clarification") and self._active_tools and self._tool_placeholder_index is not None:
+        # Permission and clarification content should render AFTER the tool tree
+        # Append to end of lines so it appears below the tool status
+        if source in ("permission", "clarification") and self._active_tools:
             self._flush_current_block()
 
             if mode == "append":
@@ -500,21 +500,20 @@ class OutputBuffer:
                             total_display_lines += self._measure_display_lines(source, line_text, False)
                         line.display_lines = total_display_lines
                         return
-                # No existing line found, fall through to insert as new
+                # No existing line found, fall through to append as new
 
-            # Insert the entire content as a single block at the placeholder position
+            # Append the entire content as a single block at the end
             # Count display lines for the entire text block
             total_display_lines = 0
             for line_text in text.split('\n'):
                 total_display_lines += self._measure_display_lines(source, line_text, False)
-            self._lines.insert(self._tool_placeholder_index, OutputLine(
+            self._lines.append(OutputLine(
                 source=source,
                 text=text,
                 style="line",
                 display_lines=total_display_lines,
                 is_turn_start=False
             ))
-            self._tool_placeholder_index += 1
             return
 
         # Queue enrichment notifications while tools are active
@@ -1483,6 +1482,27 @@ class OutputBuffer:
         # Restore expanded state if no more pending prompts
         self._maybe_restore_expanded_state()
 
+        # Clear permission content from the buffer since it's now resolved
+        self._clear_content_by_source("permission")
+
+    def _clear_content_by_source(self, source: str) -> None:
+        """Remove all OutputLine entries with the given source from the buffer.
+
+        Used to clean up permission/clarification content after resolution.
+
+        Args:
+            source: The source type to remove ("permission" or "clarification").
+        """
+        # Filter out lines with the matching source
+        original_count = len(self._lines)
+        self._lines = [
+            line for line in self._lines
+            if not (isinstance(line, OutputLine) and line.source == source)
+        ]
+        removed_count = original_count - len(self._lines)
+        if removed_count > 0:
+            _trace(f"_clear_content_by_source: removed {removed_count} {source} lines")
+
     def set_tool_clarification_pending(self, tool_name: str, prompt_lines: List[str]) -> None:
         """Mark a tool as awaiting clarification (initial context only).
 
@@ -1581,6 +1601,9 @@ class OutputBuffer:
         if resolved:
             # Restore expanded state if no more pending prompts
             self._maybe_restore_expanded_state()
+
+            # Clear clarification content from the buffer since it's now resolved
+            self._clear_content_by_source("clarification")
 
     def get_pending_prompt_for_pager(self) -> Optional[Tuple[str, List[str]]]:
         """Get the pending prompt that's awaiting user input for pager display.
@@ -1727,7 +1750,7 @@ class OutputBuffer:
 
                     # Unified flow: no prompt_lines means content is in main output
                     if not tool.permission_prompt_lines:
-                        height += 1  # "(see prompt above)" indicator
+                        height += 1  # "(see details below)" indicator
                         continue
 
                     prompt_lines = tool.permission_prompt_lines
@@ -1784,7 +1807,7 @@ class OutputBuffer:
 
                     # Unified flow: no prompt_lines means content is in main output
                     if not tool.clarification_prompt_lines:
-                        height += 1  # "(see prompt above)" indicator
+                        height += 1  # "(see details below)" indicator
                         continue
 
                     # Previously answered questions
@@ -2077,7 +2100,7 @@ class OutputBuffer:
         if not prompt_lines:
             output.append("\n")
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-            output.append("(see prompt above)", style=self._style("muted", "dim"))
+            output.append("(see details below)", style=self._style("muted", "dim"))
             return
 
         if tool.permission_format_hint == "diff":
@@ -2152,7 +2175,7 @@ class OutputBuffer:
         if not prompt_lines:
             output.append("\n")
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-            output.append("(see prompt above)", style=self._style("muted", "dim"))
+            output.append("(see details below)", style=self._style("muted", "dim"))
             return
 
         # Render prompt lines
@@ -2590,12 +2613,22 @@ class OutputBuffer:
                     output.append(wrapped_line, style=self._style("muted", "dim"))
             elif line.source == "permission":
                 # Permission content - may contain multi-line text with ANSI codes
-                # Render using Text.from_ansi to preserve formatting
-                output.append_text(Text.from_ansi(line.text))
+                # Render using Text.from_ansi to preserve formatting, with indentation
+                indent = "       "  # Align with tool tree details
+                for j, content_line in enumerate(line.text.split('\n')):
+                    if j > 0:
+                        output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(Text.from_ansi(content_line))
             elif line.source == "clarification":
                 # Clarification content - may contain multi-line text with ANSI codes
-                # Render using Text.from_ansi to preserve formatting
-                output.append_text(Text.from_ansi(line.text))
+                # Render using Text.from_ansi to preserve formatting, with indentation
+                indent = "       "  # Align with tool tree details
+                for j, content_line in enumerate(line.text.split('\n')):
+                    if j > 0:
+                        output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(Text.from_ansi(content_line))
             elif line.source == "enrichment":
                 # Enrichment notifications - render dimmed with proper wrapping
                 # The formatter pre-aligns continuation lines, so we wrap each line
