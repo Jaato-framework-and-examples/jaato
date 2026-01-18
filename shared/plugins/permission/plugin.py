@@ -82,8 +82,8 @@ class PermissionPlugin:
         # Agent context for trace logging
         self._agent_name: Optional[str] = None
         # Permission lifecycle hooks for UI integration
-        # on_requested: (tool_name, request_id, prompt_lines, response_options) -> None
-        self._on_permission_requested: Optional[Callable[[str, str, List[str], List[PermissionResponseOption]], None]] = None
+        # on_requested: (tool_name, request_id, tool_args, response_options, call_id) -> None
+        self._on_permission_requested: Optional[Callable[[str, str, Dict[str, Any], List[PermissionResponseOption], Optional[str]], None]] = None
         self._on_permission_resolved: Optional[Callable[[str, str, bool, str], None]] = None
 
     def _get_channel(self) -> Optional[Channel]:
@@ -121,7 +121,7 @@ class PermissionPlugin:
 
     def set_permission_hooks(
         self,
-        on_requested: Optional[Callable[[str, str, List[str], List[PermissionResponseOption]], None]] = None,
+        on_requested: Optional[Callable[[str, str, Dict[str, Any], List[PermissionResponseOption], Optional[str]], None]] = None,
         on_resolved: Optional[Callable[[str, str, bool, str], None]] = None
     ) -> None:
         """Set hooks for permission lifecycle events.
@@ -131,7 +131,7 @@ class PermissionPlugin:
 
         Args:
             on_requested: Called when permission prompt is shown.
-                Signature: (tool_name, request_id, tool_args, response_options) -> None
+                Signature: (tool_name, request_id, tool_args, response_options, call_id) -> None
                 - tool_name: Name of the tool requesting permission
                 - request_id: Unique identifier for this request
                 - tool_args: Raw arguments dict passed to the tool (client formats display)
@@ -141,6 +141,7 @@ class PermissionPlugin:
                   - full: Full form (e.g., "yes")
                   - description: User-facing description
                   - decision: The ChannelDecision this maps to
+                - call_id: Unique identifier for the tool call (for parallel tool matching)
             on_resolved: Called when permission is resolved.
                 Signature: (tool_name, request_id, granted, method) -> None
                 method is one of: "yes", "always", "once", "never",
@@ -852,7 +853,8 @@ If permission is denied, do not attempt to proceed with that action."""
         self,
         tool_name: str,
         args: Dict[str, Any],
-        context: Optional[Dict[str, Any]] = None
+        context: Optional[Dict[str, Any]] = None,
+        call_id: Optional[str] = None
     ) -> Tuple[bool, Dict[str, Any]]:
         """Check if a tool execution is permitted.
 
@@ -860,6 +862,7 @@ If permission is denied, do not attempt to proceed with that action."""
             tool_name: Name of the tool to execute
             args: Arguments for the tool
             context: Optional context for channel (session_id, turn_number, etc.)
+            call_id: Optional unique identifier for this tool call (for parallel tool matching)
 
         Returns:
             Tuple of (is_allowed, metadata_dict) where metadata_dict contains:
@@ -868,7 +871,7 @@ If permission is denied, do not attempt to proceed with that action."""
                        'sanitization', 'session_whitelist', 'session_blacklist',
                        'user_approved', 'user_denied', 'allow_all', 'timeout')
         """
-        self._trace(f"check_permission: tool={tool_name}")
+        self._trace(f"check_permission: tool={tool_name} call_id={call_id}")
 
         # Check suspension states in priority order:
         # 1. idle suspension (most conservative - clears on idle)
@@ -955,7 +958,7 @@ If permission is denied, do not attempt to proceed with that action."""
                 # SKIP in subagent mode
                 if self._on_permission_requested and not is_subagent_mode:
                     self._on_permission_requested(
-                        tool_name, request.request_id, args, request.response_options
+                        tool_name, request.request_id, args, request.response_options, call_id
                     )
 
                 response = channel.request_permission(request)

@@ -2495,7 +2495,7 @@ class JaatoSession:
                     self._forward_to_parent("TOOL_OUTPUT", f"[{_name}] {chunk}")
                 self._executor.set_tool_output_callback(tool_output_callback)
 
-                executor_result = self._executor.execute(name, args)
+                executor_result = self._executor.execute(name, args, call_id=fc.id)
 
                 self._executor.set_tool_output_callback(None)
             else:
@@ -2589,7 +2589,7 @@ class JaatoSession:
 
                 # Pass callback directly - executor will set it in thread-local
                 executor_result = self._executor.execute(
-                    name, args, tool_output_callback=tool_output_callback
+                    name, args, tool_output_callback=tool_output_callback, call_id=fc.id
                 )
             else:
                 executor_result = (False, {"error": f"No executor registered for {name}"})
@@ -3386,7 +3386,7 @@ class JaatoSession:
                                 )
                             self._executor.set_tool_output_callback(tool_output_callback)
 
-                        executor_result = self._executor.execute(name, args)
+                        executor_result = self._executor.execute(name, args, call_id=fc.id)
 
                         # Clear the callback after execution
                         self._executor.set_tool_output_callback(None)
