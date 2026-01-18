@@ -103,6 +103,7 @@
     "clarification_required": {"fg": "warning"},
     "clarification_answer": {"fg": "success", "dim": true},
     "clarification_question": {"dim": true},
+    "clarification_resolved": {"fg": "success", "bold": true},
 
     "system_info": {"dim": true},
     "system_highlight": {"fg": "primary"},
