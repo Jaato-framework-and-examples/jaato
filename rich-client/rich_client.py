@@ -2971,10 +2971,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         AgentCreatedEvent,
         AgentStatusChangedEvent,
         AgentCompletedEvent,
-        PermissionRequestedEvent,
+        PermissionInputModeEvent,
         PermissionResolvedEvent,
-        ClarificationRequestedEvent,
-        ClarificationQuestionEvent,
+        ClarificationInputModeEvent,
         ClarificationResolvedEvent,
         ReferenceSelectionRequestedEvent,
         ReferenceSelectionResolvedEvent,
@@ -3257,44 +3256,20 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 agent_registry.mark_completed(event.agent_id)
                 display.refresh()
 
-            elif isinstance(event, PermissionRequestedEvent):
-                ipc_trace(f"  PermissionRequestedEvent: tool={event.tool_name}, id={event.request_id}")
-                # Show permission request
+            elif isinstance(event, PermissionInputModeEvent):
+                # New unified flow: content already emitted via AgentOutputEvent,
+                # this event just signals input mode and updates tool tree status
+                ipc_trace(f"  PermissionInputModeEvent: tool={event.tool_name}, id={event.request_id}")
                 pending_permission_request = {
                     "request_id": event.request_id,
                     "options": event.response_options,
                 }
-
-                # Use pre-formatted prompt lines from server if available (includes diff)
-                # Server already formats through its pipeline, so don't format again
-                if event.prompt_lines:
-                    formatted_lines = event.prompt_lines
-                else:
-                    # Fall back to building prompt lines locally
-                    from shared.ui_utils import build_permission_prompt_lines
-                    prompt_lines = build_permission_prompt_lines(
-                        tool_args=event.tool_args,
-                        response_options=event.response_options,
-                        include_tool_name=False,  # Tool name already shown in tool tree
-                    )
-                    # Only format locally-built prompts (server prompts are pre-formatted)
-                    formatted_lines = [
-                        agent_registry.format_text(line, format_hint=event.format_hint)
-                        for line in prompt_lines
-                    ]
-
-                # Integrate into tool tree (same as direct mode)
-                # Route to the agent that requested permission, not the selected agent
+                # Update tool tree to show simple "awaiting approval" status
                 buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
                 if buffer:
-                    buffer.set_tool_permission_pending(
-                        event.tool_name,
-                        formatted_lines,
-                        event.format_hint
-                    )
-                display.refresh()
-                # Enable permission input mode
+                    buffer.set_tool_awaiting_approval(event.tool_name)
                 display.set_waiting_for_channel_input(True, event.response_options)
+                display.refresh()
 
             elif isinstance(event, PermissionResolvedEvent):
                 pending_permission_request = None
@@ -3306,44 +3281,21 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                     buffer.set_tool_permission_resolved(event.tool_name, event.granted, event.method)
                     display.refresh()
 
-            elif isinstance(event, ClarificationRequestedEvent):
-                ipc_trace(f"  ClarificationRequestedEvent: tool={event.tool_name}, id={event.request_id}")
-                # Initialize clarification in tool tree (same as direct mode)
-                pending_clarification_request = {
-                    "request_id": event.request_id,
-                    "tool_name": event.tool_name,
-                    "agent_id": event.agent_id,  # Track which agent requested clarification
-                }
-                # Route to the agent that requested clarification, not the selected agent
-                buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
-                if buffer:
-                    buffer.set_tool_clarification_pending(event.tool_name, event.context_lines)
-                display.refresh()
-
-            elif isinstance(event, ClarificationQuestionEvent):
-                ipc_trace(f"  ClarificationQuestionEvent: q{event.question_index}/{event.total_questions}")
-                # Show clarification question in tool tree (same as direct mode)
+            elif isinstance(event, ClarificationInputModeEvent):
+                # New unified flow: content already emitted via AgentOutputEvent,
+                # this event just signals input mode
+                ipc_trace(f"  ClarificationInputModeEvent: tool={event.tool_name}, q{event.question_index}/{event.total_questions}")
                 if not pending_clarification_request:
                     pending_clarification_request = {"request_id": event.request_id, "agent_id": event.agent_id}
                 pending_clarification_request["current_question"] = event.question_index
                 pending_clarification_request["total_questions"] = event.total_questions
-
-                # Update tool tree with current question
-                tool_name = pending_clarification_request.get("tool_name", "clarification")
-                # Route to the agent that requested clarification, not the selected agent
-                agent_id = event.agent_id or pending_clarification_request.get("agent_id")
-                buffer = agent_registry.get_buffer(agent_id) if agent_id else agent_registry.get_selected_buffer()
+                pending_clarification_request["tool_name"] = event.tool_name
+                # Update tool tree with simple "awaiting input" status
+                buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
                 if buffer:
-                    question_lines = event.question_text.split("\n") if event.question_text else []
-                    buffer.set_tool_clarification_question(
-                        tool_name,
-                        event.question_index,
-                        event.total_questions,
-                        question_lines
-                    )
-                display.refresh()
-                # Enable clarification input mode
+                    buffer.set_tool_awaiting_clarification(event.tool_name, event.question_index, event.total_questions)
                 display.set_waiting_for_channel_input(True)
+                display.refresh()
 
             elif isinstance(event, ClarificationResolvedEvent):
                 ipc_trace(f"  ClarificationResolvedEvent: tool={event.tool_name}, qa_pairs={len(event.qa_pairs)}")
