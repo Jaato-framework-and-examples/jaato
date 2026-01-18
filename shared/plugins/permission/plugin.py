@@ -1093,7 +1093,9 @@ If permission is denied, do not attempt to proceed with that action."""
         tool_name: str,
         args: Dict[str, Any],
         display_info: Optional[PermissionDisplayInfo],
-        response_options: Optional[List[PermissionResponseOption]] = None
+        response_options: Optional[List[PermissionResponseOption]] = None,
+        include_details: bool = True,
+        include_options: bool = True
     ) -> List[str]:
         """Build prompt lines for UI display from request info.
 
@@ -1102,6 +1104,10 @@ If permission is denied, do not attempt to proceed with that action."""
             args: Arguments passed to the tool
             display_info: Optional custom display info from plugin
             response_options: List of valid response options (defaults to standard options)
+            include_details: Whether to include details in the prompt. Set to False
+                when details will be rendered separately (e.g., code blocks).
+            include_options: Whether to include the options line. Set to False when
+                options are displayed separately (e.g., in input area).
 
         Returns:
             List of strings representing the permission prompt.
@@ -1111,7 +1117,7 @@ If permission is denied, do not attempt to proceed with that action."""
         if display_info:
             # Use custom display info
             lines.append(display_info.summary)
-            if display_info.details:
+            if include_details and display_info.details:
                 # Split details into lines
                 for detail_line in display_info.details.split('\n'):
                     lines.append(detail_line)
@@ -1121,10 +1127,11 @@ If permission is denied, do not attempt to proceed with that action."""
             if args:
                 lines.append(f"Args: {format_tool_args_summary(args, max_length=100)}")
 
-        # Add options line using shared utility
-        lines.append("")
-        options = response_options or get_default_permission_options()
-        lines.append(format_permission_options(options))
+        # Add options line if requested (may be shown separately in input area instead)
+        if include_options:
+            lines.append("")
+            options = response_options or get_default_permission_options()
+            lines.append(format_permission_options(options))
 
         return lines
 
@@ -1133,7 +1140,7 @@ If permission is denied, do not attempt to proceed with that action."""
         tool_name: str,
         args: Dict[str, Any],
         channel_type: str = "ipc"
-    ) -> Tuple[List[str], Optional[str]]:
+    ) -> Tuple[List[str], Optional[str], Optional[str], Optional[str]]:
         """Get formatted prompt lines for a permission request.
 
         This is used by the server to include pre-formatted prompts
@@ -1145,13 +1152,26 @@ If permission is denied, do not attempt to proceed with that action."""
             channel_type: Type of channel ("console", "ipc", etc.)
 
         Returns:
-            Tuple of (prompt_lines, format_hint).
-            format_hint is "diff" for colored diff display, None otherwise.
+            Tuple of (prompt_lines, format_hint, language, raw_details).
+            - prompt_lines: The formatted permission prompt
+            - format_hint: "diff" for colored diff, "code" for code, None otherwise
+            - language: Programming language when format_hint="code" (e.g., "python")
+            - raw_details: Original details content when excluded from prompt_lines
+                (e.g., code to be rendered separately)
         """
         display_info = self._get_display_info(tool_name, args, channel_type)
-        lines = self._build_prompt_lines(tool_name, args, display_info)
         format_hint = display_info.format_hint if display_info else None
-        return lines, format_hint
+        language = display_info.language if display_info else None
+        raw_details = None
+
+        # When format_hint is "code", exclude details from prompt so they can be
+        # rendered separately with syntax highlighting
+        include_details = format_hint != "code"
+        if not include_details and display_info and display_info.details:
+            raw_details = display_info.details
+
+        lines = self._build_prompt_lines(tool_name, args, display_info, include_details=include_details, include_options=False)
+        return lines, format_hint, language, raw_details
 
     def get_execution_log(self) -> List[Dict[str, Any]]:
         """Get the log of permission decisions."""

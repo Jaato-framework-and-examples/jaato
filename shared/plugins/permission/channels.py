@@ -896,72 +896,11 @@ class QueueChannel(ConsoleChannel):
         return None
 
     def request_permission(self, request: PermissionRequest) -> ChannelResponse:
-        """Request permission by displaying in output panel and waiting for queue input."""
-        from ..base import PermissionDisplayInfo
+        """Wait for permission response from queue input.
 
-        # Display the permission request header with coloring
-        self._output(self._c("=" * 60, self.ANSI_BOLD), "write")
-
-        # Show agent type with colored label
-        agent_type = request.context.get("agent_type") if request.context else None
-        agent_name = request.context.get("agent_name") if request.context else None
-        if agent_type == "subagent":
-            if agent_name:
-                self._output(
-                    f"{self._c('[askPermission]', self.ANSI_YELLOW)} "
-                    f"Subagent '{agent_name}' requesting tool execution:",
-                    "append"
-                )
-            else:
-                self._output(
-                    f"{self._c('[askPermission]', self.ANSI_YELLOW)} "
-                    "Subagent requesting tool execution:",
-                    "append"
-                )
-        else:
-            self._output(
-                f"{self._c('[askPermission]', self.ANSI_YELLOW)} "
-                "Main agent requesting tool execution:",
-                "append"
-            )
-
-        # Intent if provided
-        intent = request.context.get("intent") if request.context else None
-        if intent:
-            self._output(f"  Intent: {intent}", "append")
-
-        # Check for custom display info
-        display_info = request.context.get("display_info") if request.context else None
-        if isinstance(display_info, PermissionDisplayInfo):
-            self._output("", "append")
-            self._output(f"  {display_info.summary}", "append")
-            if display_info.details:
-                self._output("", "append")
-                # Colorize diff if format hint is diff
-                if display_info.format_hint == "diff":
-                    for line in display_info.details.split('\n')[:20]:
-                        self._output(f"  {self._colorize_diff_line(line)}", "append")
-                else:
-                    for line in display_info.details.split('\n')[:20]:
-                        self._output(f"  {line}", "append")
-                if display_info.truncated:
-                    self._output(f"  {self._c('[Content truncated]', self.ANSI_DIM)}", "append")
-        else:
-            # Show tool name and arguments
-            self._output(f"  {self._c('Tool:', self.ANSI_BOLD)} {request.tool_name}", "append")
-            self._output("", "append")
-            self._output("  Arguments:", "append")
-            args_str = json.dumps(request.arguments, indent=2)
-            for line in args_str.split('\n')[:15]:  # Limit lines
-                self._output(f"    {line}", "append")
-
-        self._output(self._c("=" * 60, self.ANSI_BOLD), "append")
-        self._output("", "append")
-
-        # Build options line from request.response_options (uses parent's method)
-        options_line = self._build_options_line(request.response_options)
-        self._output(options_line, "append")
-
+        Note: Permission content is displayed via unified event flow (AgentOutputEvent).
+        This method only handles input waiting.
+        """
         # Signal that we're waiting for input
         self._waiting_for_input = True
         if self._prompt_callback:

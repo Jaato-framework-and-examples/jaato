@@ -481,12 +481,40 @@ class OutputBuffer:
         if source == "plan":
             return
 
-        # Skip permission messages - they're shown inline under tool calls in the tree
-        if source == "permission":
-            return
+        # Permission and clarification content should render BEFORE the tool tree
+        # Insert at the tool placeholder position so it appears above the tool status
+        if source in ("permission", "clarification") and self._active_tools and self._tool_placeholder_index is not None:
+            self._flush_current_block()
 
-        # Skip clarification messages - they're shown inline under tool calls in the tree
-        if source == "clarification":
+            if mode == "append":
+                # Append to existing permission/clarification content
+                # Find the most recent line with this source and append to it
+                for i in range(len(self._lines) - 1, -1, -1):
+                    line = self._lines[i]
+                    if isinstance(line, OutputLine) and line.source == source:
+                        # Append text with newline
+                        line.text = line.text + "\n" + text
+                        # Recalculate display lines
+                        total_display_lines = 0
+                        for line_text in line.text.split('\n'):
+                            total_display_lines += self._measure_display_lines(source, line_text, False)
+                        line.display_lines = total_display_lines
+                        return
+                # No existing line found, fall through to insert as new
+
+            # Insert the entire content as a single block at the placeholder position
+            # Count display lines for the entire text block
+            total_display_lines = 0
+            for line_text in text.split('\n'):
+                total_display_lines += self._measure_display_lines(source, line_text, False)
+            self._lines.insert(self._tool_placeholder_index, OutputLine(
+                source=source,
+                text=text,
+                style="line",
+                display_lines=total_display_lines,
+                is_turn_start=False
+            ))
+            self._tool_placeholder_index += 1
             return
 
         # Queue enrichment notifications while tools are active
@@ -1346,6 +1374,74 @@ class OutputBuffer:
 
         _trace(f"set_tool_permission_pending: NO MATCH for {tool_name}")
 
+    def set_tool_awaiting_approval(self, tool_name: str) -> None:
+        """Mark tool as awaiting permission (content rendered separately in main output).
+
+        This is used with the unified output flow where permission content flows
+        through AgentOutputEvent to the main output area, and the tool tree just
+        shows a simple status indicator.
+
+        Args:
+            tool_name: Name of the tool awaiting permission.
+        """
+        _trace(f"set_tool_awaiting_approval: looking for tool={tool_name}")
+
+        # First try exact match by tool name
+        for tool in self._active_tools:
+            if tool.name == tool_name and not tool.completed:
+                tool.permission_state = "pending"
+                tool.permission_prompt_lines = None  # No content in tree - shown in main output
+                # Save current state and force expanded view so user can see tool status
+                if self._tools_expanded_before_prompt is None:
+                    self._tools_expanded_before_prompt = self._tools_expanded
+                self._tools_expanded = True
+                _trace(f"set_tool_awaiting_approval: FOUND exact match for {tool_name}")
+                return
+
+        # Fallback: attach to the last uncompleted tool
+        for tool in reversed(self._active_tools):
+            if not tool.completed:
+                tool.permission_state = "pending"
+                tool.permission_prompt_lines = None  # No content in tree
+                if tool.name != tool_name:
+                    tool.display_name = tool_name
+                    tool.display_args_summary = ""
+                if self._tools_expanded_before_prompt is None:
+                    self._tools_expanded_before_prompt = self._tools_expanded
+                self._tools_expanded = True
+                _trace(f"set_tool_awaiting_approval: FALLBACK attached to {tool.name}")
+                return
+
+        _trace(f"set_tool_awaiting_approval: NO MATCH for {tool_name}")
+
+    def set_tool_awaiting_clarification(self, tool_name: str, question_index: int, total_questions: int) -> None:
+        """Mark tool as awaiting clarification input (content rendered in main output).
+
+        This is used with the unified output flow where clarification content flows
+        through AgentOutputEvent to the main output area.
+
+        Args:
+            tool_name: Name of the tool awaiting clarification.
+            question_index: Current question number (1-based).
+            total_questions: Total number of questions.
+        """
+        _trace(f"set_tool_awaiting_clarification: tool={tool_name}, q{question_index}/{total_questions}")
+
+        for tool in self._active_tools:
+            if tool.name == tool_name and not tool.completed:
+                tool.clarification_state = "pending"
+                tool.clarification_prompt_lines = None  # No content in tree - shown in main output
+                tool.clarification_current_question = question_index
+                tool.clarification_total_questions = total_questions
+                # Save current state and force expanded view
+                if self._tools_expanded_before_prompt is None:
+                    self._tools_expanded_before_prompt = self._tools_expanded
+                self._tools_expanded = True
+                _trace(f"set_tool_awaiting_clarification: FOUND for {tool_name}")
+                return
+
+        _trace(f"set_tool_awaiting_clarification: NO MATCH for {tool_name}")
+
     def set_tool_permission_resolved(self, tool_name: str, granted: bool,
                                       method: str) -> None:
         """Mark a tool's permission as resolved.
@@ -1520,9 +1616,10 @@ class OutputBuffer:
             True if any permission or clarification prompt is pending.
         """
         for tool in self._active_tools:
-            if tool.permission_state == "pending" and tool.permission_prompt_lines:
+            # Check pending state regardless of prompt_lines (unified flow case)
+            if tool.permission_state == "pending":
                 return True
-            if tool.clarification_state == "pending" and tool.clarification_prompt_lines:
+            if tool.clarification_state == "pending":
                 return True
         return False
 
@@ -1625,8 +1722,13 @@ class OutputBuffer:
             # Check for pending prompts (same logic for both views)
             for tool in self._active_tools:
                 # Permission prompt (if pending)
-                if tool.permission_state == "pending" and tool.permission_prompt_lines:
+                if tool.permission_state == "pending":
                     height += 1  # "Permission required" header
+
+                    # Unified flow: no prompt_lines means content is in main output
+                    if not tool.permission_prompt_lines:
+                        height += 1  # "(see prompt above)" indicator
+                        continue
 
                     prompt_lines = tool.permission_prompt_lines
 
@@ -1679,6 +1781,11 @@ class OutputBuffer:
                 # Clarification prompt (if pending)
                 if tool.clarification_state == "pending":
                     height += 1  # header ("Clarification needed" or progress)
+
+                    # Unified flow: no prompt_lines means content is in main output
+                    if not tool.clarification_prompt_lines:
+                        height += 1  # "(see prompt above)" indicator
+                        continue
 
                     # Previously answered questions
                     if tool.clarification_answered:
@@ -1884,12 +1991,12 @@ class OutputBuffer:
                     output.append(f"    {continuation} ", style=self._style("tree_connector", "dim"))
                     output.append(f"  ⚠ {tool.error_message}", style=self._style("tool_error", "red dim"))
 
-                # Permission prompt
-                if tool.permission_state == "pending" and tool.permission_prompt_lines:
+                # Permission prompt - render if pending (with or without prompt_lines for unified flow)
+                if tool.permission_state == "pending":
                     self._render_permission_prompt(output, tool, is_last)
 
-                # Clarification prompt
-                if tool.clarification_state == "pending" and tool.clarification_prompt_lines:
+                # Clarification prompt - render if pending (with or without prompt_lines for unified flow)
+                if tool.clarification_state == "pending":
                     self._render_clarification_prompt(output, tool, is_last)
 
                 # Clarification summary table (Q&A pairs when expanded)
@@ -1960,10 +2067,18 @@ class OutputBuffer:
         prefix = "    "
         prompt_lines = tool.permission_prompt_lines or []
 
-        # Header
+        # Header - always show
         output.append("\n")
         output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
         output.append("  🔒 Permission required", style=self._style("permission_prompt", "bold yellow"))
+
+        # Unified flow: no prompt_lines means content is in main output area
+        # Just show a minimal indicator
+        if not prompt_lines:
+            output.append("\n")
+            output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
+            output.append("(see prompt above)", style=self._style("muted", "dim"))
+            return
 
         if tool.permission_format_hint == "diff":
             # Pre-formatted content (diff) - render lines directly without box
@@ -2024,10 +2139,21 @@ class OutputBuffer:
         prefix = "    "
         prompt_lines = tool.clarification_prompt_lines or []
 
-        # Header
+        # Header - always show with question progress if available
         output.append("\n")
         output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
-        output.append("  ❓ Clarification needed", style=self._style("clarification_required", "bold cyan"))
+        if tool.clarification_current_question and tool.clarification_total_questions:
+            output.append(f"  ❓ Clarification needed ({tool.clarification_current_question}/{tool.clarification_total_questions})", style=self._style("clarification_required", "bold cyan"))
+        else:
+            output.append("  ❓ Clarification needed", style=self._style("clarification_required", "bold cyan"))
+
+        # Unified flow: no prompt_lines means content is in main output area
+        # Just show a minimal indicator
+        if not prompt_lines:
+            output.append("\n")
+            output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
+            output.append("(see prompt above)", style=self._style("muted", "dim"))
+            return
 
         # Render prompt lines
         for line in prompt_lines:
@@ -2463,59 +2589,13 @@ class OutputBuffer:
                         output.append(" " * (len(f"[{line.source}] ")))  # Indent continuation
                     output.append(wrapped_line, style=self._style("muted", "dim"))
             elif line.source == "permission":
-                # Permission prompts - wrap but preserve ANSI codes
-                text = line.text
-                if "[askPermission]" in text:
-                    text = text.replace("[askPermission]", "")
-                    wrapped = wrap_text(text, 16)  # "[askPermission] " = 16 chars
-                    for j, wrapped_line in enumerate(wrapped):
-                        if j > 0:
-                            output.append("\n                ")  # Indent continuation
-                        if j == 0:
-                            output.append("[askPermission] ", style=self._style("permission_prompt", "bold yellow"))
-                        output.append_text(Text.from_ansi(wrapped_line))
-                elif "Options:" in text or text.startswith(("===", "─", "=")) or "Enter choice" in text:
-                    # Special lines - wrap normally
-                    wrapped = wrap_text(text)
-                    for j, wrapped_line in enumerate(wrapped):
-                        if j > 0:
-                            output.append("\n")
-                        if "Options:" in text:
-                            output.append_text(Text.from_ansi(wrapped_line, style=self._style("clarification_label", "cyan")))
-                        elif text.startswith(("===", "─", "=")):
-                            output.append(wrapped_line, style=self._style("separator", "dim"))
-                        else:
-                            output.append_text(Text.from_ansi(wrapped_line, style=self._style("clarification_label", "cyan")))
-                else:
-                    # Preserve ANSI codes with wrapping
-                    wrapped = wrap_text(text)
-                    for j, wrapped_line in enumerate(wrapped):
-                        if j > 0:
-                            output.append("\n")
-                        output.append_text(Text.from_ansi(wrapped_line))
+                # Permission content - may contain multi-line text with ANSI codes
+                # Render using Text.from_ansi to preserve formatting
+                output.append_text(Text.from_ansi(line.text))
             elif line.source == "clarification":
-                # Clarification prompts - wrap but preserve ANSI codes
-                text = line.text
-                wrapped = wrap_text(text)
-                for j, wrapped_line in enumerate(wrapped):
-                    if j > 0:
-                        output.append("\n")
-                    if "Clarification Needed" in wrapped_line:
-                        output.append_text(Text.from_ansi(wrapped_line, style=self._style("clarification_label", "bold cyan")))
-                    elif wrapped_line.startswith(("===", "─", "=")):
-                        output.append(wrapped_line, style=self._style("separator", "dim"))
-                    elif "Enter choice" in wrapped_line:
-                        output.append_text(Text.from_ansi(wrapped_line, style=self._style("clarification_label", "cyan")))
-                    elif wrapped_line.strip().startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.")):
-                        output.append_text(Text.from_ansi(wrapped_line, style=self._style("clarification_label", "cyan")))
-                    elif "Question" in wrapped_line and "/" in wrapped_line:
-                        output.append_text(Text.from_ansi(wrapped_line, style=self._style("emphasis", "bold")))
-                    elif "[*required]" in wrapped_line:
-                        wrapped_line = wrapped_line.replace("[*required]", "")
-                        output.append_text(Text.from_ansi(wrapped_line))
-                        output.append("[*required]", style=self._style("clarification_required", "yellow"))
-                    else:
-                        output.append_text(Text.from_ansi(wrapped_line))
+                # Clarification content - may contain multi-line text with ANSI codes
+                # Render using Text.from_ansi to preserve formatting
+                output.append_text(Text.from_ansi(line.text))
             elif line.source == "enrichment":
                 # Enrichment notifications - render dimmed with proper wrapping
                 # The formatter pre-aligns continuation lines, so we wrap each line
