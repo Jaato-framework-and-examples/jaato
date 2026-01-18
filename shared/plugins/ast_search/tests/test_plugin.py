@@ -567,3 +567,181 @@ class TestBackgroundCapable:
         duration = plugin.estimate_duration("ast_search", {"path": "/some/dir"})
         assert duration is not None
         assert duration > 5.0
+
+
+class TestStreamingCapable:
+    """Tests for streaming execution support."""
+
+    def test_supports_streaming(self):
+        """Test that ast_search supports streaming execution."""
+        plugin = ASTSearchPlugin()
+
+        assert plugin.supports_streaming("ast_search") is True
+        assert plugin.supports_streaming("unknown_tool") is False
+
+    def test_get_streaming_tool_names(self):
+        """Test get_streaming_tool_names returns ast_search."""
+        plugin = ASTSearchPlugin()
+
+        streaming_tools = plugin.get_streaming_tool_names()
+        assert "ast_search" in streaming_tools
+        assert len(streaming_tools) == 1
+
+
+@requires_ast_grep
+class TestStreamingExecution:
+    """Tests for streaming execution of ast_search."""
+
+    @pytest.mark.asyncio
+    async def test_streaming_basic(self):
+        """Test basic streaming execution."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "test.py").write_text(
+                "def hello():\n"
+                "    pass\n"
+                "\n"
+                "def world():\n"
+                "    pass\n"
+            )
+
+            plugin = ASTSearchPlugin()
+            plugin.initialize()
+
+            chunks = []
+            async for chunk in plugin.execute_streaming(
+                "ast_search",
+                {"pattern": "def $FUNC(): $$$", "path": tmpdir, "language": "python"},
+            ):
+                chunks.append(chunk)
+
+            # Should have progress, 2 matches, and summary
+            assert len(chunks) >= 3
+
+            # First chunk should be progress
+            assert chunks[0].chunk_type == "progress"
+
+            # Should have match chunks
+            match_chunks = [c for c in chunks if c.chunk_type == "match"]
+            assert len(match_chunks) == 2
+
+            # Last chunk should be summary
+            assert chunks[-1].chunk_type == "summary"
+            assert chunks[-1].metadata["total_matches"] == 2
+
+    @pytest.mark.asyncio
+    async def test_streaming_with_callback(self):
+        """Test streaming execution with callback."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "test.py").write_text("def hello():\n    pass\n")
+
+            plugin = ASTSearchPlugin()
+            plugin.initialize()
+
+            callback_chunks = []
+
+            def on_chunk(chunk):
+                callback_chunks.append(chunk)
+
+            chunks = []
+            async for chunk in plugin.execute_streaming(
+                "ast_search",
+                {"pattern": "def $FUNC(): $$$", "path": tmpdir, "language": "python"},
+                on_chunk=on_chunk,
+            ):
+                chunks.append(chunk)
+
+            # Callback should receive same chunks
+            assert len(callback_chunks) == len(chunks)
+
+    @pytest.mark.asyncio
+    async def test_streaming_error_empty_pattern(self):
+        """Test streaming error for empty pattern."""
+        plugin = ASTSearchPlugin()
+        plugin.initialize()
+
+        chunks = []
+        async for chunk in plugin.execute_streaming(
+            "ast_search",
+            {"pattern": "", "path": "/tmp"},
+        ):
+            chunks.append(chunk)
+
+        assert len(chunks) == 1
+        assert chunks[0].chunk_type == "error"
+        assert "Pattern is required" in chunks[0].content
+
+    @pytest.mark.asyncio
+    async def test_streaming_error_invalid_tool(self):
+        """Test streaming error for unsupported tool."""
+        plugin = ASTSearchPlugin()
+        plugin.initialize()
+
+        chunks = []
+        async for chunk in plugin.execute_streaming(
+            "unknown_tool",
+            {"pattern": "test"},
+        ):
+            chunks.append(chunk)
+
+        assert len(chunks) == 1
+        assert chunks[0].chunk_type == "error"
+        assert "not supported" in chunks[0].content
+
+    @pytest.mark.asyncio
+    async def test_streaming_max_results(self):
+        """Test streaming respects max_results limit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create file with many functions
+            funcs = "\n".join([f"def func{i}():\n    pass\n" for i in range(10)])
+            (Path(tmpdir) / "test.py").write_text(funcs)
+
+            plugin = ASTSearchPlugin()
+            plugin.initialize()
+
+            chunks = []
+            async for chunk in plugin.execute_streaming(
+                "ast_search",
+                {
+                    "pattern": "def $FUNC(): $$$",
+                    "path": tmpdir,
+                    "language": "python",
+                    "max_results": 3,
+                },
+            ):
+                chunks.append(chunk)
+
+            # Should have progress, 3 matches (limited), and summary
+            match_chunks = [c for c in chunks if c.chunk_type == "match"]
+            assert len(match_chunks) == 3
+
+            # Summary should indicate truncation
+            summary = chunks[-1]
+            assert summary.chunk_type == "summary"
+            assert summary.metadata["truncated"] is True
+
+    @pytest.mark.asyncio
+    async def test_streaming_sequence_numbers(self):
+        """Test that streaming chunks have correct sequence numbers."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "test.py").write_text(
+                "def a():\n    pass\n"
+                "def b():\n    pass\n"
+            )
+
+            plugin = ASTSearchPlugin()
+            plugin.initialize()
+
+            chunks = []
+            async for chunk in plugin.execute_streaming(
+                "ast_search",
+                {"pattern": "def $FUNC(): $$$", "path": tmpdir, "language": "python"},
+            ):
+                chunks.append(chunk)
+
+            # Match and summary chunks should have incrementing sequence numbers
+            sequenced_chunks = [c for c in chunks if c.sequence > 0]
+            sequences = [c.sequence for c in sequenced_chunks]
+
+            # Sequences should be monotonically increasing
+            assert sequences == sorted(sequences)
+            assert len(set(sequences)) == len(sequences)  # All unique
