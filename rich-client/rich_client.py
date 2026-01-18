@@ -3372,7 +3372,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 buffer = agent_registry.get_buffer(event.agent_id)
                 if buffer:
                     buffer.add_active_tool(event.tool_name, event.tool_args, call_id=event.call_id)
-                    buffer.scroll_to_bottom()  # Auto-scroll when tool tree grows
+                    # add_active_tool() calls scroll_to_show_tool_tree() internally
                     display.refresh()
                 else:
                     # Agent not yet created - queue event for later

@@ -762,8 +762,8 @@ class OutputBuffer:
         self._active_tools.append(ActiveToolCall(
             name=tool_name, args_summary=args_str, call_id=call_id
         ))
-        # Scroll to bottom so user sees the full tool tree as it grows
-        self._scroll_offset = 0
+        # Scroll to show the full tool tree (prioritizing top if it's taller than visible area)
+        self.scroll_to_show_tool_tree()
 
     def mark_tool_completed(self, tool_name: str, success: bool = True,
                             duration_seconds: Optional[float] = None,
@@ -1331,12 +1331,12 @@ class OutputBuffer:
                 tool.permission_state = "pending"
                 tool.permission_prompt_lines = prompt_lines
                 tool.permission_format_hint = format_hint
-                # Scroll to bottom to show the prompt
-                self._scroll_offset = 0
                 # Save current state and force expanded view so user can see the permission prompt
                 if self._tools_expanded_before_prompt is None:
                     self._tools_expanded_before_prompt = self._tools_expanded
                 self._tools_expanded = True
+                # Scroll to show the tool tree with the permission prompt
+                self.scroll_to_show_tool_tree()
                 _trace(f"set_tool_permission_pending: FOUND exact match for {tool_name}")
                 return
 
@@ -1353,11 +1353,12 @@ class OutputBuffer:
                     tool.display_name = tool_name
                     # Clear the args summary since it contains askPermission's args, not the target tool's
                     tool.display_args_summary = ""
-                self._scroll_offset = 0
                 # Save current state and force expanded view so user can see the permission prompt
                 if self._tools_expanded_before_prompt is None:
                     self._tools_expanded_before_prompt = self._tools_expanded
                 self._tools_expanded = True
+                # Scroll to show the tool tree with the permission prompt
+                self.scroll_to_show_tool_tree()
                 _trace(f"set_tool_permission_pending: FALLBACK attached to {tool.name} (requested: {tool_name})")
                 return
 
@@ -1385,8 +1386,8 @@ class OutputBuffer:
             if self._tools_expanded_before_prompt is None:
                 self._tools_expanded_before_prompt = self._tools_expanded
             self._tools_expanded = True
-            # Scroll to bottom so user sees the permission prompt
-            self._scroll_offset = 0
+            # Scroll to show the tool tree with the permission prompt
+            self.scroll_to_show_tool_tree()
 
         # First try exact match by call_id (most reliable for parallel tools)
         if call_id:
@@ -1440,8 +1441,8 @@ class OutputBuffer:
                 if self._tools_expanded_before_prompt is None:
                     self._tools_expanded_before_prompt = self._tools_expanded
                 self._tools_expanded = True
-                # Scroll to bottom so user sees the clarification prompt
-                self._scroll_offset = 0
+                # Scroll to show the tool tree with the clarification prompt
+                self.scroll_to_show_tool_tree()
                 _trace(f"set_tool_awaiting_clarification: FOUND for {tool_name}")
                 return
 
@@ -1500,12 +1501,12 @@ class OutputBuffer:
                 tool.clarification_state = "pending"
                 tool.clarification_prompt_lines = prompt_lines
                 tool.clarification_answered = []  # Initialize answered list
-                # Scroll to bottom to show the prompt
-                self._scroll_offset = 0
                 # Save current state and force expanded view so user can see the prompt
                 if self._tools_expanded_before_prompt is None:
                     self._tools_expanded_before_prompt = self._tools_expanded
                 self._tools_expanded = True
+                # Scroll to show the tool tree with the clarification prompt
+                self.scroll_to_show_tool_tree()
                 return
 
     def set_tool_clarification_question(
@@ -1531,12 +1532,12 @@ class OutputBuffer:
                 tool.clarification_prompt_lines = question_lines
                 if tool.clarification_answered is None:
                     tool.clarification_answered = []
-                # Scroll to bottom to show the question
-                self._scroll_offset = 0
                 # Save current state and force expanded view so user can see the prompt
                 if self._tools_expanded_before_prompt is None:
                     self._tools_expanded_before_prompt = self._tools_expanded
                 self._tools_expanded = True
+                # Scroll to show the tool tree with the question
+                self.scroll_to_show_tool_tree()
                 return
 
     def set_tool_question_answered(
@@ -1684,6 +1685,56 @@ class OutputBuffer:
     def is_at_bottom(self) -> bool:
         """Check if scrolled to the bottom."""
         return self._scroll_offset == 0
+
+    def scroll_to_show_tool_tree(self) -> bool:
+        """Scroll to show the active tool tree, prioritizing its top.
+
+        When the tool tree is taller than the visible area, shows from the top.
+        When it fits, scrolls so the entire tree is visible.
+
+        Returns:
+            True if scroll position changed.
+        """
+        if not self._active_tools or self._tool_placeholder_index is None:
+            return False
+
+        old_offset = self._scroll_offset
+
+        # Calculate total display lines before the tool tree
+        lines_before_tree = sum(
+            self._get_item_display_lines(item)
+            for item in self._lines[:self._tool_placeholder_index]
+        )
+
+        # Calculate tool tree height
+        tree_height = self._calculate_tool_tree_height()
+
+        # Calculate lines after the tool tree (remaining content in _lines + any streaming)
+        lines_after_tree = sum(
+            self._get_item_display_lines(item)
+            for item in self._lines[self._tool_placeholder_index:]
+        )
+
+        # Total content height
+        total_height = lines_before_tree + tree_height + lines_after_tree
+
+        # We want to show the tool tree starting from its top
+        # scroll_offset = how many lines from the bottom to skip
+        # To show from line X, scroll_offset = total_height - X - visible_height
+        # We want to show starting at lines_before_tree (top of tree)
+
+        # If tree fits in visible area, show it entirely
+        # If tree is taller, show from the top of the tree
+        if tree_height <= self._visible_height:
+            # Show entire tree - scroll so bottom of tree is visible
+            # with some margin for content after it
+            tree_bottom = lines_before_tree + tree_height
+            self._scroll_offset = max(0, total_height - tree_bottom - max(0, self._visible_height - tree_height))
+        else:
+            # Tree is taller than visible - show from top of tree
+            self._scroll_offset = max(0, total_height - lines_before_tree - self._visible_height)
+
+        return self._scroll_offset != old_offset
 
     def _calculate_tool_tree_height(self) -> int:
         """Calculate the approximate height of the tool tree in display lines.
