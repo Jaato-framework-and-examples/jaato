@@ -762,6 +762,8 @@ class OutputBuffer:
         self._active_tools.append(ActiveToolCall(
             name=tool_name, args_summary=args_str, call_id=call_id
         ))
+        # Scroll to bottom so user sees the full tool tree as it grows
+        self._scroll_offset = 0
 
     def mark_tool_completed(self, tool_name: str, success: bool = True,
                             duration_seconds: Optional[float] = None,
