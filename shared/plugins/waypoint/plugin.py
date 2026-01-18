@@ -610,10 +610,13 @@ Use `list_waypoints` to see ownership of each waypoint.
         return {"error": f"Unknown action: {action}. Try: create, restore, delete, info, list"}
 
     def _list_waypoints(self, include_ownership: bool = False) -> Dict[str, Any]:
-        """List all waypoints.
+        """List all waypoints as a tree structure.
 
         Args:
             include_ownership: If True, include owner field in output (for model).
+
+        Returns:
+            Dictionary with tree structure and text visualization.
         """
         if not self._manager:
             return {"error": "Manager not initialized"}
@@ -623,34 +626,106 @@ Use `list_waypoints` to see ownership of each waypoint.
 
         if not waypoints:
             return {
-                "waypoints": [],
+                "tree": "",
+                "current": None,
                 "message": "No waypoints yet. Use 'waypoint create' to mark your first.",
             }
 
-        # Format waypoints for display
-        formatted = []
-        for wp in waypoints:
-            desc = wp.description
-            if len(desc) > 40:
-                desc = desc[:37] + "..."
+        # Get tree structure from manager
+        tree_data = self._manager.get_tree_structure()
 
-            entry = {
-                "id": wp.id,
-                "description": desc,
-                "created_at": wp.created_at.strftime("%H:%M"),
-                "messages": wp.message_count,
-                "is_implicit": wp.is_implicit,
-                "is_current": wp.id == current_id,
-            }
-            if include_ownership:
-                entry["owner"] = wp.owner
+        # Build text visualization
+        tree_text = self._build_tree_text(
+            tree_data["nodes"],
+            tree_data["root"],
+            current_id,
+            include_ownership,
+        )
 
-            formatted.append(entry)
-
-        return {
-            "waypoints": formatted,
+        result = {
+            "tree": tree_text,
             "current": current_id,
+            "nodes": tree_data["nodes"] if include_ownership else None,
         }
+
+        # Remove None values for cleaner output
+        if not include_ownership:
+            del result["nodes"]
+
+        return result
+
+    def _build_tree_text(
+        self,
+        nodes: Dict[str, Any],
+        root_id: str,
+        current_id: str,
+        include_ownership: bool,
+        prefix: str = "",
+        is_last: bool = True,
+    ) -> str:
+        """Build a text-based tree visualization.
+
+        Args:
+            nodes: Dictionary of node data from get_tree_structure().
+            root_id: The waypoint ID to start from.
+            current_id: The current waypoint ID (marked with ◀).
+            include_ownership: Whether to show [user]/[model] tags.
+            prefix: Indentation prefix for current level.
+            is_last: Whether this is the last child at current level.
+
+        Returns:
+            Multi-line string with ASCII tree visualization.
+        """
+        if root_id not in nodes:
+            return ""
+
+        node = nodes[root_id]
+        lines = []
+
+        # Build the node line
+        desc = node["description"]
+        if len(desc) > 30:
+            desc = desc[:27] + "..."
+
+        parts = [node["id"]]
+        parts.append(f'"{desc}"')
+        if include_ownership:
+            parts.append(f"[{node['owner']}]")
+        if node["id"] == current_id:
+            parts.append("◀ current")
+
+        node_text = " ".join(parts)
+
+        # Add connector
+        if prefix == "":
+            # Root node
+            lines.append(node_text)
+        else:
+            connector = "└── " if is_last else "├── "
+            lines.append(prefix + connector + node_text)
+
+        # Process children
+        children = node.get("children", [])
+        # Sort children by ID for consistent output
+        children = sorted(children, key=lambda x: (
+            int(x[1:]) if x[1:].isdigit() else 0
+        ))
+
+        child_prefix = prefix + ("    " if is_last else "│   ") if prefix else ""
+
+        for i, child_id in enumerate(children):
+            is_last_child = (i == len(children) - 1)
+            child_text = self._build_tree_text(
+                nodes,
+                child_id,
+                current_id,
+                include_ownership,
+                child_prefix,
+                is_last_child,
+            )
+            lines.append(child_text)
+
+        return "\n".join(lines)
 
     def _create_waypoint(
         self,

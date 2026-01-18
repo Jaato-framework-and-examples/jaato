@@ -93,35 +93,40 @@ class TestCommandExecution:
     def test_list_empty(self, plugin):
         """Test listing when only w0 exists."""
         result = plugin._execute_waypoint({"action": "list"})
-        assert "waypoints" in result
-        assert len(result["waypoints"]) == 1
+        assert "tree" in result
+        assert "current" in result
+        assert result["current"] == "w0"
+        assert "w0" in result["tree"]
 
     def test_list_shows_current_waypoint(self, plugin, mock_backup_manager):
         """Test that list shows which waypoint is current."""
         # Initially w0 is current
         result = plugin._execute_waypoint({"action": "list"})
         assert result["current"] == "w0"
-        assert result["waypoints"][0]["is_current"] is True
+        assert "w0" in result["tree"]
+        assert "◀ current" in result["tree"]
 
         # Create a new waypoint - it becomes current
         plugin._execute_waypoint({"action": "create", "target": '"first"'})
         result = plugin._execute_waypoint({"action": "list"})
         assert result["current"] == "w1"
-        # w0 should no longer be current
-        w0 = next(wp for wp in result["waypoints"] if wp["id"] == "w0")
-        w1 = next(wp for wp in result["waypoints"] if wp["id"] == "w1")
-        assert w0["is_current"] is False
-        assert w1["is_current"] is True
+        # Tree should show w1 as current
+        lines = result["tree"].split("\n")
+        w0_line = next(l for l in lines if l.startswith("w0"))
+        w1_line = next(l for l in lines if "w1" in l)
+        assert "◀ current" not in w0_line
+        assert "◀ current" in w1_line
 
         # Restore to w0 - current should change back
         mock_backup_manager.get_first_backup_per_file_by_waypoint.return_value = {}
         plugin._execute_waypoint({"action": "restore", "target": "w0"})
         result = plugin._execute_waypoint({"action": "list"})
         assert result["current"] == "w0"
-        w0 = next(wp for wp in result["waypoints"] if wp["id"] == "w0")
-        w1 = next(wp for wp in result["waypoints"] if wp["id"] == "w1")
-        assert w0["is_current"] is True
-        assert w1["is_current"] is False
+        lines = result["tree"].split("\n")
+        w0_line = next(l for l in lines if l.startswith("w0"))
+        w1_line = next(l for l in lines if "w1" in l)
+        assert "◀ current" in w0_line
+        assert "◀ current" not in w1_line
 
     def test_create_with_description(self, plugin):
         """Test creating waypoint with description."""
@@ -271,7 +276,7 @@ class TestModelToolExecutors:
     """Test model tool executor methods."""
 
     def test_list_waypoints_includes_ownership(self, plugin):
-        """Test list_waypoints returns ownership info."""
+        """Test list_waypoints returns ownership info in tree nodes."""
         # Create a user waypoint via command
         plugin._execute_waypoint({"action": "create", "target": '"user checkpoint"'})
 
@@ -279,15 +284,17 @@ class TestModelToolExecutors:
         plugin._execute_create_waypoint({"description": "model checkpoint"})
 
         result = plugin._execute_list_waypoints({})
-        assert "waypoints" in result
+        assert "nodes" in result
+        assert "tree" in result
 
         # Check ownership info is included (w1=user, w2=model - sequential IDs)
-        waypoints = result["waypoints"]
-        user_wp = next(wp for wp in waypoints if wp["id"] == "w1")
-        model_wp = next(wp for wp in waypoints if wp["id"] == "w2")
+        nodes = result["nodes"]
+        assert nodes["w1"]["owner"] == "user"
+        assert nodes["w2"]["owner"] == "model"
 
-        assert user_wp["owner"] == "user"
-        assert model_wp["owner"] == "model"
+        # Tree should show ownership tags
+        assert "[user]" in result["tree"]
+        assert "[model]" in result["tree"]
 
     def test_create_waypoint_model_owned(self, plugin):
         """Test create_waypoint creates model-owned waypoint with sequential ID."""
@@ -390,25 +397,20 @@ class TestOwnershipSeparation:
 
         # List all
         result = plugin._execute_list_waypoints({})
-        waypoints = result["waypoints"]
+        nodes = result["nodes"]
 
         # Should have w0 (implicit), w1, w2 (user), w3, w4 (model) - all sequential
-        ids = [wp["id"] for wp in waypoints]
-        assert "w0" in ids
-        assert "w1" in ids
-        assert "w2" in ids
-        assert "w3" in ids
-        assert "w4" in ids
+        assert "w0" in nodes
+        assert "w1" in nodes
+        assert "w2" in nodes
+        assert "w3" in nodes
+        assert "w4" in nodes
 
         # Check ownership is correct
-        w1 = next(wp for wp in waypoints if wp["id"] == "w1")
-        w2 = next(wp for wp in waypoints if wp["id"] == "w2")
-        w3 = next(wp for wp in waypoints if wp["id"] == "w3")
-        w4 = next(wp for wp in waypoints if wp["id"] == "w4")
-        assert w1["owner"] == "user"
-        assert w2["owner"] == "user"
-        assert w3["owner"] == "model"
-        assert w4["owner"] == "model"
+        assert nodes["w1"]["owner"] == "user"
+        assert nodes["w2"]["owner"] == "user"
+        assert nodes["w3"]["owner"] == "model"
+        assert nodes["w4"]["owner"] == "model"
 
     def test_user_can_delete_model_owned(self, plugin):
         """Test user can delete model-owned waypoints via command."""

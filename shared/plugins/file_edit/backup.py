@@ -35,12 +35,20 @@ DEFAULT_SESSION_MAX_OPS = 100
 
 @dataclass
 class BackupInfo:
-    """Information about a single backup file."""
+    """Information about a single backup file.
+
+    Backups are tagged with waypoint information for tree-based navigation:
+    - diverged_from: The waypoint that was current when this backup was created.
+      The backup contains the file state AT this waypoint (before the edit).
+    - next_waypoint: The waypoint created after this backup (set retroactively
+      when a waypoint is created). None if no waypoint has been created yet.
+    """
     backup_path: Path
     original_path: str  # The original file path this is a backup of
     timestamp: datetime
     size: int
     diverged_from: str = "w0"  # Waypoint ID this backup diverged from
+    next_waypoint: Optional[str] = None  # Waypoint created after this backup (set lazily)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API response."""
@@ -50,6 +58,7 @@ class BackupInfo:
             "timestamp": self.timestamp.isoformat(),
             "size": self.size,
             "diverged_from": self.diverged_from,
+            "next_waypoint": self.next_waypoint,
         }
 
 
@@ -135,6 +144,7 @@ class BackupManager:
                         timestamp=datetime.fromisoformat(info_dict["timestamp"]),
                         size=info_dict["size"],
                         diverged_from=info_dict.get("diverged_from", DEFAULT_WAYPOINT_ID),
+                        next_waypoint=info_dict.get("next_waypoint"),  # None for pending
                     )
         except (json.JSONDecodeError, IOError, KeyError):
             # If metadata is corrupted, start fresh
@@ -211,6 +221,98 @@ class BackupManager:
                 first_per_file[backup.original_path] = backup
 
         return first_per_file
+
+    def get_pending_backups(self) -> List[BackupInfo]:
+        """Get backups that haven't been assigned to a waypoint yet.
+
+        These are backups where next_waypoint is None, meaning no waypoint
+        has been created since these edits were made. They diverge from
+        the current waypoint.
+
+        Returns:
+            List of BackupInfo objects with next_waypoint=None.
+        """
+        return [
+            info for info in self._backup_metadata.values()
+            if info.next_waypoint is None and info.diverged_from == self._current_waypoint
+        ]
+
+    def tag_pending_backups(self, waypoint_id: str) -> int:
+        """Tag all pending backups with the given waypoint ID.
+
+        Called when a new waypoint is created to "close" the pending backups,
+        associating them with the waypoint they lead to.
+
+        Args:
+            waypoint_id: The new waypoint ID to tag backups with.
+
+        Returns:
+            Number of backups tagged.
+        """
+        tagged = 0
+        for info in self._backup_metadata.values():
+            if info.next_waypoint is None and info.diverged_from == self._current_waypoint:
+                info.next_waypoint = waypoint_id
+                tagged += 1
+
+        if tagged > 0:
+            self._save_metadata()
+
+        return tagged
+
+    def get_backups_by_next_waypoint(self, waypoint_id: str) -> List[BackupInfo]:
+        """Get all backups that lead to a specific waypoint.
+
+        These are backups whose edits were "closed" by the creation of the
+        given waypoint. Used for tree-based restoration.
+
+        Args:
+            waypoint_id: The waypoint ID to query.
+
+        Returns:
+            List of BackupInfo objects where next_waypoint matches.
+        """
+        return [
+            info for info in self._backup_metadata.values()
+            if info.next_waypoint == waypoint_id
+        ]
+
+    def get_first_backup_per_file_by_next_waypoint(
+        self,
+        waypoint_id: str
+    ) -> Dict[str, BackupInfo]:
+        """Get the first backup for each file that leads to a waypoint.
+
+        For tree-based restoration, we need backups that were created as part
+        of the journey TO a waypoint. The first backup per file contains the
+        file state before the edits that led to that waypoint.
+
+        Args:
+            waypoint_id: The waypoint ID to query.
+
+        Returns:
+            Dict mapping original file paths to their first backup leading to waypoint.
+        """
+        backups = self.get_backups_by_next_waypoint(waypoint_id)
+
+        # Sort by timestamp to get earliest first
+        backups.sort(key=lambda b: b.timestamp)
+
+        # Keep only the first backup per file
+        first_per_file: Dict[str, BackupInfo] = {}
+        for backup in backups:
+            if backup.original_path not in first_per_file:
+                first_per_file[backup.original_path] = backup
+
+        return first_per_file
+
+    def has_pending_backups(self) -> bool:
+        """Check if there are uncommitted edits (pending backups).
+
+        Returns:
+            True if there are backups with next_waypoint=None for current waypoint.
+        """
+        return len(self.get_pending_backups()) > 0
 
     def _sanitize_path(self, file_path: Path) -> str:
         """Convert a file path to a safe backup filename prefix.

@@ -21,8 +21,8 @@ WaypointOwner = Literal["user", "model"]
 class Waypoint:
     """A marked point in your coding journey.
 
-    Waypoints capture the state of both your code and conversation at a
-    specific moment, allowing you to return if the path ahead leads astray.
+    Waypoints form a tree structure where each waypoint (except w0) has a parent.
+    This enables navigation forward and backward through different timelines.
 
     Attributes:
         id: Short identifier (w0, w1, w2, ...). Sequential regardless of
@@ -36,6 +36,8 @@ class Waypoint:
         user_message_preview: Preview of the last user message for context.
         owner: Who created this waypoint - "user" or "model". Determines
             what operations are permitted without user approval.
+        parent_id: ID of the parent waypoint (the waypoint that was current
+            when this one was created). None only for w0.
     """
 
     id: str
@@ -47,6 +49,7 @@ class Waypoint:
     message_count: int = 0
     user_message_preview: Optional[str] = None
     owner: WaypointOwner = "user"
+    parent_id: Optional[str] = None  # None only for w0 (root)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -60,6 +63,7 @@ class Waypoint:
             "message_count": self.message_count,
             "user_message_preview": self.user_message_preview,
             "owner": self.owner,
+            "parent_id": self.parent_id,
         }
 
     @classmethod
@@ -75,6 +79,7 @@ class Waypoint:
             message_count=data.get("message_count", 0),
             user_message_preview=data.get("user_message_preview"),
             owner=data.get("owner", "user"),  # Default to user for backwards compat
+            parent_id=data.get("parent_id"),  # None for w0 or legacy waypoints
         )
 
 
