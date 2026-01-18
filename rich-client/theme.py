@@ -355,6 +355,7 @@ DEFAULT_SEMANTIC_STYLES = {
     "clarification_required": StyleSpec(fg="warning"),
     "clarification_answer": StyleSpec(fg="success", dim=True),
     "clarification_question": StyleSpec(dim=True),
+    "clarification_resolved": StyleSpec(fg="success", bold=True),
 
     # System messages
     "system_info": StyleSpec(dim=True),  # Default system message
