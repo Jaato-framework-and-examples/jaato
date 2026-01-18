@@ -16,10 +16,29 @@ Usage (pipeline):
     pipeline.register(create_plugin())  # priority 25
 """
 
+import os
 import re
+import unicodedata
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import wcwidth
+
+
+def _get_ambiguous_width() -> int:
+    """Get the width to use for East Asian Ambiguous characters.
+
+    Reads from JAATO_AMBIGUOUS_WIDTH environment variable.
+    Default is 1 (standard Western terminals).
+    Set to 2 for CJK terminals or terminals with ambiguous width = wide.
+
+    Returns:
+        1 or 2 depending on configuration.
+    """
+    try:
+        value = os.environ.get("JAATO_AMBIGUOUS_WIDTH", "1")
+        return 2 if value == "2" else 1
+    except (ValueError, TypeError):
+        return 1
 
 # Priority for pipeline ordering (20-39 = structural formatting)
 DEFAULT_PRIORITY = 25
@@ -52,8 +71,16 @@ ASCII_GRID_ROW = re.compile(r"^\s*\|.*\|\s*$")
 def _display_width(text: str) -> int:
     """Calculate the display width of a string, accounting for wide characters.
 
-    Uses wcwidth to properly handle emojis, CJK characters, and other
-    characters that take up more than one terminal column.
+    Uses unicodedata.east_asian_width() to properly handle:
+    - Fullwidth (F) and Wide (W) characters: 2 columns
+    - Ambiguous (A) characters: configurable via JAATO_AMBIGUOUS_WIDTH env var
+    - Halfwidth (H), Narrow (Na), Neutral (N): 1 column
+    - Zero-width characters (via wcwidth): 0 columns
+
+    This is more accurate than wcwidth alone because it respects the
+    terminal's ambiguous width setting for box-drawing characters,
+    which are East Asian Ambiguous and may render as 1 or 2 columns
+    depending on the terminal configuration.
 
     Args:
         text: The string to measure.
@@ -61,12 +88,28 @@ def _display_width(text: str) -> int:
     Returns:
         The display width in terminal columns.
     """
+    ambiguous_width = _get_ambiguous_width()
     width = 0
     for char in text:
-        char_width = wcwidth.wcwidth(char)
-        # wcwidth returns -1 for non-printable characters, treat as 0
-        if char_width >= 0:
-            width += char_width
+        # First check for zero-width characters via wcwidth
+        wc = wcwidth.wcwidth(char)
+        if wc == 0:
+            continue
+        if wc == -1:
+            # Non-printable, treat as 0
+            continue
+
+        # Use East Asian Width for proper handling
+        eaw = unicodedata.east_asian_width(char)
+        if eaw in ('F', 'W'):
+            # Fullwidth and Wide are always 2 columns
+            width += 2
+        elif eaw == 'A':
+            # Ambiguous - depends on terminal settings
+            width += ambiguous_width
+        else:
+            # Halfwidth (H), Narrow (Na), Neutral (N) are 1 column
+            width += 1
     return width
 
 

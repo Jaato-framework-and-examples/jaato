@@ -306,6 +306,28 @@ class MCPToolPlugin:
         self._connected_servers = set()
         self._failed_servers = {}
 
+    def _normalize_tool_name(self, server_name: str, tool_name: str) -> str:
+        """Normalize MCP tool name to include server prefix if not present.
+
+        Some MCP servers return tool names with the mcp__{server}__ prefix,
+        while others return just the tool name. This ensures consistent naming
+        across all MCP tools.
+
+        Args:
+            server_name: Name of the MCP server (e.g., "context7", "GitHub")
+            tool_name: Original tool name from the MCP server
+
+        Returns:
+            Normalized tool name in format mcp__{server}__{tool}
+        """
+        expected_prefix = f"mcp__{server_name}__"
+        if tool_name.startswith(expected_prefix):
+            return tool_name
+        # Check if it has any mcp__ prefix (from a different server name)
+        if tool_name.startswith("mcp__"):
+            return tool_name
+        return f"{expected_prefix}{tool_name}"
+
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return ToolSchemas for all discovered MCP tools."""
         if not self._initialized:
@@ -316,8 +338,9 @@ class MCPToolPlugin:
             for tool in tools:
                 try:
                     cleaned_schema = self._clean_schema_for_vertex(tool.inputSchema)
+                    normalized_name = self._normalize_tool_name(server_name, tool.name)
                     schema = ToolSchema(
-                        name=tool.name,
+                        name=normalized_name,
                         description=tool.description,
                         parameters=cleaned_schema
                     )
@@ -325,6 +348,8 @@ class MCPToolPlugin:
                 except Exception as exc:
                     self._log_event(LOG_ERROR, f"Error creating schema for {tool.name}", server=server_name, details=str(exc))
 
+        schema_names = [s.name for s in schemas]
+        self._trace(f"get_tool_schemas: returning {len(schemas)} schemas: {schema_names[:10]}...")
         return schemas
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
@@ -335,19 +360,26 @@ class MCPToolPlugin:
         executors = {}
 
         # Executors for MCP model tools
-        for tools in self._tool_cache.values():
+        tool_count = 0
+        for server_name, tools in self._tool_cache.items():
             for tool in tools:
-                # Create a closure that captures the tool name
-                def make_executor(toolname: str):
+                # Normalize the tool name for registration
+                normalized_name = self._normalize_tool_name(server_name, tool.name)
+                # Create a closure that captures the ORIGINAL tool name for MCP server calls
+                def make_executor(original_name: str):
                     def executor(args: Dict[str, Any]) -> Dict[str, Any]:
-                        return self._execute(toolname, args)
+                        return self._execute(original_name, args)
                     return executor
-                executors[tool.name] = make_executor(tool.name)
+                executors[normalized_name] = make_executor(tool.name)
+                tool_count += 1
 
         # Executor for 'mcp' user command
         def mcp_command_executor(args: Dict[str, Any]) -> str:
             return self.execute_user_command('mcp', args)
         executors['mcp'] = mcp_command_executor
+
+        tool_names = [name for name in executors.keys() if name != 'mcp']
+        self._trace(f"get_executors: returning {len(executors)} executors ({tool_count} MCP tools from {len(self._tool_cache)} servers): {tool_names[:10]}...")
 
         return executors
 
@@ -365,7 +397,8 @@ class MCPToolPlugin:
             lines.append(f"\nFrom '{server_name}' server:")
             for tool in tools:
                 desc = tool.description or "No description"
-                lines.append(f"  - {tool.name}: {desc}")
+                normalized_name = self._normalize_tool_name(server_name, tool.name)
+                lines.append(f"  - {normalized_name}: {desc}")
 
         return "\n".join(lines)
 
