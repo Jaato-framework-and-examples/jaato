@@ -1382,6 +1382,8 @@ class OutputBuffer:
             if self._tools_expanded_before_prompt is None:
                 self._tools_expanded_before_prompt = self._tools_expanded
             self._tools_expanded = True
+            # Scroll to bottom so user sees the permission prompt
+            self._scroll_offset = 0
 
         # First try exact match by tool name
         for tool in self._active_tools:
@@ -1427,6 +1429,8 @@ class OutputBuffer:
                 if self._tools_expanded_before_prompt is None:
                     self._tools_expanded_before_prompt = self._tools_expanded
                 self._tools_expanded = True
+                # Scroll to bottom so user sees the clarification prompt
+                self._scroll_offset = 0
                 _trace(f"set_tool_awaiting_clarification: FOUND for {tool_name}")
                 return
 
