@@ -250,6 +250,7 @@ class PermissionInputModeEvent(Event):
     agent_id: str = ""  # Which agent is requesting permission
     request_id: str = ""
     tool_name: str = ""
+    call_id: Optional[str] = None  # Unique ID for matching tool call (parallel execution)
     response_options: List[Dict[str, str]] = field(default_factory=list)
     # ^ List of {key, label, action, description?}
 

@@ -991,7 +991,8 @@ class JaatoServer:
         server = self
 
         def on_permission_requested(tool_name: str, request_id: str,
-                                    tool_args: dict, response_options: list):
+                                    tool_args: dict, response_options: list,
+                                    call_id: Optional[str] = None):
             server._pending_permission_request_id = request_id
             server._waiting_for_channel_input = True
 
@@ -1077,6 +1078,7 @@ class JaatoServer:
                 agent_id=server._current_tool_agent_id,
                 request_id=request_id,
                 tool_name=tool_name,
+                call_id=call_id,
                 response_options=options_dicts,
             ))
 
@@ -1085,17 +1087,8 @@ class JaatoServer:
             server._pending_permission_request_id = None
             server._waiting_for_channel_input = False
 
-            # Emit resolution status as output (appears after the permission prompt)
-            if granted:
-                status_text = f"✓ Granted ({method})"
-            else:
-                status_text = f"✗ Denied ({method})"
-            server.emit(AgentOutputEvent(
-                agent_id=server._current_tool_agent_id,
-                source="permission",
-                text=status_text,
-                mode="append",
-            ))
+            # Resolution status is shown in the tool tree (e.g., "✓ [once]")
+            # No need to emit separate output text
 
             server.emit(PermissionResolvedEvent(
                 agent_id=server._current_tool_agent_id,

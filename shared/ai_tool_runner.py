@@ -351,7 +351,8 @@ class ToolExecutor:
         self,
         name: str,
         args: Dict[str, Any],
-        tool_output_callback: Optional[ToolOutputCallback] = None
+        tool_output_callback: Optional[ToolOutputCallback] = None,
+        call_id: Optional[str] = None
     ) -> Tuple[bool, Any]:
         """Execute a tool by name with the given arguments.
 
@@ -361,6 +362,8 @@ class ToolExecutor:
             tool_output_callback: Optional callback for streaming output during execution.
                 If provided, overrides the instance-level callback for this call only.
                 This enables thread-safe parallel execution where each tool has its own callback.
+            call_id: Optional unique identifier for this tool call (for parallel tool matching
+                in permission UI).
 
         Returns:
             Tuple of (success: bool, result: Any).
@@ -378,7 +381,7 @@ class ToolExecutor:
             _thread_local.tool_output_callback = tool_output_callback
 
         try:
-            return self._execute_impl(name, args, debug)
+            return self._execute_impl(name, args, debug, call_id)
         finally:
             # Clean up thread-local callback
             if tool_output_callback is not None:
@@ -388,7 +391,8 @@ class ToolExecutor:
         self,
         name: str,
         args: Dict[str, Any],
-        debug: bool
+        debug: bool,
+        call_id: Optional[str] = None
     ) -> Tuple[bool, Any]:
         """Internal implementation of execute(), separated for try/finally wrapping."""
         # Track permission metadata for injection into result
@@ -399,7 +403,7 @@ class ToolExecutor:
         if self._permission_plugin is not None and name != 'askPermission':
             try:
                 allowed, perm_info = self._permission_plugin.check_permission(
-                    name, args, self._permission_context
+                    name, args, self._permission_context, call_id
                 )
                 # Build permission metadata for result injection
                 permission_meta = {

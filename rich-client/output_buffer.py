@@ -170,6 +170,7 @@ class ActiveToolCall:
     permission_format_hint: Optional[str] = None  # "diff" for pre-formatted content (skip box wrapping)
     permission_truncated: bool = False  # True if prompt is truncated
     permission_h_scroll: int = 0  # Horizontal scroll offset for diff viewport (stage 2)
+    permission_content: Optional[str] = None  # Formatted content from unified flow (may contain ANSI codes)
     # Clarification tracking (per-question progressive display)
     clarification_state: Optional[str] = None  # None, "pending", "resolved"
     clarification_prompt_lines: Optional[List[str]] = None  # Current question lines
@@ -178,6 +179,7 @@ class ActiveToolCall:
     clarification_total_questions: int = 0  # Total number of questions
     clarification_answered: Optional[List[Tuple[int, str]]] = None  # List of (question_index, answer_summary)
     clarification_summary: Optional[List[Tuple[str, str]]] = None  # Q&A pairs [(question, answer), ...] for overview
+    clarification_content: Optional[str] = None  # Formatted content from unified flow (may contain ANSI codes)
     # Live output tracking (tail -f style preview)
     output_lines: Optional[List[str]] = None  # Rolling buffer of recent output lines
     output_max_lines: int = 30  # Max lines to keep in buffer
@@ -231,6 +233,9 @@ class OutputBuffer:
         self._keybinding_config: Optional[Any] = None
         # Pending enrichment notifications (queued while tools are active)
         self._pending_enrichments: List[Tuple[str, str, str]] = []  # (source, text, mode)
+        # Pending permission/clarification content (buffered until associated with tool)
+        self._pending_permission_content: Optional[str] = None
+        self._pending_clarification_content: Optional[str] = None
         # Formatter pipeline for output processing (optional)
         self._formatter_pipeline: Optional[Any] = None
         # Theme configuration for styling (optional)
@@ -481,39 +486,22 @@ class OutputBuffer:
         if source == "plan":
             return
 
-        # Permission and clarification content should render AFTER the tool tree
-        # Append to end of lines so it appears below the tool status
-        if source in ("permission", "clarification") and self._active_tools:
+        # Permission and clarification content is buffered until associated with a tool
+        # This ensures correct association when multiple tools run in parallel
+        if source == "permission" and self._active_tools:
             self._flush_current_block()
+            if mode == "append" and self._pending_permission_content:
+                self._pending_permission_content += "\n" + text
+            else:
+                self._pending_permission_content = text
+            return
 
-            if mode == "append":
-                # Append to existing permission/clarification content
-                # Find the most recent line with this source and append to it
-                for i in range(len(self._lines) - 1, -1, -1):
-                    line = self._lines[i]
-                    if isinstance(line, OutputLine) and line.source == source:
-                        # Append text with newline
-                        line.text = line.text + "\n" + text
-                        # Recalculate display lines
-                        total_display_lines = 0
-                        for line_text in line.text.split('\n'):
-                            total_display_lines += self._measure_display_lines(source, line_text, False)
-                        line.display_lines = total_display_lines
-                        return
-                # No existing line found, fall through to append as new
-
-            # Append the entire content as a single block at the end
-            # Count display lines for the entire text block
-            total_display_lines = 0
-            for line_text in text.split('\n'):
-                total_display_lines += self._measure_display_lines(source, line_text, False)
-            self._lines.append(OutputLine(
-                source=source,
-                text=text,
-                style="line",
-                display_lines=total_display_lines,
-                is_turn_start=False
-            ))
+        if source == "clarification" and self._active_tools:
+            self._flush_current_block()
+            if mode == "append" and self._pending_clarification_content:
+                self._pending_clarification_content += "\n" + text
+            else:
+                self._pending_clarification_content = text
             return
 
         # Queue enrichment notifications while tools are active
@@ -774,6 +762,8 @@ class OutputBuffer:
         self._active_tools.append(ActiveToolCall(
             name=tool_name, args_summary=args_str, call_id=call_id
         ))
+        # Scroll to show the full tool tree (prioritizing top if it's taller than visible area)
+        self.scroll_to_show_tool_tree()
 
     def mark_tool_completed(self, tool_name: str, success: bool = True,
                             duration_seconds: Optional[float] = None,
@@ -1341,12 +1331,12 @@ class OutputBuffer:
                 tool.permission_state = "pending"
                 tool.permission_prompt_lines = prompt_lines
                 tool.permission_format_hint = format_hint
-                # Scroll to bottom to show the prompt
-                self._scroll_offset = 0
                 # Save current state and force expanded view so user can see the permission prompt
                 if self._tools_expanded_before_prompt is None:
                     self._tools_expanded_before_prompt = self._tools_expanded
                 self._tools_expanded = True
+                # Scroll to show the tool tree with the permission prompt
+                self.scroll_to_show_tool_tree()
                 _trace(f"set_tool_permission_pending: FOUND exact match for {tool_name}")
                 return
 
@@ -1363,61 +1353,75 @@ class OutputBuffer:
                     tool.display_name = tool_name
                     # Clear the args summary since it contains askPermission's args, not the target tool's
                     tool.display_args_summary = ""
-                self._scroll_offset = 0
                 # Save current state and force expanded view so user can see the permission prompt
                 if self._tools_expanded_before_prompt is None:
                     self._tools_expanded_before_prompt = self._tools_expanded
                 self._tools_expanded = True
+                # Scroll to show the tool tree with the permission prompt
+                self.scroll_to_show_tool_tree()
                 _trace(f"set_tool_permission_pending: FALLBACK attached to {tool.name} (requested: {tool_name})")
                 return
 
         _trace(f"set_tool_permission_pending: NO MATCH for {tool_name}")
 
-    def set_tool_awaiting_approval(self, tool_name: str) -> None:
-        """Mark tool as awaiting permission (content rendered separately in main output).
+    def set_tool_awaiting_approval(self, tool_name: str, call_id: Optional[str] = None) -> None:
+        """Mark tool as awaiting permission and associate buffered content.
 
         This is used with the unified output flow where permission content flows
-        through AgentOutputEvent to the main output area, and the tool tree just
-        shows a simple status indicator.
+        through AgentOutputEvent, gets buffered, and is then associated with
+        the specific tool when this method is called.
 
         Args:
             tool_name: Name of the tool awaiting permission.
+            call_id: Optional unique identifier for the tool call (for parallel tool matching).
         """
-        _trace(f"set_tool_awaiting_approval: looking for tool={tool_name}")
+        _trace(f"set_tool_awaiting_approval: looking for tool={tool_name} call_id={call_id}")
 
-        # First try exact match by tool name
+        def _associate_content(tool: ActiveToolCall) -> None:
+            """Associate buffered permission content with the tool."""
+            tool.permission_state = "pending"
+            tool.permission_content = self._pending_permission_content
+            self._pending_permission_content = None  # Clear buffer
+            # Save current state and force expanded view so user can see tool status
+            if self._tools_expanded_before_prompt is None:
+                self._tools_expanded_before_prompt = self._tools_expanded
+            self._tools_expanded = True
+            # Scroll to show the tool tree with the permission prompt
+            self.scroll_to_show_tool_tree()
+
+        # First try exact match by call_id (most reliable for parallel tools)
+        if call_id:
+            for tool in self._active_tools:
+                if tool.call_id == call_id and not tool.completed:
+                    _associate_content(tool)
+                    _trace(f"set_tool_awaiting_approval: FOUND by call_id={call_id}")
+                    return
+
+        # Fallback: try exact match by tool name (for backwards compatibility)
         for tool in self._active_tools:
             if tool.name == tool_name and not tool.completed:
-                tool.permission_state = "pending"
-                tool.permission_prompt_lines = None  # No content in tree - shown in main output
-                # Save current state and force expanded view so user can see tool status
-                if self._tools_expanded_before_prompt is None:
-                    self._tools_expanded_before_prompt = self._tools_expanded
-                self._tools_expanded = True
+                _associate_content(tool)
                 _trace(f"set_tool_awaiting_approval: FOUND exact match for {tool_name}")
                 return
 
-        # Fallback: attach to the last uncompleted tool
+        # Last resort: attach to the last uncompleted tool
         for tool in reversed(self._active_tools):
             if not tool.completed:
-                tool.permission_state = "pending"
-                tool.permission_prompt_lines = None  # No content in tree
                 if tool.name != tool_name:
                     tool.display_name = tool_name
                     tool.display_args_summary = ""
-                if self._tools_expanded_before_prompt is None:
-                    self._tools_expanded_before_prompt = self._tools_expanded
-                self._tools_expanded = True
+                _associate_content(tool)
                 _trace(f"set_tool_awaiting_approval: FALLBACK attached to {tool.name}")
                 return
 
-        _trace(f"set_tool_awaiting_approval: NO MATCH for {tool_name}")
+        _trace(f"set_tool_awaiting_approval: NO MATCH for {tool_name} call_id={call_id}")
 
     def set_tool_awaiting_clarification(self, tool_name: str, question_index: int, total_questions: int) -> None:
-        """Mark tool as awaiting clarification input (content rendered in main output).
+        """Mark tool as awaiting clarification and associate buffered content.
 
         This is used with the unified output flow where clarification content flows
-        through AgentOutputEvent to the main output area.
+        through AgentOutputEvent, gets buffered, and is then associated with
+        the specific tool when this method is called.
 
         Args:
             tool_name: Name of the tool awaiting clarification.
@@ -1429,13 +1433,16 @@ class OutputBuffer:
         for tool in self._active_tools:
             if tool.name == tool_name and not tool.completed:
                 tool.clarification_state = "pending"
-                tool.clarification_prompt_lines = None  # No content in tree - shown in main output
+                tool.clarification_content = self._pending_clarification_content
+                self._pending_clarification_content = None  # Clear buffer
                 tool.clarification_current_question = question_index
                 tool.clarification_total_questions = total_questions
                 # Save current state and force expanded view
                 if self._tools_expanded_before_prompt is None:
                     self._tools_expanded_before_prompt = self._tools_expanded
                 self._tools_expanded = True
+                # Scroll to show the tool tree with the clarification prompt
+                self.scroll_to_show_tool_tree()
                 _trace(f"set_tool_awaiting_clarification: FOUND for {tool_name}")
                 return
 
@@ -1459,7 +1466,7 @@ class OutputBuffer:
             if tool.name == tool_name and tool.permission_state == "pending":
                 tool.permission_state = "granted" if granted else "denied"
                 tool.permission_method = method
-                tool.permission_prompt_lines = None  # Clear expanded prompt
+                tool.permission_content = None  # Clear permission content
                 _trace(f"set_tool_permission_resolved: FOUND exact match for {tool_name}")
                 resolved = True
                 break
@@ -1470,7 +1477,7 @@ class OutputBuffer:
                 if tool.permission_state == "pending":
                     tool.permission_state = "granted" if granted else "denied"
                     tool.permission_method = method
-                    tool.permission_prompt_lines = None  # Clear expanded prompt
+                    tool.permission_content = None  # Clear permission content
                     _trace(f"set_tool_permission_resolved: FALLBACK resolved {tool.name} (requested: {tool_name})")
                     resolved = True
                     break
@@ -1481,27 +1488,6 @@ class OutputBuffer:
 
         # Restore expanded state if no more pending prompts
         self._maybe_restore_expanded_state()
-
-        # Clear permission content from the buffer since it's now resolved
-        self._clear_content_by_source("permission")
-
-    def _clear_content_by_source(self, source: str) -> None:
-        """Remove all OutputLine entries with the given source from the buffer.
-
-        Used to clean up permission/clarification content after resolution.
-
-        Args:
-            source: The source type to remove ("permission" or "clarification").
-        """
-        # Filter out lines with the matching source
-        original_count = len(self._lines)
-        self._lines = [
-            line for line in self._lines
-            if not (isinstance(line, OutputLine) and line.source == source)
-        ]
-        removed_count = original_count - len(self._lines)
-        if removed_count > 0:
-            _trace(f"_clear_content_by_source: removed {removed_count} {source} lines")
 
     def set_tool_clarification_pending(self, tool_name: str, prompt_lines: List[str]) -> None:
         """Mark a tool as awaiting clarification (initial context only).
@@ -1515,12 +1501,12 @@ class OutputBuffer:
                 tool.clarification_state = "pending"
                 tool.clarification_prompt_lines = prompt_lines
                 tool.clarification_answered = []  # Initialize answered list
-                # Scroll to bottom to show the prompt
-                self._scroll_offset = 0
                 # Save current state and force expanded view so user can see the prompt
                 if self._tools_expanded_before_prompt is None:
                     self._tools_expanded_before_prompt = self._tools_expanded
                 self._tools_expanded = True
+                # Scroll to show the tool tree with the clarification prompt
+                self.scroll_to_show_tool_tree()
                 return
 
     def set_tool_clarification_question(
@@ -1546,12 +1532,12 @@ class OutputBuffer:
                 tool.clarification_prompt_lines = question_lines
                 if tool.clarification_answered is None:
                     tool.clarification_answered = []
-                # Scroll to bottom to show the question
-                self._scroll_offset = 0
                 # Save current state and force expanded view so user can see the prompt
                 if self._tools_expanded_before_prompt is None:
                     self._tools_expanded_before_prompt = self._tools_expanded
                 self._tools_expanded = True
+                # Scroll to show the tool tree with the question
+                self.scroll_to_show_tool_tree()
                 return
 
     def set_tool_question_answered(
@@ -1591,7 +1577,7 @@ class OutputBuffer:
         for tool in self._active_tools:
             if tool.name == tool_name:
                 tool.clarification_state = "resolved"
-                tool.clarification_prompt_lines = None
+                tool.clarification_content = None  # Clear clarification content
                 tool.clarification_current_question = 0
                 tool.clarification_total_questions = 0
                 tool.clarification_summary = qa_pairs
@@ -1601,9 +1587,6 @@ class OutputBuffer:
         if resolved:
             # Restore expanded state if no more pending prompts
             self._maybe_restore_expanded_state()
-
-            # Clear clarification content from the buffer since it's now resolved
-            self._clear_content_by_source("clarification")
 
     def get_pending_prompt_for_pager(self) -> Optional[Tuple[str, List[str]]]:
         """Get the pending prompt that's awaiting user input for pager display.
@@ -1702,6 +1685,59 @@ class OutputBuffer:
     def is_at_bottom(self) -> bool:
         """Check if scrolled to the bottom."""
         return self._scroll_offset == 0
+
+    def scroll_to_show_tool_tree(self) -> bool:
+        """Scroll to show the active tool tree, prioritizing its top.
+
+        When the tool tree is taller than the visible area, shows from the top.
+        When it fits, scrolls so the entire tree is visible.
+
+        Returns:
+            True if scroll position changed.
+        """
+        if not self._active_tools or self._tool_placeholder_index is None:
+            return False
+
+        old_offset = self._scroll_offset
+
+        # Calculate total display lines before the tool tree
+        # Note: _lines is a deque which doesn't support slicing, so we iterate with enumerate
+        lines_before_tree = sum(
+            self._get_item_display_lines(item)
+            for i, item in enumerate(self._lines)
+            if i < self._tool_placeholder_index
+        )
+
+        # Calculate tool tree height
+        tree_height = self._calculate_tool_tree_height()
+
+        # Calculate lines after the tool tree (remaining content in _lines + any streaming)
+        lines_after_tree = sum(
+            self._get_item_display_lines(item)
+            for i, item in enumerate(self._lines)
+            if i >= self._tool_placeholder_index
+        )
+
+        # Total content height
+        total_height = lines_before_tree + tree_height + lines_after_tree
+
+        # We want to show the tool tree starting from its top
+        # scroll_offset = how many lines from the bottom to skip
+        # To show from line X, scroll_offset = total_height - X - visible_height
+        # We want to show starting at lines_before_tree (top of tree)
+
+        # If tree fits in visible area, show it entirely
+        # If tree is taller, show from the top of the tree
+        if tree_height <= self._visible_height:
+            # Show entire tree - scroll so bottom of tree is visible
+            # with some margin for content after it
+            tree_bottom = lines_before_tree + tree_height
+            self._scroll_offset = max(0, total_height - tree_bottom - max(0, self._visible_height - tree_height))
+        else:
+            # Tree is taller than visible - show from top of tree
+            self._scroll_offset = max(0, total_height - lines_before_tree - self._visible_height)
+
+        return self._scroll_offset != old_offset
 
     def _calculate_tool_tree_height(self) -> int:
         """Calculate the approximate height of the tool tree in display lines.
@@ -2095,12 +2131,17 @@ class OutputBuffer:
         output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
         output.append("  🔒 Permission required", style=self._style("permission_prompt", "bold yellow"))
 
-        # Unified flow: no prompt_lines means content is in main output area
-        # Just show a minimal indicator
+        # Unified flow: permission_content contains formatted content to render inline
+        if tool.permission_content:
+            indent = f"{prefix}{continuation}     "
+            for content_line in tool.permission_content.split('\n'):
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                output.append_text(Text.from_ansi(content_line))
+            return
+
+        # Legacy flow: no permission_content means we use prompt_lines or show minimal indicator
         if not prompt_lines:
-            output.append("\n")
-            output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-            output.append("(see details below)", style=self._style("muted", "dim"))
             return
 
         if tool.permission_format_hint == "diff":
@@ -2170,12 +2211,17 @@ class OutputBuffer:
         else:
             output.append("  ❓ Clarification needed", style=self._style("clarification_required", "bold cyan"))
 
-        # Unified flow: no prompt_lines means content is in main output area
-        # Just show a minimal indicator
+        # Unified flow: clarification_content contains formatted content to render inline
+        if tool.clarification_content:
+            indent = f"{prefix}{continuation}     "
+            for content_line in tool.clarification_content.split('\n'):
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                output.append_text(Text.from_ansi(content_line))
+            return
+
+        # Legacy flow: no clarification_content means we use prompt_lines or show minimal indicator
         if not prompt_lines:
-            output.append("\n")
-            output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-            output.append("(see details below)", style=self._style("muted", "dim"))
             return
 
         # Render prompt lines
@@ -2611,24 +2657,6 @@ class OutputBuffer:
                     elif j > 0 and line.is_turn_start:
                         output.append(" " * (len(f"[{line.source}] ")))  # Indent continuation
                     output.append(wrapped_line, style=self._style("muted", "dim"))
-            elif line.source == "permission":
-                # Permission content - may contain multi-line text with ANSI codes
-                # Render using Text.from_ansi to preserve formatting, with indentation
-                indent = "       "  # Align with tool tree details
-                for j, content_line in enumerate(line.text.split('\n')):
-                    if j > 0:
-                        output.append("\n")
-                    output.append(indent, style=self._style("tree_connector", "dim"))
-                    output.append_text(Text.from_ansi(content_line))
-            elif line.source == "clarification":
-                # Clarification content - may contain multi-line text with ANSI codes
-                # Render using Text.from_ansi to preserve formatting, with indentation
-                indent = "       "  # Align with tool tree details
-                for j, content_line in enumerate(line.text.split('\n')):
-                    if j > 0:
-                        output.append("\n")
-                    output.append(indent, style=self._style("tree_connector", "dim"))
-                    output.append_text(Text.from_ansi(content_line))
             elif line.source == "enrichment":
                 # Enrichment notifications - render dimmed with proper wrapping
                 # The formatter pre-aligns continuation lines, so we wrap each line
