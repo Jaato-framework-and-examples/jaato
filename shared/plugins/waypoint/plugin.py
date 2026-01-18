@@ -10,9 +10,14 @@ becomes treacherous.
 Unlike version control which captures code state, waypoints capture the full context
 of your collaboration - both the code changes and the conversation that led to them.
 
-This plugin provides user-facing commands only - it is NOT exposed to the model
-as a tool. Waypoints are user-initiated checkpoints for human control over the
-session state.
+This plugin supports BOTH user commands AND model tools with an ownership model:
+- User-owned waypoints: Created via user commands, model needs permission to restore,
+  cannot delete
+- Model-owned waypoints: Created via model tools, model has full control (create,
+  restore, delete without permission)
+
+Note: All waypoints use sequential IDs (w1, w2, w3...) regardless of owner.
+Ownership is tracked separately in the Waypoint.owner field.
 """
 
 import json
@@ -20,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
-from .models import INITIAL_WAYPOINT_ID
+from .models import INITIAL_WAYPOINT_ID, WaypointOwner
 from .manager import WaypointManager
 from ..base import (
     UserCommand,
@@ -38,16 +43,32 @@ if TYPE_CHECKING:
 class WaypointPlugin:
     """Plugin for marking and restoring session waypoints.
 
-    This plugin provides user-facing commands for managing waypoints.
-    It is NOT exposed to the model - waypoints are user-initiated only.
+    This plugin provides BOTH user-facing commands AND model tools with an
+    ownership-based permission model.
 
-    Commands:
+    Ownership Model:
+        - User waypoints: Created by user commands. Model can list/view
+          but needs permission to restore, cannot delete.
+        - Model waypoints: Created by model tools. Model has full control
+          (create, restore, delete) without needing permission.
+
+    Note: All waypoints use sequential IDs (w1, w2, w3...) regardless of owner.
+    Ownership is tracked in the Waypoint.owner field.
+
+    User Commands:
         waypoint              - List all waypoints
-        waypoint create "desc" - Create with description
+        waypoint create "desc" - Create user-owned waypoint
         waypoint restore N    - Restore files to waypoint N
-        waypoint delete N     - Delete waypoint N
+        waypoint delete N     - Delete waypoint N (user-owned only)
         waypoint delete all   - Delete all user waypoints
         waypoint info N       - Show detailed info about waypoint N
+
+    Model Tools:
+        list_waypoints        - List all waypoints with ownership info
+        waypoint_info         - Get detailed info about a waypoint
+        create_waypoint       - Create a model-owned waypoint
+        restore_waypoint      - Restore to a waypoint (permission for user-owned)
+        delete_waypoint       - Delete a model-owned waypoint
     """
 
     def __init__(self):
@@ -196,22 +217,186 @@ class WaypointPlugin:
             )
 
     def get_tool_schemas(self) -> List[ToolSchema]:
-        """Return empty list - waypoints are not exposed to model."""
-        return []
+        """Return tool schemas for model waypoint access.
+
+        The model has access to waypoint tools with ownership-based permissions:
+        - Full control over model-owned waypoints
+        - Read access to user-owned waypoints
+        - Restore access to user-owned waypoints with permission
+        - No delete access to user-owned waypoints
+        """
+        return [
+            ToolSchema(
+                name="list_waypoints",
+                description=(
+                    "List all waypoints in the session. Waypoints are checkpoints "
+                    "that capture file state at significant moments. Each waypoint "
+                    "has an owner (user or model) shown in the response."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+                category="planning",
+            ),
+            ToolSchema(
+                name="waypoint_info",
+                description=(
+                    "Get detailed information about a specific waypoint, including "
+                    "files changed since that waypoint and ownership."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "waypoint_id": {
+                            "type": "string",
+                            "description": (
+                                "The waypoint ID (e.g., 'w1', 'w2'). IDs are "
+                                "sequential; ownership is shown in the response."
+                            ),
+                        },
+                    },
+                    "required": ["waypoint_id"],
+                },
+                category="planning",
+            ),
+            ToolSchema(
+                name="create_waypoint",
+                description=(
+                    "Create a new model-owned waypoint to mark the current file state. "
+                    "Use this before risky operations so you can restore if needed. "
+                    "Model-owned waypoints can be restored and deleted freely."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": (
+                                "A brief description of why this waypoint is being "
+                                "created (e.g., 'before auth refactor', "
+                                "'pre-optimization checkpoint')."
+                            ),
+                        },
+                    },
+                    "required": ["description"],
+                },
+                category="planning",
+            ),
+            ToolSchema(
+                name="restore_waypoint",
+                description=(
+                    "Restore all files to their state at a waypoint, undoing changes "
+                    "made after that point. You can restore your own waypoints freely. "
+                    "Restoring user-owned waypoints requires user permission."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "waypoint_id": {
+                            "type": "string",
+                            "description": (
+                                "The waypoint ID to restore to (e.g., 'w1', 'w2'). "
+                                "Model-owned waypoints can be restored without permission."
+                            ),
+                        },
+                    },
+                    "required": ["waypoint_id"],
+                },
+                category="planning",
+            ),
+            ToolSchema(
+                name="delete_waypoint",
+                description=(
+                    "Delete a waypoint you created. Attempting to delete a user-owned "
+                    "waypoint will fail with an error."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "waypoint_id": {
+                            "type": "string",
+                            "description": "The waypoint ID to delete (e.g., 'w1', 'w2').",
+                        },
+                    },
+                    "required": ["waypoint_id"],
+                },
+                category="planning",
+            ),
+        ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
-        """Return command executors."""
+        """Return command executors for both user commands and model tools."""
         return {
+            # User command
             "waypoint": self._execute_waypoint,
+            # Model tools
+            "list_waypoints": self._execute_list_waypoints,
+            "waypoint_info": self._execute_waypoint_info,
+            "create_waypoint": self._execute_create_waypoint,
+            "restore_waypoint": self._execute_restore_waypoint,
+            "delete_waypoint": self._execute_delete_waypoint,
         }
 
     def get_system_instructions(self) -> Optional[str]:
-        """Return None - waypoints are user-facing only."""
-        return None
+        """Return system instructions explaining waypoint ownership model."""
+        return """## Waypoints
+
+Waypoints are checkpoints that capture file state at significant moments, forming
+a tree structure that allows bidirectional navigation through different timelines.
+
+**Tree Structure:**
+Waypoints form a tree where each waypoint has a parent (except w0, the root).
+Use `list_waypoints` to see the tree visualization with the current position marked.
+You can navigate backward to ancestors and forward to descendants.
+
+**Ownership Model:**
+All waypoints use sequential IDs (w1, w2, w3...). Ownership is tracked separately:
+- **User-owned**: Created by the user. You can view and restore them (with user
+  permission), but cannot delete them.
+- **Model-owned**: Created by you. You have full control - create, restore, and
+  delete without needing permission.
+
+**Auto-save on restore:**
+When restoring to a previous waypoint with uncommitted file changes, a "ceiling"
+waypoint is automatically created to preserve your work. This ensures you can
+always navigate back to where you were.
+
+**Limitations:**
+- **File existence not tracked**: Waypoints capture file contents, not creation/deletion.
+  New files created after a waypoint persist after restore; deleted files aren't recreated.
+
+**When to use waypoints:**
+- Before attempting risky refactoring or experimental changes
+- Before making multiple related file changes that might need rollback
+- When exploring different implementation approaches
+
+**Example workflow:**
+1. `create_waypoint("before auth refactor")` - creates w1 (model-owned)
+2. Make changes across multiple files
+3. If changes don't work: `restore_waypoint("w1")` - reverts all files
+4. If changes work: optionally `delete_waypoint("w1")` to clean up"""
 
     def get_auto_approved_tools(self) -> List[str]:
-        """Return waypoint command as auto-approved."""
-        return ["waypoint"]
+        """Return auto-approved tools.
+
+        Auto-approved:
+        - waypoint: user command (always trusted)
+        - list_waypoints, waypoint_info: read-only operations
+        - create_waypoint: creates model-owned waypoint (safe)
+        - delete_waypoint: executor enforces model-owned only
+
+        Requires permission:
+        - restore_waypoint: can affect user-owned waypoints
+        """
+        return [
+            "waypoint",  # User command
+            "list_waypoints",
+            "waypoint_info",
+            "create_waypoint",
+            "delete_waypoint",  # Executor enforces ownership
+        ]
 
     # ==================== Prompt Enrichment Protocol ====================
 
@@ -428,8 +613,15 @@ class WaypointPlugin:
 
         return {"error": f"Unknown action: {action}. Try: create, restore, delete, info, list"}
 
-    def _list_waypoints(self) -> Dict[str, Any]:
-        """List all waypoints."""
+    def _list_waypoints(self, include_ownership: bool = False) -> Dict[str, Any]:
+        """List all waypoints as a tree structure.
+
+        Args:
+            include_ownership: If True, include owner field in output (for model).
+
+        Returns:
+            Dictionary with tree structure and text visualization.
+        """
         if not self._manager:
             return {"error": "Manager not initialized"}
 
@@ -438,36 +630,117 @@ class WaypointPlugin:
 
         if not waypoints:
             return {
-                "waypoints": [],
+                "tree": "",
+                "current": None,
                 "message": "No waypoints yet. Use 'waypoint create' to mark your first.",
             }
 
-        # Format waypoints for display
-        formatted = []
-        for wp in waypoints:
-            desc = wp.description
-            if len(desc) > 40:
-                desc = desc[:37] + "..."
+        # Get tree structure from manager
+        tree_data = self._manager.get_tree_structure()
 
-            formatted.append({
-                "id": wp.id,
-                "description": desc,
-                "created_at": wp.created_at.strftime("%H:%M"),
-                "messages": wp.message_count,
-                "is_implicit": wp.is_implicit,
-                "is_current": wp.id == current_id,
-            })
+        # Build text visualization
+        tree_text = self._build_tree_text(
+            tree_data["nodes"],
+            tree_data["root"],
+            current_id,
+            include_ownership,
+        )
 
-        return {
-            "waypoints": formatted,
+        result = {
+            "tree": tree_text,
             "current": current_id,
+            "nodes": tree_data["nodes"] if include_ownership else None,
         }
 
-    def _create_waypoint(self, description: str) -> Dict[str, Any]:
+        # Remove None values for cleaner output
+        if not include_ownership:
+            del result["nodes"]
+
+        return result
+
+    def _build_tree_text(
+        self,
+        nodes: Dict[str, Any],
+        root_id: str,
+        current_id: str,
+        include_ownership: bool,
+        prefix: str = "",
+        is_last: bool = True,
+    ) -> str:
+        """Build a text-based tree visualization.
+
+        Args:
+            nodes: Dictionary of node data from get_tree_structure().
+            root_id: The waypoint ID to start from.
+            current_id: The current waypoint ID (marked with ◀).
+            include_ownership: Whether to show [user]/[model] tags.
+            prefix: Indentation prefix for current level.
+            is_last: Whether this is the last child at current level.
+
+        Returns:
+            Multi-line string with ASCII tree visualization.
+        """
+        if root_id not in nodes:
+            return ""
+
+        node = nodes[root_id]
+        lines = []
+
+        # Build the node line
+        desc = node["description"]
+        if len(desc) > 30:
+            desc = desc[:27] + "..."
+
+        parts = [node["id"]]
+        parts.append(f'"{desc}"')
+        if include_ownership:
+            parts.append(f"[{node['owner']}]")
+        if node["id"] == current_id:
+            parts.append("◀ current")
+
+        node_text = " ".join(parts)
+
+        # Add connector
+        if prefix == "":
+            # Root node
+            lines.append(node_text)
+        else:
+            connector = "└── " if is_last else "├── "
+            lines.append(prefix + connector + node_text)
+
+        # Process children
+        children = node.get("children", [])
+        # Sort children by ID for consistent output
+        children = sorted(children, key=lambda x: (
+            int(x[1:]) if x[1:].isdigit() else 0
+        ))
+
+        child_prefix = prefix + ("    " if is_last else "│   ") if prefix else ""
+
+        for i, child_id in enumerate(children):
+            is_last_child = (i == len(children) - 1)
+            child_text = self._build_tree_text(
+                nodes,
+                child_id,
+                current_id,
+                include_ownership,
+                child_prefix,
+                is_last_child,
+            )
+            lines.append(child_text)
+
+        return "\n".join(lines)
+
+    def _create_waypoint(
+        self,
+        description: str,
+        owner: WaypointOwner = "user",
+    ) -> Dict[str, Any]:
         """Create a new waypoint.
 
         Args:
             description: Required description for the waypoint.
+            owner: Who is creating this waypoint - "user" or "model".
 
         Returns:
             Result dict with success/error status.
@@ -498,12 +771,14 @@ class WaypointPlugin:
             description=description,
             turn_index=turn_index,
             user_message_preview=user_message_preview,
+            owner=owner,
         )
 
         return {
             "success": True,
             "id": waypoint.id,
             "description": waypoint.description,
+            "owner": waypoint.owner,
             "message": f"Waypoint {waypoint.id} created: {waypoint.description}",
         }
 
@@ -570,6 +845,120 @@ class WaypointPlugin:
             return {"error": f"Waypoint not found: {waypoint_id}"}
 
         return info
+
+
+    # ==================== Model Tool Executors ====================
+
+    def _execute_list_waypoints(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute list_waypoints tool for model.
+
+        Returns all waypoints with ownership information.
+        """
+        if not self._ensure_manager():
+            return {"error": "Waypoint plugin not available"}
+
+        return self._list_waypoints(include_ownership=True)
+
+    def _execute_waypoint_info(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute waypoint_info tool for model.
+
+        Args:
+            args: Must contain 'waypoint_id'.
+        """
+        if not self._ensure_manager():
+            return {"error": "Waypoint plugin not available"}
+
+        waypoint_id = args.get("waypoint_id")
+        if not waypoint_id:
+            return {"error": "waypoint_id is required"}
+
+        return self._waypoint_info(waypoint_id)
+
+    def _execute_create_waypoint(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute create_waypoint tool for model.
+
+        Creates a model-owned waypoint with the next sequential ID.
+
+        Args:
+            args: Must contain 'description'.
+        """
+        if not self._ensure_manager():
+            return {"error": "Waypoint plugin not available"}
+
+        description = args.get("description")
+        if not description:
+            return {"error": "description is required"}
+
+        return self._create_waypoint(description=description, owner="model")
+
+    def _execute_restore_waypoint(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute restore_waypoint tool for model.
+
+        Model can restore to any waypoint, but restoring to user-owned
+        waypoints should go through permission flow.
+        Model-owned waypoints can be restored freely.
+
+        Args:
+            args: Must contain 'waypoint_id'.
+        """
+        if not self._ensure_manager():
+            return {"error": "Waypoint plugin not available"}
+
+        waypoint_id = args.get("waypoint_id")
+        if not waypoint_id:
+            return {"error": "waypoint_id is required"}
+
+        # Check if waypoint exists
+        waypoint = self._manager.get(waypoint_id)
+        if not waypoint:
+            return {"error": f"Waypoint not found: {waypoint_id}"}
+
+        # Note: Permission for user-owned waypoints is handled by the
+        # permission plugin since restore_waypoint is not auto-approved.
+        # If we get here, permission was granted (or it's model-owned).
+
+        return self._restore_waypoint(waypoint_id)
+
+    def _execute_delete_waypoint(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute delete_waypoint tool for model.
+
+        Model can only delete its own waypoints.
+        User-owned waypoints cannot be deleted by model.
+
+        Args:
+            args: Must contain 'waypoint_id'.
+        """
+        if not self._ensure_manager():
+            return {"error": "Waypoint plugin not available"}
+
+        waypoint_id = args.get("waypoint_id")
+        if not waypoint_id:
+            return {"error": "waypoint_id is required"}
+
+        # Check if waypoint exists
+        waypoint = self._manager.get(waypoint_id)
+        if not waypoint:
+            return {"error": f"Waypoint not found: {waypoint_id}"}
+
+        # Enforce ownership: model can only delete model-owned waypoints
+        if waypoint.owner != "model":
+            return {
+                "error": (
+                    f"Cannot delete user-owned waypoint {waypoint_id}. "
+                    "You can only delete waypoints you created (owner='model')."
+                )
+            }
+
+        # Proceed with deletion
+        success = self._manager.delete(waypoint_id)
+        if success:
+            return {
+                "success": True,
+                "id": waypoint_id,
+                "message": f"Waypoint {waypoint_id} deleted.",
+            }
+        else:
+            return {"error": f"Failed to delete waypoint: {waypoint_id}"}
 
 
 def create_plugin() -> WaypointPlugin:
