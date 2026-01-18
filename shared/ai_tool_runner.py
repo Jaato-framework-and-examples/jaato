@@ -230,6 +230,16 @@ class ToolExecutor:
             Tuple of (success, result).
         """
         fn = self._map.get(name)
+        if not fn and self._registry:
+            # Fallback: try to get executor from registry
+            # This handles tools discovered after session configuration (e.g., MCP tools)
+            plugin = self._registry.get_plugin_for_tool(name)
+            if plugin and hasattr(plugin, 'get_executors'):
+                plugin_executors = plugin.get_executors()
+                fn = plugin_executors.get(name)
+                if fn:
+                    # Cache it for future calls
+                    self._map[name] = fn
         if not fn:
             # Check if generic execution is allowed
             if os.environ.get('AI_EXECUTE_TOOLS', '').lower() in ('1', 'true', 'yes'):
@@ -444,6 +454,24 @@ class ToolExecutor:
                     # Fall through to normal execution
 
         fn = self._map.get(name)
+        if not fn and self._registry:
+            # Fallback: try to get executor from registry
+            # This handles tools discovered after session configuration (e.g., MCP tools)
+            if debug:
+                print(f"[ai_tool_runner] execute: executor not in _map for {name}, trying registry fallback")
+            plugin = self._registry.get_plugin_for_tool(name)
+            if debug:
+                print(f"[ai_tool_runner] execute: get_plugin_for_tool({name}) returned {plugin.name if plugin else None}")
+            if plugin and hasattr(plugin, 'get_executors'):
+                plugin_executors = plugin.get_executors()
+                if debug:
+                    print(f"[ai_tool_runner] execute: plugin {plugin.name} has {len(plugin_executors)} executors: {list(plugin_executors.keys())[:5]}...")
+                fn = plugin_executors.get(name)
+                if fn:
+                    # Cache it for future calls
+                    self._map[name] = fn
+                    if debug:
+                        print(f"[ai_tool_runner] execute: found executor for {name} via registry fallback")
         if not fn:
             if debug:
                 print(f"[ai_tool_runner] execute: no executor registered for {name}, attempting generic execution")

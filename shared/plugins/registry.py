@@ -1081,13 +1081,18 @@ class PluginRegistry:
         Returns:
             The ToolPlugin instance that provides this tool, or None if not found.
         """
+        _trace(f" get_plugin_for_tool: looking for '{tool_name}' in {len(self._exposed)} exposed plugins: {list(self._exposed)}")
         for name in self._exposed:
             try:
                 plugin = self._plugins[name]
-                if tool_name in plugin.get_executors():
+                executors = plugin.get_executors()
+                _trace(f" get_plugin_for_tool: plugin '{name}' has {len(executors)} executors")
+                if tool_name in executors:
+                    _trace(f" get_plugin_for_tool: FOUND '{tool_name}' in plugin '{name}'")
                     return plugin
-            except Exception:
-                pass
+            except Exception as exc:
+                _trace(f" get_plugin_for_tool: error getting executors from '{name}': {exc}")
+        _trace(f" get_plugin_for_tool: '{tool_name}' NOT FOUND in any plugin")
         return None
 
     def list_skipped_plugins(self) -> Dict[str, List[str]]:

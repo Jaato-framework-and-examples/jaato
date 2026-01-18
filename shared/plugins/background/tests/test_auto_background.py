@@ -298,6 +298,81 @@ class TestToolExecutorAutoBackground:
         assert "error" in result
         assert "No executor registered" in result["error"]
 
+    def test_execute_sync_registry_fallback(self):
+        """Test _execute_sync falls back to registry for unregistered tools.
+
+        This tests the scenario where MCP tools are discovered after session
+        configuration. The executor should query the registry to find the
+        executor and cache it.
+        """
+        executor = ToolExecutor()
+
+        # Create a mock plugin with an executor for a tool
+        mock_plugin = MagicMock()
+        mock_plugin.get_executors.return_value = {
+            "mcp_tool": lambda args: {"result": args.get("value", 0) * 2}
+        }
+
+        # Create a mock registry that returns the plugin
+        mock_registry = MagicMock()
+        mock_registry.get_plugin_for_tool.return_value = mock_plugin
+
+        executor.set_registry(mock_registry)
+
+        # Tool not registered locally, but registry fallback should find it
+        ok, result = executor._execute_sync("mcp_tool", {"value": 21})
+
+        assert ok is True
+        assert result["result"] == 42
+
+        # Verify the registry was queried
+        mock_registry.get_plugin_for_tool.assert_called_with("mcp_tool")
+        mock_plugin.get_executors.assert_called_once()
+
+        # Verify the executor was cached for future calls
+        assert "mcp_tool" in executor._map
+
+    def test_execute_registry_fallback(self):
+        """Test execute() falls back to registry for unregistered tools.
+
+        Tests the main execute() code path (via _execute_impl) for the same
+        registry fallback scenario.
+        """
+        executor = ToolExecutor()
+
+        # Create a mock plugin with an executor for a tool
+        mock_plugin = MagicMock()
+        mock_plugin.get_executors.return_value = {
+            "mcp_tool": lambda args: {"result": args.get("value", 0) * 2}
+        }
+
+        # Create a mock registry that returns the plugin
+        mock_registry = MagicMock()
+        mock_registry.get_plugin_for_tool.return_value = mock_plugin
+
+        executor.set_registry(mock_registry)
+
+        # Tool not registered locally, but registry fallback should find it
+        ok, result = executor.execute("mcp_tool", {"value": 21})
+
+        assert ok is True
+        assert result["result"] == 42
+
+        # Verify the executor was cached for future calls
+        assert "mcp_tool" in executor._map
+
+        # Second call should use cached executor
+        # Note: get_plugin_for_tool is still called for auto-background check,
+        # but get_executors should not be called since executor is cached
+        mock_plugin.reset_mock()
+
+        ok2, result2 = executor.execute("mcp_tool", {"value": 10})
+        assert ok2 is True
+        assert result2["result"] == 20
+
+        # get_executors should not be called again since executor is cached
+        mock_plugin.get_executors.assert_not_called()
+
     def test_execute_sync_exception(self):
         """Test _execute_sync with exception."""
         executor = ToolExecutor()
