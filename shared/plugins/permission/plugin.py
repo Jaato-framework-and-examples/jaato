@@ -1170,7 +1170,7 @@ If permission is denied, do not attempt to proceed with that action."""
         if not include_details and display_info and display_info.details:
             raw_details = display_info.details
 
-        lines = self._build_prompt_lines(tool_name, args, display_info, include_details=include_details, include_options=False)
+        lines = self._build_prompt_lines(tool_name, args, display_info, include_details=include_details, include_options=True)
         return lines, format_hint, language, raw_details
 
     def get_execution_log(self) -> List[Dict[str, Any]]:
