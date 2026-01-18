@@ -69,10 +69,9 @@ from .events import (
     ToolCallStartEvent,
     ToolCallEndEvent,
     ToolOutputEvent,
-    PermissionRequestedEvent,
+    PermissionInputModeEvent,
     PermissionResolvedEvent,
-    ClarificationRequestedEvent,
-    ClarificationQuestionEvent,
+    ClarificationInputModeEvent,
     ClarificationResolvedEvent,
     ReferenceSelectionRequestedEvent,
     ReferenceSelectionResolvedEvent,
@@ -1011,17 +1010,16 @@ class JaatoServer:
                     opt_dict["description"] = opt.description
                 options_dicts.append(opt_dict)
 
-            # Get formatted prompt lines (with diff for file edits)
+            # Get formatted prompt from permission plugin
             prompt_lines = None
             format_hint = None
             if hasattr(server.permission_plugin, 'get_formatted_prompt'):
                 try:
-                    prompt_lines, format_hint = server.permission_plugin.get_formatted_prompt(
+                    prompt_lines, format_hint, language, raw_details = server.permission_plugin.get_formatted_prompt(
                         tool_name, tool_args or {}, "ipc"
                     )
-                    # Format through the pipeline - the diff formatter buffers lines
-                    # internally and renders when complete
-                    if prompt_lines and server._formatter_pipeline:
+
+                    if server._formatter_pipeline:
                         # First, flush any buffered model output and emit it separately
                         # This prevents model text from leaking into the permission prompt
                         for output in server._formatter_pipeline.flush():
@@ -1034,27 +1032,52 @@ class JaatoServer:
                                 ))
                         server._formatter_pipeline.reset()
 
-                        # Now format the permission prompt with a clean pipeline
-                        formatted_lines = []
-                        for line in prompt_lines:
-                            for output in server._formatter_pipeline.process_chunk(line + "\n"):
-                                formatted_lines.extend(output.rstrip("\n").split("\n"))
-                        # Flush any remaining buffered content from the prompt
-                        for output in server._formatter_pipeline.flush():
-                            formatted_lines.extend(output.rstrip("\n").split("\n"))
-                        server._formatter_pipeline.reset()
-                        prompt_lines = formatted_lines
-                except Exception:
-                    pass  # Fall back to client-side formatting
+                        # Build permission content for unified output flow
+                        content_parts = []
 
-            server.emit(PermissionRequestedEvent(
+                        # When format_hint is "code", include code block first with syntax highlighting
+                        if format_hint == "code" and language and raw_details:
+                            code_block = f"```{language}\n{raw_details}\n```\n"
+                            # Format through pipeline for syntax highlighting
+                            formatted_code = []
+                            for output in server._formatter_pipeline.process_chunk(code_block):
+                                formatted_code.append(output)
+                            for output in server._formatter_pipeline.flush():
+                                formatted_code.append(output)
+                            server._formatter_pipeline.reset()
+                            if formatted_code:
+                                content_parts.append("".join(formatted_code))
+
+                        # Format the permission prompt summary + options
+                        if prompt_lines:
+                            formatted_lines = []
+                            for line in prompt_lines:
+                                for output in server._formatter_pipeline.process_chunk(line + "\n"):
+                                    formatted_lines.extend(output.rstrip("\n").split("\n"))
+                            for output in server._formatter_pipeline.flush():
+                                formatted_lines.extend(output.rstrip("\n").split("\n"))
+                            server._formatter_pipeline.reset()
+                            content_parts.append("\n".join(formatted_lines))
+
+                        # Emit content as AgentOutputEvent (flows through main output area)
+                        if content_parts:
+                            full_content = "\n".join(content_parts)
+                            server.emit(AgentOutputEvent(
+                                agent_id=server._current_tool_agent_id,
+                                source="permission",
+                                text=full_content,
+                                mode="write",
+                            ))
+
+                except Exception:
+                    pass  # Content formatting failed, tool tree will show minimal status
+
+            # Emit control event to signal input mode (lightweight, no content)
+            server.emit(PermissionInputModeEvent(
                 agent_id=server._current_tool_agent_id,
                 request_id=request_id,
                 tool_name=tool_name,
-                tool_args=tool_args or {},
                 response_options=options_dicts,
-                prompt_lines=prompt_lines,
-                format_hint=format_hint,
             ))
 
         def on_permission_resolved(tool_name: str, request_id: str,
@@ -1089,12 +1112,16 @@ class JaatoServer:
             request_id = f"clarify_{datetime.utcnow().timestamp()}"
             server._pending_clarification_request_id = request_id
             server._waiting_for_channel_input = True
-            server.emit(ClarificationRequestedEvent(
-                agent_id=server._current_tool_agent_id,
-                request_id=request_id,
-                tool_name=tool_name,
-                context_lines=prompt_lines,
-            ))
+
+            # Emit context content as AgentOutputEvent (flows through main output)
+            if prompt_lines:
+                content = "\n".join(prompt_lines)
+                server.emit(AgentOutputEvent(
+                    agent_id=server._current_tool_agent_id,
+                    source="clarification",
+                    text=content,
+                    mode="write",
+                ))
 
         def on_clarification_resolved(tool_name: str, qa_pairs: list):
             request_id = server._pending_clarification_request_id or ""
@@ -1111,13 +1138,23 @@ class JaatoServer:
 
         def on_question_displayed(tool_name: str, question_index: int,
                                   total_questions: int, question_lines: list):
-            server.emit(ClarificationQuestionEvent(
+            # Emit question content as AgentOutputEvent (flows through main output)
+            if question_lines:
+                content = "\n".join(question_lines)
+                server.emit(AgentOutputEvent(
+                    agent_id=server._current_tool_agent_id,
+                    source="clarification",
+                    text=content,
+                    mode="write",
+                ))
+
+            # Emit control event to signal input mode (lightweight, no content)
+            server.emit(ClarificationInputModeEvent(
                 agent_id=server._current_tool_agent_id,
                 request_id=server._pending_clarification_request_id or "",
+                tool_name=tool_name,
                 question_index=question_index,
                 total_questions=total_questions,
-                question_type="free_text",  # Default, could be enhanced
-                question_text="\n".join(question_lines),
             ))
 
         def on_question_answered(tool_name: str, question_index: int, answer_summary: str):

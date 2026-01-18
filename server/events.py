@@ -41,11 +41,13 @@ class EventType(str, Enum):
 
     # Permission flow (Server <-> Client)
     PERMISSION_REQUESTED = "permission.requested"
+    PERMISSION_INPUT_MODE = "permission.input_mode"  # Signal client to enter permission input mode
     PERMISSION_RESOLVED = "permission.resolved"
     PERMISSION_RESPONSE = "permission.response"  # Client -> Server
 
     # Clarification flow (Server <-> Client)
     CLARIFICATION_REQUESTED = "clarification.requested"
+    CLARIFICATION_INPUT_MODE = "clarification.input_mode"  # Signal client to enter clarification input mode
     CLARIFICATION_QUESTION = "clarification.question"
     CLARIFICATION_RESOLVED = "clarification.resolved"
     CLARIFICATION_RESPONSE = "clarification.response"  # Client -> Server
@@ -238,6 +240,21 @@ class PermissionRequestedEvent(Event):
 
 
 @dataclass
+class PermissionInputModeEvent(Event):
+    """Signal client to enter permission input mode.
+
+    Sent AFTER permission content has been emitted via AgentOutputEvent.
+    This lightweight control event separates content delivery from input control.
+    """
+    type: EventType = field(default=EventType.PERMISSION_INPUT_MODE)
+    agent_id: str = ""  # Which agent is requesting permission
+    request_id: str = ""
+    tool_name: str = ""
+    response_options: List[Dict[str, str]] = field(default_factory=list)
+    # ^ List of {key, label, action, description?}
+
+
+@dataclass
 class PermissionResolvedEvent(Event):
     """Permission has been resolved (granted or denied)."""
     type: EventType = field(default=EventType.PERMISSION_RESOLVED)
@@ -270,6 +287,21 @@ class ClarificationQuestionEvent(Event):
     question_type: str = ""  # "single_choice", "multiple_choice", "free_text"
     question_text: str = ""
     options: Optional[List[Dict[str, str]]] = None  # For choice questions
+
+
+@dataclass
+class ClarificationInputModeEvent(Event):
+    """Signal client to enter clarification input mode.
+
+    Sent AFTER clarification content has been emitted via AgentOutputEvent.
+    This lightweight control event separates content delivery from input control.
+    """
+    type: EventType = field(default=EventType.CLARIFICATION_INPUT_MODE)
+    agent_id: str = ""  # Which agent is requesting clarification
+    request_id: str = ""
+    tool_name: str = ""
+    question_index: int = 0
+    total_questions: int = 0
 
 
 @dataclass
@@ -642,8 +674,10 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.TOOL_CALL_END.value: ToolCallEndEvent,
     EventType.TOOL_OUTPUT.value: ToolOutputEvent,
     EventType.PERMISSION_REQUESTED.value: PermissionRequestedEvent,
+    EventType.PERMISSION_INPUT_MODE.value: PermissionInputModeEvent,
     EventType.PERMISSION_RESOLVED.value: PermissionResolvedEvent,
     EventType.CLARIFICATION_REQUESTED.value: ClarificationRequestedEvent,
+    EventType.CLARIFICATION_INPUT_MODE.value: ClarificationInputModeEvent,
     EventType.CLARIFICATION_QUESTION.value: ClarificationQuestionEvent,
     EventType.CLARIFICATION_RESOLVED.value: ClarificationResolvedEvent,
     EventType.REFERENCE_SELECTION_REQUESTED.value: ReferenceSelectionRequestedEvent,
