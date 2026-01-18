@@ -1701,9 +1701,11 @@ class OutputBuffer:
         old_offset = self._scroll_offset
 
         # Calculate total display lines before the tool tree
+        # Note: _lines is a deque which doesn't support slicing, so we iterate with enumerate
         lines_before_tree = sum(
             self._get_item_display_lines(item)
-            for item in self._lines[:self._tool_placeholder_index]
+            for i, item in enumerate(self._lines)
+            if i < self._tool_placeholder_index
         )
 
         # Calculate tool tree height
@@ -1712,7 +1714,8 @@ class OutputBuffer:
         # Calculate lines after the tool tree (remaining content in _lines + any streaming)
         lines_after_tree = sum(
             self._get_item_display_lines(item)
-            for item in self._lines[self._tool_placeholder_index:]
+            for i, item in enumerate(self._lines)
+            if i >= self._tool_placeholder_index
         )
 
         # Total content height
