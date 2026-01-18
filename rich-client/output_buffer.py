@@ -1786,8 +1786,14 @@ class OutputBuffer:
 
                     # Unified flow: permission_content is rendered inline under the tool
                     if tool.permission_content:
-                        # Count actual lines in the content (matches render logic)
-                        height += tool.permission_content.count('\n') + 1
+                        # Count lines, accounting for truncation (matches render logic)
+                        actual_lines = tool.permission_content.count('\n') + 1
+                        max_content_lines = max(10, self._visible_height - 8)
+                        if actual_lines > max_content_lines:
+                            # Truncated: lines_at_start + ellipsis + lines_at_end
+                            height += max_content_lines
+                        else:
+                            height += actual_lines
                         continue
 
                     # Legacy flow: no permission_content, use prompt_lines
@@ -1848,8 +1854,13 @@ class OutputBuffer:
 
                     # Unified flow: clarification_content is rendered inline under the tool
                     if tool.clarification_content:
-                        # Count actual lines in the content (matches render logic)
-                        height += tool.clarification_content.count('\n') + 1
+                        # Count lines, accounting for truncation (matches render logic)
+                        actual_lines = tool.clarification_content.count('\n') + 1
+                        max_content_lines = max(10, self._visible_height - 8)
+                        if actual_lines > max_content_lines:
+                            height += max_content_lines
+                        else:
+                            height += actual_lines
                         continue
 
                     # Legacy flow: no clarification_content, use prompt_lines
@@ -2144,10 +2155,43 @@ class OutputBuffer:
         # Unified flow: permission_content contains formatted content to render inline
         if tool.permission_content:
             indent = f"{prefix}{continuation}     "
-            for content_line in tool.permission_content.split('\n'):
+            content_lines = tool.permission_content.split('\n')
+
+            # Calculate max lines based on visible height, reserving space for:
+            # - Tool tree header and tool line (~3 lines)
+            # - Permission header (1 line)
+            # - Some breathing room for other UI elements (~4 lines)
+            max_content_lines = max(10, self._visible_height - 8)
+
+            if len(content_lines) > max_content_lines:
+                # Truncate in the middle: show beginning, ellipsis, and end
+                # Reserve more lines for the end (includes response options)
+                lines_at_start = max_content_lines // 3
+                lines_at_end = max_content_lines - lines_at_start - 1  # -1 for ellipsis line
+                hidden_count = len(content_lines) - lines_at_start - lines_at_end
+
+                # Render first N lines
+                for content_line in content_lines[:lines_at_start]:
+                    output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(Text.from_ansi(content_line))
+
+                # Render ellipsis indicator
                 output.append("\n")
                 output.append(indent, style=self._style("tree_connector", "dim"))
-                output.append_text(Text.from_ansi(content_line))
+                output.append(f"... {hidden_count} lines not shown ...", style=self._style("muted", "dim italic"))
+
+                # Render last M lines (includes response options)
+                for content_line in content_lines[-lines_at_end:]:
+                    output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(Text.from_ansi(content_line))
+            else:
+                # Content fits, render all lines
+                for content_line in content_lines:
+                    output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(Text.from_ansi(content_line))
             return
 
         # Legacy flow: no permission_content means we use prompt_lines or show minimal indicator
@@ -2224,10 +2268,35 @@ class OutputBuffer:
         # Unified flow: clarification_content contains formatted content to render inline
         if tool.clarification_content:
             indent = f"{prefix}{continuation}     "
-            for content_line in tool.clarification_content.split('\n'):
+            content_lines = tool.clarification_content.split('\n')
+
+            # Calculate max lines based on visible height (same as permission content)
+            max_content_lines = max(10, self._visible_height - 8)
+
+            if len(content_lines) > max_content_lines:
+                # Truncate in the middle: show beginning, ellipsis, and end
+                lines_at_start = max_content_lines // 3
+                lines_at_end = max_content_lines - lines_at_start - 1
+                hidden_count = len(content_lines) - lines_at_start - lines_at_end
+
+                for content_line in content_lines[:lines_at_start]:
+                    output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(Text.from_ansi(content_line))
+
                 output.append("\n")
                 output.append(indent, style=self._style("tree_connector", "dim"))
-                output.append_text(Text.from_ansi(content_line))
+                output.append(f"... {hidden_count} lines not shown ...", style=self._style("muted", "dim italic"))
+
+                for content_line in content_lines[-lines_at_end:]:
+                    output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(Text.from_ansi(content_line))
+            else:
+                for content_line in content_lines:
+                    output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(Text.from_ansi(content_line))
             return
 
         # Legacy flow: no clarification_content means we use prompt_lines or show minimal indicator
