@@ -1784,9 +1784,14 @@ class OutputBuffer:
                 if tool.permission_state == "pending":
                     height += 1  # "Permission required" header
 
-                    # Unified flow: no prompt_lines means content is in main output
+                    # Unified flow: permission_content is rendered inline under the tool
+                    if tool.permission_content:
+                        # Count actual lines in the content (matches render logic)
+                        height += tool.permission_content.count('\n') + 1
+                        continue
+
+                    # Legacy flow: no permission_content, use prompt_lines
                     if not tool.permission_prompt_lines:
-                        height += 1  # "(see details below)" indicator
                         continue
 
                     prompt_lines = tool.permission_prompt_lines
@@ -1841,9 +1846,14 @@ class OutputBuffer:
                 if tool.clarification_state == "pending":
                     height += 1  # header ("Clarification needed" or progress)
 
-                    # Unified flow: no prompt_lines means content is in main output
+                    # Unified flow: clarification_content is rendered inline under the tool
+                    if tool.clarification_content:
+                        # Count actual lines in the content (matches render logic)
+                        height += tool.clarification_content.count('\n') + 1
+                        continue
+
+                    # Legacy flow: no clarification_content, use prompt_lines
                     if not tool.clarification_prompt_lines:
-                        height += 1  # "(see details below)" indicator
                         continue
 
                     # Previously answered questions
