@@ -1094,7 +1094,8 @@ If permission is denied, do not attempt to proceed with that action."""
         args: Dict[str, Any],
         display_info: Optional[PermissionDisplayInfo],
         response_options: Optional[List[PermissionResponseOption]] = None,
-        include_details: bool = True
+        include_details: bool = True,
+        include_options: bool = True
     ) -> List[str]:
         """Build prompt lines for UI display from request info.
 
@@ -1105,6 +1106,8 @@ If permission is denied, do not attempt to proceed with that action."""
             response_options: List of valid response options (defaults to standard options)
             include_details: Whether to include details in the prompt. Set to False
                 when details will be rendered separately (e.g., code blocks).
+            include_options: Whether to include the options line. Set to False when
+                options are displayed separately (e.g., in input area).
 
         Returns:
             List of strings representing the permission prompt.
@@ -1124,10 +1127,11 @@ If permission is denied, do not attempt to proceed with that action."""
             if args:
                 lines.append(f"Args: {format_tool_args_summary(args, max_length=100)}")
 
-        # Add options line using shared utility
-        lines.append("")
-        options = response_options or get_default_permission_options()
-        lines.append(format_permission_options(options))
+        # Add options line if requested (may be shown separately in input area instead)
+        if include_options:
+            lines.append("")
+            options = response_options or get_default_permission_options()
+            lines.append(format_permission_options(options))
 
         return lines
 
@@ -1166,7 +1170,7 @@ If permission is denied, do not attempt to proceed with that action."""
         if not include_details and display_info and display_info.details:
             raw_details = display_info.details
 
-        lines = self._build_prompt_lines(tool_name, args, display_info, include_details=include_details)
+        lines = self._build_prompt_lines(tool_name, args, display_info, include_details=include_details, include_options=False)
         return lines, format_hint, language, raw_details
 
     def get_execution_log(self) -> List[Dict[str, Any]]:
