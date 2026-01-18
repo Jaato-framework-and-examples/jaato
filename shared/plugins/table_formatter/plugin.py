@@ -19,6 +19,8 @@ Usage (pipeline):
 import re
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+import wcwidth
+
 # Priority for pipeline ordering (20-39 = structural formatting)
 DEFAULT_PRIORITY = 25
 
@@ -45,6 +47,51 @@ MARKDOWN_SEPARATOR = re.compile(r"^\s*\|[\s\-:|]+\|\s*$")
 # ASCII grid table: +---+---+ style
 ASCII_GRID_BORDER = re.compile(r"^\s*\+[-+]+\+\s*$")
 ASCII_GRID_ROW = re.compile(r"^\s*\|.*\|\s*$")
+
+
+def _display_width(text: str) -> int:
+    """Calculate the display width of a string, accounting for wide characters.
+
+    Uses wcwidth to properly handle emojis, CJK characters, and other
+    characters that take up more than one terminal column.
+
+    Args:
+        text: The string to measure.
+
+    Returns:
+        The display width in terminal columns.
+    """
+    width = 0
+    for char in text:
+        char_width = wcwidth.wcwidth(char)
+        # wcwidth returns -1 for non-printable characters, treat as 0
+        if char_width >= 0:
+            width += char_width
+    return width
+
+
+def _pad_to_width(text: str, target_width: int, align: str = "left") -> str:
+    """Pad a string to a target display width, accounting for wide characters.
+
+    Args:
+        text: The string to pad.
+        target_width: The desired display width.
+        align: Alignment - 'left', 'right', or 'center'.
+
+    Returns:
+        The padded string.
+    """
+    current_width = _display_width(text)
+    padding_needed = max(0, target_width - current_width)
+
+    if align == "right":
+        return " " * padding_needed + text
+    elif align == "center":
+        left_pad = padding_needed // 2
+        right_pad = padding_needed - left_pad
+        return " " * left_pad + text + " " * right_pad
+    else:  # left
+        return text + " " * padding_needed
 
 
 class TableFormatterPlugin:
@@ -324,7 +371,7 @@ class TableFormatterPlugin:
             max_width = 0
             for row in all_rows:
                 if col_idx < len(row):
-                    max_width = max(max_width, len(row[col_idx]))
+                    max_width = max(max_width, _display_width(row[col_idx]))
             col_widths.append(max(max_width, 1))  # Minimum width of 1
 
         # Build the table
@@ -372,12 +419,7 @@ class TableFormatterPlugin:
         formatted_cells = []
 
         for i, (cell, width, align) in enumerate(zip(cells, col_widths, alignments)):
-            if align == "center":
-                formatted = cell.center(width)
-            elif align == "right":
-                formatted = cell.rjust(width)
-            else:  # left
-                formatted = cell.ljust(width)
+            formatted = _pad_to_width(cell, width, align)
             formatted_cells.append(f" {formatted} ")
 
         return vert + vert.join(formatted_cells) + vert
