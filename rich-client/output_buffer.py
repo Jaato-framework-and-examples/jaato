@@ -481,9 +481,9 @@ class OutputBuffer:
         if source == "plan":
             return
 
-        # Permission and clarification content should render BEFORE the tool tree
-        # Insert at the tool placeholder position so it appears above the tool status
-        if source in ("permission", "clarification") and self._active_tools and self._tool_placeholder_index is not None:
+        # Permission and clarification content should render AFTER the tool tree
+        # Append to end of lines so it appears below the tool status
+        if source in ("permission", "clarification") and self._active_tools:
             self._flush_current_block()
 
             if mode == "append":
@@ -500,21 +500,20 @@ class OutputBuffer:
                             total_display_lines += self._measure_display_lines(source, line_text, False)
                         line.display_lines = total_display_lines
                         return
-                # No existing line found, fall through to insert as new
+                # No existing line found, fall through to append as new
 
-            # Insert the entire content as a single block at the placeholder position
+            # Append the entire content as a single block at the end
             # Count display lines for the entire text block
             total_display_lines = 0
             for line_text in text.split('\n'):
                 total_display_lines += self._measure_display_lines(source, line_text, False)
-            self._lines.insert(self._tool_placeholder_index, OutputLine(
+            self._lines.append(OutputLine(
                 source=source,
                 text=text,
                 style="line",
                 display_lines=total_display_lines,
                 is_turn_start=False
             ))
-            self._tool_placeholder_index += 1
             return
 
         # Queue enrichment notifications while tools are active
@@ -1503,13 +1502,6 @@ class OutputBuffer:
         removed_count = original_count - len(self._lines)
         if removed_count > 0:
             _trace(f"_clear_content_by_source: removed {removed_count} {source} lines")
-
-        # Recalculate tool placeholder index if it was affected
-        if self._tool_placeholder_index is not None and removed_count > 0:
-            # Count how many permission/clarification lines were before the placeholder
-            # Since they were inserted AT the placeholder position, just decrement by removed count
-            self._tool_placeholder_index = max(0, self._tool_placeholder_index - removed_count)
-            _trace(f"_clear_content_by_source: adjusted placeholder to {self._tool_placeholder_index}")
 
     def set_tool_clarification_pending(self, tool_name: str, prompt_lines: List[str]) -> None:
         """Mark a tool as awaiting clarification (initial context only).
