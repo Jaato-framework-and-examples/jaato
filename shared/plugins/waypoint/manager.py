@@ -258,6 +258,7 @@ class WaypointManager:
         """Delete a waypoint.
 
         Cannot delete the implicit initial waypoint (w0).
+        Children of the deleted waypoint are reparented to its parent.
 
         Args:
             waypoint_id: The waypoint ID to delete.
@@ -270,6 +271,14 @@ class WaypointManager:
 
         if waypoint_id not in self._waypoints:
             return False
+
+        # Reparent children to the deleted waypoint's parent
+        deleted_wp = self._waypoints[waypoint_id]
+        parent_id = deleted_wp.parent_id
+
+        for wp in self._waypoints.values():
+            if wp.parent_id == waypoint_id:
+                wp.parent_id = parent_id
 
         del self._waypoints[waypoint_id]
         self._save()

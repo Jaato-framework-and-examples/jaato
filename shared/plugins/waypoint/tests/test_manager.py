@@ -620,3 +620,56 @@ class TestWaypointRestoreTree:
         assert manager.get("w2") is None
         waypoints = manager.list()
         assert len(waypoints) == 2  # w0 and w1 only
+
+
+class TestWaypointDeleteReparenting:
+    """Test that deleting a waypoint reparents its children."""
+
+    def test_delete_reparents_children(self, manager):
+        """Test that children are reparented when parent is deleted."""
+        manager.create("first")   # w1, parent=w0
+        manager.create("second")  # w2, parent=w1
+        manager.create("third")   # w3, parent=w2
+
+        # w2's parent is w1
+        assert manager.get("w2").parent_id == "w1"
+
+        # Delete w1
+        manager.delete("w1")
+
+        # w2 should now have w0 as parent (reparented)
+        assert manager.get("w2").parent_id == "w0"
+
+        # w3's parent should still be w2
+        assert manager.get("w3").parent_id == "w2"
+
+        # Tree should still be valid
+        children_w0 = manager.get_children("w0")
+        assert "w2" in children_w0
+
+    def test_delete_reparents_multiple_children(self, manager):
+        """Test that multiple children are reparented."""
+        manager.create("parent")  # w1, parent=w0
+
+        # Create w2 as child of w1
+        manager.create("child1")  # w2, parent=w1
+
+        # Restore to w1 to create another child
+        manager.restore("w1")
+        manager.create("child2")  # w3, parent=w1
+
+        # Both w2 and w3 should have w1 as parent
+        assert manager.get("w2").parent_id == "w1"
+        assert manager.get("w3").parent_id == "w1"
+
+        # Delete w1
+        manager.delete("w1")
+
+        # Both children should now have w0 as parent
+        assert manager.get("w2").parent_id == "w0"
+        assert manager.get("w3").parent_id == "w0"
+
+        # w0 should have both as children
+        children_w0 = manager.get_children("w0")
+        assert "w2" in children_w0
+        assert "w3" in children_w0
