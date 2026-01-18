@@ -3259,7 +3259,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
             elif isinstance(event, PermissionInputModeEvent):
                 # New unified flow: content already emitted via AgentOutputEvent,
                 # this event just signals input mode and updates tool tree status
-                ipc_trace(f"  PermissionInputModeEvent: tool={event.tool_name}, id={event.request_id}")
+                ipc_trace(f"  PermissionInputModeEvent: tool={event.tool_name}, id={event.request_id}, call_id={event.call_id}")
                 pending_permission_request = {
                     "request_id": event.request_id,
                     "options": event.response_options,
@@ -3267,7 +3267,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 # Update tool tree to show simple "awaiting approval" status
                 buffer = agent_registry.get_buffer(event.agent_id) if event.agent_id else agent_registry.get_selected_buffer()
                 if buffer:
-                    buffer.set_tool_awaiting_approval(event.tool_name)
+                    buffer.set_tool_awaiting_approval(event.tool_name, call_id=event.call_id)
                 display.set_waiting_for_channel_input(True, event.response_options)
                 display.refresh()
 

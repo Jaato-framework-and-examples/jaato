@@ -1361,7 +1361,7 @@ class OutputBuffer:
 
         _trace(f"set_tool_permission_pending: NO MATCH for {tool_name}")
 
-    def set_tool_awaiting_approval(self, tool_name: str) -> None:
+    def set_tool_awaiting_approval(self, tool_name: str, call_id: Optional[str] = None) -> None:
         """Mark tool as awaiting permission and associate buffered content.
 
         This is used with the unified output flow where permission content flows
@@ -1370,8 +1370,9 @@ class OutputBuffer:
 
         Args:
             tool_name: Name of the tool awaiting permission.
+            call_id: Optional unique identifier for the tool call (for parallel tool matching).
         """
-        _trace(f"set_tool_awaiting_approval: looking for tool={tool_name}")
+        _trace(f"set_tool_awaiting_approval: looking for tool={tool_name} call_id={call_id}")
 
         def _associate_content(tool: ActiveToolCall) -> None:
             """Associate buffered permission content with the tool."""
@@ -1385,14 +1386,22 @@ class OutputBuffer:
             # Scroll to bottom so user sees the permission prompt
             self._scroll_offset = 0
 
-        # First try exact match by tool name
+        # First try exact match by call_id (most reliable for parallel tools)
+        if call_id:
+            for tool in self._active_tools:
+                if tool.call_id == call_id and not tool.completed:
+                    _associate_content(tool)
+                    _trace(f"set_tool_awaiting_approval: FOUND by call_id={call_id}")
+                    return
+
+        # Fallback: try exact match by tool name (for backwards compatibility)
         for tool in self._active_tools:
             if tool.name == tool_name and not tool.completed:
                 _associate_content(tool)
                 _trace(f"set_tool_awaiting_approval: FOUND exact match for {tool_name}")
                 return
 
-        # Fallback: attach to the last uncompleted tool
+        # Last resort: attach to the last uncompleted tool
         for tool in reversed(self._active_tools):
             if not tool.completed:
                 if tool.name != tool_name:
@@ -1402,7 +1411,7 @@ class OutputBuffer:
                 _trace(f"set_tool_awaiting_approval: FALLBACK attached to {tool.name}")
                 return
 
-        _trace(f"set_tool_awaiting_approval: NO MATCH for {tool_name}")
+        _trace(f"set_tool_awaiting_approval: NO MATCH for {tool_name} call_id={call_id}")
 
     def set_tool_awaiting_clarification(self, tool_name: str, question_index: int, total_questions: int) -> None:
         """Mark tool as awaiting clarification and associate buffered content.
