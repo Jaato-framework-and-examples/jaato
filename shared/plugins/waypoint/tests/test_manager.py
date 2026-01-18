@@ -20,12 +20,19 @@ def temp_dir():
 
 @pytest.fixture
 def mock_backup_manager():
-    """Create a mock BackupManager."""
+    """Create a mock BackupManager with state tracking."""
     mock = MagicMock()
-    mock.current_waypoint = INITIAL_WAYPOINT_ID
+    # Use a mutable container to track current_waypoint state
+    state = {"current": INITIAL_WAYPOINT_ID, "has_pending": False}
+    type(mock).current_waypoint = property(lambda self: state["current"])
+    mock.set_current_waypoint.side_effect = lambda wp_id: state.update({"current": wp_id})
     mock.get_backups_by_waypoint.return_value = []
     mock.get_first_backup_per_file_by_waypoint.return_value = {}
     mock.restore_from_backup.return_value = True
+    mock.has_pending_backups.return_value = state["has_pending"]
+    mock.tag_pending_backups.return_value = 0
+    # Store state for test access
+    mock._test_state = state
     return mock
 
 
@@ -425,3 +432,191 @@ class TestWaypointOwnership:
 
         wp = manager.create("new", owner="user")
         assert wp.id == "w2"
+
+
+class TestWaypointTree:
+    """Test waypoint tree structure and navigation."""
+
+    def test_parent_id_set_on_create(self, manager):
+        """Test that parent_id is set to current waypoint on creation."""
+        # First waypoint's parent should be w0
+        wp1 = manager.create("first")
+        assert wp1.parent_id == INITIAL_WAYPOINT_ID
+
+        # Second waypoint's parent should be w1 (now current)
+        wp2 = manager.create("second")
+        assert wp2.parent_id == "w1"
+
+    def test_w0_has_no_parent(self, manager):
+        """Test that initial waypoint w0 has no parent."""
+        w0 = manager.get(INITIAL_WAYPOINT_ID)
+        assert w0.parent_id is None
+
+    def test_get_ancestors(self, manager):
+        """Test getting ancestors from waypoint to root."""
+        manager.create("first")   # w1, parent=w0
+        manager.create("second")  # w2, parent=w1
+        manager.create("third")   # w3, parent=w2
+
+        ancestors = manager.get_ancestors("w3")
+        assert ancestors == ["w3", "w2", "w1", "w0"]
+
+    def test_get_ancestors_of_root(self, manager):
+        """Test getting ancestors of root returns just root."""
+        ancestors = manager.get_ancestors(INITIAL_WAYPOINT_ID)
+        assert ancestors == ["w0"]
+
+    def test_get_children(self, manager):
+        """Test getting direct children of a waypoint."""
+        manager.create("first")   # w1, parent=w0
+        manager.create("second")  # w2, parent=w1
+
+        # w0 should have w1 as child
+        children_w0 = manager.get_children(INITIAL_WAYPOINT_ID)
+        assert children_w0 == ["w1"]
+
+        # w1 should have w2 as child
+        children_w1 = manager.get_children("w1")
+        assert children_w1 == ["w2"]
+
+        # w2 should have no children
+        children_w2 = manager.get_children("w2")
+        assert children_w2 == []
+
+    def test_find_path_same_waypoint(self, manager):
+        """Test finding path from waypoint to itself."""
+        manager.create("first")
+        path = manager.find_path("w1", "w1")
+        assert path == ["w1"]
+
+    def test_find_path_parent_to_child(self, manager):
+        """Test finding path from parent to child."""
+        manager.create("first")   # w1
+        manager.create("second")  # w2
+
+        path = manager.find_path("w0", "w2")
+        assert path == ["w0", "w1", "w2"]
+
+    def test_find_path_child_to_parent(self, manager):
+        """Test finding path from child to parent."""
+        manager.create("first")   # w1
+        manager.create("second")  # w2
+
+        path = manager.find_path("w2", "w0")
+        assert path == ["w2", "w1", "w0"]
+
+    def test_get_tree_structure(self, manager):
+        """Test getting full tree structure."""
+        manager.create("first")   # w1
+        manager.create("second")  # w2
+
+        tree = manager.get_tree_structure()
+
+        assert tree["root"] == INITIAL_WAYPOINT_ID
+        assert tree["current"] == "w2"
+        assert "w0" in tree["nodes"]
+        assert "w1" in tree["nodes"]
+        assert "w2" in tree["nodes"]
+
+        # Check node structure
+        assert tree["nodes"]["w0"]["children"] == ["w1"]
+        assert tree["nodes"]["w1"]["children"] == ["w2"]
+        assert tree["nodes"]["w2"]["children"] == []
+
+    def test_get_info_includes_tree_data(self, manager, mock_backup_manager):
+        """Test that get_info includes parent_id and children."""
+        manager.create("first")   # w1
+        manager.create("second")  # w2
+
+        mock_backup_manager.get_backups_by_waypoint.return_value = []
+
+        info = manager.get_info("w1")
+
+        assert info["parent_id"] == "w0"
+        assert info["children"] == ["w2"]
+
+    def test_parent_id_persisted(self, temp_dir, mock_backup_manager):
+        """Test that parent_id is persisted to storage."""
+        storage_path = temp_dir / "waypoints.json"
+
+        mgr1 = WaypointManager(
+            backup_manager=mock_backup_manager,
+            storage_path=storage_path,
+        )
+        mgr1.create("first")   # w1
+        mgr1.create("second")  # w2
+
+        # Create new manager from same storage
+        mgr2 = WaypointManager(
+            backup_manager=mock_backup_manager,
+            storage_path=storage_path,
+        )
+
+        w1 = mgr2.get("w1")
+        w2 = mgr2.get("w2")
+
+        assert w1.parent_id == "w0"
+        assert w2.parent_id == "w1"
+
+
+class TestWaypointRestoreTree:
+    """Test restore behavior with tree structure."""
+
+    def test_restore_updates_current_to_target(self, manager, mock_backup_manager):
+        """Test that restore sets current waypoint to target."""
+        manager.create("first")   # w1, current
+        manager.create("second")  # w2, current
+
+        # Restore to w1
+        mock_backup_manager.get_first_backup_per_file_by_waypoint.return_value = {}
+        manager.restore("w1")
+
+        assert manager.current_waypoint == "w1"
+
+    def test_restore_with_pending_creates_ceiling(self, temp_dir):
+        """Test that restore auto-creates ceiling waypoint with pending edits."""
+        # Create mock that reports pending backups
+        mock = MagicMock()
+        state = {"current": INITIAL_WAYPOINT_ID}
+        type(mock).current_waypoint = property(lambda self: state["current"])
+        mock.set_current_waypoint.side_effect = lambda wp_id: state.update({"current": wp_id})
+        mock.get_backups_by_waypoint.return_value = []
+        mock.get_first_backup_per_file_by_waypoint.return_value = {}
+        mock.restore_from_backup.return_value = True
+        mock.has_pending_backups.return_value = True  # Has uncommitted edits
+        mock.tag_pending_backups.return_value = 1
+
+        storage_path = temp_dir / "waypoints.json"
+        manager = WaypointManager(
+            backup_manager=mock,
+            storage_path=storage_path,
+        )
+
+        manager.create("first")   # w1
+        # Now current is w1, and there are "pending edits"
+
+        # Restore to w0 - should auto-create ceiling at w2
+        result = manager.restore("w0")
+
+        assert result.success is True
+        # Ceiling waypoint should have been created
+        assert manager.get("w2") is not None
+        ceiling = manager.get("w2")
+        assert "auto-saved" in ceiling.description
+        assert ceiling.parent_id == "w1"  # Parent was w1 (where we were before restore)
+
+    def test_restore_without_pending_no_ceiling(self, manager, mock_backup_manager):
+        """Test that restore without pending edits doesn't create ceiling."""
+        manager.create("first")   # w1
+
+        # Ensure no pending backups
+        mock_backup_manager.has_pending_backups.return_value = False
+        mock_backup_manager.get_first_backup_per_file_by_waypoint.return_value = {}
+
+        # Restore to w0
+        manager.restore("w0")
+
+        # No ceiling should be created (still just w0 and w1)
+        assert manager.get("w2") is None
+        waypoints = manager.list()
+        assert len(waypoints) == 2  # w0 and w1 only

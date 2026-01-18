@@ -169,6 +169,11 @@ class WaypointManager:
     ) -> Waypoint:
         """Create a new waypoint marking the current state.
 
+        This establishes a new node in the waypoint tree:
+        - parent_id is set to the current waypoint
+        - Pending backups are tagged with this waypoint's ID
+        - Future backups will diverge from this waypoint
+
         Args:
             description: User or model-provided description.
             turn_index: Current turn in the conversation (optional).
@@ -181,6 +186,12 @@ class WaypointManager:
             The newly created Waypoint.
         """
         wp_id = self._generate_id()
+
+        # Parent is the current waypoint (where we are in the tree)
+        parent_id = self._backup_manager.current_waypoint
+
+        # Tag pending backups with this waypoint ID (closes the edit sequence)
+        self._backup_manager.tag_pending_backups(wp_id)
 
         # Capture conversation history snapshot
         history_snapshot = None
@@ -201,11 +212,12 @@ class WaypointManager:
             message_count=message_count,
             user_message_preview=user_message_preview,
             owner=owner,
+            parent_id=parent_id,
         )
 
         self._waypoints[wp_id] = waypoint
 
-        # Update BackupManager to tag future backups with this waypoint
+        # Update BackupManager - future backups diverge from this waypoint
         self._backup_manager.set_current_waypoint(wp_id)
 
         self._save()
@@ -290,6 +302,10 @@ class WaypointManager:
     def restore(self, waypoint_id: str) -> RestoreResult:
         """Restore files to their state at a waypoint.
 
+        If there are uncommitted edits (pending backups), a ceiling waypoint
+        is automatically created to preserve them before restoring. This
+        ensures you can always navigate back to where you were.
+
         Restores only file changes. The model is notified of the restoration
         through prompt enrichment, so conversation history is not modified.
 
@@ -308,6 +324,14 @@ class WaypointManager:
                 error=f"Waypoint not found: {waypoint_id}",
             )
 
+        # Auto-create ceiling waypoint if there are uncommitted edits
+        ceiling_waypoint = None
+        if self._backup_manager.has_pending_backups():
+            ceiling_waypoint = self.create(
+                description=f"auto-saved before restore to {waypoint_id}",
+                owner="user",  # System-created, but user-owned for safety
+            )
+
         # Restore files to their state at the waypoint
         files_restored = self._restore_code(waypoint_id)
 
@@ -316,10 +340,15 @@ class WaypointManager:
         self._backup_manager.set_current_waypoint(waypoint_id)
 
         # Build result message
+        parts = []
+        if ceiling_waypoint:
+            parts.append(f"auto-saved to {ceiling_waypoint.id}")
         if files_restored:
-            message = f"Returned to waypoint {waypoint_id}: restored {len(files_restored)} file(s)"
+            parts.append(f"restored {len(files_restored)} file(s)")
         else:
-            message = f"Returned to waypoint {waypoint_id}: no files to restore"
+            parts.append("no files to restore")
+
+        message = f"Returned to waypoint {waypoint_id}: {', '.join(parts)}"
 
         return RestoreResult(
             success=True,
@@ -375,6 +404,9 @@ class WaypointManager:
         backups = self._backup_manager.get_backups_by_waypoint(waypoint_id)
         unique_files = set(b.original_path for b in backups)
 
+        # Get children for tree navigation
+        children = self.get_children(waypoint_id)
+
         return {
             "id": waypoint.id,
             "description": waypoint.description,
@@ -384,6 +416,8 @@ class WaypointManager:
             "message_count": waypoint.message_count,
             "user_message_preview": waypoint.user_message_preview,
             "owner": waypoint.owner,
+            "parent_id": waypoint.parent_id,
+            "children": children,
             "files_changed_since": list(unique_files),
             "total_backups_since": len(backups),
         }
@@ -392,3 +426,128 @@ class WaypointManager:
     def current_waypoint(self) -> str:
         """Get the current waypoint ID (what new backups are tagged with)."""
         return self._backup_manager.current_waypoint
+
+    # ==================== Tree Navigation ====================
+
+    def get_ancestors(self, waypoint_id: str) -> List[str]:
+        """Get the path from a waypoint to the root (w0).
+
+        Args:
+            waypoint_id: The waypoint ID to start from.
+
+        Returns:
+            List of waypoint IDs from the given waypoint to root (inclusive).
+            Example: ["w3", "w2", "w1", "w0"]
+        """
+        path = []
+        current_id = waypoint_id
+
+        while current_id is not None:
+            waypoint = self._waypoints.get(current_id)
+            if waypoint is None:
+                break
+            path.append(current_id)
+            current_id = waypoint.parent_id
+
+        return path
+
+    def get_children(self, waypoint_id: str) -> List[str]:
+        """Get the direct children of a waypoint.
+
+        Args:
+            waypoint_id: The parent waypoint ID.
+
+        Returns:
+            List of waypoint IDs that have this waypoint as their parent.
+        """
+        return [
+            wp.id for wp in self._waypoints.values()
+            if wp.parent_id == waypoint_id
+        ]
+
+    def find_path(self, from_id: str, to_id: str) -> Optional[List[str]]:
+        """Find the path between two waypoints in the tree.
+
+        The path goes through the common ancestor:
+        from_id → ... → common_ancestor → ... → to_id
+
+        Args:
+            from_id: Starting waypoint ID.
+            to_id: Target waypoint ID.
+
+        Returns:
+            List of waypoint IDs representing the path, or None if no path exists.
+            The list includes both endpoints.
+        """
+        if from_id == to_id:
+            return [from_id]
+
+        # Get ancestors of both waypoints
+        from_ancestors = self.get_ancestors(from_id)
+        to_ancestors = self.get_ancestors(to_id)
+
+        if not from_ancestors or not to_ancestors:
+            return None
+
+        # Convert to sets for fast lookup
+        from_ancestor_set = set(from_ancestors)
+        to_ancestor_set = set(to_ancestors)
+
+        # Find common ancestor (first ancestor of 'from' that's also ancestor of 'to')
+        common_ancestor = None
+        for ancestor in from_ancestors:
+            if ancestor in to_ancestor_set:
+                common_ancestor = ancestor
+                break
+
+        if common_ancestor is None:
+            return None  # No path exists (shouldn't happen in a valid tree)
+
+        # Build path: from_id → common_ancestor (backward)
+        backward_path = []
+        for ancestor in from_ancestors:
+            backward_path.append(ancestor)
+            if ancestor == common_ancestor:
+                break
+
+        # Build path: common_ancestor → to_id (forward)
+        forward_path = []
+        for ancestor in to_ancestors:
+            if ancestor == common_ancestor:
+                break
+            forward_path.append(ancestor)
+
+        # Combine: backward path + reversed forward path
+        # backward_path ends with common_ancestor, forward_path excludes it
+        forward_path.reverse()
+        full_path = backward_path + forward_path
+
+        return full_path
+
+    def get_tree_structure(self) -> Dict[str, Any]:
+        """Get the full waypoint tree structure.
+
+        Returns:
+            Dictionary with tree information:
+            - current: The current waypoint ID
+            - root: The root waypoint ID (w0)
+            - nodes: Dict mapping waypoint IDs to their info including children
+        """
+        nodes = {}
+        for wp in self._waypoints.values():
+            children = self.get_children(wp.id)
+            nodes[wp.id] = {
+                "id": wp.id,
+                "description": wp.description,
+                "owner": wp.owner,
+                "parent_id": wp.parent_id,
+                "children": children,
+                "is_implicit": wp.is_implicit,
+                "created_at": wp.created_at.isoformat(),
+            }
+
+        return {
+            "current": self.current_waypoint,
+            "root": INITIAL_WAYPOINT_ID,
+            "nodes": nodes,
+        }
