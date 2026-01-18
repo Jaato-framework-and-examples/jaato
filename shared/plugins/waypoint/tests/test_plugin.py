@@ -63,9 +63,11 @@ class TestPluginProtocol:
         """Test that waypoint has system instructions for model."""
         instructions = plugin.get_system_instructions()
         assert instructions is not None
+        assert "Tree Structure" in instructions
         assert "Ownership Model" in instructions
         assert "User-owned" in instructions
         assert "Model-owned" in instructions
+        assert "Auto-save on restore" in instructions
 
     def test_auto_approved(self, plugin):
         """Test auto-approved tools include user command and safe model tools."""
