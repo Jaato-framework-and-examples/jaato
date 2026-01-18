@@ -167,8 +167,8 @@ class TestWaypointDelete:
         assert waypoints[0].id == INITIAL_WAYPOINT_ID
         mock_backup_manager.set_current_waypoint.assert_called_with(INITIAL_WAYPOINT_ID)
 
-    def test_id_reused_after_delete(self, manager):
-        """Test that IDs are reused after deletion."""
+    def test_id_not_reused_after_delete(self, manager):
+        """Test that IDs are NOT reused after deletion (monotonic)."""
         # Create w1
         wp1 = manager.create("first")
         assert wp1.id == "w1"
@@ -176,12 +176,12 @@ class TestWaypointDelete:
         # Delete w1
         manager.delete("w1")
 
-        # Next create should reuse w1
-        wp1_again = manager.create("first again")
-        assert wp1_again.id == "w1"
+        # Next create should be w2 (not w1 - IDs are never reused)
+        wp2 = manager.create("second")
+        assert wp2.id == "w2"
 
-    def test_lowest_available_id_used(self, manager):
-        """Test that the lowest available ID is always used."""
+    def test_ids_always_increase(self, manager):
+        """Test that IDs always increase (monotonic, no gaps filled)."""
         # Create w1, w2, w3
         manager.create("first")
         manager.create("second")
@@ -190,9 +190,9 @@ class TestWaypointDelete:
         # Delete w2 (middle one)
         manager.delete("w2")
 
-        # Next create should be w2 (lowest available)
+        # Next create should be w4 (not w2 - gaps are NOT filled)
         wp = manager.create("new")
-        assert wp.id == "w2"
+        assert wp.id == "w4"
 
 
 class TestWaypointRestore:
@@ -415,15 +415,15 @@ class TestWaypointOwnership:
         assert manager.delete("w1") is True
         assert manager.get("w1") is None
 
-    def test_id_reused_after_delete(self, manager):
-        """Test that IDs are reused after deletion regardless of owner."""
+    def test_id_not_reused_after_delete_regardless_of_owner(self, manager):
+        """Test that IDs are NOT reused after deletion (monotonic)."""
         manager.create("first", owner="model")
         manager.delete("w1")
         wp = manager.create("second", owner="user")  # Different owner
-        assert wp.id == "w1"
+        assert wp.id == "w2"  # Not w1 - IDs are never reused
 
-    def test_lowest_id_used_after_delete(self, manager):
-        """Test that the lowest available ID is used."""
+    def test_ids_always_increase_regardless_of_owner(self, manager):
+        """Test that IDs always increase (monotonic, no gaps filled)."""
         manager.create("first", owner="model")
         manager.create("second", owner="user")
         manager.create("third", owner="model")
@@ -431,7 +431,7 @@ class TestWaypointOwnership:
         manager.delete("w2")
 
         wp = manager.create("new", owner="user")
-        assert wp.id == "w2"
+        assert wp.id == "w4"  # Not w2 - gaps are NOT filled
 
 
 class TestWaypointTree:

@@ -366,8 +366,6 @@ always navigate back to where you were.
 **Limitations:**
 - **File existence not tracked**: Waypoints capture file contents, not creation/deletion.
   New files created after a waypoint persist after restore; deleted files aren't recreated.
-- **ID recycling**: If you delete w2 and create a new waypoint, it becomes the new w2.
-  Use descriptions to distinguish waypoints.
 
 **When to use waypoints:**
 - Before attempting risky refactoring or experimental changes

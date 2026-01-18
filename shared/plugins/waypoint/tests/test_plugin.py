@@ -423,15 +423,15 @@ class TestOwnershipSeparation:
 
         assert result["success"] is True
 
-    def test_id_reuse_after_deletion(self, plugin):
-        """Test that IDs are reused after deletion regardless of owner."""
+    def test_ids_monotonic_after_deletion(self, plugin):
+        """Test that IDs are NOT reused after deletion (monotonic)."""
         # Create w1 (model-owned)
         plugin._execute_create_waypoint({"description": "first"})
 
         # Delete w1
         plugin._execute_delete_waypoint({"waypoint_id": "w1"})
 
-        # Create again via user command - should reuse w1
+        # Create again via user command - should be w2 (not w1)
         result = plugin._execute_waypoint({"action": "create", "target": '"second"'})
-        assert result["id"] == "w1"
+        assert result["id"] == "w2"  # IDs are never reused
         assert result["owner"] == "user"

@@ -61,13 +61,14 @@ class WaypointManager:
             self._storage_path = Path(".jaato/waypoints.json").resolve()
 
         self._waypoints: Dict[str, Waypoint] = {}
+        self._next_id: int = 1  # Next ID to assign (monotonically increasing)
 
         # Callbacks for session info (set by plugin)
         # Used to capture history snapshots for waypoint metadata
         self._get_history: Optional[Callable[[], List["Message"]]] = None
         self._serialize_history: Optional[Callable[[List["Message"]], str]] = None
 
-        # Load existing waypoints
+        # Load existing waypoints (also loads _next_id)
         self._load()
 
         # Ensure implicit initial waypoint exists
@@ -106,7 +107,7 @@ class WaypointManager:
             self._save()
 
     def _load(self) -> None:
-        """Load waypoints from storage."""
+        """Load waypoints and next_id counter from storage."""
         if not self._storage_path.exists():
             return
 
@@ -118,17 +119,22 @@ class WaypointManager:
                 waypoint = Waypoint.from_dict(wp_data)
                 self._waypoints[waypoint.id] = waypoint
 
+            # Load next_id counter (defaults to 1 if not present)
+            self._next_id = data.get("next_id", 1)
+
         except (json.JSONDecodeError, IOError, KeyError):
             # If storage is corrupted, start fresh (but keep w0)
             self._waypoints = {}
+            self._next_id = 1
 
     def _save(self) -> None:
-        """Save waypoints to storage."""
+        """Save waypoints and next_id counter to storage."""
         self._storage_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
             data = {
                 "waypoints": [wp.to_dict() for wp in self._waypoints.values()],
+                "next_id": self._next_id,
             }
             with open(self._storage_path, 'w') as f:
                 json.dump(data, f, indent=2)
@@ -138,27 +144,16 @@ class WaypointManager:
     def _generate_id(self) -> str:
         """Generate the next sequential waypoint ID.
 
-        IDs are sequential regardless of owner (w1, w2, w3, ...).
-        Ownership is tracked separately in the Waypoint.owner field.
-        IDs are reused after deletion to keep numbering compact.
+        IDs are monotonically increasing (w1, w2, w3, ...) and never reused.
+        This ensures IDs always increase chronologically - a higher ID always
+        means a waypoint was created later, making trees easier to understand.
 
         Returns:
-            The next available ID (e.g., "w1", "w2").
+            The next ID (uses and increments the counter).
         """
-        # Find existing numeric IDs (all waypoints share the same counter)
-        existing_nums = set()
-        for wp_id in self._waypoints.keys():
-            if wp_id.startswith("w") and wp_id[1:].isdigit():
-                num = int(wp_id[1:])
-                if num > 0:  # Skip w0 (implicit initial)
-                    existing_nums.add(num)
-
-        # Find lowest available ID starting from 1
-        next_num = 1
-        while next_num in existing_nums:
-            next_num += 1
-
-        return f"w{next_num}"
+        wp_id = f"w{self._next_id}"
+        self._next_id += 1
+        return wp_id
 
     def create(
         self,
