@@ -11,10 +11,13 @@ Unlike version control which captures code state, waypoints capture the full con
 of your collaboration - both the code changes and the conversation that led to them.
 
 This plugin supports BOTH user commands AND model tools with an ownership model:
-- User-owned waypoints (w-prefix): Created via user commands, model needs permission
-  to restore, cannot delete
-- Model-owned waypoints (m-prefix): Created via model tools, model has full control
-  (create, restore, delete without permission)
+- User-owned waypoints: Created via user commands, model needs permission to restore,
+  cannot delete
+- Model-owned waypoints: Created via model tools, model has full control (create,
+  restore, delete without permission)
+
+Note: All waypoints use sequential IDs (w1, w2, w3...) regardless of owner.
+Ownership is tracked separately in the Waypoint.owner field.
 """
 
 import json
@@ -44,10 +47,13 @@ class WaypointPlugin:
     ownership-based permission model.
 
     Ownership Model:
-        - User waypoints (w-prefix): Created by user commands. Model can list/view
+        - User waypoints: Created by user commands. Model can list/view
           but needs permission to restore, cannot delete.
-        - Model waypoints (m-prefix): Created by model tools. Model has full control
+        - Model waypoints: Created by model tools. Model has full control
           (create, restore, delete) without needing permission.
+
+    Note: All waypoints use sequential IDs (w1, w2, w3...) regardless of owner.
+    Ownership is tracked in the Waypoint.owner field.
 
     User Commands:
         waypoint              - List all waypoints
@@ -214,8 +220,8 @@ class WaypointPlugin:
         """Return tool schemas for model waypoint access.
 
         The model has access to waypoint tools with ownership-based permissions:
-        - Full control over model-owned waypoints (m-prefix)
-        - Read access to user-owned waypoints (w-prefix)
+        - Full control over model-owned waypoints
+        - Read access to user-owned waypoints
         - Restore access to user-owned waypoints with permission
         - No delete access to user-owned waypoints
         """
@@ -224,9 +230,8 @@ class WaypointPlugin:
                 name="list_waypoints",
                 description=(
                     "List all waypoints in the session. Waypoints are checkpoints "
-                    "that capture file state at significant moments. User-owned "
-                    "waypoints (w-prefix) are created by the user; model-owned "
-                    "waypoints (m-prefix) are created by you."
+                    "that capture file state at significant moments. Each waypoint "
+                    "has an owner (user or model) shown in the response."
                 ),
                 parameters={
                     "type": "object",
@@ -239,7 +244,7 @@ class WaypointPlugin:
                 name="waypoint_info",
                 description=(
                     "Get detailed information about a specific waypoint, including "
-                    "files changed since that waypoint."
+                    "files changed since that waypoint and ownership."
                 ),
                 parameters={
                     "type": "object",
@@ -247,8 +252,8 @@ class WaypointPlugin:
                         "waypoint_id": {
                             "type": "string",
                             "description": (
-                                "The waypoint ID (e.g., 'w0', 'w1', 'm1'). "
-                                "w-prefix = user-owned, m-prefix = model-owned."
+                                "The waypoint ID (e.g., 'w1', 'w2'). IDs are "
+                                "sequential; ownership is shown in the response."
                             ),
                         },
                     },
@@ -261,8 +266,7 @@ class WaypointPlugin:
                 description=(
                     "Create a new model-owned waypoint to mark the current file state. "
                     "Use this before risky operations so you can restore if needed. "
-                    "Model waypoints use m-prefix (m1, m2, ...) and you have full "
-                    "control over them."
+                    "Model-owned waypoints can be restored and deleted freely."
                 ),
                 parameters={
                     "type": "object",
@@ -284,9 +288,8 @@ class WaypointPlugin:
                 name="restore_waypoint",
                 description=(
                     "Restore all files to their state at a waypoint, undoing changes "
-                    "made after that point. You can restore model-owned waypoints "
-                    "(m-prefix) freely. Restoring user-owned waypoints (w-prefix) "
-                    "requires user permission."
+                    "made after that point. You can restore your own waypoints freely. "
+                    "Restoring user-owned waypoints requires user permission."
                 ),
                 parameters={
                     "type": "object",
@@ -294,8 +297,8 @@ class WaypointPlugin:
                         "waypoint_id": {
                             "type": "string",
                             "description": (
-                                "The waypoint ID to restore to (e.g., 'w1', 'm1'). "
-                                "m-prefix waypoints can be restored without permission."
+                                "The waypoint ID to restore to (e.g., 'w1', 'w2'). "
+                                "Model-owned waypoints can be restored without permission."
                             ),
                         },
                     },
@@ -306,19 +309,15 @@ class WaypointPlugin:
             ToolSchema(
                 name="delete_waypoint",
                 description=(
-                    "Delete a model-owned waypoint. You can only delete waypoints "
-                    "you created (m-prefix). User-owned waypoints (w-prefix) cannot "
-                    "be deleted by the model."
+                    "Delete a waypoint you created. Attempting to delete a user-owned "
+                    "waypoint will fail with an error."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
                         "waypoint_id": {
                             "type": "string",
-                            "description": (
-                                "The model-owned waypoint ID to delete (must be "
-                                "m-prefix, e.g., 'm1', 'm2')."
-                            ),
+                            "description": "The waypoint ID to delete (e.g., 'w1', 'w2').",
                         },
                     },
                     "required": ["waypoint_id"],
@@ -348,17 +347,20 @@ Waypoints are checkpoints that capture file state at significant moments, allowi
 restoration if changes don't work out.
 
 **Ownership Model:**
-- **User waypoints (w-prefix)**: Created by the user. You can view and restore them
-  (with user permission), but cannot delete them.
-- **Model waypoints (m-prefix)**: Created by you. You have full control - create,
-  restore, and delete without needing permission.
+All waypoints use sequential IDs (w1, w2, w3...). Ownership is tracked separately:
+- **User-owned**: Created by the user. You can view and restore them (with user
+  permission), but cannot delete them.
+- **Model-owned**: Created by you. You have full control - create, restore, and
+  delete without needing permission.
+
+Use `list_waypoints` to see ownership of each waypoint.
 
 **Critical Limitations:**
 - **Rollback only, no time-travel**: You can restore to an older waypoint, but you
-  cannot "go forward" again. If you restore to m1, content captured at m2/m3 is lost.
+  cannot "go forward" again. If you restore to w1, content captured at w2/w3 is lost.
 - **File existence not tracked**: Waypoints capture file contents, not creation/deletion.
   New files created after a waypoint persist after restore; deleted files aren't recreated.
-- **ID recycling**: If you delete m2 and create a new waypoint, it becomes the new m2.
+- **ID recycling**: If you delete w2 and create a new waypoint, it becomes the new w2.
   Use descriptions to distinguish waypoints, and be careful with ID references.
 
 **When to use waypoints:**
@@ -367,10 +369,10 @@ restoration if changes don't work out.
 - When exploring different implementation approaches
 
 **Example workflow:**
-1. `create_waypoint("before auth refactor")` - creates m1
+1. `create_waypoint("before auth refactor")` - creates w1 (model-owned)
 2. Make changes across multiple files
-3. If changes don't work: `restore_waypoint("m1")` - reverts all files
-4. If changes work: optionally `delete_waypoint("m1")` to clean up"""
+3. If changes don't work: `restore_waypoint("w1")` - reverts all files
+4. If changes work: optionally `delete_waypoint("w1")` to clean up"""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return auto-approved tools.
@@ -796,7 +798,7 @@ restoration if changes don't work out.
     def _execute_create_waypoint(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute create_waypoint tool for model.
 
-        Creates a model-owned waypoint (m-prefix).
+        Creates a model-owned waypoint with the next sequential ID.
 
         Args:
             args: Must contain 'description'.
@@ -814,8 +816,8 @@ restoration if changes don't work out.
         """Execute restore_waypoint tool for model.
 
         Model can restore to any waypoint, but restoring to user-owned
-        waypoints (w-prefix) should go through permission flow.
-        Model-owned waypoints (m-prefix) can be restored freely.
+        waypoints should go through permission flow.
+        Model-owned waypoints can be restored freely.
 
         Args:
             args: Must contain 'waypoint_id'.
@@ -841,8 +843,8 @@ restoration if changes don't work out.
     def _execute_delete_waypoint(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute delete_waypoint tool for model.
 
-        Model can only delete its own waypoints (m-prefix).
-        User-owned waypoints (w-prefix) cannot be deleted by model.
+        Model can only delete its own waypoints.
+        User-owned waypoints cannot be deleted by model.
 
         Args:
             args: Must contain 'waypoint_id'.
@@ -864,7 +866,7 @@ restoration if changes don't work out.
             return {
                 "error": (
                     f"Cannot delete user-owned waypoint {waypoint_id}. "
-                    "You can only delete waypoints you created (m-prefix)."
+                    "You can only delete waypoints you created (owner='model')."
                 )
             }
 
