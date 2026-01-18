@@ -135,25 +135,20 @@ class WaypointManager:
         except IOError:
             pass
 
-    def _generate_id(self, owner: WaypointOwner = "user") -> str:
-        """Generate the lowest available waypoint ID for the given owner.
+    def _generate_id(self) -> str:
+        """Generate the next sequential waypoint ID.
 
+        IDs are sequential regardless of owner (w1, w2, w3, ...).
+        Ownership is tracked separately in the Waypoint.owner field.
         IDs are reused after deletion to keep numbering compact.
-        User waypoints use w-prefix (w1, w2, ...), model waypoints use
-        m-prefix (m1, m2, ...).
-
-        Args:
-            owner: Who will own the waypoint - "user" or "model".
 
         Returns:
-            The next available ID for the owner type.
+            The next available ID (e.g., "w1", "w2").
         """
-        prefix = "w" if owner == "user" else "m"
-
-        # Find existing numeric IDs with this prefix
+        # Find existing numeric IDs (all waypoints share the same counter)
         existing_nums = set()
         for wp_id in self._waypoints.keys():
-            if wp_id.startswith(prefix) and wp_id[1:].isdigit():
+            if wp_id.startswith("w") and wp_id[1:].isdigit():
                 num = int(wp_id[1:])
                 if num > 0:  # Skip w0 (implicit initial)
                     existing_nums.add(num)
@@ -163,7 +158,7 @@ class WaypointManager:
         while next_num in existing_nums:
             next_num += 1
 
-        return f"{prefix}{next_num}"
+        return f"w{next_num}"
 
     def create(
         self,
@@ -179,12 +174,13 @@ class WaypointManager:
             turn_index: Current turn in the conversation (optional).
             user_message_preview: Preview of recent user message (optional).
             owner: Who is creating this waypoint - "user" or "model".
-                   Determines the ID prefix and permission rules.
+                   Tracked for permission rules (model can only delete
+                   waypoints it owns).
 
         Returns:
             The newly created Waypoint.
         """
-        wp_id = self._generate_id(owner)
+        wp_id = self._generate_id()
 
         # Capture conversation history snapshot
         history_snapshot = None

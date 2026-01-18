@@ -25,9 +25,8 @@ class Waypoint:
     specific moment, allowing you to return if the path ahead leads astray.
 
     Attributes:
-        id: Short identifier. User waypoints use w-prefix (w0, w1, w2, ...),
-            model waypoints use m-prefix (m1, m2, ...). w0 is the implicit
-            initial state (owned by user).
+        id: Short identifier (w0, w1, w2, ...). Sequential regardless of
+            who created the waypoint. w0 is the implicit initial state.
         description: User or model-provided description of this waypoint.
         created_at: When the waypoint was created.
         turn_index: Which conversation turn this waypoint was created at.

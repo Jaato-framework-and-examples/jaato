@@ -64,8 +64,8 @@ class TestPluginProtocol:
         instructions = plugin.get_system_instructions()
         assert instructions is not None
         assert "Ownership Model" in instructions
-        assert "w-prefix" in instructions
-        assert "m-prefix" in instructions
+        assert "User-owned" in instructions
+        assert "Model-owned" in instructions
 
     def test_auto_approved(self, plugin):
         """Test auto-approved tools include user command and safe model tools."""
@@ -281,31 +281,31 @@ class TestModelToolExecutors:
         result = plugin._execute_list_waypoints({})
         assert "waypoints" in result
 
-        # Check ownership info is included
+        # Check ownership info is included (w1=user, w2=model - sequential IDs)
         waypoints = result["waypoints"]
         user_wp = next(wp for wp in waypoints if wp["id"] == "w1")
-        model_wp = next(wp for wp in waypoints if wp["id"] == "m1")
+        model_wp = next(wp for wp in waypoints if wp["id"] == "w2")
 
         assert user_wp["owner"] == "user"
         assert model_wp["owner"] == "model"
 
     def test_create_waypoint_model_owned(self, plugin):
-        """Test create_waypoint creates model-owned waypoint with m-prefix."""
+        """Test create_waypoint creates model-owned waypoint with sequential ID."""
         result = plugin._execute_create_waypoint({"description": "model checkpoint"})
 
         assert result["success"] is True
-        assert result["id"] == "m1"
+        assert result["id"] == "w1"  # First waypoint after w0
         assert result["owner"] == "model"
 
     def test_create_waypoint_multiple_model_owned(self, plugin):
-        """Test multiple model waypoints get sequential m-prefix IDs."""
+        """Test multiple model waypoints get sequential IDs."""
         result1 = plugin._execute_create_waypoint({"description": "first"})
         result2 = plugin._execute_create_waypoint({"description": "second"})
         result3 = plugin._execute_create_waypoint({"description": "third"})
 
-        assert result1["id"] == "m1"
-        assert result2["id"] == "m2"
-        assert result3["id"] == "m3"
+        assert result1["id"] == "w1"
+        assert result2["id"] == "w2"
+        assert result3["id"] == "w3"
 
     def test_create_waypoint_requires_description(self, plugin):
         """Test create_waypoint requires description."""
@@ -317,19 +317,19 @@ class TestModelToolExecutors:
         """Test waypoint_info includes ownership."""
         plugin._execute_create_waypoint({"description": "model checkpoint"})
 
-        result = plugin._execute_waypoint_info({"waypoint_id": "m1"})
+        result = plugin._execute_waypoint_info({"waypoint_id": "w1"})
 
-        assert result["id"] == "m1"
+        assert result["id"] == "w1"
         assert result["owner"] == "model"
 
     def test_delete_model_owned_waypoint(self, plugin):
         """Test model can delete its own waypoints."""
         plugin._execute_create_waypoint({"description": "to delete"})
 
-        result = plugin._execute_delete_waypoint({"waypoint_id": "m1"})
+        result = plugin._execute_delete_waypoint({"waypoint_id": "w1"})
 
         assert result["success"] is True
-        assert result["id"] == "m1"
+        assert result["id"] == "w1"
 
     def test_delete_user_owned_waypoint_rejected(self, plugin):
         """Test model cannot delete user-owned waypoints."""
@@ -355,14 +355,14 @@ class TestModelToolExecutors:
 
         mock_backup_manager.get_first_backup_per_file_by_waypoint.return_value = {}
 
-        result = plugin._execute_restore_waypoint({"waypoint_id": "m1"})
+        result = plugin._execute_restore_waypoint({"waypoint_id": "w1"})
 
         assert result["success"] is True
-        assert result["waypoint_id"] == "m1"
+        assert result["waypoint_id"] == "w1"
 
     def test_restore_nonexistent_waypoint(self, plugin):
         """Test restore returns error for nonexistent waypoint."""
-        result = plugin._execute_restore_waypoint({"waypoint_id": "m999"})
+        result = plugin._execute_restore_waypoint({"waypoint_id": "w999"})
 
         assert "error" in result
         assert "not found" in result["error"]
@@ -376,10 +376,10 @@ class TestModelToolExecutors:
 
 
 class TestOwnershipSeparation:
-    """Test that user and model waypoint IDs are separate namespaces."""
+    """Test waypoint ownership and sequential IDs."""
 
-    def test_user_and_model_ids_independent(self, plugin):
-        """Test user and model waypoints have independent ID counters."""
+    def test_sequential_ids_regardless_of_owner(self, plugin):
+        """Test all waypoints share a single sequential counter."""
         # Create user waypoints
         plugin._execute_waypoint({"action": "create", "target": '"user 1"'})
         plugin._execute_waypoint({"action": "create", "target": '"user 2"'})
@@ -392,31 +392,42 @@ class TestOwnershipSeparation:
         result = plugin._execute_list_waypoints({})
         waypoints = result["waypoints"]
 
-        # Should have w0 (implicit), w1, w2 (user), m1, m2 (model)
+        # Should have w0 (implicit), w1, w2 (user), w3, w4 (model) - all sequential
         ids = [wp["id"] for wp in waypoints]
         assert "w0" in ids
         assert "w1" in ids
         assert "w2" in ids
-        assert "m1" in ids
-        assert "m2" in ids
+        assert "w3" in ids
+        assert "w4" in ids
+
+        # Check ownership is correct
+        w1 = next(wp for wp in waypoints if wp["id"] == "w1")
+        w2 = next(wp for wp in waypoints if wp["id"] == "w2")
+        w3 = next(wp for wp in waypoints if wp["id"] == "w3")
+        w4 = next(wp for wp in waypoints if wp["id"] == "w4")
+        assert w1["owner"] == "user"
+        assert w2["owner"] == "user"
+        assert w3["owner"] == "model"
+        assert w4["owner"] == "model"
 
     def test_user_can_delete_model_owned(self, plugin):
         """Test user can delete model-owned waypoints via command."""
         plugin._execute_create_waypoint({"description": "model checkpoint"})
 
         # Delete via user command
-        result = plugin._execute_waypoint({"action": "delete", "target": "m1"})
+        result = plugin._execute_waypoint({"action": "delete", "target": "w1"})
 
         assert result["success"] is True
 
-    def test_id_reuse_per_owner(self, plugin):
-        """Test that IDs are reused within owner namespace after deletion."""
-        # Create m1
+    def test_id_reuse_after_deletion(self, plugin):
+        """Test that IDs are reused after deletion regardless of owner."""
+        # Create w1 (model-owned)
         plugin._execute_create_waypoint({"description": "first"})
 
-        # Delete m1
-        plugin._execute_delete_waypoint({"waypoint_id": "m1"})
+        # Delete w1
+        plugin._execute_delete_waypoint({"waypoint_id": "w1"})
 
-        # Create again - should reuse m1
-        result = plugin._execute_create_waypoint({"description": "second"})
-        assert result["id"] == "m1"
+        # Create again via user command - should reuse w1
+        result = plugin._execute_waypoint({"action": "create", "target": '"second"'})
+        assert result["id"] == "w1"
+        assert result["owner"] == "user"

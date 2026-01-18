@@ -345,27 +345,24 @@ class TestWaypointOwnership:
         wp = manager.create("model checkpoint", owner="model")
         assert wp.owner == "model"
 
-    def test_model_waypoint_gets_m_prefix(self, manager):
-        """Test model waypoints get m-prefix IDs."""
-        wp = manager.create("model checkpoint", owner="model")
-        assert wp.id == "m1"
+    def test_all_waypoints_get_w_prefix(self, manager):
+        """Test all waypoints use w-prefix IDs regardless of owner."""
+        user_wp = manager.create("user checkpoint", owner="user")
+        model_wp = manager.create("model checkpoint", owner="model")
+        assert user_wp.id == "w1"
+        assert model_wp.id == "w2"
 
-    def test_user_waypoint_gets_w_prefix(self, manager):
-        """Test user waypoints get w-prefix IDs."""
-        wp = manager.create("user checkpoint", owner="user")
-        assert wp.id == "w1"
-
-    def test_independent_id_counters(self, manager):
-        """Test user and model have independent ID counters."""
+    def test_sequential_ids_regardless_of_owner(self, manager):
+        """Test IDs are sequential regardless of owner."""
         user_wp1 = manager.create("user 1", owner="user")
         model_wp1 = manager.create("model 1", owner="model")
         user_wp2 = manager.create("user 2", owner="user")
         model_wp2 = manager.create("model 2", owner="model")
 
         assert user_wp1.id == "w1"
-        assert user_wp2.id == "w2"
-        assert model_wp1.id == "m1"
-        assert model_wp2.id == "m2"
+        assert model_wp1.id == "w2"
+        assert user_wp2.id == "w3"
+        assert model_wp2.id == "w4"
 
     def test_ownership_persisted(self, temp_dir, mock_backup_manager):
         """Test that ownership is persisted to storage."""
@@ -385,7 +382,7 @@ class TestWaypointOwnership:
         )
 
         user_wp = mgr2.get("w1")
-        model_wp = mgr2.get("m1")
+        model_wp = mgr2.get("w2")
 
         assert user_wp.owner == "user"
         assert model_wp.owner == "model"
@@ -396,7 +393,7 @@ class TestWaypointOwnership:
 
         mock_backup_manager.get_backups_by_waypoint.return_value = []
 
-        info = manager.get_info("m1")
+        info = manager.get_info("w1")
 
         assert info["owner"] == "model"
 
@@ -408,23 +405,23 @@ class TestWaypointOwnership:
     def test_delete_model_waypoint(self, manager):
         """Test deleting model-owned waypoint."""
         manager.create("model wp", owner="model")
-        assert manager.delete("m1") is True
-        assert manager.get("m1") is None
+        assert manager.delete("w1") is True
+        assert manager.get("w1") is None
 
-    def test_model_id_reused_after_delete(self, manager):
-        """Test that model IDs are reused after deletion."""
+    def test_id_reused_after_delete(self, manager):
+        """Test that IDs are reused after deletion regardless of owner."""
         manager.create("first", owner="model")
-        manager.delete("m1")
-        wp = manager.create("second", owner="model")
-        assert wp.id == "m1"
+        manager.delete("w1")
+        wp = manager.create("second", owner="user")  # Different owner
+        assert wp.id == "w1"
 
-    def test_lowest_model_id_used(self, manager):
-        """Test that the lowest available model ID is used."""
-        manager.create("m1", owner="model")
-        manager.create("m2", owner="model")
-        manager.create("m3", owner="model")
+    def test_lowest_id_used_after_delete(self, manager):
+        """Test that the lowest available ID is used."""
+        manager.create("first", owner="model")
+        manager.create("second", owner="user")
+        manager.create("third", owner="model")
 
-        manager.delete("m2")
+        manager.delete("w2")
 
-        wp = manager.create("new", owner="model")
-        assert wp.id == "m2"
+        wp = manager.create("new", owner="user")
+        assert wp.id == "w2"
