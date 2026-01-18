@@ -485,6 +485,23 @@ class OutputBuffer:
         # Insert at the tool placeholder position so it appears above the tool status
         if source in ("permission", "clarification") and self._active_tools and self._tool_placeholder_index is not None:
             self._flush_current_block()
+
+            if mode == "append":
+                # Append to existing permission/clarification content
+                # Find the most recent line with this source and append to it
+                for i in range(len(self._lines) - 1, -1, -1):
+                    line = self._lines[i]
+                    if isinstance(line, OutputLine) and line.source == source:
+                        # Append text with newline
+                        line.text = line.text + "\n" + text
+                        # Recalculate display lines
+                        total_display_lines = 0
+                        for line_text in line.text.split('\n'):
+                            total_display_lines += self._measure_display_lines(source, line_text, False)
+                        line.display_lines = total_display_lines
+                        return
+                # No existing line found, fall through to insert as new
+
             # Insert the entire content as a single block at the placeholder position
             # Count display lines for the entire text block
             total_display_lines = 0

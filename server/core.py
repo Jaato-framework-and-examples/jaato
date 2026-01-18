@@ -1084,6 +1084,19 @@ class JaatoServer:
                                    granted: bool, method: str):
             server._pending_permission_request_id = None
             server._waiting_for_channel_input = False
+
+            # Emit resolution status as output (appears after the permission prompt)
+            if granted:
+                status_text = f"✓ Granted ({method})"
+            else:
+                status_text = f"✗ Denied ({method})"
+            server.emit(AgentOutputEvent(
+                agent_id=server._current_tool_agent_id,
+                source="permission",
+                text=status_text,
+                mode="append",
+            ))
+
             server.emit(PermissionResolvedEvent(
                 agent_id=server._current_tool_agent_id,
                 request_id=request_id,
