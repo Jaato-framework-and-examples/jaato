@@ -1788,7 +1788,7 @@ class OutputBuffer:
                     if tool.permission_content:
                         # Count lines, accounting for truncation (matches render logic)
                         actual_lines = tool.permission_content.count('\n') + 1
-                        max_content_lines = max(10, self._visible_height - 8)
+                        max_content_lines = min(22, max(10, self._visible_height - 8))
                         if actual_lines > max_content_lines:
                             # Truncated: lines_at_start + ellipsis + lines_at_end
                             height += max_content_lines
@@ -1856,7 +1856,7 @@ class OutputBuffer:
                     if tool.clarification_content:
                         # Count lines, accounting for truncation (matches render logic)
                         actual_lines = tool.clarification_content.count('\n') + 1
-                        max_content_lines = max(10, self._visible_height - 8)
+                        max_content_lines = min(22, max(10, self._visible_height - 8))
                         if actual_lines > max_content_lines:
                             height += max_content_lines
                         else:
@@ -2157,11 +2157,12 @@ class OutputBuffer:
             indent = f"{prefix}{continuation}     "
             content_lines = tool.permission_content.split('\n')
 
-            # Calculate max lines based on visible height, reserving space for:
-            # - Tool tree header and tool line (~3 lines)
-            # - Permission header (1 line)
-            # - Some breathing room for other UI elements (~4 lines)
-            max_content_lines = max(10, self._visible_height - 8)
+            # Calculate max lines for permission content.
+            # Use the smaller of:
+            # - visible_height - 8 (reserve space for UI elements)
+            # - A fixed cap of 22 lines (handles mobile terminals where _visible_height
+            #   may not accurately reflect usable output area due to status bars, input area, etc.)
+            max_content_lines = min(22, max(10, self._visible_height - 8))
 
             if len(content_lines) > max_content_lines:
                 # Truncate in the middle: show beginning, ellipsis, and end
@@ -2270,8 +2271,8 @@ class OutputBuffer:
             indent = f"{prefix}{continuation}     "
             content_lines = tool.clarification_content.split('\n')
 
-            # Calculate max lines based on visible height (same as permission content)
-            max_content_lines = max(10, self._visible_height - 8)
+            # Calculate max lines (same as permission content - capped at 22 for mobile terminals)
+            max_content_lines = min(22, max(10, self._visible_height - 8))
 
             if len(content_lines) > max_content_lines:
                 # Truncate in the middle: show beginning, ellipsis, and end
