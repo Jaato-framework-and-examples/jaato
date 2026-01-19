@@ -292,10 +292,10 @@ class NotebookPlugin:
                             break
 
             return PermissionDisplayInfo(
-                summary=f"Execute Python ({backend_name}): {notebook_id}",
+                summary=f"Execute IPython ({backend_name}): {notebook_id}",
                 details=code,
                 format_hint="code",
-                language="python",
+                language="ipython",
             )
         return None
 

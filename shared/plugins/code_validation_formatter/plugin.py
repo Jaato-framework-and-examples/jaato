@@ -362,6 +362,11 @@ class CodeValidationFormatterPlugin:
         """Validate syntax using language-specific compile/parse."""
         diagnostics = []
 
+        # Skip strict Python validation for IPython code
+        # IPython handles !shell commands, %magics, %%cell_magics natively
+        if language in ('ipython', 'ipython3'):
+            return diagnostics
+
         if language in ('python', 'py'):
             try:
                 compile(code, '<code_block>', 'exec')
