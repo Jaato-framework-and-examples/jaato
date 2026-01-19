@@ -1198,7 +1198,9 @@ class OutputBuffer:
                 tool.output_scroll_offset += 1
                 return True
         elif tool.file_output_lines:
-            max_offset = max(0, len(tool.file_output_lines) - tool.file_output_display_lines)
+            # Use 70% of visible height for file content display
+            max_display_lines = max(5, int(self._visible_height * 0.7))
+            max_offset = max(0, len(tool.file_output_lines) - max_display_lines)
             if tool.file_output_scroll_offset < max_offset:
                 tool.file_output_scroll_offset += 1
                 return True
@@ -2026,10 +2028,12 @@ class OutputBuffer:
                 if tool.expanded and tool.file_output_lines:
                     height += 1  # header ("Content")
                     total_lines = len(tool.file_output_lines)
-                    display_count = min(total_lines, tool.file_output_display_lines)
+                    # Use 70% of visible height for file content display
+                    max_display_lines = max(5, int(self._visible_height * 0.7))
+                    display_count = min(total_lines, max_display_lines)
                     height += display_count
                     # Scroll indicators (up/down)
-                    if total_lines > tool.file_output_display_lines:
+                    if total_lines > max_display_lines:
                         height += 2
         else:
             height += 1  # Collapsed summary line
@@ -2628,12 +2632,16 @@ class OutputBuffer:
         output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
         output.append("  📄 Content", style=self._style("file_output_header", "bold cyan"))
 
+        # Calculate display count as 70% of visible height, with reasonable bounds
+        max_display_lines = max(5, int(self._visible_height * 0.7))
+        display_count = min(len(tool.file_output_lines), max_display_lines)
+
         # Use shared scrollable content renderer with ANSI preservation for diffs
         self._render_scrollable_content(
             output=output,
             lines=tool.file_output_lines,
             scroll_offset=tool.file_output_scroll_offset,
-            display_count=tool.file_output_display_lines,
+            display_count=display_count,
             is_last=is_last,
             preserve_ansi=True
         )
