@@ -2164,6 +2164,13 @@ class OutputBuffer:
             #   may not accurately reflect usable output area due to status bars, input area, etc.)
             max_content_lines = min(22, max(10, self._visible_height - 8))
 
+            # Log last 3 lines to verify response options are in content
+            last_lines_preview = [line[:50] for line in content_lines[-3:]]
+            _trace(f"_render_permission_prompt: visible_height={self._visible_height}, "
+                   f"content_lines={len(content_lines)}, max_content_lines={max_content_lines}, "
+                   f"will_truncate={len(content_lines) > max_content_lines}, "
+                   f"last_3_lines={last_lines_preview}")
+
             if len(content_lines) > max_content_lines:
                 # Truncate in the middle: show beginning, ellipsis, and end
                 # Reserve more lines for the end (includes response options)
@@ -2544,6 +2551,8 @@ class OutputBuffer:
 
         # Store visible height for auto-scroll calculations
         if height:
+            if height != self._visible_height:
+                _trace(f"render: visible_height changed from {self._visible_height} to {height}")
             self._visible_height = height
 
         # Work backwards from the end, using stored display line counts
