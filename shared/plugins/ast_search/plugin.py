@@ -314,6 +314,20 @@ Patterns use code-like syntax with metavariables:
 - Start with broader patterns, then refine
 - Use language parameter when searching mixed-language codebases
 - Use file_pattern to limit search scope for better performance
+
+## Streaming vs Non-streaming
+
+| Aspect | Non-Streaming (`ast_search`) | Streaming (`ast_search:stream`) |
+|--------|------------------------------|--------------------------------|
+| Initial response | Waits for completion | Immediate (first results) |
+| Large searches | May auto-background (60s+) | Returns partial results instantly |
+| Result format | Full JSON with metavariables, context | Simplified `file:line: code` |
+| Use case | Need complete data | Need quick feedback |
+
+Guidelines:
+1. **Use streaming for exploration**: When checking if a pattern matches anything
+2. **Use non-streaming for complete data**: When you need metavariables and context
+3. **Dismiss streams early**: If you find what you need, dismiss to save resources
 """
 
     # --- BackgroundCapable overrides ---
@@ -329,12 +343,20 @@ Patterns use code-like syntax with metavariables:
     def estimate_duration(
         self, tool_name: str, arguments: Dict[str, Any]
     ) -> Optional[float]:
-        """Estimate execution duration based on arguments."""
+        """Estimate execution duration based on arguments.
+
+        Uses heuristics to estimate whether this is likely a directory
+        search (longer) or a single file search (shorter).
+        """
         if tool_name == "ast_search":
             path = arguments.get("path", ".")
-            if Path(path).is_dir():
-                return 15.0  # Directory search takes longer
-            return 2.0
+            # Use heuristics: if path has a file extension, it's likely a file
+            # Otherwise assume directory search (which takes longer)
+            path_obj = Path(path)
+            has_extension = bool(path_obj.suffix)
+            if has_extension:
+                return 2.0  # Single file search
+            return 15.0  # Directory search takes longer
         return None
 
     # --- Tool implementation ---
