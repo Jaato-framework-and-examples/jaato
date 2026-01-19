@@ -5,7 +5,6 @@ region of the TUI.
 """
 
 import os
-import tempfile
 import textwrap
 from collections import deque
 from dataclasses import dataclass
@@ -15,18 +14,16 @@ from typing import Any, List, Optional, Tuple, Union
 
 def _trace(msg: str) -> None:
     """Write trace message to log file for debugging."""
-    trace_path = os.environ.get(
-        'JAATO_TRACE_LOG',
-        os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-    )
-    if trace_path:
-        try:
-            with open(trace_path, "a") as f:
-                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] [OutputBuffer] {msg}\n")
-                f.flush()
-        except (IOError, OSError):
-            pass
+    trace_path = os.environ.get('JAATO_TRACE_LOG')
+    if not trace_path:
+        return  # Tracing disabled
+    try:
+        with open(trace_path, "a") as f:
+            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            f.write(f"[{ts}] [OutputBuffer] {msg}\n")
+            f.flush()
+    except (IOError, OSError):
+        pass
 
 import re
 
