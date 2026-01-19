@@ -250,8 +250,23 @@ def load_config(
         whitelist_arguments=whitelist.get("arguments", {}),
         channel_type=channel.get("type", "console"),
         channel_endpoint=channel.get("endpoint"),
-        channel_timeout=channel.get("timeout", 30),
+        channel_timeout=_get_timeout(channel.get("timeout", 30)),
     )
+
+
+def _get_timeout(config_value: int) -> int:
+    """Get timeout value, allowing env var override.
+
+    JAATO_PERMISSION_TIMEOUT env var overrides config.
+    A value of 0 or negative means no timeout (wait forever).
+    """
+    env_timeout = os.environ.get("JAATO_PERMISSION_TIMEOUT")
+    if env_timeout is not None:
+        try:
+            return int(env_timeout)
+        except ValueError:
+            pass
+    return config_value
 
 
 def create_default_config(path: str) -> None:

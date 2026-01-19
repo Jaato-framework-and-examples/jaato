@@ -64,6 +64,7 @@ DEFAULT_COMMANDS = [
     ("screenshot format html", "HTML format"),
     ("screenshot auto", "Toggle auto-capture on turn end"),
     ("screenshot interval", "Set periodic capture interval (ms) during streaming"),
+    ("screenshot delay", "Capture once after N seconds (default: 5)"),
     ("screenshot help", "Show screenshot command help"),
     ("plan", "Show current plan status"),
     ("quit", "Exit the client"),

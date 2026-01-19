@@ -775,7 +775,18 @@ class FileChannel(Channel):
         response_file = self._base_path / "responses" / f"{request.request_id}.json"
         start_time = time.time()
 
-        while time.time() - start_time < request.timeout_seconds:
+        # Apply env var override at runtime (session env may not be loaded at init time)
+        timeout = request.timeout_seconds
+        env_timeout = os.environ.get("JAATO_PERMISSION_TIMEOUT")
+        if env_timeout is not None:
+            try:
+                timeout = float(env_timeout)
+            except ValueError:
+                pass
+
+        no_timeout = timeout <= 0  # 0 or negative means wait forever
+
+        while no_timeout or time.time() - start_time < timeout:
             if response_file.exists():
                 try:
                     with open(response_file, 'r', encoding='utf-8') as f:
@@ -867,7 +878,7 @@ class QueueChannel(ConsoleChannel):
         """Read input from the queue with timeout, checking for cancellation.
 
         Args:
-            timeout: Seconds to wait for input.
+            timeout: Seconds to wait for input. 0 or negative means wait forever.
 
         Returns:
             User input string, None on timeout, or "__CANCELLED__" if cancelled.
@@ -878,11 +889,20 @@ class QueueChannel(ConsoleChannel):
         if not self._input_queue:
             return None
 
+        # Apply env var override at runtime (session env may not be loaded at init time)
+        env_timeout = os.environ.get("JAATO_PERMISSION_TIMEOUT")
+        if env_timeout is not None:
+            try:
+                timeout = float(env_timeout)
+            except ValueError:
+                pass
+
         # Poll in short intervals to check for cancellation
         poll_interval = 0.1  # Check every 100ms
         elapsed = 0.0
+        no_timeout = timeout <= 0  # 0 or negative means wait forever
 
-        while elapsed < timeout:
+        while no_timeout or elapsed < timeout:
             # Check for cancellation
             if self._cancel_token and hasattr(self._cancel_token, 'is_cancelled'):
                 if self._cancel_token.is_cancelled:
