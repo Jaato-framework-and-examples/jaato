@@ -5,7 +5,6 @@ region of the TUI.
 """
 
 import os
-import tempfile
 import textwrap
 from collections import deque
 from dataclasses import dataclass
@@ -15,18 +14,20 @@ from typing import Any, List, Optional, Tuple, Union
 
 def _trace(msg: str) -> None:
     """Write trace message to log file for debugging."""
+    import tempfile
     trace_path = os.environ.get(
         'JAATO_TRACE_LOG',
         os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
     )
-    if trace_path:
-        try:
-            with open(trace_path, "a") as f:
-                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                f.write(f"[{ts}] [OutputBuffer] {msg}\n")
-                f.flush()
-        except (IOError, OSError):
-            pass
+    if not trace_path:
+        return  # Tracing disabled (empty string)
+    try:
+        with open(trace_path, "a") as f:
+            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            f.write(f"[{ts}] [OutputBuffer] {msg}\n")
+            f.flush()
+    except (IOError, OSError):
+        pass
 
 import re
 
@@ -34,6 +35,8 @@ from rich.console import Console, RenderableType
 from rich.text import Text
 from rich.panel import Panel
 from rich.align import Align
+
+from shared.plugins.table_formatter.plugin import _display_width
 
 # Type checking import for ThemeConfig
 from typing import TYPE_CHECKING
@@ -1687,10 +1690,10 @@ class OutputBuffer:
         return self._scroll_offset == 0
 
     def scroll_to_show_tool_tree(self) -> bool:
-        """Scroll to show the active tool tree, prioritizing its top.
+        """Scroll to show the active tool tree.
 
-        When the tool tree is taller than the visible area, shows from the top.
-        When it fits, scrolls so the entire tree is visible.
+        When there's a pending permission/clarification, prioritizes showing the
+        bottom of the tree (where response options are). Otherwise shows from top.
 
         Returns:
             True if scroll position changed.
@@ -1699,6 +1702,12 @@ class OutputBuffer:
             return False
 
         old_offset = self._scroll_offset
+
+        # Check if any tool has a pending prompt (permission or clarification)
+        has_pending_prompt = any(
+            tool.permission_state == "pending" or tool.clarification_state == "pending"
+            for tool in self._active_tools
+        )
 
         # Calculate total display lines before the tool tree
         # Note: _lines is a deque which doesn't support slicing, so we iterate with enumerate
@@ -1721,23 +1730,42 @@ class OutputBuffer:
         # Total content height
         total_height = lines_before_tree + tree_height + lines_after_tree
 
-        # We want to show the tool tree starting from its top
         # scroll_offset = how many lines from the bottom to skip
-        # To show from line X, scroll_offset = total_height - X - visible_height
-        # We want to show starting at lines_before_tree (top of tree)
+        # To show ending at line X, scroll_offset = total_height - X
 
-        # If tree fits in visible area, show it entirely
-        # If tree is taller, show from the top of the tree
         if tree_height <= self._visible_height:
-            # Show entire tree - scroll so bottom of tree is visible
-            # with some margin for content after it
+            # Tree fits - show entire tree with some context before it
             tree_bottom = lines_before_tree + tree_height
             self._scroll_offset = max(0, total_height - tree_bottom - max(0, self._visible_height - tree_height))
+        elif has_pending_prompt:
+            # Tree is taller AND has pending prompt - prioritize showing BOTTOM
+            # (where response options are), keeping minimal context at top
+            context_lines = min(1, lines_before_tree)  # Keep just 1 line of context
+            tree_bottom = lines_before_tree + tree_height
+            # Scroll so bottom of tree is visible, with minimal context
+            self._scroll_offset = max(0, total_height - tree_bottom - context_lines)
         else:
-            # Tree is taller than visible - show from top of tree
+            # Tree is taller, no pending prompt - show from top of tree
             self._scroll_offset = max(0, total_height - lines_before_tree - self._visible_height)
 
+        _trace(f"scroll_to_show_tool_tree: visible={self._visible_height}, tree={tree_height}, "
+               f"before={lines_before_tree}, pending={has_pending_prompt}, offset={self._scroll_offset}")
+
         return self._scroll_offset != old_offset
+
+    def _measure_content_lines(self, content: str) -> int:
+        """Count display lines for content (lines are truncated, not wrapped).
+
+        Args:
+            content: The content string (may contain newlines).
+
+        Returns:
+            Number of display lines (1 logical line = 1 display line since we truncate).
+        """
+        if not content:
+            return 0
+        # Each logical line = 1 display line (long lines are truncated with indicator)
+        return content.count('\n') + 1
 
     def _calculate_tool_tree_height(self) -> int:
         """Calculate the approximate height of the tool tree in display lines.
@@ -1758,8 +1786,9 @@ class OutputBuffer:
 
         if self._active_tools:
             if self._tools_expanded:
-                # Expanded view: header + each tool on its own line
-                height += 1  # Header line
+                # Expanded view: separator + header + each tool on its own line
+                height += 1  # Separator/hint line (e.g., "───  Ctrl+T to expand")
+                height += 1  # Header line with tool count
 
                 for tool in self._active_tools:
                     height += 1  # Tool line
@@ -1775,8 +1804,9 @@ class OutputBuffer:
                     elif tool.completed and not tool.success and tool.error_message:
                         height += 1
             else:
-                # Collapsed view: just one summary line
-                height += 1
+                # Collapsed view: separator + summary line
+                height += 1  # Separator/hint line
+                height += 1  # Summary line with tool count
 
             # Check for pending prompts (same logic for both views)
             for tool in self._active_tools:
@@ -1784,9 +1814,26 @@ class OutputBuffer:
                 if tool.permission_state == "pending":
                     height += 1  # "Permission required" header
 
-                    # Unified flow: no prompt_lines means content is in main output
+                    # Unified flow: permission_content is rendered inline under the tool
+                    if tool.permission_content:
+                        # Lines are truncated (not wrapped), so 1 logical line = 1 display line
+                        logical_lines = self._measure_content_lines(tool.permission_content)
+
+                        # Calculate max content lines dynamically (same as _render_permission_prompt)
+                        overhead = self._calculate_prompt_overhead(tool)
+                        available_space = self._visible_height - overhead
+                        max_content_lines = max(3, available_space)
+
+                        if logical_lines > max_content_lines:
+                            # Truncation will occur: lines_at_start + ellipsis (1) + lines_at_end
+                            height += max_content_lines
+                        else:
+                            # No truncation - all lines shown
+                            height += logical_lines
+                        continue
+
+                    # Legacy flow: no permission_content, use prompt_lines
                     if not tool.permission_prompt_lines:
-                        height += 1  # "(see details below)" indicator
                         continue
 
                     prompt_lines = tool.permission_prompt_lines
@@ -1841,9 +1888,26 @@ class OutputBuffer:
                 if tool.clarification_state == "pending":
                     height += 1  # header ("Clarification needed" or progress)
 
-                    # Unified flow: no prompt_lines means content is in main output
+                    # Unified flow: clarification_content is rendered inline under the tool
+                    if tool.clarification_content:
+                        # Lines are truncated (not wrapped), so 1 logical line = 1 display line
+                        logical_lines = self._measure_content_lines(tool.clarification_content)
+
+                        # Calculate max content lines dynamically (same as _render_clarification_prompt)
+                        overhead = self._calculate_prompt_overhead(tool)
+                        available_space = self._visible_height - overhead
+                        max_content_lines = max(3, available_space)
+
+                        if logical_lines > max_content_lines:
+                            # Truncation will occur: lines_at_start + ellipsis (1) + lines_at_end
+                            height += max_content_lines
+                        else:
+                            # No truncation - all lines shown
+                            height += logical_lines
+                        continue
+
+                    # Legacy flow: no clarification_content, use prompt_lines
                     if not tool.clarification_prompt_lines:
-                        height += 1  # "(see details below)" indicator
                         continue
 
                     # Previously answered questions
@@ -2120,6 +2184,137 @@ class OutputBuffer:
             scroll_down_key = self._format_key_hint("nav_down")
             output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
 
+    def _calculate_prompt_overhead(self, tool: 'ActiveToolCall') -> int:
+        """Calculate actual lines of overhead before permission/clarification content.
+
+        This includes:
+        - Context lines kept at top by scroll logic
+        - Tool tree header line
+        - Tool name lines for tools up to and including current tool
+        - Output lines for tools before current tool
+        - Prompt header line ("Permission required" or "Clarification needed")
+        """
+        overhead = 0
+
+        # Calculate context lines that scroll logic will keep at top
+        # (mirrors the logic in scroll_to_show_tool_tree)
+        lines_before_tree = sum(
+            self._get_item_display_lines(item)
+            for i, item in enumerate(self._lines)
+            if i < self._tool_placeholder_index
+        )
+        context_lines = min(1, lines_before_tree)  # Scroll keeps 1 line max for pending prompts
+        overhead += context_lines
+
+        # Tool tree header (1 line when expanded - permissions force expanded view)
+        overhead += 1
+
+        # Lines for tools up to and including the current one
+        for t in self._active_tools:
+            overhead += 1  # Tool name line
+            if t is tool:
+                break
+            # Output lines for tools before the current one
+            if t.output_lines:
+                overhead += len(t.output_lines)
+
+        # "Permission required" header line
+        overhead += 1
+
+        return overhead
+
+    def _get_content_width(self, line: str) -> int:
+        """Get the display width of actual content in a line (excluding trailing whitespace).
+
+        Uses _display_width for proper handling of wide characters and
+        JAATO_AMBIGUOUS_WIDTH for CJK terminal compatibility.
+
+        Args:
+            line: The line (may contain ANSI codes).
+
+        Returns:
+            Display width of content (excluding trailing spaces).
+        """
+        if not line:
+            return 0
+
+        # Parse ANSI codes to get plain text
+        if '\x1b[' in line:
+            text = Text.from_ansi(line)
+            plain = text.plain
+        else:
+            plain = line
+
+        # Strip trailing spaces and measure content width
+        content = plain.rstrip()
+        if not content:
+            return 0
+
+        return _display_width(content)
+
+    def _truncate_line_to_width(self, line: str, target_width: int, max_width: int, indicator: str = "▸") -> Text:
+        """Truncate a line to target_width, adding indicator if it exceeds max_width.
+
+        Uses _display_width for proper handling of wide characters and
+        JAATO_AMBIGUOUS_WIDTH for CJK terminal compatibility.
+
+        Args:
+            line: The line to truncate (may contain ANSI codes).
+            target_width: The natural width to truncate to (preserves background styling).
+            max_width: Maximum allowed width - add indicator if content exceeds this.
+            indicator: Character to show when line is truncated (default: ▸).
+
+        Returns:
+            Rich Text object, truncated to target_width with indicator if needed.
+        """
+        if not line:
+            return Text("")
+
+        # Parse ANSI codes to get styled text
+        if '\x1b[' in line:
+            text = Text.from_ansi(line)
+        else:
+            text = Text(line)
+
+        # Get actual content width (excluding trailing spaces) using _display_width
+        plain = text.plain
+        content = plain.rstrip()
+        content_width = _display_width(content) if content else 0
+
+        # Determine if we need to show truncation indicator
+        needs_indicator = content_width > max_width
+
+        # Calculate final width: truncate to target_width but leave room for indicator if needed
+        if needs_indicator:
+            final_width = min(target_width, max_width) - 1
+        else:
+            final_width = min(target_width, max_width)
+
+        if final_width <= 0:
+            return Text(indicator, style="dim") if needs_indicator else Text("")
+
+        # Truncate by character position to reach target display width
+        # We need to find the character index that corresponds to final_width display columns
+        current_width = 0
+        char_count = 0
+        for char in plain:
+            char_width = _display_width(char)
+            if current_width + char_width > final_width:
+                break
+            current_width += char_width
+            char_count += 1
+
+        # Copy the text up to char_count (preserves styling)
+        if char_count > 0:
+            result = text[:char_count]
+        else:
+            result = Text()
+
+        if needs_indicator:
+            result.append(indicator, style="dim")
+
+        return result
+
     def _render_permission_prompt(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
         """Render permission prompt for a tool awaiting approval."""
         continuation = "   " if is_last else "│  "
@@ -2134,10 +2329,62 @@ class OutputBuffer:
         # Unified flow: permission_content contains formatted content to render inline
         if tool.permission_content:
             indent = f"{prefix}{continuation}     "
-            for content_line in tool.permission_content.split('\n'):
+            indent_width = len(indent)  # 12 chars
+            content_lines = tool.permission_content.split('\n')
+
+            # Calculate available width for content
+            max_width = max(20, self._console_width - indent_width)
+
+            # Find the natural width of the content (max content width across all lines)
+            # This preserves background styling up to the widest content
+            natural_width = max((self._get_content_width(line) for line in content_lines), default=0)
+            target_width = min(natural_width, max_width)
+
+            # Calculate max content lines dynamically based on actual overhead
+            overhead = self._calculate_prompt_overhead(tool)
+            available_space = self._visible_height - overhead
+            # Minimum 3 to show something useful even on tiny terminals
+            max_content_lines = max(3, available_space)
+
+            # Log content structure for debugging
+            last_lines_preview = [line[:60] for line in content_lines[-5:]]
+            first_lines_preview = [line[:60] for line in content_lines[:3]]
+            _trace(f"_render_permission_prompt: visible_height={self._visible_height}, "
+                   f"overhead={overhead}, available_space={available_space}, "
+                   f"content_lines={len(content_lines)}, max_content_lines={max_content_lines}, "
+                   f"will_truncate={len(content_lines) > max_content_lines}")
+            _trace(f"  first_3_lines={first_lines_preview}")
+            _trace(f"  last_5_lines={last_lines_preview}")
+
+            if len(content_lines) > max_content_lines:
+                # Truncate in the middle: show beginning, ellipsis, and end
+                # Reserve more lines for the end (includes response options)
+                lines_at_start = max_content_lines // 3
+                lines_at_end = max_content_lines - lines_at_start - 1  # -1 for ellipsis line
+                hidden_count = len(content_lines) - lines_at_start - lines_at_end
+
+                # Render first N lines (truncated to natural width)
+                for content_line in content_lines[:lines_at_start]:
+                    output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
+
+                # Render ellipsis indicator
                 output.append("\n")
                 output.append(indent, style=self._style("tree_connector", "dim"))
-                output.append_text(Text.from_ansi(content_line))
+                output.append(f"... {hidden_count} lines not shown ...", style=self._style("muted", "dim italic"))
+
+                # Render last M lines (truncated to natural width, includes response options)
+                for content_line in content_lines[-lines_at_end:]:
+                    output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
+            else:
+                # Content fits, render all lines (truncated to natural width)
+                for content_line in content_lines:
+                    output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
             return
 
         # Legacy flow: no permission_content means we use prompt_lines or show minimal indicator
@@ -2214,10 +2461,46 @@ class OutputBuffer:
         # Unified flow: clarification_content contains formatted content to render inline
         if tool.clarification_content:
             indent = f"{prefix}{continuation}     "
-            for content_line in tool.clarification_content.split('\n'):
+            indent_width = len(indent)  # 12 chars
+            content_lines = tool.clarification_content.split('\n')
+
+            # Calculate available width for content
+            max_width = max(20, self._console_width - indent_width)
+
+            # Find the natural width of the content (max content width across all lines)
+            # This preserves background styling up to the widest content
+            natural_width = max((self._get_content_width(line) for line in content_lines), default=0)
+            target_width = min(natural_width, max_width)
+
+            # Calculate max content lines dynamically based on actual overhead
+            overhead = self._calculate_prompt_overhead(tool)
+            available_space = self._visible_height - overhead
+            max_content_lines = max(3, available_space)
+
+            if len(content_lines) > max_content_lines:
+                # Truncate in the middle: show beginning, ellipsis, and end
+                lines_at_start = max_content_lines // 3
+                lines_at_end = max_content_lines - lines_at_start - 1
+                hidden_count = len(content_lines) - lines_at_start - lines_at_end
+
+                for content_line in content_lines[:lines_at_start]:
+                    output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
+
                 output.append("\n")
                 output.append(indent, style=self._style("tree_connector", "dim"))
-                output.append_text(Text.from_ansi(content_line))
+                output.append(f"... {hidden_count} lines not shown ...", style=self._style("muted", "dim italic"))
+
+                for content_line in content_lines[-lines_at_end:]:
+                    output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
+            else:
+                for content_line in content_lines:
+                    output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
             return
 
         # Legacy flow: no clarification_content means we use prompt_lines or show minimal indicator
@@ -2464,6 +2747,8 @@ class OutputBuffer:
 
         # Store visible height for auto-scroll calculations
         if height:
+            if height != self._visible_height:
+                _trace(f"render: visible_height changed from {self._visible_height} to {height}")
             self._visible_height = height
 
         # Work backwards from the end, using stored display line counts
@@ -2493,6 +2778,15 @@ class OutputBuffer:
             # scroll_offset>0 means we've scrolled up, showing older content
             end_display_line = total_display_lines - self._scroll_offset
             start_display_line = max(0, end_display_line - available_for_lines)
+
+            # Log render viewport for debugging scroll issues
+            has_pending = any(
+                t.permission_state == "pending" or t.clarification_state == "pending"
+                for t in self._active_tools
+            ) if self._active_tools else False
+            if has_pending:
+                _trace(f"render: total={total_display_lines}, offset={self._scroll_offset}, "
+                       f"start={start_display_line}, end={end_display_line}, available={available_for_lines}")
 
             # Collect items that fall within the visible range
             current_display_line = 0
