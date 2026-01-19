@@ -14,9 +14,13 @@ from typing import Any, List, Optional, Tuple, Union
 
 def _trace(msg: str) -> None:
     """Write trace message to log file for debugging."""
-    trace_path = os.environ.get('JAATO_TRACE_LOG')
+    import tempfile
+    trace_path = os.environ.get(
+        'JAATO_TRACE_LOG',
+        os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
+    )
     if not trace_path:
-        return  # Tracing disabled
+        return  # Tracing disabled (empty string)
     try:
         with open(trace_path, "a") as f:
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -2639,6 +2643,15 @@ class OutputBuffer:
             # scroll_offset>0 means we've scrolled up, showing older content
             end_display_line = total_display_lines - self._scroll_offset
             start_display_line = max(0, end_display_line - available_for_lines)
+
+            # Log render viewport for debugging scroll issues
+            has_pending = any(
+                t.permission_state == "pending" or t.clarification_state == "pending"
+                for t in self._active_tools
+            ) if self._active_tools else False
+            if has_pending:
+                _trace(f"render: total={total_display_lines}, offset={self._scroll_offset}, "
+                       f"start={start_display_line}, end={end_display_line}, available={available_for_lines}")
 
             # Collect items that fall within the visible range
             current_display_line = 0
