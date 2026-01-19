@@ -1,8 +1,24 @@
 """Channels for handling user interaction in the clarification plugin."""
 
+import os
 import sys
 from abc import ABC, abstractmethod
 from typing import Any, Callable, List, Optional
+
+
+def _get_timeout(default: float) -> float:
+    """Get timeout value, allowing env var override.
+
+    JAATO_CLARIFICATION_TIMEOUT env var overrides default.
+    A value of 0 or negative means no timeout (wait forever).
+    """
+    env_timeout = os.environ.get("JAATO_CLARIFICATION_TIMEOUT")
+    if env_timeout is not None:
+        try:
+            return float(env_timeout)
+        except ValueError:
+            pass
+    return default
 
 from .models import (
     Answer,
@@ -403,11 +419,15 @@ class QueueChannel(ClarificationChannel):
         if not self._input_queue:
             return None
 
+        # Apply env var override
+        timeout = _get_timeout(timeout)
+        no_timeout = timeout <= 0  # 0 or negative means wait forever
+
         # Poll in short intervals to check for cancellation
         poll_interval = 0.1  # Check every 100ms
         elapsed = 0.0
 
-        while elapsed < timeout:
+        while no_timeout or elapsed < timeout:
             # Check for cancellation
             if self._cancel_token and hasattr(self._cancel_token, 'is_cancelled'):
                 if self._cancel_token.is_cancelled:
