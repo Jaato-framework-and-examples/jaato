@@ -26,3 +26,6 @@ lxml>=5.0.0  # Fast HTML parser backend for BeautifulSoup
 
 # Notebook plugin dependencies
 ipython-pygments-lexers>=1.0.0  # IPython syntax highlighting (handles !shell, %magic)
+
+# AST search plugin dependencies (optional)
+ast-grep-py>=0.30.0  # AST-based structural code search
