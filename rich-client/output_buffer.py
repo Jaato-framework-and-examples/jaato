@@ -174,6 +174,9 @@ class ActiveToolCall:
     permission_truncated: bool = False  # True if prompt is truncated
     permission_h_scroll: int = 0  # Horizontal scroll offset for diff viewport (stage 2)
     permission_content: Optional[str] = None  # Formatted content from unified flow (may contain ANSI codes)
+    # Persisted file output (preserved after permission resolution for display in collapsed blocks)
+    file_output: Optional[str] = None  # File content/diff that persists after tool completes
+    file_output_expanded: bool = False  # Whether to show the file output when tool is expanded
     # Clarification tracking (per-question progressive display)
     clarification_state: Optional[str] = None  # None, "pending", "resolved"
     clarification_prompt_lines: Optional[List[str]] = None  # Current question lines
@@ -1469,7 +1472,10 @@ class OutputBuffer:
             if tool.name == tool_name and tool.permission_state == "pending":
                 tool.permission_state = "granted" if granted else "denied"
                 tool.permission_method = method
-                tool.permission_content = None  # Clear permission content
+                # Preserve permission content as file output for display in collapsed blocks
+                if tool.permission_content:
+                    tool.file_output = tool.permission_content
+                    tool.permission_content = None
                 _trace(f"set_tool_permission_resolved: FOUND exact match for {tool_name}")
                 resolved = True
                 break
@@ -1480,7 +1486,10 @@ class OutputBuffer:
                 if tool.permission_state == "pending":
                     tool.permission_state = "granted" if granted else "denied"
                     tool.permission_method = method
-                    tool.permission_content = None  # Clear permission content
+                    # Preserve permission content as file output for display in collapsed blocks
+                    if tool.permission_content:
+                        tool.file_output = tool.permission_content
+                        tool.permission_content = None
                     _trace(f"set_tool_permission_resolved: FALLBACK resolved {tool.name} (requested: {tool_name})")
                     resolved = True
                     break
@@ -1998,6 +2007,18 @@ class OutputBuffer:
                 if tool.expanded and tool.clarification_summary:
                     height += 1  # header ("Answers (N)")
                     height += len(tool.clarification_summary)  # One line per Q&A pair
+                # File output content (preserved from permission prompt when expanded)
+                if tool.expanded and tool.file_output:
+                    height += 1  # header ("File content")
+                    content_lines = tool.file_output.split('\n')
+                    max_display_lines = 15  # Match _render_file_output
+                    if len(content_lines) > max_display_lines:
+                        # Truncated: start lines + ellipsis + end lines
+                        lines_at_start = max_display_lines // 3
+                        lines_at_end = max_display_lines - lines_at_start - 1
+                        height += lines_at_start + 1 + lines_at_end  # 1 for ellipsis
+                    else:
+                        height += len(content_lines)
         else:
             height += 1  # Collapsed summary line
         return height
@@ -2126,6 +2147,11 @@ class OutputBuffer:
                 show_summary = tool.expanded if self._tool_nav_active else True
                 if show_summary and tool.completed and tool.clarification_summary:
                     self._render_clarification_summary(output, tool, is_last)
+
+                # File output content (preserved from permission prompt when expanded)
+                show_file_output = tool.expanded if self._tool_nav_active else True
+                if show_file_output and tool.completed and tool.file_output:
+                    self._render_file_output(output, tool, is_last)
         else:
             # Collapsed view
             if pending_tool:
@@ -2542,6 +2568,56 @@ class OutputBuffer:
             output.append(" → ", style=self._style("muted", "dim"))
             output.append(f"{a_display}", style=self._style("clarification_answer", "green"))
 
+    def _render_file_output(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
+        """Render preserved file output content for a completed tool."""
+        if not tool.file_output:
+            return
+
+        continuation = "   " if is_last else "│  "
+        prefix = "    "
+        content_lines = tool.file_output.split('\n')
+
+        # Header - show file content indicator
+        output.append("\n")
+        output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
+        output.append("  📄 File content", style=self._style("file_output_header", "bold cyan"))
+
+        # Calculate display parameters
+        indent = f"{prefix}{continuation}     "
+        indent_width = len(indent)
+        max_width = max(20, self._console_width - indent_width)
+        natural_width = max((self._get_content_width(line) for line in content_lines), default=0)
+        target_width = min(natural_width, max_width)
+
+        # Show up to max_lines of content, with middle truncation if needed
+        max_display_lines = 15  # Show reasonable amount when expanded
+
+        if len(content_lines) > max_display_lines:
+            # Truncate in middle: show beginning, ellipsis, end
+            lines_at_start = max_display_lines // 3
+            lines_at_end = max_display_lines - lines_at_start - 1
+            hidden_count = len(content_lines) - lines_at_start - lines_at_end
+
+            for content_line in content_lines[:lines_at_start]:
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
+
+            output.append("\n")
+            output.append(indent, style=self._style("tree_connector", "dim"))
+            output.append(f"... {hidden_count} lines not shown ...", style=self._style("muted", "dim italic"))
+
+            for content_line in content_lines[-lines_at_end:]:
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
+        else:
+            # Content fits, render all lines
+            for content_line in content_lines:
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
+
     def _render_tool_block(self, block: ToolBlock, output: Text, wrap_width: int) -> None:
         """Render a ToolBlock inline in the output."""
         tool_count = len(block.tools)
@@ -2665,6 +2741,10 @@ class OutputBuffer:
                 # Clarification summary table (Q&A pairs when expanded)
                 if tool.expanded and tool.clarification_summary:
                     self._render_clarification_summary(output, tool, is_last)
+
+                # File output content (preserved from permission prompt when expanded)
+                if tool.expanded and tool.file_output:
+                    self._render_file_output(output, tool, is_last)
         else:
             # Collapsed view
             tool_summaries = []
