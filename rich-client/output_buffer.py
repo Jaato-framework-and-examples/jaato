@@ -2580,7 +2580,7 @@ class OutputBuffer:
         # Header - show file content indicator
         output.append("\n")
         output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
-        output.append("  📄 File content", style=self._style("file_output_header", "bold cyan"))
+        output.append("  📄 Content", style=self._style("file_output_header", "bold cyan"))
 
         # Calculate display parameters
         indent = f"{prefix}{continuation}     "
