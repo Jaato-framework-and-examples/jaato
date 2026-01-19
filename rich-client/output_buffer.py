@@ -36,6 +36,8 @@ from rich.text import Text
 from rich.panel import Panel
 from rich.align import Align
 
+from shared.plugins.table_formatter.plugin import _display_width
+
 # Type checking import for ThemeConfig
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -1751,6 +1753,20 @@ class OutputBuffer:
 
         return self._scroll_offset != old_offset
 
+    def _measure_content_lines(self, content: str) -> int:
+        """Count display lines for content (lines are truncated, not wrapped).
+
+        Args:
+            content: The content string (may contain newlines).
+
+        Returns:
+            Number of display lines (1 logical line = 1 display line since we truncate).
+        """
+        if not content:
+            return 0
+        # Each logical line = 1 display line (long lines are truncated with indicator)
+        return content.count('\n') + 1
+
     def _calculate_tool_tree_height(self) -> int:
         """Calculate the approximate height of the tool tree in display lines.
 
@@ -1770,8 +1786,9 @@ class OutputBuffer:
 
         if self._active_tools:
             if self._tools_expanded:
-                # Expanded view: header + each tool on its own line
-                height += 1  # Header line
+                # Expanded view: separator + header + each tool on its own line
+                height += 1  # Separator/hint line (e.g., "───  Ctrl+T to expand")
+                height += 1  # Header line with tool count
 
                 for tool in self._active_tools:
                     height += 1  # Tool line
@@ -1787,8 +1804,9 @@ class OutputBuffer:
                     elif tool.completed and not tool.success and tool.error_message:
                         height += 1
             else:
-                # Collapsed view: just one summary line
-                height += 1
+                # Collapsed view: separator + summary line
+                height += 1  # Separator/hint line
+                height += 1  # Summary line with tool count
 
             # Check for pending prompts (same logic for both views)
             for tool in self._active_tools:
@@ -1798,17 +1816,20 @@ class OutputBuffer:
 
                     # Unified flow: permission_content is rendered inline under the tool
                     if tool.permission_content:
-                        # Count lines, accounting for truncation (matches render logic)
-                        actual_lines = tool.permission_content.count('\n') + 1
+                        # Lines are truncated (not wrapped), so 1 logical line = 1 display line
+                        logical_lines = self._measure_content_lines(tool.permission_content)
+
                         # Calculate max content lines dynamically (same as _render_permission_prompt)
                         overhead = self._calculate_prompt_overhead(tool)
                         available_space = self._visible_height - overhead
                         max_content_lines = max(3, available_space)
-                        if actual_lines > max_content_lines:
-                            # Truncated: lines_at_start + ellipsis + lines_at_end
+
+                        if logical_lines > max_content_lines:
+                            # Truncation will occur: lines_at_start + ellipsis (1) + lines_at_end
                             height += max_content_lines
                         else:
-                            height += actual_lines
+                            # No truncation - all lines shown
+                            height += logical_lines
                         continue
 
                     # Legacy flow: no permission_content, use prompt_lines
@@ -1869,16 +1890,20 @@ class OutputBuffer:
 
                     # Unified flow: clarification_content is rendered inline under the tool
                     if tool.clarification_content:
-                        # Count lines, accounting for truncation (matches render logic)
-                        actual_lines = tool.clarification_content.count('\n') + 1
+                        # Lines are truncated (not wrapped), so 1 logical line = 1 display line
+                        logical_lines = self._measure_content_lines(tool.clarification_content)
+
                         # Calculate max content lines dynamically (same as _render_clarification_prompt)
                         overhead = self._calculate_prompt_overhead(tool)
                         available_space = self._visible_height - overhead
                         max_content_lines = max(3, available_space)
-                        if actual_lines > max_content_lines:
+
+                        if logical_lines > max_content_lines:
+                            # Truncation will occur: lines_at_start + ellipsis (1) + lines_at_end
                             height += max_content_lines
                         else:
-                            height += actual_lines
+                            # No truncation - all lines shown
+                            height += logical_lines
                         continue
 
                     # Legacy flow: no clarification_content, use prompt_lines
@@ -2198,6 +2223,98 @@ class OutputBuffer:
 
         return overhead
 
+    def _get_content_width(self, line: str) -> int:
+        """Get the display width of actual content in a line (excluding trailing whitespace).
+
+        Uses _display_width for proper handling of wide characters and
+        JAATO_AMBIGUOUS_WIDTH for CJK terminal compatibility.
+
+        Args:
+            line: The line (may contain ANSI codes).
+
+        Returns:
+            Display width of content (excluding trailing spaces).
+        """
+        if not line:
+            return 0
+
+        # Parse ANSI codes to get plain text
+        if '\x1b[' in line:
+            text = Text.from_ansi(line)
+            plain = text.plain
+        else:
+            plain = line
+
+        # Strip trailing spaces and measure content width
+        content = plain.rstrip()
+        if not content:
+            return 0
+
+        return _display_width(content)
+
+    def _truncate_line_to_width(self, line: str, target_width: int, max_width: int, indicator: str = "▸") -> Text:
+        """Truncate a line to target_width, adding indicator if it exceeds max_width.
+
+        Uses _display_width for proper handling of wide characters and
+        JAATO_AMBIGUOUS_WIDTH for CJK terminal compatibility.
+
+        Args:
+            line: The line to truncate (may contain ANSI codes).
+            target_width: The natural width to truncate to (preserves background styling).
+            max_width: Maximum allowed width - add indicator if content exceeds this.
+            indicator: Character to show when line is truncated (default: ▸).
+
+        Returns:
+            Rich Text object, truncated to target_width with indicator if needed.
+        """
+        if not line:
+            return Text("")
+
+        # Parse ANSI codes to get styled text
+        if '\x1b[' in line:
+            text = Text.from_ansi(line)
+        else:
+            text = Text(line)
+
+        # Get actual content width (excluding trailing spaces) using _display_width
+        plain = text.plain
+        content = plain.rstrip()
+        content_width = _display_width(content) if content else 0
+
+        # Determine if we need to show truncation indicator
+        needs_indicator = content_width > max_width
+
+        # Calculate final width: truncate to target_width but leave room for indicator if needed
+        if needs_indicator:
+            final_width = min(target_width, max_width) - 1
+        else:
+            final_width = min(target_width, max_width)
+
+        if final_width <= 0:
+            return Text(indicator, style="dim") if needs_indicator else Text("")
+
+        # Truncate by character position to reach target display width
+        # We need to find the character index that corresponds to final_width display columns
+        current_width = 0
+        char_count = 0
+        for char in plain:
+            char_width = _display_width(char)
+            if current_width + char_width > final_width:
+                break
+            current_width += char_width
+            char_count += 1
+
+        # Copy the text up to char_count (preserves styling)
+        if char_count > 0:
+            result = text[:char_count]
+        else:
+            result = Text()
+
+        if needs_indicator:
+            result.append(indicator, style="dim")
+
+        return result
+
     def _render_permission_prompt(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
         """Render permission prompt for a tool awaiting approval."""
         continuation = "   " if is_last else "│  "
@@ -2212,7 +2329,16 @@ class OutputBuffer:
         # Unified flow: permission_content contains formatted content to render inline
         if tool.permission_content:
             indent = f"{prefix}{continuation}     "
+            indent_width = len(indent)  # 12 chars
             content_lines = tool.permission_content.split('\n')
+
+            # Calculate available width for content
+            max_width = max(20, self._console_width - indent_width)
+
+            # Find the natural width of the content (max content width across all lines)
+            # This preserves background styling up to the widest content
+            natural_width = max((self._get_content_width(line) for line in content_lines), default=0)
+            target_width = min(natural_width, max_width)
 
             # Calculate max content lines dynamically based on actual overhead
             overhead = self._calculate_prompt_overhead(tool)
@@ -2237,28 +2363,28 @@ class OutputBuffer:
                 lines_at_end = max_content_lines - lines_at_start - 1  # -1 for ellipsis line
                 hidden_count = len(content_lines) - lines_at_start - lines_at_end
 
-                # Render first N lines
+                # Render first N lines (truncated to natural width)
                 for content_line in content_lines[:lines_at_start]:
                     output.append("\n")
                     output.append(indent, style=self._style("tree_connector", "dim"))
-                    output.append_text(Text.from_ansi(content_line))
+                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
 
                 # Render ellipsis indicator
                 output.append("\n")
                 output.append(indent, style=self._style("tree_connector", "dim"))
                 output.append(f"... {hidden_count} lines not shown ...", style=self._style("muted", "dim italic"))
 
-                # Render last M lines (includes response options)
+                # Render last M lines (truncated to natural width, includes response options)
                 for content_line in content_lines[-lines_at_end:]:
                     output.append("\n")
                     output.append(indent, style=self._style("tree_connector", "dim"))
-                    output.append_text(Text.from_ansi(content_line))
+                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
             else:
-                # Content fits, render all lines
+                # Content fits, render all lines (truncated to natural width)
                 for content_line in content_lines:
                     output.append("\n")
                     output.append(indent, style=self._style("tree_connector", "dim"))
-                    output.append_text(Text.from_ansi(content_line))
+                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
             return
 
         # Legacy flow: no permission_content means we use prompt_lines or show minimal indicator
@@ -2335,7 +2461,16 @@ class OutputBuffer:
         # Unified flow: clarification_content contains formatted content to render inline
         if tool.clarification_content:
             indent = f"{prefix}{continuation}     "
+            indent_width = len(indent)  # 12 chars
             content_lines = tool.clarification_content.split('\n')
+
+            # Calculate available width for content
+            max_width = max(20, self._console_width - indent_width)
+
+            # Find the natural width of the content (max content width across all lines)
+            # This preserves background styling up to the widest content
+            natural_width = max((self._get_content_width(line) for line in content_lines), default=0)
+            target_width = min(natural_width, max_width)
 
             # Calculate max content lines dynamically based on actual overhead
             overhead = self._calculate_prompt_overhead(tool)
@@ -2351,7 +2486,7 @@ class OutputBuffer:
                 for content_line in content_lines[:lines_at_start]:
                     output.append("\n")
                     output.append(indent, style=self._style("tree_connector", "dim"))
-                    output.append_text(Text.from_ansi(content_line))
+                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
 
                 output.append("\n")
                 output.append(indent, style=self._style("tree_connector", "dim"))
@@ -2360,12 +2495,12 @@ class OutputBuffer:
                 for content_line in content_lines[-lines_at_end:]:
                     output.append("\n")
                     output.append(indent, style=self._style("tree_connector", "dim"))
-                    output.append_text(Text.from_ansi(content_line))
+                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
             else:
                 for content_line in content_lines:
                     output.append("\n")
                     output.append(indent, style=self._style("tree_connector", "dim"))
-                    output.append_text(Text.from_ansi(content_line))
+                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
             return
 
         # Legacy flow: no clarification_content means we use prompt_lines or show minimal indicator
