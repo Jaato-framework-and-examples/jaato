@@ -95,6 +95,8 @@
     "tool_unselected": {"dim": true},
     "tool_indicator": {"fg": "primary", "dim": true},
 
+    "file_output_header": {"fg": "primary", "bold": true},
+
     "permission_prompt": {"fg": "warning", "bold": true},
     "permission_text": {"fg": "primary"},
     "permission_denied": {"fg": "error", "dim": true},
