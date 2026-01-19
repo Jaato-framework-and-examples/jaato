@@ -374,6 +374,9 @@ class RichClient:
         # - Tool configuration
         # - Session management
 
+        # Load env vars for client-side components (OutputBuffer tracing, etc.)
+        load_dotenv(self.env_file)
+
         # We just need to set up local UI components
         self._model_name = self._backend.model_name
         self._model_provider = self._backend.provider_name
