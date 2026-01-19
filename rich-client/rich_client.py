@@ -69,6 +69,41 @@ from theme import load_theme, list_available_themes
 from backend import Backend, DirectBackend, IPCBackend
 
 
+def _capture_vision(
+    buffer,
+    vision_capture: VisionCapture,
+    display_height: int,
+    display_width: int,
+    terminal_theme,
+    context: CaptureContext,
+    turn_index: int,
+    agent_id: Optional[str],
+):
+    """Core vision capture logic shared between direct and IPC modes.
+
+    Args:
+        buffer: Output buffer to render.
+        vision_capture: VisionCapture instance.
+        display_height: Terminal height for 1:1 capture.
+        display_width: Terminal width for 1:1 capture.
+        terminal_theme: Theme for export styling.
+        context: What triggered the capture.
+        turn_index: Current turn index.
+        agent_id: Selected agent ID.
+
+    Returns:
+        CaptureResult on success, None on failure.
+    """
+    panel = buffer.render_panel(height=display_height, width=display_width)
+    return vision_capture.capture(
+        panel,
+        context=context,
+        turn_index=turn_index,
+        agent_id=agent_id,
+        terminal_theme=terminal_theme,
+    )
+
+
 class RichClient:
     """Rich TUI client with sticky plan display.
 
@@ -1812,21 +1847,16 @@ class RichClient:
             buffer = self._display._output_buffer
 
         try:
-            panel = buffer.render_panel(
-                height=50,
-                width=self._display._width
-            )
-            # Get terminal theme from display's theme config for consistent export styling
-            terminal_theme = self._display._theme.to_terminal_theme()
-            result = self._vision_capture.capture(
-                panel,
+            return _capture_vision(
+                buffer=buffer,
+                vision_capture=self._vision_capture,
+                display_height=self._display._height,
+                display_width=self._display._width,
+                terminal_theme=self._display._theme.to_terminal_theme(),
                 context=context,
                 turn_index=len(self._original_inputs),
                 agent_id=self._agent_registry._selected_agent_id,
-                terminal_theme=terminal_theme,
             )
-            return result
-
         except Exception as e:
             self._display.show_lines([
                 ("[Screenshot failed]", "system_error"),
@@ -1863,6 +1893,7 @@ class RichClient:
             self._display.add_system_message("  screenshot format F     Set output format (svg, png, html)", "dim")
             self._display.add_system_message("  screenshot auto         Toggle auto-capture on turn end", "dim")
             self._display.add_system_message("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim")
+            self._display.add_system_message("  screenshot delay N      Capture once after N seconds (default: 5)", "dim")
             self._display.add_system_message("  screenshot help         Show this help", "dim")
             return
 
@@ -1938,6 +1969,35 @@ class RichClient:
             except ValueError:
                 self._display.add_system_message(f"[Invalid interval: {interval_str}]", "system_error")
                 self._display.add_system_message("  Usage: screenshot interval <milliseconds>", "dim")
+            return
+
+        if subcommand == 'delay':
+            # One-shot delayed capture
+            self._init_vision_capture()
+            delay_str = parts[2] if len(parts) > 2 else ""
+            try:
+                delay_sec = float(delay_str) if delay_str else 5.0
+                if delay_sec <= 0:
+                    self._display.add_system_message("[Delay must be positive]", "system_error")
+                    return
+
+                import threading
+                from shared.plugins.vision_capture.protocol import CaptureContext
+
+                def delayed_capture():
+                    result = self._do_vision_capture(CaptureContext.USER_REQUESTED)
+                    if result and result.success:
+                        self._display.add_system_message(f"Delayed screenshot captured: {result.path}", "cyan")
+                    elif result and not result.success:
+                        self._display.add_system_message(f"[Delayed screenshot failed: {result.error}]", "system_error")
+
+                timer = threading.Timer(delay_sec, delayed_capture)
+                timer.daemon = True
+                timer.start()
+                self._display.add_system_message(f"Screenshot scheduled in {delay_sec}s", "cyan")
+            except ValueError:
+                self._display.add_system_message(f"[Invalid delay: {delay_str}]", "system_error")
+                self._display.add_system_message("  Usage: screenshot delay <seconds>", "dim")
             return
 
         if subcommand == 'nosend':
@@ -2758,6 +2818,7 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
         display.add_system_message("  screenshot format F     Set output format (svg, png, html)", "dim")
         display.add_system_message("  screenshot auto         Toggle auto-capture on turn end", "dim")
         display.add_system_message("  screenshot interval N   Capture every N ms during streaming (0=off)", "dim")
+        display.add_system_message("  screenshot delay N      Capture once after N seconds (default: 5)", "dim")
         display.add_system_message("  screenshot help         Show this help", "dim")
         return
 
@@ -2846,6 +2907,33 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
             display.add_system_message("  Usage: screenshot interval <milliseconds>", "dim")
         return
 
+    if subcommand == 'delay':
+        # One-shot delayed capture
+        delay_str = parts[2] if len(parts) > 2 else ""
+        try:
+            delay_sec = float(delay_str) if delay_str else 5.0
+            if delay_sec <= 0:
+                display.add_system_message("[Delay must be positive]", "system_error")
+                return
+
+            import threading
+
+            def delayed_capture():
+                result = _do_vision_capture_ipc(display, agent_registry, CaptureContext.USER_REQUESTED)
+                if result and result.success:
+                    display.add_system_message(f"Delayed screenshot captured: {result.path}", "cyan")
+                elif result and not result.success:
+                    display.add_system_message(f"[Delayed screenshot failed: {result.error}]", "system_error")
+
+            timer = threading.Timer(delay_sec, delayed_capture)
+            timer.daemon = True
+            timer.start()
+            display.add_system_message(f"Screenshot scheduled in {delay_sec}s", "cyan")
+        except ValueError:
+            display.add_system_message(f"[Invalid delay: {delay_str}]", "system_error")
+            display.add_system_message("  Usage: screenshot delay <seconds>", "dim")
+        return
+
     if subcommand == 'nosend':
         # Capture without sending hint to model
         result = _do_vision_capture_ipc(display, agent_registry, CaptureContext.USER_REQUESTED)
@@ -2905,8 +2993,6 @@ async def handle_screenshot_command_ipc(user_input: str, display, agent_registry
 
 def _do_vision_capture_ipc(display, agent_registry, context):
     """Perform a vision capture in IPC mode."""
-    from shared.plugins.vision_capture.protocol import CaptureContext
-
     try:
         vision_capture, _ = _get_ipc_vision_state(display)
 
@@ -2919,24 +3005,24 @@ def _do_vision_capture_ipc(display, agent_registry, context):
             ])
             return None
 
-        panel = buffer.render_panel(
-            height=50,
-            width=getattr(display, '_width', 120)
-        )
-        # Get terminal theme from display's theme config for consistent export styling
+        # Get terminal theme if available
         terminal_theme = None
         if hasattr(display, '_theme') and display._theme:
             terminal_theme = display._theme.to_terminal_theme()
-        result = vision_capture.capture(
-            panel,
+
+        result = _capture_vision(
+            buffer=buffer,
+            vision_capture=vision_capture,
+            display_height=getattr(display, '_height', 50),
+            display_width=getattr(display, '_width', 120),
+            terminal_theme=terminal_theme,
             context=context,
             turn_index=0,
             agent_id=agent_registry.get_selected_agent_id(),
-            terminal_theme=terminal_theme,
         )
 
         # For auto/periodic captures, just show a brief message
-        if context in (CaptureContext.TURN_END, CaptureContext.PERIODIC) and result.success:
+        if context in (CaptureContext.TURN_END, CaptureContext.PERIODIC) and result and result.success:
             display.add_system_message(f"Auto-captured: {result.path}", style="hint")
 
         return result
