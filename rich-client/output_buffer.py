@@ -1687,10 +1687,10 @@ class OutputBuffer:
         return self._scroll_offset == 0
 
     def scroll_to_show_tool_tree(self) -> bool:
-        """Scroll to show the active tool tree, prioritizing its top.
+        """Scroll to show the active tool tree.
 
-        When the tool tree is taller than the visible area, shows from the top.
-        When it fits, scrolls so the entire tree is visible.
+        When there's a pending permission/clarification, prioritizes showing the
+        bottom of the tree (where response options are). Otherwise shows from top.
 
         Returns:
             True if scroll position changed.
@@ -1699,6 +1699,12 @@ class OutputBuffer:
             return False
 
         old_offset = self._scroll_offset
+
+        # Check if any tool has a pending prompt (permission or clarification)
+        has_pending_prompt = any(
+            tool.permission_state == "pending" or tool.clarification_state == "pending"
+            for tool in self._active_tools
+        )
 
         # Calculate total display lines before the tool tree
         # Note: _lines is a deque which doesn't support slicing, so we iterate with enumerate
@@ -1721,21 +1727,26 @@ class OutputBuffer:
         # Total content height
         total_height = lines_before_tree + tree_height + lines_after_tree
 
-        # We want to show the tool tree starting from its top
         # scroll_offset = how many lines from the bottom to skip
-        # To show from line X, scroll_offset = total_height - X - visible_height
-        # We want to show starting at lines_before_tree (top of tree)
+        # To show ending at line X, scroll_offset = total_height - X
 
-        # If tree fits in visible area, show it entirely
-        # If tree is taller, show from the top of the tree
         if tree_height <= self._visible_height:
-            # Show entire tree - scroll so bottom of tree is visible
-            # with some margin for content after it
+            # Tree fits - show entire tree with some context before it
             tree_bottom = lines_before_tree + tree_height
             self._scroll_offset = max(0, total_height - tree_bottom - max(0, self._visible_height - tree_height))
+        elif has_pending_prompt:
+            # Tree is taller AND has pending prompt - prioritize showing BOTTOM
+            # (where response options are), keeping just a few lines of context at top
+            context_lines = min(3, lines_before_tree)  # Keep up to 3 lines of context
+            tree_bottom = lines_before_tree + tree_height
+            # Scroll so bottom of tree is visible, with minimal context
+            self._scroll_offset = max(0, total_height - tree_bottom - context_lines)
         else:
-            # Tree is taller than visible - show from top of tree
+            # Tree is taller, no pending prompt - show from top of tree
             self._scroll_offset = max(0, total_height - lines_before_tree - self._visible_height)
+
+        _trace(f"scroll_to_show_tool_tree: visible={self._visible_height}, tree={tree_height}, "
+               f"before={lines_before_tree}, pending={has_pending_prompt}, offset={self._scroll_offset}")
 
         return self._scroll_offset != old_offset
 
@@ -1788,7 +1799,7 @@ class OutputBuffer:
                     if tool.permission_content:
                         # Count lines, accounting for truncation (matches render logic)
                         actual_lines = tool.permission_content.count('\n') + 1
-                        max_content_lines = min(22, max(5, self._visible_height - 2))
+                        max_content_lines = min(25, max(8, self._visible_height - 4))
                         if actual_lines > max_content_lines:
                             # Truncated: lines_at_start + ellipsis + lines_at_end
                             height += max_content_lines
@@ -1856,7 +1867,7 @@ class OutputBuffer:
                     if tool.clarification_content:
                         # Count lines, accounting for truncation (matches render logic)
                         actual_lines = tool.clarification_content.count('\n') + 1
-                        max_content_lines = min(22, max(5, self._visible_height - 2))
+                        max_content_lines = min(25, max(8, self._visible_height - 4))
                         if actual_lines > max_content_lines:
                             height += max_content_lines
                         else:
@@ -2158,11 +2169,12 @@ class OutputBuffer:
             content_lines = tool.permission_content.split('\n')
 
             # Calculate max lines for permission content.
-            # Must fit within visible_height, accounting for header line.
-            # - Cap at visible_height - 2 (1 for header, 1 for margin)
-            # - Also cap at 22 for very large terminals
-            # - Minimum of 5 lines to show something useful
-            max_content_lines = min(22, max(5, self._visible_height - 2))
+            # With improved scroll logic that prioritizes showing permission content,
+            # we can use most of visible_height minus small overhead:
+            # - 3 lines for tool tree header/tool line/permission header
+            # - 1 line margin
+            # Cap at 25 for readability, minimum 8 to show useful context
+            max_content_lines = min(25, max(8, self._visible_height - 4))
 
             # Log last 3 lines to verify response options are in content
             last_lines_preview = [line[:50] for line in content_lines[-3:]]
@@ -2279,7 +2291,7 @@ class OutputBuffer:
             content_lines = tool.clarification_content.split('\n')
 
             # Calculate max lines (same as permission content)
-            max_content_lines = min(22, max(5, self._visible_height - 2))
+            max_content_lines = min(25, max(8, self._visible_height - 4))
 
             if len(content_lines) > max_content_lines:
                 # Truncate in the middle: show beginning, ellipsis, and end
