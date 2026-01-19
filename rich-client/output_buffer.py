@@ -1799,7 +1799,10 @@ class OutputBuffer:
                     if tool.permission_content:
                         # Count lines, accounting for truncation (matches render logic)
                         actual_lines = tool.permission_content.count('\n') + 1
-                        max_content_lines = max(3, self._visible_height - 2)
+                        # Calculate max content lines dynamically (same as _render_permission_prompt)
+                        overhead = self._calculate_prompt_overhead(tool)
+                        available_space = self._visible_height - overhead
+                        max_content_lines = max(3, available_space)
                         if actual_lines > max_content_lines:
                             # Truncated: lines_at_start + ellipsis + lines_at_end
                             height += max_content_lines
@@ -1867,7 +1870,10 @@ class OutputBuffer:
                     if tool.clarification_content:
                         # Count lines, accounting for truncation (matches render logic)
                         actual_lines = tool.clarification_content.count('\n') + 1
-                        max_content_lines = max(3, self._visible_height - 2)
+                        # Calculate max content lines dynamically (same as _render_clarification_prompt)
+                        overhead = self._calculate_prompt_overhead(tool)
+                        available_space = self._visible_height - overhead
+                        max_content_lines = max(3, available_space)
                         if actual_lines > max_content_lines:
                             height += max_content_lines
                         else:
@@ -2152,6 +2158,45 @@ class OutputBuffer:
             scroll_down_key = self._format_key_hint("nav_down")
             output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
 
+    def _calculate_prompt_overhead(self, tool: 'ActiveToolCall') -> int:
+        """Calculate actual lines of overhead before permission/clarification content.
+
+        This includes:
+        - Context lines kept at top by scroll logic
+        - Tool tree header line
+        - Tool name lines for tools up to and including current tool
+        - Output lines for tools before current tool
+        - Prompt header line ("Permission required" or "Clarification needed")
+        """
+        overhead = 0
+
+        # Calculate context lines that scroll logic will keep at top
+        # (mirrors the logic in scroll_to_show_tool_tree)
+        lines_before_tree = sum(
+            self._get_item_display_lines(item)
+            for i, item in enumerate(self._lines)
+            if i < self._tool_placeholder_index
+        )
+        context_lines = min(1, lines_before_tree)  # Scroll keeps 1 line max for pending prompts
+        overhead += context_lines
+
+        # Tool tree header (1 line when expanded - permissions force expanded view)
+        overhead += 1
+
+        # Lines for tools up to and including the current one
+        for t in self._active_tools:
+            overhead += 1  # Tool name line
+            if t is tool:
+                break
+            # Output lines for tools before the current one
+            if t.output_lines:
+                overhead += len(t.output_lines)
+
+        # "Permission required" header line
+        overhead += 1
+
+        return overhead
+
     def _render_permission_prompt(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
         """Render permission prompt for a tool awaiting approval."""
         continuation = "   " if is_last else "│  "
@@ -2168,21 +2213,21 @@ class OutputBuffer:
             indent = f"{prefix}{continuation}     "
             content_lines = tool.permission_content.split('\n')
 
-            # Calculate max lines for permission content.
-            # Goal: maximize content, minimize truncation.
-            # Scroll will push model text to top (keeping ~1 line context).
-            # So we can use almost all of visible_height:
-            # - 1 line for context at top
-            # - 1 line for "Permission required" header
+            # Calculate max content lines dynamically based on actual overhead
+            overhead = self._calculate_prompt_overhead(tool)
+            available_space = self._visible_height - overhead
             # Minimum 3 to show something useful even on tiny terminals
-            max_content_lines = max(3, self._visible_height - 2)
+            max_content_lines = max(3, available_space)
 
-            # Log last 3 lines to verify response options are in content
-            last_lines_preview = [line[:50] for line in content_lines[-3:]]
+            # Log content structure for debugging
+            last_lines_preview = [line[:60] for line in content_lines[-5:]]
+            first_lines_preview = [line[:60] for line in content_lines[:3]]
             _trace(f"_render_permission_prompt: visible_height={self._visible_height}, "
+                   f"overhead={overhead}, available_space={available_space}, "
                    f"content_lines={len(content_lines)}, max_content_lines={max_content_lines}, "
-                   f"will_truncate={len(content_lines) > max_content_lines}, "
-                   f"last_3_lines={last_lines_preview}")
+                   f"will_truncate={len(content_lines) > max_content_lines}")
+            _trace(f"  first_3_lines={first_lines_preview}")
+            _trace(f"  last_5_lines={last_lines_preview}")
 
             if len(content_lines) > max_content_lines:
                 # Truncate in the middle: show beginning, ellipsis, and end
@@ -2291,8 +2336,10 @@ class OutputBuffer:
             indent = f"{prefix}{continuation}     "
             content_lines = tool.clarification_content.split('\n')
 
-            # Calculate max lines (same as permission content)
-            max_content_lines = max(3, self._visible_height - 2)
+            # Calculate max content lines dynamically based on actual overhead
+            overhead = self._calculate_prompt_overhead(tool)
+            available_space = self._visible_height - overhead
+            max_content_lines = max(3, available_space)
 
             if len(content_lines) > max_content_lines:
                 # Truncate in the middle: show beginning, ellipsis, and end
