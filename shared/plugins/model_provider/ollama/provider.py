@@ -139,6 +139,12 @@ class OllamaProvider(AnthropicProvider):
         self._enable_caching = False
         self._enable_thinking = False
 
+        # Ollama doesn't use OAuth/PKCE - set to disabled
+        self._use_pkce = False
+        self._pkce_access_token = None
+        self._oauth_token = None
+        self._api_key = "ollama"  # Dummy value, Ollama ignores it
+
         # Create the client
         self._client = self._create_client()
 
@@ -253,6 +259,36 @@ class OllamaProvider(AnthropicProvider):
         if self._context_length_override:
             return self._context_length_override
         return DEFAULT_CONTEXT_LIMIT
+
+    def _handle_api_error(self, error: Exception) -> None:
+        """Handle API errors with Ollama-specific interpretation.
+
+        Overrides parent to avoid misinterpreting Ollama errors.
+        For example, a 404 from Ollama likely means the Anthropic API
+        endpoint isn't available, not that the model wasn't found.
+        """
+        error_str = str(error).lower()
+
+        # Check for Ollama-specific memory errors
+        if "system memory" in error_str or "not enough memory" in error_str:
+            raise RuntimeError(
+                f"Ollama: Not enough memory to load model '{self._model_name}'. "
+                f"Try a smaller model or increase available memory.\n"
+                f"Original error: {error}"
+            ) from error
+
+        # Check for 404 - likely means Anthropic API not supported
+        if "404" in error_str or "page not found" in error_str:
+            raise RuntimeError(
+                f"Ollama returned 404. This may indicate:\n"
+                f"  1. Ollama version < 0.14.0 (Anthropic API requires 0.14.0+)\n"
+                f"  2. The Anthropic API endpoint is not enabled\n"
+                f"Check your Ollama version: curl {self._host}/api/version\n"
+                f"Original error: {error}"
+            ) from error
+
+        # For other errors, use parent's handling
+        super()._handle_api_error(error)
 
     @staticmethod
     def login(on_message=None) -> None:
