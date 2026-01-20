@@ -309,8 +309,12 @@ class LocalJupyterBackend(NotebookBackend):
 
         return variables
 
-    def reset_notebook(self, notebook_id: str) -> None:
-        """Reset notebook by clearing its namespace."""
+    def reset_notebook(self, notebook_id: str) -> str:
+        """Reset notebook by clearing its namespace.
+
+        Returns the same notebook_id since local backend doesn't need
+        to regenerate IDs (no remote persistence).
+        """
         if notebook_id in self._notebooks:
             self._notebooks[notebook_id] = {
                 '__name__': '__main__',
@@ -320,6 +324,7 @@ class LocalJupyterBackend(NotebookBackend):
             if notebook_id in self._notebook_info:
                 self._notebook_info[notebook_id].variables = {}
                 self._notebook_info[notebook_id].execution_count = 0
+        return notebook_id
 
     def delete_notebook(self, notebook_id: str) -> None:
         """Delete a notebook."""
