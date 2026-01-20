@@ -1797,10 +1797,11 @@ class JaatoServer:
         """
         if not self._jaato:
             return []
-        # Get model completions and extract just the names
+        # Get model completions for the "select" subcommand to get actual model names
+        # (calling with [] returns subcommands like "list", "select" instead)
         try:
-            completions = self._jaato.get_model_completions([])
-            return [c[0] if isinstance(c, tuple) else str(c) for c in completions]
+            completions = self._jaato.get_model_completions(["select"])
+            return [c.value if hasattr(c, 'value') else str(c) for c in completions]
         except Exception:
             return []
 

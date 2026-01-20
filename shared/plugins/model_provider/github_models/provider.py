@@ -358,12 +358,41 @@ class GitHubModelsProvider:
     # ==================== Connection ====================
 
     def connect(self, model: str) -> None:
-        """Set the model to use.
+        """Set the model to use and verify it responds.
 
         Args:
             model: Model ID (e.g., 'openai/gpt-4o', 'anthropic/claude-3.5-sonnet').
+
+        Raises:
+            ModelNotFoundError: Model doesn't exist or is not accessible.
         """
         self._model_name = model
+
+        # Verify model can actually respond
+        self._verify_model_responds()
+
+    def _verify_model_responds(self) -> None:
+        """Verify the model can actually respond.
+
+        Sends a minimal test message to catch issues like:
+        - Invalid model name
+        - Model access restrictions
+        - Organization disabled GitHub Models
+        """
+        if not self._client or not self._model_name:
+            return  # Will fail later with clear error
+
+        try:
+            # Send minimal request to verify model responds
+            messages = [get_models().UserMessage(content="hi")]
+            self._client.complete(
+                model=self._model_name,
+                messages=messages,
+                max_tokens=1,
+            )
+        except Exception as e:
+            # Use our error handler to provide helpful messages
+            self._handle_api_error(e)
 
     @property
     def is_connected(self) -> bool:
