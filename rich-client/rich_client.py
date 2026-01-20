@@ -3051,6 +3051,9 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         single_prompt: Optional single prompt (non-interactive mode).
         new_session: Whether to start a new session instead of resuming default.
     """
+    # Load env vars for client-side components (OutputBuffer tracing, etc.)
+    load_dotenv(env_file)
+
     import asyncio
     from ipc_client import IPCClient
     from server.events import (

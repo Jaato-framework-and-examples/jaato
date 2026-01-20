@@ -15,13 +15,9 @@ from typing import Any, List, Optional, Tuple, Union
 
 def _trace(msg: str) -> None:
     """Write trace message to log file for debugging."""
-    import tempfile
-    trace_path = os.environ.get(
-        'JAATO_TRACE_LOG',
-        os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
-    )
+    trace_path = os.environ.get('JAATO_TRACE_LOG')
     if not trace_path:
-        return  # Tracing disabled (empty string)
+        return  # Tracing disabled
     try:
         with open(trace_path, "a") as f:
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -850,10 +846,12 @@ class OutputBuffer:
         Returns:
             True if now expanded, False if now collapsed.
         """
+        old = self._tools_expanded
         self._tools_expanded = not self._tools_expanded
         # Clear saved state so user's manual toggle is respected and not overwritten
         # by the restore logic when permission/clarification resolves
         self._tools_expanded_before_prompt = None
+        _trace(f"toggle_tools_expanded: {old} -> {self._tools_expanded}, cleared before_prompt")
         return self._tools_expanded
 
     @property
@@ -1278,10 +1276,20 @@ class OutputBuffer:
         import copy
         tools_copy = copy.deepcopy(self._active_tools)
 
+        # Determine expansion state for the ToolBlock:
+        # - If _tools_expanded_before_prompt is set, it means expansion was system-forced
+        #   (permission/clarification prompt), so use the saved user preference
+        # - If None, user manually toggled (or never had prompt), so use current state
+        if self._tools_expanded_before_prompt is not None:
+            block_expanded = self._tools_expanded_before_prompt
+        else:
+            block_expanded = self._tools_expanded
+
         # Create ToolBlock with the completed tools
+        _trace(f"_finalize_completed_tools: creating ToolBlock with expanded={block_expanded}, _before_prompt={self._tools_expanded_before_prompt}, current={self._tools_expanded}")
         tool_block = ToolBlock(
             tools=tools_copy,
-            expanded=self._tools_expanded,
+            expanded=block_expanded,
             selected_index=None
         )
 
@@ -1343,20 +1351,28 @@ class OutputBuffer:
         rather than restoring the state and then having finalization capture
         the restored state.
         """
+        _trace(f"_maybe_restore_expanded_state: active_tools={len(self._active_tools)}, expanded={self._tools_expanded}, before_prompt={self._tools_expanded_before_prompt}")
+
         # Check if any tool still has a pending prompt
         for tool in self._active_tools:
             if tool.permission_state == "pending" or tool.clarification_state == "pending":
+                _trace(f"_maybe_restore_expanded_state: skip - tool {tool.name} has pending prompt")
                 return  # Still have pending prompts, keep expanded
 
         # Don't restore while tools are still active - let finalization capture the visible state
         # The restore will happen after finalization clears _active_tools
         if self._active_tools:
+            _trace(f"_maybe_restore_expanded_state: skip restore - {len(self._active_tools)} active tools remaining")
             return
 
         # No active tools and no pending prompts, restore saved state if we have one
         if self._tools_expanded_before_prompt is not None:
+            old = self._tools_expanded
             self._tools_expanded = self._tools_expanded_before_prompt
+            _trace(f"_maybe_restore_expanded_state: RESTORED {old} -> {self._tools_expanded}")
             self._tools_expanded_before_prompt = None
+        else:
+            _trace(f"_maybe_restore_expanded_state: no saved state to restore")
 
     def set_tool_permission_pending(
         self,
@@ -1516,10 +1532,8 @@ class OutputBuffer:
             if tool.name == tool_name and tool.permission_state == "pending":
                 tool.permission_state = "granted" if granted else "denied"
                 tool.permission_method = method
-                # Preserve permission content as file output lines for display in collapsed blocks
-                if tool.permission_content:
-                    tool.file_output_lines = tool.permission_content.split('\n')
-                    tool.permission_content = None
+                # Clear permission content - it was just for the prompt display, not permanent storage
+                tool.permission_content = None
                 _trace(f"set_tool_permission_resolved: FOUND exact match for {tool_name}")
                 resolved = True
                 break
@@ -1530,10 +1544,8 @@ class OutputBuffer:
                 if tool.permission_state == "pending":
                     tool.permission_state = "granted" if granted else "denied"
                     tool.permission_method = method
-                    # Preserve permission content as file output lines for display in collapsed blocks
-                    if tool.permission_content:
-                        tool.file_output_lines = tool.permission_content.split('\n')
-                        tool.permission_content = None
+                    # Clear permission content - it was just for the prompt display, not permanent storage
+                    tool.permission_content = None
                     _trace(f"set_tool_permission_resolved: FALLBACK resolved {tool.name} (requested: {tool_name})")
                     resolved = True
                     break
@@ -2980,6 +2992,7 @@ class OutputBuffer:
     def _render_tool_block(self, block: ToolBlock, output: Text, wrap_width: int) -> None:
         """Render a ToolBlock inline in the output."""
         tool_count = len(block.tools)
+        _trace(f"_render_tool_block: block.expanded={block.expanded}, tool_count={tool_count}")
 
         # Separator
         output.append("  ───", style=self._style("separator", "dim"))
@@ -3026,11 +3039,16 @@ class OutputBuffer:
                 status_icon = "✓" if tool.success else "✗"
                 status_style = self._style("tool_success", "green") if tool.success else self._style("tool_error", "red")
 
+                # Determine if tool output should be shown:
+                # - In nav mode: respect tool.expanded (user can toggle individual tools)
+                # - Not in nav mode: always show output (consistent with active tools behavior)
+                show_tool_output = tool.expanded if self._tool_nav_active else True
+
                 # Expand indicator for tool output (only if tool has output or file content)
                 has_output = (tool.output_lines and len(tool.output_lines) > 0) or \
                              (tool.file_output_lines and len(tool.file_output_lines) > 0)
                 if has_output:
-                    expand_icon = "▾" if tool.expanded else "▸"
+                    expand_icon = "▾" if show_tool_output else "▸"
                 else:
                     expand_icon = " "
 
@@ -3058,8 +3076,8 @@ class OutputBuffer:
                 if tool.duration_seconds is not None:
                     output.append(f" ({tool.duration_seconds:.1f}s)", style=self._style("tool_duration", "dim"))
 
-                # Expanded output - use shared rendering method with smart truncation
-                if tool.expanded and tool.output_lines:
+                # Tool output - use shared rendering method with smart truncation
+                if show_tool_output and tool.output_lines:
                     self._render_tool_output_lines(output, tool, is_last)
 
                 # Error message
@@ -3068,12 +3086,12 @@ class OutputBuffer:
                     continuation = "   " if is_last else "│  "
                     output.append(f"    {continuation}   ⚠ {tool.error_message}", style=self._style("tool_error", "red dim"))
 
-                # Clarification summary table (Q&A pairs when expanded)
-                if tool.expanded and tool.clarification_summary:
+                # Clarification summary table (Q&A pairs)
+                if show_tool_output and tool.clarification_summary:
                     self._render_clarification_summary(output, tool, is_last)
 
-                # File output content (preserved from permission prompt when expanded)
-                if tool.expanded and tool.file_output_lines:
+                # File output content (preserved from permission prompt)
+                if show_tool_output and tool.file_output_lines:
                     self._render_file_output(output, tool, is_last)
         else:
             # Collapsed view

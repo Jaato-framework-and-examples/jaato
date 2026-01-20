@@ -748,24 +748,25 @@ class TestToolBlockExpansionPersistence:
         # The block should be collapsed (user's explicit choice during execution)
         assert tool_blocks[0].expanded is False, "ToolBlock should be collapsed per user's choice"
 
-    def test_permission_forced_expansion_persists_without_user_toggle(self):
-        """If user doesn't toggle after permission forces expansion, it should persist.
+    def test_system_forced_expansion_uses_original_preference(self):
+        """System-forced expansion (permission) should use user's original preference in ToolBlock.
 
-        This tests that when permission forces expansion and user doesn't touch it,
-        the expanded state is captured in the ToolBlock (what you see is what you get).
+        When expansion is forced by the system (permission/clarification prompt) and user
+        doesn't manually toggle, the finalized ToolBlock should use the user's ORIGINAL
+        preference (before the system forced expansion), not the forced state.
 
-        The visible state during execution is preserved in the ToolBlock, then
-        _tools_expanded is restored to the original preference for future tools.
+        This ensures that temporary UI changes for prompts don't override user preferences.
         """
-        # Start collapsed
+        # Start collapsed (user's preference)
         assert self.buffer._tools_expanded is False
 
         # Add a tool
         self.buffer.add_active_tool("dangerousTool", {"cmd": "rm"}, call_id="call_1")
 
-        # Permission pending - forces expansion
+        # Permission pending - forces expansion, saves original preference
         self.buffer.set_tool_permission_pending("dangerousTool", ["Allow?"])
         assert self.buffer._tools_expanded is True, "Should be forced to expanded"
+        assert self.buffer._tools_expanded_before_prompt is False, "Should save user's original preference"
 
         # Permission resolves (user approves, doesn't toggle)
         self.buffer.set_tool_permission_resolved("dangerousTool", "granted", "user_approved")
@@ -783,9 +784,9 @@ class TestToolBlockExpansionPersistence:
         tool_blocks = [item for item in self.buffer._lines if isinstance(item, ToolBlock)]
         assert len(tool_blocks) == 1, "Expected 1 tool block"
 
-        # The ToolBlock captures the visible state (expanded) during execution
-        assert tool_blocks[0].expanded is True, (
-            "ToolBlock should be expanded (captures visible state during execution)"
+        # The ToolBlock uses user's ORIGINAL preference (collapsed), not the forced state
+        assert tool_blocks[0].expanded is False, (
+            "ToolBlock should use user's original preference (collapsed), not system-forced state"
         )
 
         # After finalization, _tools_expanded is restored to original preference
