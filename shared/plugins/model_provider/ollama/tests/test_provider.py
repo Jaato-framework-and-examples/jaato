@@ -29,7 +29,8 @@ class TestInitialization:
         assert provider._host == DEFAULT_OLLAMA_HOST
         mock_anthropic.assert_called_once()
         call_kwargs = mock_anthropic.call_args.kwargs
-        assert call_kwargs["base_url"] == f"{DEFAULT_OLLAMA_HOST}/v1"
+        # SDK adds /v1/messages to base_url, so we pass host directly
+        assert call_kwargs["base_url"] == DEFAULT_OLLAMA_HOST
         assert call_kwargs["api_key"] == "ollama"
 
     @patch('requests.get')
@@ -44,7 +45,8 @@ class TestInitialization:
 
         assert provider._host == "http://remote:11434"
         call_kwargs = mock_anthropic.call_args.kwargs
-        assert call_kwargs["base_url"] == "http://remote:11434/v1"
+        # SDK adds /v1/messages to base_url, so we pass host directly
+        assert call_kwargs["base_url"] == "http://remote:11434"
 
     @patch('requests.get')
     @patch('anthropic.Anthropic')
@@ -153,6 +155,31 @@ class TestConnection:
         provider.connect("llama3")  # Without :latest
 
         assert provider.model_name == "llama3"
+
+    @patch('requests.get')
+    @patch('anthropic.Anthropic')
+    def test_connect_memory_error(self, mock_anthropic, mock_get):
+        """Should raise RuntimeError with helpful message on memory error."""
+        mock_get.return_value = MagicMock(status_code=200)
+        mock_get.return_value.json.return_value = {
+            "models": [{"name": "qwen3:32b"}]
+        }
+
+        # Mock the client to raise a memory error
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = Exception(
+            "Error code: 500 - model requires more system memory (20.0 GiB)"
+        )
+        mock_anthropic.return_value = mock_client
+
+        provider = OllamaProvider()
+        provider.initialize()
+
+        with pytest.raises(RuntimeError) as exc_info:
+            provider.connect("qwen3:32b")
+
+        assert "Not enough memory" in str(exc_info.value)
+        assert "qwen3:32b" in str(exc_info.value)
 
 
 class TestModelListing:
