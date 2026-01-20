@@ -349,6 +349,11 @@ DEFAULT_SEMANTIC_STYLES = {
     # File output (preserved content from permission prompts)
     "file_output_header": StyleSpec(fg="primary", bold=True),
 
+    # Notebook output (Jupyter-style cell labels)
+    "notebook_input_label": StyleSpec(fg="success", bold=True),   # In [n]:
+    "notebook_output_label": StyleSpec(fg="primary", bold=True),  # Out [n]:
+    "notebook_error_label": StyleSpec(fg="error", bold=True),     # Err [n]:
+
     # Output - misc
     "permission_prompt": StyleSpec(fg="warning", bold=True),
     "permission_text": StyleSpec(fg="primary"),
