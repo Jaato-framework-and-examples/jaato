@@ -4,15 +4,21 @@ This plugin provides interactive Python notebook capabilities:
 - Execute Python code with state preserved across calls
 - Multiple backend support (local, Kaggle GPU)
 - Variable inspection and notebook management
+- Streaming output support for real-time execution feedback
 """
 
+import asyncio
+import io
 import os
+import queue
 import tempfile
+import threading
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from ..base import UserCommand, PermissionDisplayInfo
 from ..model_provider.types import ToolSchema
+from ..streaming.protocol import StreamingCapable, StreamChunk, ChunkCallback
 from .types import ExecutionStatus, OutputType
 from .backends import NotebookBackend, LocalJupyterBackend, KaggleBackend, _KAGGLE_AVAILABLE
 
@@ -24,7 +30,7 @@ DEFAULT_BACKEND = "local"
 MAX_OUTPUT_LENGTH = 10000
 
 
-class NotebookPlugin:
+class NotebookPlugin(StreamingCapable):
     """Plugin for Python notebook execution with GPU support.
 
     Provides tools for:
@@ -32,11 +38,14 @@ class NotebookPlugin:
     - Executing Python code with persistent state
     - Switching between local (instant) and Kaggle (GPU) backends
     - Variable inspection
+    - Streaming execution output in real-time
 
     Configuration:
         default_backend: 'local' or 'kaggle' (default: 'local')
         enable_kaggle: Whether to enable Kaggle backend (default: True)
         max_output_length: Max output chars to return (default: 10000)
+
+    Implements StreamingCapable for real-time output streaming during execution.
     """
 
     def __init__(self):
@@ -563,6 +572,297 @@ class NotebookPlugin:
             "active_backend": self._active_backend_name,
             "backends": backends,
         }
+
+    # ==================== StreamingCapable Implementation ====================
+
+    def supports_streaming(self, tool_name: str) -> bool:
+        """Check if a tool supports streaming execution.
+
+        Only notebook_execute supports streaming for now.
+        """
+        return tool_name == "notebook_execute"
+
+    def get_streaming_tool_names(self) -> List[str]:
+        """Get list of tools that support streaming."""
+        return ["notebook_execute"]
+
+    async def execute_streaming(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        on_chunk: Optional[ChunkCallback] = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Execute notebook code with streaming output.
+
+        Yields StreamChunks as stdout/stderr/results become available.
+        Output is wrapped with <notebook-cell> markers for the formatter pipeline.
+
+        Args:
+            tool_name: Should be "notebook_execute".
+            arguments: Tool arguments (code, notebook_id).
+            on_chunk: Optional callback for each chunk.
+
+        Yields:
+            StreamChunk objects for input, stdout, stderr, result, and errors.
+        """
+        if tool_name != "notebook_execute":
+            raise ValueError(f"Streaming not supported for tool: {tool_name}")
+
+        code = arguments.get("code", "")
+        notebook_id = arguments.get("notebook_id")
+
+        if not code.strip():
+            chunk = StreamChunk(
+                content="<notebook-cell type=\"error\">No code provided</notebook-cell>",
+                chunk_type="error",
+            )
+            if on_chunk:
+                on_chunk(chunk)
+            yield chunk
+            return
+
+        # Auto-create notebook if needed
+        if not notebook_id:
+            if self._current_notebook_id:
+                notebook_id = self._current_notebook_id
+            else:
+                result = self._create_notebook({"name": "default", "gpu": False})
+                if "error" in result:
+                    chunk = StreamChunk(
+                        content=f"<notebook-cell type=\"error\">{result['error']}</notebook-cell>",
+                        chunk_type="error",
+                    )
+                    if on_chunk:
+                        on_chunk(chunk)
+                    yield chunk
+                    return
+                notebook_id = result["notebook_id"]
+
+        # Find the backend
+        backend = None
+        backend_name = "local"
+        for name, b in self._backends.items():
+            for nb in b.list_notebooks():
+                if nb.notebook_id == notebook_id:
+                    backend = b
+                    backend_name = name
+                    break
+            if backend:
+                break
+
+        if not backend:
+            chunk = StreamChunk(
+                content=f"<notebook-cell type=\"error\">Notebook {notebook_id} not found</notebook-cell>",
+                chunk_type="error",
+            )
+            if on_chunk:
+                on_chunk(chunk)
+            yield chunk
+            return
+
+        # Get current execution count (will be incremented after execution)
+        exec_count = backend._execution_counts.get(notebook_id, 0) + 1
+
+        self._trace(f"Streaming execution in {notebook_id}: {code[:50]}...")
+
+        # Yield the input cell first (so formatter can display In[n]:)
+        input_chunk = StreamChunk(
+            content=self._format_input_cell(code, exec_count),
+            chunk_type="input",
+            metadata={"notebook_id": notebook_id, "execution_count": exec_count},
+        )
+        if on_chunk:
+            on_chunk(input_chunk)
+        yield input_chunk
+
+        # Execute with streaming output capture
+        async for chunk in self._execute_streaming_impl(
+            backend, notebook_id, code, exec_count, on_chunk
+        ):
+            yield chunk
+
+    async def _execute_streaming_impl(
+        self,
+        backend: NotebookBackend,
+        notebook_id: str,
+        code: str,
+        exec_count: int,
+        on_chunk: Optional[ChunkCallback] = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Implementation of streaming execution using a background thread.
+
+        Runs the execution in a thread and yields output chunks as they arrive.
+        """
+        output_queue: queue.Queue = queue.Queue()
+        result_holder: List[Any] = [None]  # To hold the final result
+        error_holder: List[Optional[Exception]] = [None]
+
+        def run_execution():
+            """Run execution in a background thread."""
+            try:
+                result = backend.execute(notebook_id, code)
+                result_holder[0] = result
+            except Exception as e:
+                error_holder[0] = e
+
+        # Start execution in background thread
+        exec_thread = threading.Thread(target=run_execution, daemon=True)
+        exec_thread.start()
+
+        # Wait for execution to complete (with periodic checks)
+        while exec_thread.is_alive():
+            await asyncio.sleep(0.1)
+
+        # Check for errors
+        if error_holder[0]:
+            chunk = StreamChunk(
+                content=f"<notebook-cell type=\"error\">{str(error_holder[0])}</notebook-cell>",
+                chunk_type="error",
+            )
+            if on_chunk:
+                on_chunk(chunk)
+            yield chunk
+            return
+
+        result = result_holder[0]
+        if result is None:
+            chunk = StreamChunk(
+                content="<notebook-cell type=\"error\">Execution returned no result</notebook-cell>",
+                chunk_type="error",
+            )
+            if on_chunk:
+                on_chunk(chunk)
+            yield chunk
+            return
+
+        # Yield output chunks based on result
+        sequence = 1
+
+        if result.status == ExecutionStatus.COMPLETED:
+            for output in result.outputs:
+                if output.output_type == OutputType.STDOUT and output.content:
+                    chunk = StreamChunk(
+                        content=self._format_stdout_cell(output.content, exec_count),
+                        chunk_type="stdout",
+                        sequence=sequence,
+                        metadata={"notebook_id": notebook_id, "execution_count": exec_count},
+                    )
+                    sequence += 1
+                    if on_chunk:
+                        on_chunk(chunk)
+                    yield chunk
+
+                elif output.output_type == OutputType.STDERR and output.content:
+                    chunk = StreamChunk(
+                        content=self._format_stderr_cell(output.content, exec_count),
+                        chunk_type="stderr",
+                        sequence=sequence,
+                        metadata={"notebook_id": notebook_id, "execution_count": exec_count},
+                    )
+                    sequence += 1
+                    if on_chunk:
+                        on_chunk(chunk)
+                    yield chunk
+
+                elif output.output_type == OutputType.RESULT and output.content:
+                    chunk = StreamChunk(
+                        content=self._format_result_cell(output.content, exec_count),
+                        chunk_type="result",
+                        sequence=sequence,
+                        metadata={"notebook_id": notebook_id, "execution_count": exec_count},
+                    )
+                    sequence += 1
+                    if on_chunk:
+                        on_chunk(chunk)
+                    yield chunk
+
+                elif output.output_type == OutputType.DISPLAY:
+                    mime = output.mime_type or "unknown"
+                    if mime.startswith("image/"):
+                        content = f"[Image: {mime}]"
+                    else:
+                        content = output.content[:500] if output.content else ""
+                    chunk = StreamChunk(
+                        content=self._format_display_cell(content, exec_count),
+                        chunk_type="display",
+                        sequence=sequence,
+                        metadata={"notebook_id": notebook_id, "execution_count": exec_count, "mime": mime},
+                    )
+                    sequence += 1
+                    if on_chunk:
+                        on_chunk(chunk)
+                    yield chunk
+
+        elif result.status == ExecutionStatus.FAILED:
+            error_content = result.error_message or "Unknown error"
+            if result.traceback:
+                error_content += f"\n{result.traceback}"
+            chunk = StreamChunk(
+                content=self._format_error_cell(error_content, exec_count),
+                chunk_type="error",
+                sequence=sequence,
+                metadata={"notebook_id": notebook_id, "execution_count": exec_count},
+            )
+            if on_chunk:
+                on_chunk(chunk)
+            yield chunk
+
+        # Final summary chunk
+        duration = result.duration_seconds or 0
+        summary = f"Execution completed in {duration:.2f}s"
+        if result.variables:
+            summary += f", {len(result.variables)} variables defined"
+
+        yield StreamChunk(
+            content=summary,
+            chunk_type="summary",
+            sequence=sequence + 1,
+            metadata={
+                "notebook_id": notebook_id,
+                "execution_count": exec_count,
+                "status": result.status.value,
+                "duration_seconds": duration,
+                "variables": result.variables,
+            },
+        )
+
+    # ==================== Notebook Cell Formatting ====================
+
+    def _format_input_cell(self, code: str, exec_count: int) -> str:
+        """Format code as an input cell with markers for the formatter pipeline.
+
+        The formatter will transform this into a table row with In[n]: label.
+        """
+        return f"<notebook-cell type=\"input\" exec=\"{exec_count}\">\n```python\n{code}\n```\n</notebook-cell>"
+
+    def _format_stdout_cell(self, content: str, exec_count: int) -> str:
+        """Format stdout output with markers."""
+        # Truncate if too long
+        if len(content) > self._max_output_length:
+            content = content[:self._max_output_length] + "\n... (truncated)"
+        return f"<notebook-cell type=\"stdout\" exec=\"{exec_count}\">\n{content}\n</notebook-cell>"
+
+    def _format_stderr_cell(self, content: str, exec_count: int) -> str:
+        """Format stderr output with markers."""
+        if len(content) > self._max_output_length:
+            content = content[:self._max_output_length] + "\n... (truncated)"
+        return f"<notebook-cell type=\"stderr\" exec=\"{exec_count}\">\n{content}\n</notebook-cell>"
+
+    def _format_result_cell(self, content: str, exec_count: int) -> str:
+        """Format execution result with markers."""
+        if len(content) > self._max_output_length:
+            content = content[:self._max_output_length] + "\n... (truncated)"
+        return f"<notebook-cell type=\"result\" exec=\"{exec_count}\">\n{content}\n</notebook-cell>"
+
+    def _format_display_cell(self, content: str, exec_count: int) -> str:
+        """Format display output (images, etc.) with markers."""
+        return f"<notebook-cell type=\"display\" exec=\"{exec_count}\">\n{content}\n</notebook-cell>"
+
+    def _format_error_cell(self, content: str, exec_count: int) -> str:
+        """Format error output with markers."""
+        if len(content) > 2000:
+            content = content[:2000] + "\n... (truncated)"
+        return f"<notebook-cell type=\"error\" exec=\"{exec_count}\">\n{content}\n</notebook-cell>"
 
 
 def create_plugin() -> NotebookPlugin:
