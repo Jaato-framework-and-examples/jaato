@@ -21,6 +21,7 @@ from ..model_provider.types import ToolSchema
 from ..streaming.protocol import StreamingCapable, StreamChunk, ChunkCallback
 from .types import ExecutionStatus, OutputType
 from .backends import NotebookBackend, LocalJupyterBackend, KaggleBackend, _KAGGLE_AVAILABLE
+from shared.ai_tool_runner import get_current_tool_output_callback
 
 
 # Default to local backend
@@ -57,6 +58,8 @@ class NotebookPlugin(StreamingCapable):
         self._agent_name: Optional[str] = None
         self._kaggle_enabled: bool = True  # Whether to try kaggle when requested
         self._kaggle_init_attempted: bool = False  # Lazy init flag
+        # Callback for streaming output during execution (tail -f style)
+        self._tool_output_callback: Optional[Callable[[str], None]] = None
 
     @property
     def name(self) -> str:
@@ -154,6 +157,34 @@ class NotebookPlugin(StreamingCapable):
         self._current_notebook_id = None
         self._initialized = False
         self._kaggle_init_attempted = False
+
+    def set_tool_output_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Set the callback for streaming output during execution.
+
+        When set, the plugin will stream formatted notebook output to the callback
+        during code execution, enabling live preview in the UI tool tree.
+
+        Args:
+            callback: Function that accepts output chunks, or None to disable.
+        """
+        self._tool_output_callback = callback
+        self._trace(f"set_tool_output_callback: callback={'SET' if callback else 'CLEARED'}")
+
+    def _get_effective_output_callback(self) -> Optional[Callable[[str], None]]:
+        """Get the effective output callback for the current execution.
+
+        Checks thread-local storage first (for parallel execution),
+        then falls back to the instance-level callback.
+
+        Returns:
+            The callback to use, or None if not set.
+        """
+        # Thread-local takes priority (parallel execution)
+        thread_callback = get_current_tool_output_callback()
+        if thread_callback is not None:
+            return thread_callback
+        # Fall back to instance-level (sequential execution)
+        return self._tool_output_callback
 
     @property
     def _active_backend(self) -> NotebookBackend:
@@ -389,29 +420,43 @@ class NotebookPlugin(StreamingCapable):
             "execution_count": result.execution_count,
         }
 
+        # Get effective callback (checks thread-local for parallel execution)
+        output_callback = self._get_effective_output_callback()
+
         if result.status == ExecutionStatus.COMPLETED:
             # Format output with notebook cell markers for the formatter pipeline
             exec_count = result.execution_count or 1
             output_parts = []
 
             # Input cell with the code
-            output_parts.append(self._format_input_cell(code, exec_count))
+            input_cell = self._format_input_cell(code, exec_count)
+            output_parts.append(input_cell)
+            # Stream to UI if callback is set
+            if output_callback:
+                output_callback(input_cell + "\n")
 
             # Output cells for each type
             for output in result.outputs:
+                cell_output = None
                 if output.output_type == OutputType.STDOUT and output.content:
-                    output_parts.append(self._format_stdout_cell(output.content, exec_count))
+                    cell_output = self._format_stdout_cell(output.content, exec_count)
                 elif output.output_type == OutputType.RESULT and output.content:
-                    output_parts.append(self._format_result_cell(output.content, exec_count))
+                    cell_output = self._format_result_cell(output.content, exec_count)
                 elif output.output_type == OutputType.STDERR and output.content:
-                    output_parts.append(self._format_stderr_cell(output.content, exec_count))
+                    cell_output = self._format_stderr_cell(output.content, exec_count)
                 elif output.output_type == OutputType.DISPLAY:
                     mime = output.mime_type or "unknown"
                     if mime.startswith("image/"):
                         content = f"[Image: {mime}]"
                     else:
                         content = output.content[:500] if output.content else ""
-                    output_parts.append(self._format_display_cell(content, exec_count))
+                    cell_output = self._format_display_cell(content, exec_count)
+
+                if cell_output:
+                    output_parts.append(cell_output)
+                    # Stream to UI if callback is set
+                    if output_callback:
+                        output_callback(cell_output + "\n")
 
             response["output"] = "\n".join(output_parts)
             response["variables"] = result.variables
@@ -421,11 +466,19 @@ class NotebookPlugin(StreamingCapable):
         elif result.status == ExecutionStatus.FAILED:
             exec_count = result.execution_count or 1
             # Format error with markers
+            input_cell = self._format_input_cell(code, exec_count)
             error_content = result.error_message or "Unknown error"
             if result.traceback:
                 error_content += f"\n{result.traceback}"
-            response["output"] = self._format_input_cell(code, exec_count) + "\n" + self._format_error_cell(error_content, exec_count)
+            error_cell = self._format_error_cell(error_content, exec_count)
+
+            response["output"] = input_cell + "\n" + error_cell
             response["error"] = result.error_message
+
+            # Stream to UI if callback is set
+            if output_callback:
+                output_callback(input_cell + "\n")
+                output_callback(error_cell + "\n")
 
         elif result.status in (ExecutionStatus.QUEUED, ExecutionStatus.RUNNING):
             response["message"] = "Execution in progress (async backend). Poll with notebook_variables to check status."
@@ -828,42 +881,58 @@ class NotebookPlugin(StreamingCapable):
         )
 
     # ==================== Notebook Cell Formatting ====================
+    #
+    # These methods emit <nb-row> markers directly for client-side rendering.
+    # The format is: <nb-row type="..." label="...">content</nb-row>
+    #
+    # Labels:
+    #   input  → "In [n]:"
+    #   stdout → "Out [n]:"
+    #   stderr → "Err [n]:"
+    #   result → "Out [n]:"
+    #   display → "Out [n]:"
+    #   error  → "Err [n]:"
 
     def _format_input_cell(self, code: str, exec_count: int) -> str:
-        """Format code as an input cell with markers for the formatter pipeline.
+        """Format code as an input cell with nb-row markers.
 
-        The formatter will transform this into a table row with In[n]: label.
+        Uses 'ipython' language to skip LSP validation (supports !shell, %magic).
         """
-        return f"<notebook-cell type=\"input\" exec=\"{exec_count}\">\n```python\n{code}\n```\n</notebook-cell>"
+        label = f"In [{exec_count}]:"
+        return f'<nb-row type="input" label="{label}">\n```ipython\n{code}\n```\n</nb-row>'
 
     def _format_stdout_cell(self, content: str, exec_count: int) -> str:
-        """Format stdout output with markers."""
-        # Truncate if too long
+        """Format stdout output with nb-row markers."""
         if len(content) > self._max_output_length:
             content = content[:self._max_output_length] + "\n... (truncated)"
-        return f"<notebook-cell type=\"stdout\" exec=\"{exec_count}\">\n{content}\n</notebook-cell>"
+        label = f"Out [{exec_count}]:"
+        return f'<nb-row type="stdout" label="{label}">\n{content}\n</nb-row>'
 
     def _format_stderr_cell(self, content: str, exec_count: int) -> str:
-        """Format stderr output with markers."""
+        """Format stderr output with nb-row markers."""
         if len(content) > self._max_output_length:
             content = content[:self._max_output_length] + "\n... (truncated)"
-        return f"<notebook-cell type=\"stderr\" exec=\"{exec_count}\">\n{content}\n</notebook-cell>"
+        label = f"Err [{exec_count}]:"
+        return f'<nb-row type="stderr" label="{label}">\n{content}\n</nb-row>'
 
     def _format_result_cell(self, content: str, exec_count: int) -> str:
-        """Format execution result with markers."""
+        """Format execution result with nb-row markers."""
         if len(content) > self._max_output_length:
             content = content[:self._max_output_length] + "\n... (truncated)"
-        return f"<notebook-cell type=\"result\" exec=\"{exec_count}\">\n{content}\n</notebook-cell>"
+        label = f"Out [{exec_count}]:"
+        return f'<nb-row type="result" label="{label}">\n{content}\n</nb-row>'
 
     def _format_display_cell(self, content: str, exec_count: int) -> str:
-        """Format display output (images, etc.) with markers."""
-        return f"<notebook-cell type=\"display\" exec=\"{exec_count}\">\n{content}\n</notebook-cell>"
+        """Format display output (images, etc.) with nb-row markers."""
+        label = f"Out [{exec_count}]:"
+        return f'<nb-row type="display" label="{label}">\n{content}\n</nb-row>'
 
     def _format_error_cell(self, content: str, exec_count: int) -> str:
-        """Format error output with markers."""
+        """Format error output with nb-row markers."""
         if len(content) > 2000:
             content = content[:2000] + "\n... (truncated)"
-        return f"<notebook-cell type=\"error\" exec=\"{exec_count}\">\n{content}\n</notebook-cell>"
+        label = f"Err [{exec_count}]:"
+        return f'<nb-row type="error" label="{label}">\n{content}\n</nb-row>'
 
 
 def create_plugin() -> NotebookPlugin:
