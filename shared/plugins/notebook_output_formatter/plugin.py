@@ -161,14 +161,15 @@ class NotebookOutputFormatterPlugin:
     # ==================== Cell Formatting ====================
 
     def _format_cell(self, cell_type: str, exec_count: str, content: str) -> str:
-        """Format a notebook cell for display.
+        """Format a notebook cell with semantic markers for client rendering.
 
-        The output uses a two-part format:
-        1. A label line with the cell type (In[n]:, Out[n]:, etc.)
-        2. The content, indented for visual grouping
+        The output preserves semantic structure using <nb-row> markers that
+        the client can interpret to render as a 2-column table:
+        - Column 1: Label (In[n]:, Out[n]:, etc.)
+        - Column 2: Content (code fences preserved for syntax highlighting)
 
-        Code fences are preserved so code_block_formatter can apply
-        syntax highlighting. The client can add borders/styling as needed.
+        Code fences flow through to code_block_formatter for highlighting.
+        The client adds borders and table styling based on the markers.
 
         Args:
             cell_type: Type of cell (input, result, error, etc.)
@@ -176,26 +177,22 @@ class NotebookOutputFormatterPlugin:
             content: Cell content (may include code fences)
 
         Returns:
-            Formatted cell string.
+            Formatted cell string with semantic markers.
         """
         label = self._get_label(cell_type, exec_count)
         content = content.strip()
 
-        # Format as labeled block:
-        # In [1]:
+        # Wrap in semantic markers for client-side table rendering:
+        # <nb-row type="input" label="In [1]:">
         # ```python
-        # code here
+        # code
         # ```
+        # </nb-row>
         #
-        # Or for output:
-        # Out [1]:
-        # result here
+        # The client interprets these as table rows:
+        # | In [1]: | <highlighted code> |
 
-        if label:
-            return f"{label}\n{content}\n"
-        else:
-            # No label (stdout) - just show content
-            return f"{content}\n"
+        return f'<nb-row type="{cell_type}" label="{label}">\n{content}\n</nb-row>\n'
 
     def _get_label(self, cell_type: str, exec_count: str) -> str:
         """Get the label for a cell type.
