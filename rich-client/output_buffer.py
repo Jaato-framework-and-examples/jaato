@@ -5,6 +5,7 @@ region of the TUI.
 """
 
 import os
+import re
 import textwrap
 from collections import deque
 from dataclasses import dataclass
@@ -187,9 +188,9 @@ class ActiveToolCall:
     clarification_answered: Optional[List[Tuple[int, str]]] = None  # List of (question_index, answer_summary)
     clarification_summary: Optional[List[Tuple[str, str]]] = None  # Q&A pairs [(question, answer), ...] for overview
     clarification_content: Optional[str] = None  # Formatted content from unified flow (may contain ANSI codes)
-    # Live output tracking (tail -f style preview)
-    output_lines: Optional[List[str]] = None  # Rolling buffer of recent output lines
-    output_max_lines: int = 30  # Max lines to keep in buffer
+    # Live output tracking (preserves full output for smart truncation during rendering)
+    output_lines: Optional[List[str]] = None  # Full output buffer (truncation happens at render time)
+    output_max_lines: int = 1000  # Max lines to keep (high limit, rendering does smart truncation)
     output_display_lines: int = 5  # Max lines to show at once when expanded
     output_scroll_offset: int = 0  # Scroll position (0 = show most recent lines)
     # Per-tool expand state for navigation
@@ -2215,9 +2216,10 @@ class OutputBuffer:
         display_count: int,
         is_last: bool,
         preserve_ansi: bool = False,
-        style: Optional[str] = None
+        style: Optional[str] = None,
+        smart_truncate: bool = False
     ) -> None:
-        """Render scrollable content with scroll indicators.
+        """Render scrollable content with scroll indicators or smart truncation.
 
         Args:
             output: Text object to append to.
@@ -2227,29 +2229,30 @@ class OutputBuffer:
             is_last: Whether this is the last tool in the list.
             preserve_ansi: If True, use _truncate_line_to_width for ANSI preservation.
             style: Style to apply to lines (only used when preserve_ansi=False).
+            smart_truncate: If True, show beginning + "... N lines not shown ..." + end
+                           instead of scroll indicators. Better for content where both
+                           beginning and end are important (like notebook input/output).
         """
         continuation = "   " if is_last else "│  "
         prefix = "    "
         total_lines = len(lines)
 
-        end_idx = total_lines - scroll_offset
-        start_idx = max(0, end_idx - display_count)
-        lines_above = start_idx
-        lines_below = scroll_offset
-
         max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
 
-        if lines_above > 0:
-            output.append("\n")
-            output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
-            scroll_up_key = self._format_key_hint("nav_up")
-            output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''} ({scroll_up_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
+        # Find the natural width of the content (max content width across all lines)
+        # This preserves background styling up to the widest content
+        if preserve_ansi and lines:
+            natural_width = max((self._get_content_width(line) for line in lines), default=0)
+            target_width = min(natural_width, max_line_width)
+        else:
+            target_width = max_line_width
 
-        for line in lines[start_idx:end_idx]:
+        def render_line(line: str) -> None:
+            """Helper to render a single line with proper styling."""
             output.append("\n")
             output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
             if preserve_ansi:
-                output.append_text(self._truncate_line_to_width(line, max_line_width, max_line_width))
+                output.append_text(self._truncate_line_to_width(line, target_width, max_line_width))
             else:
                 if len(line) > max_line_width:
                     display_line = line[:max_line_width - 3] + "..."
@@ -2257,23 +2260,279 @@ class OutputBuffer:
                     display_line = line
                 output.append(display_line, style=self._style(style or "tool_output", "#87D7D7 italic"))
 
-        if lines_below > 0:
-            output.append("\n")
-            output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
-            scroll_down_key = self._format_key_hint("nav_down")
-            output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
+        if smart_truncate:
+            # Use shared helper for smart truncation (beginning + ellipsis + end)
+            indent = f"{prefix}{continuation}   "
+            self._render_truncated_lines(
+                output=output,
+                lines=lines,
+                max_display_lines=display_count,
+                indent=indent,
+                target_width=target_width,
+                max_width=max_line_width,
+                preserve_ansi=preserve_ansi
+            )
+        else:
+            # Standard scrollable view
+            end_idx = total_lines - scroll_offset
+            start_idx = max(0, end_idx - display_count)
+            lines_above = start_idx
+            lines_below = scroll_offset
+            visible_lines = lines[start_idx:end_idx]
+
+            if lines_above > 0:
+                output.append("\n")
+                output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
+                scroll_up_key = self._format_key_hint("nav_up")
+                output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''} ({scroll_up_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
+
+            for line in visible_lines:
+                render_line(line)
+
+            if lines_below > 0:
+                output.append("\n")
+                output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
+                scroll_down_key = self._format_key_hint("nav_down")
+                output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
 
     def _render_tool_output_lines(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
-        """Render output lines for a tool."""
-        self._render_scrollable_content(
+        """Render output lines for a tool.
+
+        Uses the same approach as _render_permission_prompt: calculates available
+        space dynamically and calls _render_truncated_lines directly.
+
+        For notebook output (content with <nb-row> markers), renders as a 2-column
+        table with labels (In[n]:, Out[n]:) on the left and content on the right.
+        """
+        continuation = "   " if is_last else "│  "
+        prefix = "    "
+        content_lines = tool.output_lines
+
+        # Check if content contains notebook row markers
+        content_text = "\n".join(content_lines)
+        if "<nb-row " in content_text:
+            self._render_notebook_rows(output, content_text, prefix, continuation, is_last)
+            return
+
+        # Same indent structure as permission prompt
+        indent = f"{prefix}{continuation}     "
+        indent_width = len(indent)
+
+        # Calculate available width for content (same as permission prompt)
+        max_width = max(20, self._console_width - indent_width)
+
+        # Find the natural width of the content (max content width across all lines)
+        # This preserves background styling up to the widest content
+        natural_width = max((self._get_content_width(line) for line in content_lines), default=0)
+        target_width = min(natural_width, max_width)
+
+        # Calculate max content lines dynamically based on actual overhead
+        overhead = self._calculate_tool_output_overhead(tool)
+        available_space = self._visible_height - overhead
+        # Minimum 3 to show something useful even on tiny terminals
+        max_content_lines = max(3, available_space)
+
+        # Use shared helper for smart truncation (beginning + ellipsis + end)
+        self._render_truncated_lines(
             output=output,
-            lines=tool.output_lines,
-            scroll_offset=tool.output_scroll_offset,
-            display_count=tool.output_display_lines,
-            is_last=is_last,
-            preserve_ansi=False,
-            style="tool_output"
+            lines=content_lines,
+            max_display_lines=max_content_lines,
+            indent=indent,
+            target_width=target_width,
+            max_width=max_width,
+            preserve_ansi=True
         )
+
+    def _render_notebook_rows(self, output: Text, content: str, prefix: str, continuation: str, is_last: bool) -> None:
+        """Render notebook content with <nb-row> markers as a 2-column table.
+
+        Format:
+            In [1]:  │ code line 1
+                     │ code line 2
+            Out [1]: │ result
+
+        Supports progressive rendering during streaming - incomplete markers
+        are rendered with whatever content is available so far.
+        """
+        # Pattern to match complete <nb-row type="..." label="...">content</nb-row>
+        complete_pattern = re.compile(
+            r'<nb-row\s+type="([^"]+)"\s+label="([^"]*)">\s*\n?(.*?)\n?</nb-row>',
+            re.DOTALL
+        )
+        # Pattern to match incomplete (streaming) marker - has opening but no closing
+        incomplete_pattern = re.compile(
+            r'<nb-row\s+type="([^"]+)"\s+label="([^"]*)">(.*)$',
+            re.DOTALL
+        )
+
+        # Find label width for alignment (use max of common labels)
+        label_width = 10  # "Out [99]:" is 9 chars, pad to 10 for alignment
+
+        # Calculate base indent and available content width
+        base_indent = f"{prefix}{continuation}"
+        separator_width = 3  # " │ " = space + bar + space
+        total_prefix_width = len(base_indent) + label_width + separator_width
+        max_content_width = max(20, self._console_width - total_prefix_width)
+
+        # Process each complete notebook row
+        last_end = 0
+        for match in complete_pattern.finditer(content):
+            # Render any text before this row (shouldn't happen normally)
+            if match.start() > last_end:
+                pre_text = content[last_end:match.start()].strip()
+                if pre_text:
+                    output.append("\n")
+                    output.append(base_indent, style=self._style("tree_connector", "dim"))
+                    output.append(pre_text)
+
+            cell_type = match.group(1)
+            label = match.group(2)
+            cell_content = match.group(3).strip()
+
+            # Render the row
+            self._render_single_notebook_row(
+                output, cell_type, label, cell_content,
+                base_indent, label_width, max_content_width
+            )
+
+            last_end = match.end()
+
+        # Check for incomplete marker after all complete ones (streaming case)
+        remaining = content[last_end:]
+        incomplete_match = incomplete_pattern.search(remaining)
+        if incomplete_match:
+            # Render any text before the incomplete marker
+            if incomplete_match.start() > 0:
+                pre_text = remaining[:incomplete_match.start()].strip()
+                if pre_text:
+                    output.append("\n")
+                    output.append(base_indent, style=self._style("tree_connector", "dim"))
+                    output.append(pre_text)
+
+            # Render the incomplete marker with available content (progressive streaming)
+            cell_type = incomplete_match.group(1)
+            label = incomplete_match.group(2)
+            cell_content = incomplete_match.group(3).strip()
+
+            # Only render if there's actual content (not just the opening tag)
+            if cell_content:
+                self._render_single_notebook_row(
+                    output, cell_type, label, cell_content,
+                    base_indent, label_width, max_content_width
+                )
+        elif last_end < len(content):
+            # Render any trailing text that's not part of a marker
+            trailing = remaining.strip()
+            if trailing:
+                output.append("\n")
+                output.append(base_indent, style=self._style("tree_connector", "dim"))
+                output.append(trailing)
+
+    def _render_single_notebook_row(
+        self,
+        output: Text,
+        cell_type: str,
+        label: str,
+        content: str,
+        base_indent: str,
+        label_width: int,
+        max_content_width: int
+    ) -> None:
+        """Render a single notebook row with label and content columns.
+
+        Args:
+            output: Text object to append to
+            cell_type: Type of cell (input, stdout, result, error, etc.)
+            label: Label like "In [1]:" or "" for stdout
+            content: Cell content (may include code fences with ANSI)
+            base_indent: Base indentation string
+            label_width: Width reserved for label column
+            max_content_width: Maximum width for content column
+        """
+        # Split content into lines
+        lines = content.split('\n')
+        if not lines:
+            return
+
+        # Determine label style based on cell type
+        if cell_type == "input":
+            label_style = self._style("notebook_input_label", "bold green")
+        elif cell_type in ("result", "display", "stdout"):
+            label_style = self._style("notebook_output_label", "bold cyan")
+        elif cell_type in ("error", "stderr"):
+            label_style = self._style("notebook_error_label", "bold red")
+        else:
+            label_style = self._style("muted", "dim")
+
+        # Column layout: [base_indent][label_col + space][separator][content]
+        # Total prefix width after base_indent: label_width + 1 + 2 = label_width + 3
+        separator = "│ "  # 2 chars: bar + space
+
+        # First line: label right-aligned in label_width + space + separator
+        # Continuation: (label_width + 1) spaces + separator
+        padded_label = label.rjust(label_width) if label else " " * label_width
+        first_line_prefix = padded_label + " "  # label_width + 1 chars
+        continuation_prefix = " " * (label_width + 1) + separator  # label_width + 1 + 2 chars
+
+        # Render first line with label
+        output.append("\n")
+        output.append(base_indent, style=self._style("tree_connector", "dim"))
+        output.append(first_line_prefix, style=label_style if label else self._style("tree_connector", "dim"))
+        output.append(separator, style=self._style("tree_connector", "dim"))
+
+        # First line of content
+        first_line = lines[0] if lines else ""
+        if '\x1b[' in first_line:
+            output.append_text(self._truncate_line_to_width(first_line, max_content_width, max_content_width))
+        else:
+            if len(first_line) > max_content_width:
+                output.append(first_line[:max_content_width - 1] + "…")
+            else:
+                output.append(first_line)
+
+        # Continuation lines use pre-computed prefix for consistent alignment
+        for line in lines[1:]:
+            output.append("\n")
+            output.append(base_indent, style=self._style("tree_connector", "dim"))
+            output.append(continuation_prefix, style=self._style("tree_connector", "dim"))
+
+            if '\x1b[' in line:
+                output.append_text(self._truncate_line_to_width(line, max_content_width, max_content_width))
+            else:
+                if len(line) > max_content_width:
+                    output.append(line[:max_content_width - 1] + "…")
+                else:
+                    output.append(line)
+
+    def _calculate_tool_output_overhead(self, tool: 'ActiveToolCall') -> int:
+        """Calculate lines of overhead before tool output content.
+
+        Similar to _calculate_prompt_overhead but for tool output display.
+        """
+        overhead = 0
+
+        # Context lines kept at top by scroll logic
+        lines_before_tree = sum(
+            self._get_item_display_lines(item)
+            for i, item in enumerate(self._lines)
+            if i < self._tool_placeholder_index
+        )
+        context_lines = min(1, lines_before_tree)
+        overhead += context_lines
+
+        # Tool tree header (1 line when expanded)
+        overhead += 1
+
+        # Lines for tools up to and including the current one
+        for t in self._active_tools:
+            overhead += 1  # Tool name line
+            if t is tool:
+                break
+            # Output lines for tools before the current one
+            if t.expanded and t.output_lines:
+                overhead += min(len(t.output_lines), t.output_display_lines)
+
+        return overhead
 
     def _calculate_prompt_overhead(self, tool: 'ActiveToolCall') -> int:
         """Calculate actual lines of overhead before permission/clarification content.
@@ -2313,6 +2572,80 @@ class OutputBuffer:
         overhead += 1
 
         return overhead
+
+    def _render_truncated_lines(
+        self,
+        output: Text,
+        lines: List[str],
+        max_display_lines: int,
+        indent: str,
+        target_width: int,
+        max_width: int,
+        preserve_ansi: bool = True
+    ) -> None:
+        """Render lines with smart truncation (beginning + ellipsis + end).
+
+        This is a shared helper used by tool output, permission prompts, and
+        clarification prompts to display content that may exceed available space.
+
+        Args:
+            output: Text object to append to.
+            lines: List of content lines to render.
+            max_display_lines: Maximum lines to show (including ellipsis line).
+            indent: Indentation string for each line.
+            target_width: Target width for truncation (natural content width).
+            max_width: Maximum allowed width.
+            preserve_ansi: If True, use ANSI-aware truncation.
+        """
+        total_lines = len(lines)
+
+        if total_lines > max_display_lines:
+            # Truncate in the middle: show beginning, ellipsis, and end
+            # Reserve more lines for the end (typically has results/output)
+            lines_at_start = max_display_lines // 3
+            lines_at_end = max_display_lines - lines_at_start - 1  # -1 for ellipsis line
+            hidden_count = total_lines - lines_at_start - lines_at_end
+
+            # Render first N lines
+            for line in lines[:lines_at_start]:
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                if preserve_ansi:
+                    output.append_text(self._truncate_line_to_width(line, target_width, max_width))
+                else:
+                    if len(line) > max_width:
+                        output.append(line[:max_width - 3] + "...", style=self._style("tool_output", "dim"))
+                    else:
+                        output.append(line, style=self._style("tool_output", "dim"))
+
+            # Render ellipsis indicator
+            output.append("\n")
+            output.append(indent, style=self._style("tree_connector", "dim"))
+            output.append(f"... {hidden_count} lines not shown ...", style=self._style("muted", "dim italic"))
+
+            # Render last M lines
+            for line in lines[-lines_at_end:]:
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                if preserve_ansi:
+                    output.append_text(self._truncate_line_to_width(line, target_width, max_width))
+                else:
+                    if len(line) > max_width:
+                        output.append(line[:max_width - 3] + "...", style=self._style("tool_output", "dim"))
+                    else:
+                        output.append(line, style=self._style("tool_output", "dim"))
+        else:
+            # Content fits, render all lines
+            for line in lines:
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                if preserve_ansi:
+                    output.append_text(self._truncate_line_to_width(line, target_width, max_width))
+                else:
+                    if len(line) > max_width:
+                        output.append(line[:max_width - 3] + "...", style=self._style("tool_output", "dim"))
+                    else:
+                        output.append(line, style=self._style("tool_output", "dim"))
 
     def _get_content_width(self, line: str) -> int:
         """Get the display width of actual content in a line (excluding trailing whitespace).
@@ -2447,35 +2780,16 @@ class OutputBuffer:
             _trace(f"  first_3_lines={first_lines_preview}")
             _trace(f"  last_5_lines={last_lines_preview}")
 
-            if len(content_lines) > max_content_lines:
-                # Truncate in the middle: show beginning, ellipsis, and end
-                # Reserve more lines for the end (includes response options)
-                lines_at_start = max_content_lines // 3
-                lines_at_end = max_content_lines - lines_at_start - 1  # -1 for ellipsis line
-                hidden_count = len(content_lines) - lines_at_start - lines_at_end
-
-                # Render first N lines (truncated to natural width)
-                for content_line in content_lines[:lines_at_start]:
-                    output.append("\n")
-                    output.append(indent, style=self._style("tree_connector", "dim"))
-                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
-
-                # Render ellipsis indicator
-                output.append("\n")
-                output.append(indent, style=self._style("tree_connector", "dim"))
-                output.append(f"... {hidden_count} lines not shown ...", style=self._style("muted", "dim italic"))
-
-                # Render last M lines (truncated to natural width, includes response options)
-                for content_line in content_lines[-lines_at_end:]:
-                    output.append("\n")
-                    output.append(indent, style=self._style("tree_connector", "dim"))
-                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
-            else:
-                # Content fits, render all lines (truncated to natural width)
-                for content_line in content_lines:
-                    output.append("\n")
-                    output.append(indent, style=self._style("tree_connector", "dim"))
-                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
+            # Use shared helper for smart truncation (beginning + ellipsis + end)
+            self._render_truncated_lines(
+                output=output,
+                lines=content_lines,
+                max_display_lines=max_content_lines,
+                indent=indent,
+                target_width=target_width,
+                max_width=max_width,
+                preserve_ansi=True
+            )
             return
 
         # Legacy flow: no permission_content means we use prompt_lines or show minimal indicator
@@ -2568,30 +2882,16 @@ class OutputBuffer:
             available_space = self._visible_height - overhead
             max_content_lines = max(3, available_space)
 
-            if len(content_lines) > max_content_lines:
-                # Truncate in the middle: show beginning, ellipsis, and end
-                lines_at_start = max_content_lines // 3
-                lines_at_end = max_content_lines - lines_at_start - 1
-                hidden_count = len(content_lines) - lines_at_start - lines_at_end
-
-                for content_line in content_lines[:lines_at_start]:
-                    output.append("\n")
-                    output.append(indent, style=self._style("tree_connector", "dim"))
-                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
-
-                output.append("\n")
-                output.append(indent, style=self._style("tree_connector", "dim"))
-                output.append(f"... {hidden_count} lines not shown ...", style=self._style("muted", "dim italic"))
-
-                for content_line in content_lines[-lines_at_end:]:
-                    output.append("\n")
-                    output.append(indent, style=self._style("tree_connector", "dim"))
-                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
-            else:
-                for content_line in content_lines:
-                    output.append("\n")
-                    output.append(indent, style=self._style("tree_connector", "dim"))
-                    output.append_text(self._truncate_line_to_width(content_line, target_width, max_width))
+            # Use shared helper for smart truncation (beginning + ellipsis + end)
+            self._render_truncated_lines(
+                output=output,
+                lines=content_lines,
+                max_display_lines=max_content_lines,
+                indent=indent,
+                target_width=target_width,
+                max_width=max_width,
+                preserve_ansi=True
+            )
             return
 
         # Legacy flow: no clarification_content means we use prompt_lines or show minimal indicator
@@ -2741,40 +3041,9 @@ class OutputBuffer:
                 if tool.duration_seconds is not None:
                     output.append(f" ({tool.duration_seconds:.1f}s)", style=self._style("tool_duration", "dim"))
 
-                # Expanded output
+                # Expanded output - use shared rendering method with smart truncation
                 if tool.expanded and tool.output_lines:
-                    continuation = "   " if is_last else "│  "
-                    prefix = "    "
-                    total_lines = len(tool.output_lines)
-                    display_count = tool.output_display_lines
-
-                    end_idx = total_lines - tool.output_scroll_offset
-                    start_idx = max(0, end_idx - display_count)
-
-                    lines_above = start_idx
-                    lines_below = tool.output_scroll_offset
-
-                    if lines_above > 0:
-                        output.append("\n")
-                        output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
-                        scroll_up_key = self._format_key_hint("nav_up")
-                        output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''} ({scroll_up_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
-
-                    for output_line in tool.output_lines[start_idx:end_idx]:
-                        output.append("\n")
-                        output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
-                        max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
-                        if len(output_line) > max_line_width:
-                            display_line = output_line[:max_line_width - 3] + "..."
-                        else:
-                            display_line = output_line
-                        output.append(display_line, style=self._style("tool_output", "#87D7D7 italic"))
-
-                    if lines_below > 0:
-                        output.append("\n")
-                        output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
-                        scroll_down_key = self._format_key_hint("nav_down")
-                        output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
+                    self._render_tool_output_lines(output, tool, is_last)
 
                 # Error message
                 if not tool.success and tool.error_message:

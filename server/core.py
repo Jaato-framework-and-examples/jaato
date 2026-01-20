@@ -961,6 +961,17 @@ class JaatoServer:
                 ))
 
             def on_tool_output(self, agent_id, call_id, chunk):
+                # Process tool output through formatter pipeline for syntax highlighting
+                # and marker transformation (e.g., <notebook-cell> → <nb-row>)
+                if server._formatter_pipeline:
+                    formatted_parts = []
+                    for output in server._formatter_pipeline.process_chunk(chunk):
+                        formatted_parts.append(output)
+                    for output in server._formatter_pipeline.flush():
+                        formatted_parts.append(output)
+                    server._formatter_pipeline.reset()
+                    chunk = "".join(formatted_parts)
+
                 server.emit(ToolOutputEvent(
                     agent_id=agent_id,
                     call_id=call_id,
