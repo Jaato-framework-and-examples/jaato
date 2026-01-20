@@ -118,6 +118,7 @@ Three plugin types:
 - `model_provider/claude_cli/`: Claude Code CLI wrapper (uses subscription, not API credits)
 - `model_provider/github_models/`: GitHub Models API (uses `azure-ai-inference` SDK)
 - `model_provider/antigravity/`: Google Antigravity IDE backend (Gemini 3, Claude via Google OAuth)
+- `model_provider/ollama/`: Ollama local models (Anthropic-compatible API)
 
 ### Tool Execution Flow
 
@@ -236,6 +237,33 @@ Configuration options via `ProviderConfig.extra`:
 | `enable_thinking` | bool | False | Enable extended thinking |
 | `thinking_budget` | int | 10000 | Max thinking tokens when enabled |
 | `cache_history` | bool | True | Cache historical messages |
+
+### Ollama (Local Models)
+| Variable | Purpose |
+|----------|---------|
+| `OLLAMA_HOST` | Ollama server URL (default: `http://localhost:11434`) |
+| `OLLAMA_MODEL` | Default model name |
+| `OLLAMA_CONTEXT_LENGTH` | Override context length for models |
+
+Requirements: Ollama v0.14.0+ (for Anthropic API compatibility)
+
+Setup:
+```bash
+# Install Ollama: https://ollama.com/download
+ollama serve                    # Start server
+ollama pull qwen3:32b          # Pull a model
+```
+
+Configuration options via `ProviderConfig.extra`:
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `host` | str | `http://localhost:11434` | Ollama server URL |
+| `context_length` | int | 32768 | Context window size |
+
+Benefits:
+- Run models locally without API costs
+- Privacy - data never leaves your machine
+- Use any model Ollama supports (Qwen, Llama, Mistral, etc.)
 
 ### Claude CLI Provider
 | Variable | Purpose |
