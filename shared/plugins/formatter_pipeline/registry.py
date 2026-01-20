@@ -43,6 +43,7 @@ from .protocol import FormatterPlugin, ConfigurableFormatter
 KNOWN_FORMATTERS: Dict[str, str] = {
     "hidden_content_filter": "shared.plugins.hidden_content_filter",
     "diff_formatter": "shared.plugins.diff_formatter",
+    "notebook_output_formatter": "shared.plugins.notebook_output_formatter",
     "table_formatter": "shared.plugins.table_formatter",
     "code_block_formatter": "shared.plugins.code_block_formatter",
     "code_validation_formatter": "shared.plugins.code_validation_formatter",
@@ -50,9 +51,11 @@ KNOWN_FORMATTERS: Dict[str, str] = {
 
 # Default formatters to enable when no config is provided
 # Note: code_validation_formatter requires LSP plugin - will be skipped if unavailable
+# Priority order: hidden_content_filter(10) -> diff(20) -> notebook_output(22) -> table(25) -> code_validation -> code_block(40)
 DEFAULT_FORMATTERS = [
     {"name": "hidden_content_filter", "enabled": True},
     {"name": "diff_formatter", "enabled": True},
+    {"name": "notebook_output_formatter", "enabled": True},
     {"name": "table_formatter", "enabled": True},
     {"name": "code_validation_formatter", "enabled": True},
     {"name": "code_block_formatter", "enabled": True, "config": {"line_numbers": True}},
