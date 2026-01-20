@@ -346,6 +346,9 @@ DEFAULT_SEMANTIC_STYLES = {
     "tool_unselected": StyleSpec(dim=True),
     "tool_indicator": StyleSpec(fg="primary", dim=True),  # Spinner/progress indicator
 
+    # File output (preserved content from permission prompts)
+    "file_output_header": StyleSpec(fg="primary", bold=True),
+
     # Output - misc
     "permission_prompt": StyleSpec(fg="warning", bold=True),
     "permission_text": StyleSpec(fg="primary"),

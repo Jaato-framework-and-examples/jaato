@@ -174,6 +174,10 @@ class ActiveToolCall:
     permission_truncated: bool = False  # True if prompt is truncated
     permission_h_scroll: int = 0  # Horizontal scroll offset for diff viewport (stage 2)
     permission_content: Optional[str] = None  # Formatted content from unified flow (may contain ANSI codes)
+    # Persisted file output (preserved after permission resolution for display in collapsed blocks)
+    file_output_lines: Optional[List[str]] = None  # File content/diff lines that persist after tool completes
+    file_output_display_lines: int = 5  # Max lines to show at once when expanded
+    file_output_scroll_offset: int = 0  # Scroll position (0 = show most recent lines)
     # Clarification tracking (per-question progressive display)
     clarification_state: Optional[str] = None  # None, "pending", "resolved"
     clarification_prompt_lines: Optional[List[str]] = None  # Current question lines
@@ -1099,6 +1103,13 @@ class OutputBuffer:
                             display_line += min(len(tool.output_lines), tool.output_display_lines)
                             if len(tool.output_lines) > tool.output_display_lines:
                                 display_line += 2  # Scroll indicators
+                        if tool.expanded and tool.file_output_lines:
+                            # File content header + content lines
+                            display_line += 1  # "Content" header
+                            max_display_lines = max(5, int(self._visible_height * 0.7))
+                            display_line += min(len(tool.file_output_lines), max_display_lines)
+                            if len(tool.file_output_lines) > max_display_lines:
+                                display_line += 2  # Scroll indicators
                     break
 
             display_line += self._get_item_display_lines(item)
@@ -1142,8 +1153,10 @@ class OutputBuffer:
         tool = self.get_selected_tool()
         if tool is None:
             return False
-        # Only expand if there's output to show
-        if not tool.output_lines or len(tool.output_lines) == 0:
+        # Only expand if there's output to show (output_lines or file_output_lines)
+        has_output = (tool.output_lines and len(tool.output_lines) > 0) or \
+                     (tool.file_output_lines and len(tool.file_output_lines) > 0)
+        if not has_output:
             return False
         tool.expanded = True
         return True
@@ -1178,33 +1191,49 @@ class OutputBuffer:
         return None
 
     def scroll_selected_tool_up(self) -> bool:
-        """Scroll up within the selected tool's output.
+        """Scroll up within the selected tool's output or file content.
 
         Returns:
             True if scroll position changed, False if at top or no tool selected.
         """
         tool = self.get_selected_tool()
-        if not tool or not tool.expanded or not tool.output_lines:
+        if not tool or not tool.expanded:
             return False
-        # Scroll offset is from the end, so scrolling "up" means increasing offset
-        max_offset = max(0, len(tool.output_lines) - tool.output_display_lines)
-        if tool.output_scroll_offset < max_offset:
-            tool.output_scroll_offset += 1
-            return True
+
+        # Handle output_lines or file_output_lines (mutually exclusive)
+        if tool.output_lines:
+            max_offset = max(0, len(tool.output_lines) - tool.output_display_lines)
+            if tool.output_scroll_offset < max_offset:
+                tool.output_scroll_offset += 1
+                return True
+        elif tool.file_output_lines:
+            # Use 70% of visible height for file content display
+            max_display_lines = max(5, int(self._visible_height * 0.7))
+            max_offset = max(0, len(tool.file_output_lines) - max_display_lines)
+            if tool.file_output_scroll_offset < max_offset:
+                tool.file_output_scroll_offset += 1
+                return True
         return False
 
     def scroll_selected_tool_down(self) -> bool:
-        """Scroll down within the selected tool's output.
+        """Scroll down within the selected tool's output or file content.
 
         Returns:
             True if scroll position changed, False if at bottom or no tool selected.
         """
         tool = self.get_selected_tool()
-        if not tool or not tool.expanded or not tool.output_lines:
+        if not tool or not tool.expanded:
             return False
-        if tool.output_scroll_offset > 0:
-            tool.output_scroll_offset -= 1
-            return True
+
+        # Handle output_lines or file_output_lines (mutually exclusive)
+        if tool.output_lines:
+            if tool.output_scroll_offset > 0:
+                tool.output_scroll_offset -= 1
+                return True
+        elif tool.file_output_lines:
+            if tool.file_output_scroll_offset > 0:
+                tool.file_output_scroll_offset -= 1
+                return True
         return False
 
     def finalize_tool_tree(self) -> None:
@@ -1469,7 +1498,10 @@ class OutputBuffer:
             if tool.name == tool_name and tool.permission_state == "pending":
                 tool.permission_state = "granted" if granted else "denied"
                 tool.permission_method = method
-                tool.permission_content = None  # Clear permission content
+                # Preserve permission content as file output lines for display in collapsed blocks
+                if tool.permission_content:
+                    tool.file_output_lines = tool.permission_content.split('\n')
+                    tool.permission_content = None
                 _trace(f"set_tool_permission_resolved: FOUND exact match for {tool_name}")
                 resolved = True
                 break
@@ -1480,7 +1512,10 @@ class OutputBuffer:
                 if tool.permission_state == "pending":
                     tool.permission_state = "granted" if granted else "denied"
                     tool.permission_method = method
-                    tool.permission_content = None  # Clear permission content
+                    # Preserve permission content as file output lines for display in collapsed blocks
+                    if tool.permission_content:
+                        tool.file_output_lines = tool.permission_content.split('\n')
+                        tool.permission_content = None
                     _trace(f"set_tool_permission_resolved: FALLBACK resolved {tool.name} (requested: {tool_name})")
                     resolved = True
                     break
@@ -1998,6 +2033,17 @@ class OutputBuffer:
                 if tool.expanded and tool.clarification_summary:
                     height += 1  # header ("Answers (N)")
                     height += len(tool.clarification_summary)  # One line per Q&A pair
+                # File output content (preserved from permission prompt when expanded)
+                if tool.expanded and tool.file_output_lines:
+                    height += 1  # header ("Content")
+                    total_lines = len(tool.file_output_lines)
+                    # Use 70% of visible height for file content display
+                    max_display_lines = max(5, int(self._visible_height * 0.7))
+                    display_count = min(total_lines, max_display_lines)
+                    height += display_count
+                    # Scroll indicators (up/down)
+                    if total_lines > max_display_lines:
+                        height += 2
         else:
             height += 1  # Collapsed summary line
         return height
@@ -2018,14 +2064,14 @@ class OutputBuffer:
             selected_tool = self._active_tools[self._selected_tool_index or 0]
             nav_up = self._format_key_hint("nav_up")
             nav_down = self._format_key_hint("nav_down")
-            expand_key = self._format_key_hint("tool_expand")
-            collapse_key = self._format_key_hint("tool_collapse")
+            toggle_key = self._format_key_hint("pager_next")  # Space key toggles expand
             exit_key = self._format_key_hint("tool_exit")
-            has_output = selected_tool.output_lines and len(selected_tool.output_lines) > 0
+            has_output = (selected_tool.output_lines and len(selected_tool.output_lines) > 0) or \
+                         (selected_tool.file_output_lines and len(selected_tool.file_output_lines) > 0)
             if selected_tool.expanded and has_output:
-                output.append(f"  ───  {nav_up}/{nav_down} scroll, {collapse_key} collapse, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
+                output.append(f"  ───  {nav_up}/{nav_down} scroll, {toggle_key} collapse, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
             elif has_output:
-                output.append(f"  ───  {nav_up}/{nav_down} nav, {expand_key} expand, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
+                output.append(f"  ───  {nav_up}/{nav_down} nav, {toggle_key} expand, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
             else:
                 output.append(f"  ───  {nav_up}/{nav_down} nav, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
         elif self._tools_expanded:
@@ -2073,7 +2119,13 @@ class OutputBuffer:
                     status_icon = "○"
                     status_style = self._style("muted", "dim")
 
-                expand_icon = "▾" if tool.expanded else "▸" if self._tool_nav_active else ""
+                # Show expand icon only if tool has content to expand
+                has_output = (tool.output_lines and len(tool.output_lines) > 0) or \
+                             (tool.file_output_lines and len(tool.file_output_lines) > 0)
+                if self._tool_nav_active and has_output:
+                    expand_icon = "▾" if tool.expanded else "▸"
+                else:
+                    expand_icon = " " if self._tool_nav_active else ""
                 row_style = "reverse" if is_selected else self._style("muted", "dim")
 
                 output.append("\n")
@@ -2126,6 +2178,11 @@ class OutputBuffer:
                 show_summary = tool.expanded if self._tool_nav_active else True
                 if show_summary and tool.completed and tool.clarification_summary:
                     self._render_clarification_summary(output, tool, is_last)
+
+                # File output content (preserved from permission prompt when expanded)
+                show_file_output = tool.expanded if self._tool_nav_active else True
+                if show_file_output and tool.completed and tool.file_output_lines:
+                    self._render_file_output(output, tool, is_last)
         else:
             # Collapsed view
             if pending_tool:
@@ -2150,17 +2207,37 @@ class OutputBuffer:
             output.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}: ", style=self._style("tool_border", "dim"))
             output.append(" ".join(tool_summaries), style=self._style("tool_border", "dim"))
 
-    def _render_tool_output_lines(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
-        """Render output lines for a tool (shared helper)."""
+    def _render_scrollable_content(
+        self,
+        output: Text,
+        lines: List[str],
+        scroll_offset: int,
+        display_count: int,
+        is_last: bool,
+        preserve_ansi: bool = False,
+        style: Optional[str] = None
+    ) -> None:
+        """Render scrollable content with scroll indicators.
+
+        Args:
+            output: Text object to append to.
+            lines: List of content lines to render.
+            scroll_offset: Current scroll position (0 = show most recent).
+            display_count: Max lines to show at once.
+            is_last: Whether this is the last tool in the list.
+            preserve_ansi: If True, use _truncate_line_to_width for ANSI preservation.
+            style: Style to apply to lines (only used when preserve_ansi=False).
+        """
         continuation = "   " if is_last else "│  "
         prefix = "    "
-        total_lines = len(tool.output_lines)
-        display_count = tool.output_display_lines
+        total_lines = len(lines)
 
-        end_idx = total_lines - tool.output_scroll_offset
+        end_idx = total_lines - scroll_offset
         start_idx = max(0, end_idx - display_count)
         lines_above = start_idx
-        lines_below = tool.output_scroll_offset
+        lines_below = scroll_offset
+
+        max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
 
         if lines_above > 0:
             output.append("\n")
@@ -2168,21 +2245,35 @@ class OutputBuffer:
             scroll_up_key = self._format_key_hint("nav_up")
             output.append(f"▲ {lines_above} more line{'s' if lines_above != 1 else ''} ({scroll_up_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
 
-        for output_line in tool.output_lines[start_idx:end_idx]:
+        for line in lines[start_idx:end_idx]:
             output.append("\n")
             output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
-            max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
-            if len(output_line) > max_line_width:
-                display_line = output_line[:max_line_width - 3] + "..."
+            if preserve_ansi:
+                output.append_text(self._truncate_line_to_width(line, max_line_width, max_line_width))
             else:
-                display_line = output_line
-            output.append(display_line, style=self._style("tool_output", "#87D7D7 italic"))
+                if len(line) > max_line_width:
+                    display_line = line[:max_line_width - 3] + "..."
+                else:
+                    display_line = line
+                output.append(display_line, style=self._style(style or "tool_output", "#87D7D7 italic"))
 
         if lines_below > 0:
             output.append("\n")
             output.append(f"{prefix}{continuation}   ", style=self._style("tree_connector", "dim"))
             scroll_down_key = self._format_key_hint("nav_down")
             output.append(f"▼ {lines_below} more line{'s' if lines_below != 1 else ''} ({scroll_down_key} to scroll)", style=self._style("scroll_indicator", "dim italic"))
+
+    def _render_tool_output_lines(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
+        """Render output lines for a tool."""
+        self._render_scrollable_content(
+            output=output,
+            lines=tool.output_lines,
+            scroll_offset=tool.output_scroll_offset,
+            display_count=tool.output_display_lines,
+            is_last=is_last,
+            preserve_ansi=False,
+            style="tool_output"
+        )
 
     def _calculate_prompt_overhead(self, tool: 'ActiveToolCall') -> int:
         """Calculate actual lines of overhead before permission/clarification content.
@@ -2542,6 +2633,33 @@ class OutputBuffer:
             output.append(" → ", style=self._style("muted", "dim"))
             output.append(f"{a_display}", style=self._style("clarification_answer", "green"))
 
+    def _render_file_output(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
+        """Render preserved file output content for a completed tool."""
+        if not tool.file_output_lines:
+            return
+
+        continuation = "   " if is_last else "│  "
+        prefix = "    "
+
+        # Header - show content indicator
+        output.append("\n")
+        output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
+        output.append("  📄 Content", style=self._style("file_output_header", "bold cyan"))
+
+        # Calculate display count as 70% of visible height, with reasonable bounds
+        max_display_lines = max(5, int(self._visible_height * 0.7))
+        display_count = min(len(tool.file_output_lines), max_display_lines)
+
+        # Use shared scrollable content renderer with ANSI preservation for diffs
+        self._render_scrollable_content(
+            output=output,
+            lines=tool.file_output_lines,
+            scroll_offset=tool.file_output_scroll_offset,
+            display_count=display_count,
+            is_last=is_last,
+            preserve_ansi=True
+        )
+
     def _render_tool_block(self, block: ToolBlock, output: Text, wrap_width: int) -> None:
         """Render a ToolBlock inline in the output."""
         tool_count = len(block.tools)
@@ -2563,16 +2681,16 @@ class OutputBuffer:
             selected_tool = block.tools[block.selected_index]
             nav_up = self._format_key_hint("nav_up")
             nav_down = self._format_key_hint("nav_down")
-            expand_key = self._format_key_hint("tool_expand")
-            collapse_key = self._format_key_hint("tool_collapse")
+            toggle_key = self._format_key_hint("pager_next")  # Space key toggles expand
             exit_key = self._format_key_hint("tool_exit")
-            has_output = selected_tool.output_lines and len(selected_tool.output_lines) > 0
+            has_output = (selected_tool.output_lines and len(selected_tool.output_lines) > 0) or \
+                         (selected_tool.file_output_lines and len(selected_tool.file_output_lines) > 0)
             if selected_tool.expanded and has_output:
-                # When expanded: arrows scroll output, left collapses
-                output.append(f"  {nav_up}/{nav_down} scroll, {collapse_key} collapse, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
+                # When expanded: arrows scroll output, space collapses
+                output.append(f"  {nav_up}/{nav_down} scroll, {toggle_key} collapse, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
             elif has_output:
-                # When collapsed but has output: arrows navigate, right expands
-                output.append(f"  {nav_up}/{nav_down} nav, {expand_key} expand, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
+                # When collapsed but has output: arrows navigate, space expands
+                output.append(f"  {nav_up}/{nav_down} nav, {toggle_key} expand, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
             else:
                 # No output: just navigation hints
                 output.append(f"  {nav_up}/{nav_down} nav, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
@@ -2591,8 +2709,10 @@ class OutputBuffer:
                 status_icon = "✓" if tool.success else "✗"
                 status_style = self._style("tool_success", "green") if tool.success else self._style("tool_error", "red")
 
-                # Expand indicator for tool output (only if tool has output)
-                if tool.output_lines:
+                # Expand indicator for tool output (only if tool has output or file content)
+                has_output = (tool.output_lines and len(tool.output_lines) > 0) or \
+                             (tool.file_output_lines and len(tool.file_output_lines) > 0)
+                if has_output:
                     expand_icon = "▾" if tool.expanded else "▸"
                 else:
                     expand_icon = " "
@@ -2665,6 +2785,10 @@ class OutputBuffer:
                 # Clarification summary table (Q&A pairs when expanded)
                 if tool.expanded and tool.clarification_summary:
                     self._render_clarification_summary(output, tool, is_last)
+
+                # File output content (preserved from permission prompt when expanded)
+                if tool.expanded and tool.file_output_lines:
+                    self._render_file_output(output, tool, is_last)
         else:
             # Collapsed view
             tool_summaries = []

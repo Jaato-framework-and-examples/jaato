@@ -1164,14 +1164,20 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("pager_next"), eager=True)
         def handle_space(event):
-            """Handle space key - pager advance or insert space."""
+            """Handle space key - pager advance, tool expand toggle, or insert space."""
             if getattr(self, '_pager_active', False):
                 # In pager mode - advance page
                 self._advance_pager_page()
                 return
-            else:
-                # Normal mode - insert space character
-                event.current_buffer.insert_text(" ")
+            # Check for tool navigation mode
+            buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
+            if buffer and buffer.tool_nav_active:
+                # In tool navigation mode - toggle expand/collapse
+                buffer.toggle_selected_tool_expanded()
+                self._app.invalidate()
+                return
+            # Normal mode - insert space character
+            event.current_buffer.insert_text(" ")
 
         @kb.add(*keys.get_key_args("cancel"))
         def handle_ctrl_c(event):
@@ -1288,13 +1294,13 @@ class PTDisplay:
             """Handle Up arrow - tool nav, scroll popup, or history/completion."""
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
-                # If selected tool is expanded, scroll its output up
+                # If selected tool is expanded and has output, try scrolling
                 selected_tool = buffer.get_selected_tool()
                 if selected_tool and selected_tool.expanded:
-                    buffer.scroll_selected_tool_up()
-                    self._app.invalidate()
-                    return
-                # Otherwise navigate to previous tool
+                    if buffer.scroll_selected_tool_up():
+                        self._app.invalidate()
+                        return
+                # Navigate to previous tool (either not expanded, no output, or at scroll boundary)
                 buffer.select_prev_tool()
                 self._app.invalidate()
                 return
@@ -1312,13 +1318,13 @@ class PTDisplay:
             """Handle Down arrow - tool nav, scroll popup, or history/completion."""
             buffer = self._get_active_buffer()
             if buffer.tool_nav_active:
-                # If selected tool is expanded, scroll its output down
+                # If selected tool is expanded and has output, try scrolling
                 selected_tool = buffer.get_selected_tool()
                 if selected_tool and selected_tool.expanded:
-                    buffer.scroll_selected_tool_down()
-                    self._app.invalidate()
-                    return
-                # Otherwise navigate to next tool
+                    if buffer.scroll_selected_tool_down():
+                        self._app.invalidate()
+                        return
+                # Navigate to next tool (either not expanded, no output, or at scroll boundary)
                 buffer.select_next_tool()
                 self._app.invalidate()
                 return
