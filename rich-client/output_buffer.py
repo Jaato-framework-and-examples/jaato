@@ -1103,6 +1103,13 @@ class OutputBuffer:
                             display_line += min(len(tool.output_lines), tool.output_display_lines)
                             if len(tool.output_lines) > tool.output_display_lines:
                                 display_line += 2  # Scroll indicators
+                        if tool.expanded and tool.file_output_lines:
+                            # File content header + content lines
+                            display_line += 1  # "Content" header
+                            max_display_lines = max(5, int(self._visible_height * 0.7))
+                            display_line += min(len(tool.file_output_lines), max_display_lines)
+                            if len(tool.file_output_lines) > max_display_lines:
+                                display_line += 2  # Scroll indicators
                     break
 
             display_line += self._get_item_display_lines(item)
@@ -1146,8 +1153,10 @@ class OutputBuffer:
         tool = self.get_selected_tool()
         if tool is None:
             return False
-        # Only expand if there's output to show
-        if not tool.output_lines or len(tool.output_lines) == 0:
+        # Only expand if there's output to show (output_lines or file_output_lines)
+        has_output = (tool.output_lines and len(tool.output_lines) > 0) or \
+                     (tool.file_output_lines and len(tool.file_output_lines) > 0)
+        if not has_output:
             return False
         tool.expanded = True
         return True
@@ -2055,15 +2064,14 @@ class OutputBuffer:
             selected_tool = self._active_tools[self._selected_tool_index or 0]
             nav_up = self._format_key_hint("nav_up")
             nav_down = self._format_key_hint("nav_down")
-            expand_key = self._format_key_hint("tool_expand")
-            collapse_key = self._format_key_hint("tool_collapse")
+            toggle_key = self._format_key_hint("pager_next")  # Space key toggles expand
             exit_key = self._format_key_hint("tool_exit")
             has_output = (selected_tool.output_lines and len(selected_tool.output_lines) > 0) or \
                          (selected_tool.file_output_lines and len(selected_tool.file_output_lines) > 0)
             if selected_tool.expanded and has_output:
-                output.append(f"  ───  {nav_up}/{nav_down} scroll, {collapse_key} collapse, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
+                output.append(f"  ───  {nav_up}/{nav_down} scroll, {toggle_key} collapse, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
             elif has_output:
-                output.append(f"  ───  {nav_up}/{nav_down} nav, {expand_key} expand, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
+                output.append(f"  ───  {nav_up}/{nav_down} nav, {toggle_key} expand, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
             else:
                 output.append(f"  ───  {nav_up}/{nav_down} nav, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
         elif self._tools_expanded:
@@ -2111,7 +2119,13 @@ class OutputBuffer:
                     status_icon = "○"
                     status_style = self._style("muted", "dim")
 
-                expand_icon = "▾" if tool.expanded else "▸" if self._tool_nav_active else ""
+                # Show expand icon only if tool has content to expand
+                has_output = (tool.output_lines and len(tool.output_lines) > 0) or \
+                             (tool.file_output_lines and len(tool.file_output_lines) > 0)
+                if self._tool_nav_active and has_output:
+                    expand_icon = "▾" if tool.expanded else "▸"
+                else:
+                    expand_icon = " " if self._tool_nav_active else ""
                 row_style = "reverse" if is_selected else self._style("muted", "dim")
 
                 output.append("\n")
@@ -2667,17 +2681,16 @@ class OutputBuffer:
             selected_tool = block.tools[block.selected_index]
             nav_up = self._format_key_hint("nav_up")
             nav_down = self._format_key_hint("nav_down")
-            expand_key = self._format_key_hint("tool_expand")
-            collapse_key = self._format_key_hint("tool_collapse")
+            toggle_key = self._format_key_hint("pager_next")  # Space key toggles expand
             exit_key = self._format_key_hint("tool_exit")
             has_output = (selected_tool.output_lines and len(selected_tool.output_lines) > 0) or \
                          (selected_tool.file_output_lines and len(selected_tool.file_output_lines) > 0)
             if selected_tool.expanded and has_output:
-                # When expanded: arrows scroll output, left collapses
-                output.append(f"  {nav_up}/{nav_down} scroll, {collapse_key} collapse, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
+                # When expanded: arrows scroll output, space collapses
+                output.append(f"  {nav_up}/{nav_down} scroll, {toggle_key} collapse, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
             elif has_output:
-                # When collapsed but has output: arrows navigate, right expands
-                output.append(f"  {nav_up}/{nav_down} nav, {expand_key} expand, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
+                # When collapsed but has output: arrows navigate, space expands
+                output.append(f"  {nav_up}/{nav_down} nav, {toggle_key} expand, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
             else:
                 # No output: just navigation hints
                 output.append(f"  {nav_up}/{nav_down} nav, {exit_key} exit [{pos}/{total}]", style=self._style("hint", "dim"))
@@ -2696,8 +2709,10 @@ class OutputBuffer:
                 status_icon = "✓" if tool.success else "✗"
                 status_style = self._style("tool_success", "green") if tool.success else self._style("tool_error", "red")
 
-                # Expand indicator for tool output (only if tool has output)
-                if tool.output_lines:
+                # Expand indicator for tool output (only if tool has output or file content)
+                has_output = (tool.output_lines and len(tool.output_lines) > 0) or \
+                             (tool.file_output_lines and len(tool.file_output_lines) > 0)
+                if has_output:
                     expand_icon = "▾" if tool.expanded else "▸"
                 else:
                     expand_icon = " "

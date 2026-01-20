@@ -57,6 +57,9 @@ dev = [
 ast = [
     "ast-grep-py>=0.30.0",  # AST-based code search
 ]
+kaggle = [
+    "kaggle>=1.5.0",
+]
 
 # Entry points for plugin discovery
 # External packages can register plugins by adding to this group
