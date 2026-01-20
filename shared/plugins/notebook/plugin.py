@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..base import UserCommand, PermissionDisplayInfo
 from ..model_provider.types import ToolSchema
 from .types import ExecutionStatus, OutputType
-from .backends import NotebookBackend, LocalJupyterBackend, KaggleBackend
+from .backends import NotebookBackend, LocalJupyterBackend, KaggleBackend, _KAGGLE_AVAILABLE
 
 
 # Default to local backend
@@ -46,6 +46,8 @@ class NotebookPlugin:
         self._max_output_length: int = MAX_OUTPUT_LENGTH
         self._initialized = False
         self._agent_name: Optional[str] = None
+        self._kaggle_enabled: bool = True  # Whether to try kaggle when requested
+        self._kaggle_init_attempted: bool = False  # Lazy init flag
 
     @property
     def name(self) -> str:
@@ -78,33 +80,59 @@ class NotebookPlugin:
                 - agent_name: Agent name for trace logging
         """
         config = config or {}
+        self._config = config  # Store for lazy kaggle init
         self._agent_name = config.get("agent_name")
         self._max_output_length = config.get("max_output_length", MAX_OUTPUT_LENGTH)
+        self._kaggle_enabled = config.get("enable_kaggle", True)
 
         # Always initialize local backend
         local_backend = LocalJupyterBackend()
         local_backend.initialize(config)
         self._backends["local"] = local_backend
 
-        # Initialize Kaggle backend if enabled
-        if config.get("enable_kaggle", True):
-            try:
-                kaggle_backend = KaggleBackend()
-                kaggle_backend.initialize(config)
-                self._backends["kaggle"] = kaggle_backend
-                self._trace("Kaggle backend initialized successfully")
-            except Exception as e:
-                self._trace(f"Kaggle backend not available: {e}")
+        # Kaggle backend is initialized lazily when first requested (gpu=true)
+        # This avoids stalling during plugin init if kaggle auth is missing/slow
+        if not _KAGGLE_AVAILABLE:
+            self._trace("Kaggle backend not available: kaggle package not installed")
 
-        # Set default backend
-        default = config.get("default_backend", DEFAULT_BACKEND)
-        if default in self._backends:
-            self._active_backend_name = default
-        else:
-            self._active_backend_name = "local"
+        # Set default backend (only local is available at init time)
+        self._active_backend_name = "local"
 
         self._initialized = True
         self._trace(f"Initialized with backend={self._active_backend_name}")
+
+    def _ensure_kaggle_backend(self) -> Optional[str]:
+        """Lazily initialize kaggle backend on first use.
+
+        Returns:
+            None if successful, error message string if failed.
+        """
+        self._trace(f"_ensure_kaggle_backend: called, kaggle_in_backends={('kaggle' in self._backends)}, init_attempted={self._kaggle_init_attempted}, enabled={self._kaggle_enabled}, available={_KAGGLE_AVAILABLE}")
+
+        if "kaggle" in self._backends:
+            return None  # Already initialized
+
+        if self._kaggle_init_attempted:
+            return "Kaggle backend initialization already failed"
+
+        self._kaggle_init_attempted = True
+
+        if not self._kaggle_enabled:
+            return "Kaggle backend disabled in config"
+
+        if not _KAGGLE_AVAILABLE:
+            return "Kaggle package not installed. Install with: pip install kaggle"
+
+        try:
+            kaggle_backend = KaggleBackend()
+            kaggle_backend.set_trace_fn(self._trace)  # Wire up tracing
+            kaggle_backend.initialize(getattr(self, '_config', None))
+            self._backends["kaggle"] = kaggle_backend
+            self._trace("Kaggle backend initialized successfully (lazy)")
+            return None
+        except Exception as e:
+            self._trace(f"Kaggle backend initialization failed: {e}")
+            return str(e)
 
     def shutdown(self) -> None:
         """Shutdown all backends."""
@@ -116,6 +144,7 @@ class NotebookPlugin:
         self._backends.clear()
         self._current_notebook_id = None
         self._initialized = False
+        self._kaggle_init_attempted = False
 
     @property
     def _active_backend(self) -> NotebookBackend:
@@ -391,18 +420,26 @@ class NotebookPlugin:
         elif result.status in (ExecutionStatus.QUEUED, ExecutionStatus.RUNNING):
             response["message"] = "Execution in progress (async backend). Poll with notebook_variables to check status."
 
+        # Log response summary
+        output_len = len(response.get("output", ""))
+        error = response.get("error", "")
+        self._trace(f"Response: status={result.status.value}, output_len={output_len}, error={error[:100] if error else 'none'}")
+
         return response
 
     def _create_notebook(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new notebook."""
         name = args.get("name", "untitled")
         gpu = args.get("gpu", False)
+        self._trace(f"_create_notebook: name={name}, gpu={gpu}")
 
         # Choose backend based on GPU requirement
         if gpu:
-            if "kaggle" not in self._backends:
+            # Lazy init kaggle backend on first GPU request
+            error = self._ensure_kaggle_backend()
+            if error:
                 return {
-                    "error": "GPU backend (Kaggle) not available",
+                    "error": f"GPU backend (Kaggle) not available: {error}",
                     "hint": "Install kaggle package and configure credentials",
                 }
             backend = self._backends["kaggle"]
@@ -457,11 +494,18 @@ class NotebookPlugin:
         for name, backend in self._backends.items():
             for nb in backend.list_notebooks():
                 if nb.notebook_id == notebook_id:
-                    backend.reset_notebook(notebook_id)
-                    return {
-                        "notebook_id": notebook_id,
+                    new_notebook_id = backend.reset_notebook(notebook_id)
+                    # Update current notebook reference if it changed
+                    if self._current_notebook_id == notebook_id:
+                        self._current_notebook_id = new_notebook_id
+                    result = {
+                        "notebook_id": new_notebook_id,
                         "message": "Notebook reset. All variables cleared.",
                     }
+                    if new_notebook_id != notebook_id:
+                        result["message"] += f" New notebook_id: {new_notebook_id}"
+                        result["previous_notebook_id"] = notebook_id
+                    return result
 
         return {"error": f"Notebook {notebook_id} not found"}
 
@@ -499,6 +543,20 @@ class NotebookPlugin:
                 "weekly_quota_hours": caps.weekly_quota_hours,
                 "is_async": caps.is_async,
                 "requires_auth": caps.requires_auth,
+            })
+
+        # Show kaggle as potential backend if available but not yet initialized
+        if "kaggle" not in self._backends and _KAGGLE_AVAILABLE and self._kaggle_enabled:
+            backends.append({
+                "name": "kaggle",
+                "available": "not_initialized",  # Will be initialized on first GPU request
+                "supports_gpu": True,
+                "gpu_type": "P100/T4",
+                "max_runtime_hours": 9.0,
+                "weekly_quota_hours": 30.0,
+                "is_async": True,
+                "requires_auth": True,
+                "note": "Will initialize on first GPU notebook request",
             })
 
         return {

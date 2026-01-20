@@ -119,11 +119,19 @@ class NotebookBackend(ABC):
         ...
 
     @abstractmethod
-    def reset_notebook(self, notebook_id: str) -> None:
+    def reset_notebook(self, notebook_id: str) -> str:
         """Reset the notebook state (clear all variables).
+
+        For backends where kernel IDs must be unique per execution (like Kaggle),
+        this may generate a new notebook_id to avoid conflicts with the
+        previously pushed kernel.
 
         Args:
             notebook_id: ID of the notebook to reset
+
+        Returns:
+            The notebook_id to use for subsequent operations (may be different
+            from the input if a new ID was generated)
         """
         ...
 
