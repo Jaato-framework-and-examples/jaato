@@ -851,6 +851,9 @@ class OutputBuffer:
             True if now expanded, False if now collapsed.
         """
         self._tools_expanded = not self._tools_expanded
+        # Clear saved state so user's manual toggle is respected and not overwritten
+        # by the restore logic when permission/clarification resolves
+        self._tools_expanded_before_prompt = None
         return self._tools_expanded
 
     @property
@@ -1316,6 +1319,10 @@ class OutputBuffer:
         self._tool_placeholder_index = None
         self._active_tools.clear()
 
+        # Now that tools are finalized, restore the expanded state if we had saved one
+        # This happens AFTER finalization so the ToolBlock captures the visible state
+        self._maybe_restore_expanded_state()
+
         # Auto-scroll to bottom to show finalized content
         # This ensures enrichment notifications and tool results are visible
         self.scroll_to_bottom()
@@ -1330,13 +1337,23 @@ class OutputBuffer:
 
         Called after permission/clarification is resolved to check if we can
         restore the user's previous collapsed state.
+
+        IMPORTANT: We don't restore while tools are still active (incomplete).
+        This ensures the ToolBlock captures the visible state when tools finalize,
+        rather than restoring the state and then having finalization capture
+        the restored state.
         """
         # Check if any tool still has a pending prompt
         for tool in self._active_tools:
             if tool.permission_state == "pending" or tool.clarification_state == "pending":
                 return  # Still have pending prompts, keep expanded
 
-        # No more pending prompts, restore saved state if we have one
+        # Don't restore while tools are still active - let finalization capture the visible state
+        # The restore will happen after finalization clears _active_tools
+        if self._active_tools:
+            return
+
+        # No active tools and no pending prompts, restore saved state if we have one
         if self._tools_expanded_before_prompt is not None:
             self._tools_expanded = self._tools_expanded_before_prompt
             self._tools_expanded_before_prompt = None
@@ -1370,7 +1387,7 @@ class OutputBuffer:
                 self._tools_expanded = True
                 # Scroll to show the tool tree with the permission prompt
                 self.scroll_to_show_tool_tree()
-                _trace(f"set_tool_permission_pending: FOUND exact match for {tool_name}")
+                _trace(f"set_tool_permission_pending: FOUND exact match for {tool_name}, _tools_expanded now True")
                 return
 
         # Fallback: attach to the last uncompleted tool (handles askPermission checking other tools)
