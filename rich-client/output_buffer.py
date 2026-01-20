@@ -2049,8 +2049,8 @@ class OutputBuffer:
             height += 1  # Header
             for tool in block.tools:
                 height += 1  # Tool line
-                # Output preview if tool has output and is expanded
-                if tool.expanded and tool.output_lines:
+                # Output preview - always shown when block is expanded
+                if tool.output_lines:
                     display_count = min(len(tool.output_lines), tool.output_display_lines)
                     height += display_count
                     # Scroll indicators
@@ -2059,12 +2059,12 @@ class OutputBuffer:
                 # Error message
                 if not tool.success and tool.error_message:
                     height += 1
-                # Clarification summary (Q&A table when expanded)
-                if tool.expanded and tool.clarification_summary:
+                # Clarification summary (Q&A table) - always shown when block is expanded
+                if tool.clarification_summary:
                     height += 1  # header ("Answers (N)")
                     height += len(tool.clarification_summary)  # One line per Q&A pair
-                # File output content (preserved from permission prompt when expanded)
-                if tool.expanded and tool.file_output_lines:
+                # File output content - always shown when block is expanded
+                if tool.file_output_lines:
                     height += 1  # header ("Content")
                     total_lines = len(tool.file_output_lines)
                     # Use 70% of visible height for file content display
