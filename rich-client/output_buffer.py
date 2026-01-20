@@ -2050,12 +2050,16 @@ class OutputBuffer:
             for tool in block.tools:
                 height += 1  # Tool line
                 # Output preview - always shown when block is expanded
+                # Match _render_tool_output_lines: overhead=2 for ToolBlocks, then max(3, visible-overhead)
                 if tool.output_lines:
-                    display_count = min(len(tool.output_lines), tool.output_display_lines)
+                    total_lines = len(tool.output_lines)
+                    overhead = 2  # Separator + header (same as _calculate_tool_output_overhead returns for ToolBlocks)
+                    max_display_lines = max(3, self._visible_height - overhead)
+                    display_count = min(total_lines, max_display_lines)
                     height += display_count
-                    # Scroll indicators
-                    if len(tool.output_lines) > tool.output_display_lines:
-                        height += 2
+                    # Truncation indicator if content exceeds display
+                    if total_lines > max_display_lines:
+                        height += 1
                 # Error message
                 if not tool.success and tool.error_message:
                     height += 1
@@ -2537,8 +2541,14 @@ class OutputBuffer:
         """Calculate lines of overhead before tool output content.
 
         Similar to _calculate_prompt_overhead but for tool output display.
+        For finalized ToolBlocks (no active tools/placeholder), returns minimal overhead.
         """
         overhead = 0
+
+        # For finalized ToolBlocks, _tool_placeholder_index is None
+        # Return minimal overhead (just the header line)
+        if self._tool_placeholder_index is None:
+            return 2  # Separator + header
 
         # Context lines kept at top by scroll logic
         lines_before_tree = sum(
