@@ -744,6 +744,16 @@ class PTDisplay:
                 ("class:session-bar.workspace", self._session_workspace),
             ])
 
+        # Add tools expansion indicator (use active buffer, same as keybinding)
+        tools_expanded = self._get_active_buffer().tools_expanded
+        tools_indicator = "▼ expanded" if tools_expanded else "▶ collapsed"
+        result.extend([
+            ("class:session-bar.separator", "  │  "),
+            ("class:session-bar.label", "Toolblocks visualization: "),
+            ("class:session-bar.value", tools_indicator),
+            ("class:session-bar.dim", " [Ctrl+T]"),
+        ])
+
         result.append(("class:session-bar", " "))
         return result
 
