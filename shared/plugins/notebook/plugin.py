@@ -390,41 +390,42 @@ class NotebookPlugin(StreamingCapable):
         }
 
         if result.status == ExecutionStatus.COMPLETED:
-            # Collect outputs
-            output_text = []
+            # Format output with notebook cell markers for the formatter pipeline
+            exec_count = result.execution_count or 1
+            output_parts = []
+
+            # Input cell with the code
+            output_parts.append(self._format_input_cell(code, exec_count))
+
+            # Output cells for each type
             for output in result.outputs:
-                if output.output_type == OutputType.STDOUT:
-                    output_text.append(output.content)
-                elif output.output_type == OutputType.RESULT:
-                    output_text.append(f"Out[{result.execution_count}]: {output.content}")
-                elif output.output_type == OutputType.STDERR:
-                    output_text.append(f"[stderr] {output.content}")
+                if output.output_type == OutputType.STDOUT and output.content:
+                    output_parts.append(self._format_stdout_cell(output.content, exec_count))
+                elif output.output_type == OutputType.RESULT and output.content:
+                    output_parts.append(self._format_result_cell(output.content, exec_count))
+                elif output.output_type == OutputType.STDERR and output.content:
+                    output_parts.append(self._format_stderr_cell(output.content, exec_count))
                 elif output.output_type == OutputType.DISPLAY:
-                    # For images, just note that they were created
-                    mime = output.mime_type
+                    mime = output.mime_type or "unknown"
                     if mime.startswith("image/"):
-                        output_text.append(f"[Image: {mime}]")
+                        content = f"[Image: {mime}]"
                     else:
-                        output_text.append(output.content[:500])
+                        content = output.content[:500] if output.content else ""
+                    output_parts.append(self._format_display_cell(content, exec_count))
 
-            combined_output = "\n".join(output_text)
-
-            # Truncate if too long
-            if len(combined_output) > self._max_output_length:
-                combined_output = combined_output[:self._max_output_length] + "\n... (truncated)"
-
-            response["output"] = combined_output
+            response["output"] = "\n".join(output_parts)
             response["variables"] = result.variables
             if result.duration_seconds:
                 response["duration_seconds"] = round(result.duration_seconds, 2)
 
         elif result.status == ExecutionStatus.FAILED:
-            response["error"] = result.error_message
+            exec_count = result.execution_count or 1
+            # Format error with markers
+            error_content = result.error_message or "Unknown error"
             if result.traceback:
-                tb = result.traceback
-                if len(tb) > 2000:
-                    tb = tb[:2000] + "\n... (truncated)"
-                response["traceback"] = tb
+                error_content += f"\n{result.traceback}"
+            response["output"] = self._format_input_cell(code, exec_count) + "\n" + self._format_error_cell(error_content, exec_count)
+            response["error"] = result.error_message
 
         elif result.status in (ExecutionStatus.QUEUED, ExecutionStatus.RUNNING):
             response["message"] = "Execution in progress (async backend). Poll with notebook_variables to check status."
