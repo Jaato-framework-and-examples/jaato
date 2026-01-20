@@ -582,12 +582,60 @@ class GoogleGenAIProvider:
     # ==================== Connection ====================
 
     def connect(self, model: str) -> None:
-        """Set the model to use.
+        """Set the model to use and verify it responds.
 
         Args:
             model: Model name (e.g., 'gemini-2.5-flash').
+
+        Raises:
+            RuntimeError: Model doesn't exist or cannot be used.
         """
         self._model_name = model
+
+        # Verify model can actually respond
+        self._verify_model_responds()
+
+    def _verify_model_responds(self) -> None:
+        """Verify the model can actually respond.
+
+        Sends a minimal test message to catch issues like:
+        - Invalid model name
+        - Model access restrictions
+        - Quota/billing issues
+        """
+        if not self._client or not self._model_name:
+            return  # Will fail later with clear error
+
+        try:
+            # Use generate_content for a one-off test (no chat session needed)
+            self._client.models.generate_content(
+                model=self._model_name,
+                contents="hi",
+                config={"max_output_tokens": 1},
+            )
+        except Exception as e:
+            error_str = str(e).lower()
+            if "not found" in error_str or "404" in error_str:
+                raise RuntimeError(
+                    f"Model '{self._model_name}' not found or not accessible.\n"
+                    f"Original error: {e}"
+                ) from e
+            elif "permission" in error_str or "403" in error_str:
+                raise RuntimeError(
+                    f"Permission denied for model '{self._model_name}'.\n"
+                    f"Check your project configuration and API access.\n"
+                    f"Original error: {e}"
+                ) from e
+            elif "quota" in error_str or "429" in error_str:
+                raise RuntimeError(
+                    f"Quota exceeded for model '{self._model_name}'.\n"
+                    f"Original error: {e}"
+                ) from e
+            else:
+                raise RuntimeError(
+                    f"Failed to verify model '{self._model_name}'.\n"
+                    f"Original error: {e}"
+                ) from e
 
     @property
     def is_connected(self) -> bool:

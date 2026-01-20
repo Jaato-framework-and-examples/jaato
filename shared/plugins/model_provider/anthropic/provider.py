@@ -425,12 +425,41 @@ class AnthropicProvider:
     # ==================== Connection ====================
 
     def connect(self, model: str) -> None:
-        """Set the model to use.
+        """Set the model to use and verify it responds.
 
         Args:
             model: Model ID (e.g., 'claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022').
+
+        Raises:
+            ModelNotFoundError: Model doesn't exist or is not accessible.
+            APIKeyInvalidError: Authentication failed.
         """
         self._model_name = model
+
+        # Verify model can actually respond
+        self._verify_model_responds()
+
+    def _verify_model_responds(self) -> None:
+        """Verify the model can actually respond.
+
+        Sends a minimal test message to catch issues like:
+        - Invalid model name
+        - Authentication issues
+        - Model access restrictions
+        """
+        if not self._client:
+            return  # Will fail later with clear error
+
+        try:
+            # Send minimal request to verify model responds
+            self._client.messages.create(
+                model=self._model_name,
+                max_tokens=1,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        except Exception as e:
+            # Use our error handler to provide helpful messages
+            self._handle_api_error(e)
 
     @property
     def is_connected(self) -> bool:

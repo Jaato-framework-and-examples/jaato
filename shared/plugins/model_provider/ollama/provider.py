@@ -155,11 +155,10 @@ class OllamaProvider(AnthropicProvider):
         """Create Anthropic client pointing to Ollama server."""
         import anthropic
 
-        # Ollama requires the /v1 suffix for Anthropic API compatibility
-        base_url = f"{self._host}/v1"
-
+        # Anthropic SDK appends /v1/messages to base_url, so use host directly
+        # Ollama serves Anthropic API at /v1/messages
         return anthropic.Anthropic(
-            base_url=base_url,
+            base_url=self._host,
             # Ollama ignores the API key but the SDK requires one
             api_key="ollama",
         )
@@ -175,6 +174,25 @@ class OllamaProvider(AnthropicProvider):
             raise OllamaConnectionError(self._host, "Connection timed out")
         except requests.exceptions.RequestException as e:
             raise OllamaConnectionError(self._host, str(e))
+
+    def _verify_model_responds(self) -> None:
+        """Verify the model can actually respond.
+
+        Sends a minimal test message to catch issues like:
+        - Insufficient memory to load model
+        - Model file corruption
+        - Other runtime errors
+        """
+        try:
+            # Send minimal request to verify model loads and responds
+            self._client.messages.create(
+                model=self._model_name,
+                max_tokens=1,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        except Exception as e:
+            # Use our error handler to provide helpful messages
+            self._handle_api_error(e)
 
     def verify_auth(
         self,
@@ -212,6 +230,7 @@ class OllamaProvider(AnthropicProvider):
 
         Raises:
             OllamaModelNotFoundError: Model not available in Ollama.
+            RuntimeError: Model cannot be loaded (memory, etc.).
         """
         # Verify model exists in Ollama
         available = self._get_local_models()
@@ -222,6 +241,9 @@ class OllamaProvider(AnthropicProvider):
                 raise OllamaModelNotFoundError(model_name, available)
 
         self._model_name = model_name
+
+        # Verify model can actually respond (catches memory issues, etc.)
+        self._verify_model_responds()
 
     def list_models(self, prefix: Optional[str] = None) -> List[str]:
         """List models available in Ollama.
