@@ -625,5 +625,175 @@ class TestEdgeCases:
         assert model_lines[0].is_turn_start is True, "First model line should be turn start"
 
 
+class TestToolBlockExpansionPersistence:
+    """Tests for tool block expansion state persistence after finalization."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.buffer = OutputBuffer()
+        self.buffer.set_width(80)
+
+    def test_user_expanded_state_persists_after_finalization(self):
+        """User's manual expansion should persist in the finalized ToolBlock.
+
+        Scenario:
+        1. Tool starts (default: collapsed)
+        2. User toggles to expand
+        3. Tool completes and finalizes
+        4. ToolBlock should be expanded
+        """
+        # Start with default collapsed state
+        assert self.buffer._tools_expanded is False
+
+        # Add a tool
+        self.buffer.add_active_tool("testTool", {"arg": "value"}, call_id="call_1")
+
+        # User manually expands (like pressing Ctrl+T)
+        self.buffer.toggle_tools_expanded()
+        assert self.buffer._tools_expanded is True
+
+        # Tool completes
+        self.buffer.mark_tool_completed("testTool", success=True, call_id="call_1")
+
+        # Finalize the tool tree
+        self.buffer.finalize_tool_tree()
+
+        # Find the tool block
+        tool_blocks = [item for item in self.buffer._lines if isinstance(item, ToolBlock)]
+        assert len(tool_blocks) == 1, "Expected 1 tool block"
+
+        # The block should be expanded (user's choice persisted)
+        assert tool_blocks[0].expanded is True, "ToolBlock should be expanded as user chose"
+
+    def test_user_collapsed_state_persists_after_finalization(self):
+        """User's manual collapse should persist in the finalized ToolBlock.
+
+        Scenario:
+        1. Tool starts
+        2. State is expanded (e.g., from previous toggle or forced expansion)
+        3. User toggles to collapse
+        4. Tool completes and finalizes
+        5. ToolBlock should be collapsed
+        """
+        # Start with expanded state
+        self.buffer._tools_expanded = True
+
+        # Add a tool
+        self.buffer.add_active_tool("testTool", {"arg": "value"}, call_id="call_1")
+
+        # User manually collapses (like pressing Ctrl+T)
+        self.buffer.toggle_tools_expanded()
+        assert self.buffer._tools_expanded is False
+
+        # Tool completes
+        self.buffer.mark_tool_completed("testTool", success=True, call_id="call_1")
+
+        # Finalize the tool tree
+        self.buffer.finalize_tool_tree()
+
+        # Find the tool block
+        tool_blocks = [item for item in self.buffer._lines if isinstance(item, ToolBlock)]
+        assert len(tool_blocks) == 1, "Expected 1 tool block"
+
+        # The block should be collapsed (user's choice persisted)
+        assert tool_blocks[0].expanded is False, "ToolBlock should be collapsed as user chose"
+
+    def test_user_toggle_overrides_permission_saved_state(self):
+        """User's toggle during permission prompt should override the saved state.
+
+        Scenario:
+        1. Tool starts collapsed
+        2. Permission pending forces expansion (saves collapsed state)
+        3. User toggles to collapse (explicit choice)
+        4. Permission resolves - should NOT restore to expanded
+        5. Tool completes and finalizes
+        6. ToolBlock should be collapsed (user's explicit choice)
+        """
+        # Start collapsed
+        assert self.buffer._tools_expanded is False
+        assert self.buffer._tools_expanded_before_prompt is None
+
+        # Add a tool
+        self.buffer.add_active_tool("dangerousTool", {"cmd": "rm -rf /"}, call_id="call_1")
+
+        # Permission pending - saves collapsed state and forces expansion
+        self.buffer.set_tool_permission_pending("dangerousTool", ["Allow dangerous operation?"])
+
+        # Verify state was saved and forced to expanded
+        assert self.buffer._tools_expanded is True, "Should be forced to expanded"
+        assert self.buffer._tools_expanded_before_prompt is False, "Should save original collapsed state"
+
+        # User explicitly toggles to collapse (explicit choice)
+        self.buffer.toggle_tools_expanded()
+        assert self.buffer._tools_expanded is False, "User chose to collapse"
+        # The saved state should be cleared so restore won't override user's choice
+        assert self.buffer._tools_expanded_before_prompt is None, "Saved state should be cleared"
+
+        # Permission resolves
+        self.buffer.set_tool_permission_resolved("dangerousTool", "granted", "user_approved")
+
+        # State should remain as user chose (collapsed), not restored to saved state
+        assert self.buffer._tools_expanded is False, "Should remain collapsed per user's choice"
+
+        # Tool completes
+        self.buffer.mark_tool_completed("dangerousTool", success=True, call_id="call_1")
+
+        # Finalize
+        self.buffer.finalize_tool_tree()
+
+        # Find the tool block
+        tool_blocks = [item for item in self.buffer._lines if isinstance(item, ToolBlock)]
+        assert len(tool_blocks) == 1, "Expected 1 tool block"
+
+        # The block should be collapsed (user's explicit choice during execution)
+        assert tool_blocks[0].expanded is False, "ToolBlock should be collapsed per user's choice"
+
+    def test_system_forced_expansion_uses_original_preference(self):
+        """System-forced expansion (permission) should use user's original preference in ToolBlock.
+
+        When expansion is forced by the system (permission/clarification prompt) and user
+        doesn't manually toggle, the finalized ToolBlock should use the user's ORIGINAL
+        preference (before the system forced expansion), not the forced state.
+
+        This ensures that temporary UI changes for prompts don't override user preferences.
+        """
+        # Start collapsed (user's preference)
+        assert self.buffer._tools_expanded is False
+
+        # Add a tool
+        self.buffer.add_active_tool("dangerousTool", {"cmd": "rm"}, call_id="call_1")
+
+        # Permission pending - forces expansion, saves original preference
+        self.buffer.set_tool_permission_pending("dangerousTool", ["Allow?"])
+        assert self.buffer._tools_expanded is True, "Should be forced to expanded"
+        assert self.buffer._tools_expanded_before_prompt is False, "Should save user's original preference"
+
+        # Permission resolves (user approves, doesn't toggle)
+        self.buffer.set_tool_permission_resolved("dangerousTool", "granted", "user_approved")
+
+        # State should NOT be restored yet - tools are still active
+        assert self.buffer._tools_expanded is True, "Should still be expanded (tools still active)"
+
+        # Tool completes
+        self.buffer.mark_tool_completed("dangerousTool", success=True, call_id="call_1")
+
+        # Finalize
+        self.buffer.finalize_tool_tree()
+
+        # Find the tool block
+        tool_blocks = [item for item in self.buffer._lines if isinstance(item, ToolBlock)]
+        assert len(tool_blocks) == 1, "Expected 1 tool block"
+
+        # The ToolBlock uses user's ORIGINAL preference (collapsed), not the forced state
+        assert tool_blocks[0].expanded is False, (
+            "ToolBlock should use user's original preference (collapsed), not system-forced state"
+        )
+
+        # After finalization, _tools_expanded is restored to original preference
+        assert self.buffer._tools_expanded is False, (
+            "_tools_expanded should be restored to collapsed for future tools"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

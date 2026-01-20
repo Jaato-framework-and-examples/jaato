@@ -685,6 +685,7 @@ class ThemeConfig:
             "session-bar.separator": "session_bar_separator",
             "session-bar.description": "session_bar_description",
             "session-bar.workspace": "session_bar_workspace",
+            "session-bar.value": "status_bar_value",
             "session-bar.dim": "agent_tab_dim",
             # Pending prompts
             "pending-prompts-bar": "session_bar_bg",
