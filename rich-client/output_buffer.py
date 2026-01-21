@@ -2388,8 +2388,9 @@ class OutputBuffer:
         are rendered with whatever content is available so far.
         """
         # Pattern to match complete <nb-row type="..." label="...">content</nb-row>
+        # Note: Use (?:\n) instead of \s*\n? to preserve leading spaces in content
         complete_pattern = re.compile(
-            r'<nb-row\s+type="([^"]+)"\s+label="([^"]*)">\s*\n?(.*?)\n?</nb-row>',
+            r'<nb-row\s+type="([^"]+)"\s+label="([^"]*)">(?:\n)(.*?)(?:\n)?</nb-row>',
             re.DOTALL
         )
         # Pattern to match incomplete (streaming) marker - has opening but no closing
@@ -2420,7 +2421,8 @@ class OutputBuffer:
 
             cell_type = match.group(1)
             label = match.group(2)
-            cell_content = match.group(3).strip()
+            # Use strip('\n') to preserve leading space indentation from code formatter
+            cell_content = match.group(3).strip('\n')
 
             # Render the row
             self._render_single_notebook_row(
@@ -2445,7 +2447,8 @@ class OutputBuffer:
             # Render the incomplete marker with available content (progressive streaming)
             cell_type = incomplete_match.group(1)
             label = incomplete_match.group(2)
-            cell_content = incomplete_match.group(3).strip()
+            # Use strip('\n') to preserve leading space indentation from code formatter
+            cell_content = incomplete_match.group(3).strip('\n')
 
             # Only render if there's actual content (not just the opening tag)
             if cell_content:
@@ -2486,6 +2489,12 @@ class OutputBuffer:
         lines = content.split('\n')
         if not lines:
             return
+
+        # Strip the 4-space indent added by code_block_formatter for notebook display
+        # The code_block_formatter adds "    " (4 spaces) to each line for visual distinction,
+        # but notebook cells have their own layout so this indent is unnecessary
+        if lines and lines[0].startswith('    '):
+            lines = [line[4:] if line.startswith('    ') else line for line in lines]
 
         # Determine label style based on cell type
         if cell_type == "input":
