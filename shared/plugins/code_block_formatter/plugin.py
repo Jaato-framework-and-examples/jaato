@@ -140,7 +140,8 @@ def _trim_line_to_width(line: str, target_width: int) -> str:
         result = Text()
 
     # Convert back to ANSI string
-    console = Console(force_terminal=True, no_color=False, highlight=False)
+    # Use a large width to prevent any wrapping during conversion
+    console = Console(width=10000, force_terminal=True, no_color=False, highlight=False)
     with console.capture() as capture:
         console.print(result, end="")
     return capture.get()
@@ -336,14 +337,20 @@ class CodeBlockFormatterPlugin:
                 max_code_width += line_number_width
 
             # Use content width as console width (prevents wrapping)
-            render_width = max(40, max_code_width + 1)
+            # Add buffer of 2 to account for any padding/formatting Rich may add
+            # (previous buffer of 1 was insufficient in some cases)
+            render_width = max(40, max_code_width + 2)
 
+            # Disable word_wrap during rendering since we've calculated render_width
+            # to be large enough for all content. This prevents any wrapping due to
+            # width calculation discrepancies between our calculation and Rich's.
+            # The self._word_wrap setting is preserved for potential future use.
             syntax = Syntax(
                 code,
                 lang,
                 theme=self._theme,
                 line_numbers=self._line_numbers,
-                word_wrap=self._word_wrap,
+                word_wrap=False,
                 background_color=self._background_color,
             )
 
