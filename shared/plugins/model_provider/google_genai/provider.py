@@ -15,9 +15,13 @@ Authentication methods:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
+import traceback
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 # Lazy imports - SDK is only loaded when actually used
 from ._lazy import get_genai, get_types
@@ -461,8 +465,8 @@ class GoogleGenAIProvider:
                     source_principal = f"serviceAccount:{creds.service_account_email}"
                 elif hasattr(creds, '_service_account_email'):
                     source_principal = f"serviceAccount:{creds._service_account_email}"
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"Could not determine source principal: {exc}")
 
             if "permission" in error_msg or "403" in error_msg or "token creator" in error_msg:
                 raise ImpersonationError(
@@ -683,7 +687,8 @@ class GoogleGenAIProvider:
 
             # Update cache
             self._models_cache = (now, models)
-        except Exception:
+        except Exception as exc:
+            logger.warning(f"Failed to list models from API: {exc}")
             # If API fails, return empty list (no fallback to static)
             return []
 
@@ -924,7 +929,8 @@ class GoogleGenAIProvider:
                 contents=content
             )
             return result.total_tokens
-        except Exception:
+        except Exception as exc:
+            logger.debug(f"Failed to count tokens, using estimate: {exc}")
             # Fallback: rough estimate (4 chars per token)
             return len(content) // 4
 
