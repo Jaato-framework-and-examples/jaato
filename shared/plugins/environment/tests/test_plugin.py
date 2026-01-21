@@ -3,7 +3,9 @@
 import json
 import os
 import platform
+import re
 import sys
+import time
 import pytest
 
 from ..plugin import EnvironmentPlugin
@@ -67,6 +69,7 @@ class TestEnvironmentPluginToolSchemas:
         assert "terminal" in aspect_enum
         assert "context" in aspect_enum
         assert "session" in aspect_enum
+        assert "datetime" in aspect_enum
         assert "all" in aspect_enum
 
 
@@ -94,6 +97,7 @@ class TestEnvironmentPluginExecution:
         assert "arch" in result
         assert "cwd" in result
         assert "terminal" in result
+        assert "datetime" in result
 
     def test_get_environment_explicit_all(self):
         """Test getting all environment info explicitly."""
@@ -105,6 +109,7 @@ class TestEnvironmentPluginExecution:
         assert "arch" in result
         assert "cwd" in result
         assert "terminal" in result
+        assert "datetime" in result
 
     def test_get_environment_os_aspect(self):
         """Test getting OS info only."""
@@ -155,6 +160,19 @@ class TestEnvironmentPluginExecution:
         assert "multiplexer" in result
         assert "color_depth" in result
         assert "emulator" in result
+
+    def test_get_environment_datetime_aspect(self):
+        """Test getting datetime info only."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "datetime"}))
+
+        # Datetime info should have these keys
+        assert "local" in result
+        assert "utc" in result
+        assert "timezone" in result
+        assert "utc_offset" in result
+        assert "iso_local" in result
+        assert "iso_utc" in result
 
     def test_get_environment_invalid_aspect(self):
         """Test handling of invalid aspect."""
@@ -531,6 +549,96 @@ class TestEnvironmentPluginSessionInfo:
 
         # Session should be in result (even if it's an error without session)
         assert "session" in result
+
+
+class TestEnvironmentPluginDatetimeInfo:
+    """Tests for datetime information accuracy."""
+
+    def test_datetime_local_format(self):
+        """Test that local datetime is in expected format."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "datetime"}))
+
+        # Should match YYYY-MM-DD HH:MM:SS format
+        pattern = r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$"
+        assert re.match(pattern, result["local"]), f"local '{result['local']}' doesn't match expected format"
+
+    def test_datetime_utc_format(self):
+        """Test that UTC datetime is in expected format."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "datetime"}))
+
+        # Should match YYYY-MM-DD HH:MM:SS format
+        pattern = r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$"
+        assert re.match(pattern, result["utc"]), f"utc '{result['utc']}' doesn't match expected format"
+
+    def test_datetime_iso_local_format(self):
+        """Test that ISO local datetime is in ISO 8601 format."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "datetime"}))
+
+        # Should be valid ISO 8601 format (YYYY-MM-DDTHH:MM:SS.microseconds)
+        pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+        assert re.match(pattern, result["iso_local"]), f"iso_local '{result['iso_local']}' doesn't match ISO format"
+
+    def test_datetime_iso_utc_format(self):
+        """Test that ISO UTC datetime ends with Z."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "datetime"}))
+
+        # Should end with Z for UTC
+        assert result["iso_utc"].endswith("Z"), f"iso_utc '{result['iso_utc']}' should end with 'Z'"
+        pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
+        assert re.match(pattern, result["iso_utc"]), f"iso_utc '{result['iso_utc']}' doesn't match expected format"
+
+    def test_datetime_utc_offset_format(self):
+        """Test that UTC offset is in ±HH:MM format."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "datetime"}))
+
+        # Should match +HH:MM or -HH:MM format
+        pattern = r"^[+-]\d{2}:\d{2}$"
+        assert re.match(pattern, result["utc_offset"]), f"utc_offset '{result['utc_offset']}' doesn't match ±HH:MM format"
+
+    def test_datetime_timezone_not_empty(self):
+        """Test that timezone name is provided."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "datetime"}))
+
+        assert result["timezone"] is not None
+        assert isinstance(result["timezone"], str)
+        assert len(result["timezone"]) > 0
+
+    def test_datetime_utc_offset_matches_system(self):
+        """Test that UTC offset matches system timezone."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "datetime"}))
+
+        local_time = time.localtime()
+        if local_time.tm_isdst > 0 and time.daylight:
+            expected_offset_seconds = -time.altzone
+        else:
+            expected_offset_seconds = -time.timezone
+
+        # Parse the offset string
+        offset_str = result["utc_offset"]
+        sign = 1 if offset_str[0] == '+' else -1
+        hours = int(offset_str[1:3])
+        minutes = int(offset_str[4:6])
+        actual_offset_seconds = sign * (hours * 3600 + minutes * 60)
+
+        assert actual_offset_seconds == expected_offset_seconds
+
+    def test_all_aspect_includes_datetime(self):
+        """Test that 'all' includes datetime key."""
+        plugin = EnvironmentPlugin()
+        result = json.loads(plugin._get_environment({"aspect": "all"}))
+
+        assert "datetime" in result
+        assert "local" in result["datetime"]
+        assert "utc" in result["datetime"]
+        assert "timezone" in result["datetime"]
+        assert "utc_offset" in result["datetime"]
 
 
 class TestEnvironmentPluginProtocol:
