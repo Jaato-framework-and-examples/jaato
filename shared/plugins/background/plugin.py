@@ -4,10 +4,14 @@ This plugin provides tools for the model to manage background task execution
 across all BackgroundCapable plugins in the registry.
 """
 
+import logging
 import os
 import tempfile
+import traceback
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 from ..model_provider.types import ToolSchema
 
@@ -54,8 +58,8 @@ class BackgroundPlugin:
                     agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
                     f.write(f"[{ts}] [BACKGROUND{agent_prefix}] {msg}\n")
                     f.flush()
-            except (IOError, OSError):
-                pass
+            except (IOError, OSError) as exc:
+                logger.debug(f"Failed to write trace: {exc}")
 
     @property
     def name(self) -> str:
@@ -106,8 +110,8 @@ class BackgroundPlugin:
         for plugin in self._capable_plugins.values():
             try:
                 plugin.cleanup_completed(max_age_seconds=0)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"Failed to cleanup plugin during shutdown: {exc}")
         self._initialized = False
 
     def get_tool_schemas(self) -> List[ToolSchema]:
@@ -295,9 +299,11 @@ Use this to discover which tools can be run in background mode.""",
                            f"Use task_id '{handle.task_id}' to check status."
             }
         except Exception as e:
+            logger.error(f"Failed to start background task: {tool_name}", exc_info=True)
             return {
                 "success": False,
-                "error": str(e)
+                "error": str(e),
+                "traceback": traceback.format_exc()
             }
 
     def _get_task(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -424,8 +430,8 @@ Use this to discover which tools can be run in background mode.""",
                         "created_at": handle.created_at.isoformat(),
                         "estimated_duration_seconds": handle.estimated_duration_seconds,
                     })
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"Failed to list tasks from plugin {plugin_name}: {exc}")
 
         return {
             "tasks": all_tasks,
@@ -463,8 +469,8 @@ Use this to discover which tools can be run in background mode.""",
                                 "tool_name": tool_name,
                                 "auto_background_threshold_seconds": threshold,
                             })
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug(f"Failed to check background support for {tool_name}: {exc}")
 
         return {
             "tools": capable_tools,

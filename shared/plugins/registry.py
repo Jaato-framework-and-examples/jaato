@@ -2,13 +2,17 @@
 
 import importlib
 import importlib.metadata
+import logging
 import os
 import pkgutil
 import sys
 import tempfile
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Set, Callable, Any, Optional, Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
 
 from .base import (
     ToolPlugin,
@@ -33,8 +37,13 @@ PLUGIN_ENTRY_POINT_GROUPS = {
 }
 
 
-def _trace(msg: str) -> None:
-    """Write trace message to log file for debugging."""
+def _trace(msg: str, include_traceback: bool = False) -> None:
+    """Write trace message to log file for debugging.
+
+    Args:
+        msg: The message to log.
+        include_traceback: If True, append the current exception traceback.
+    """
     trace_path = os.environ.get(
         'JAATO_TRACE_LOG',
         os.path.join(tempfile.gettempdir(), "rich_client_trace.log")
@@ -44,9 +53,18 @@ def _trace(msg: str) -> None:
             with open(trace_path, "a") as f:
                 ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
                 f.write(f"[{ts}] [PluginRegistry] {msg}\n")
+                if include_traceback:
+                    tb = traceback.format_exc()
+                    if tb and tb.strip() != "NoneType: None":
+                        f.write(f"[{ts}] [PluginRegistry] Traceback:\n{tb}\n")
                 f.flush()
         except (IOError, OSError):
             pass
+    # Also log to standard logger for visibility
+    if include_traceback:
+        logger.error(msg, exc_info=True)
+    else:
+        logger.debug(msg)
 
 
 class PluginRegistry:
@@ -383,7 +401,7 @@ class PluginRegistry:
                     discovered.append(plugin.name)
 
                 except Exception as exc:
-                    _trace(f" Error loading entry point '{ep.name}': {exc}")
+                    _trace(f" Error loading entry point '{ep.name}': {exc}", include_traceback=True)
 
         except Exception as exc:
             # Entry points not available (package not installed)
@@ -442,7 +460,7 @@ class PluginRegistry:
                     discovered.append(plugin.name)
 
             except Exception as exc:
-                _trace(f" Error loading plugin '{name}': {exc}")
+                _trace(f" Error loading plugin '{name}': {exc}", include_traceback=True)
 
         return discovered
 
@@ -661,7 +679,7 @@ class PluginRegistry:
             try:
                 schemas.extend(self._plugins[name].get_tool_schemas())
             except Exception as exc:
-                _trace(f" Error getting tool schemas from '{name}': {exc}")
+                _trace(f" Error getting tool schemas from '{name}': {exc}", include_traceback=True)
         # Add core tool schemas
         schemas.extend(self._core_tools.values())
         return schemas
@@ -674,7 +692,7 @@ class PluginRegistry:
             try:
                 executors.update(self._plugins[name].get_executors())
             except Exception as exc:
-                _trace(f" Error getting executors from '{name}': {exc}")
+                _trace(f" Error getting executors from '{name}': {exc}", include_traceback=True)
         # Add core tool executors
         executors.update(self._core_executors)
         return executors
@@ -693,7 +711,7 @@ class PluginRegistry:
                 schemas = self._plugins[name].get_tool_schemas()
                 names.extend(schema.name for schema in schemas)
             except Exception as exc:
-                _trace(f" Error getting tool names from '{name}': {exc}")
+                _trace(f" Error getting tool names from '{name}': {exc}", include_traceback=True)
         return names
 
     def disable_tool(self, tool_name: str) -> bool:
@@ -778,7 +796,7 @@ class PluginRegistry:
                         'plugin': plugin_name,
                     })
             except Exception as exc:
-                _trace(f" Error getting tool status from '{plugin_name}': {exc}")
+                _trace(f" Error getting tool status from '{plugin_name}': {exc}", include_traceback=True)
         return status
 
     def get_enabled_tool_schemas(self) -> List[ToolSchema]:
@@ -808,7 +826,7 @@ class PluginRegistry:
                             if stream_schema.name not in self._disabled_tools:
                                 schemas.append(stream_schema)
             except Exception as exc:
-                _trace(f" Error getting tool schemas from '{name}': {exc}")
+                _trace(f" Error getting tool schemas from '{name}': {exc}", include_traceback=True)
 
         # Add core tool schemas (excluding disabled)
         for name, schema in self._core_tools.items():
@@ -880,7 +898,7 @@ class PluginRegistry:
                             if stream_schema.name not in self._disabled_tools:
                                 schemas.append(stream_schema)
             except Exception as exc:
-                _trace(f" Error getting tool schemas from '{name}': {exc}")
+                _trace(f" Error getting tool schemas from '{name}': {exc}", include_traceback=True)
 
         # Add core tool schemas that have discoverability='core' (excluding disabled)
         for name, schema in self._core_tools.items():
@@ -905,7 +923,7 @@ class PluginRegistry:
                     if tool_name not in self._disabled_tools:
                         executors[tool_name] = executor
             except Exception as exc:
-                _trace(f" Error getting executors from '{name}': {exc}")
+                _trace(f" Error getting executors from '{name}': {exc}", include_traceback=True)
 
         # Add core tool executors (excluding disabled)
         for tool_name, executor in self._core_executors.items():
@@ -1010,7 +1028,7 @@ class PluginRegistry:
                 if plugin_instructions:
                     instructions.append(plugin_instructions)
             except Exception as exc:
-                _trace(f" Error getting system instructions from '{name}': {exc}")
+                _trace(f" Error getting system instructions from '{name}': {exc}", include_traceback=True)
 
         if not instructions:
             return None
@@ -1041,7 +1059,7 @@ class PluginRegistry:
                     if auto_approved:
                         tools.extend(auto_approved)
             except Exception as exc:
-                _trace(f" Error getting auto-approved tools from '{name}': {exc}")
+                _trace(f" Error getting auto-approved tools from '{name}': {exc}", include_traceback=True)
         return tools
 
     def get_exposed_user_commands(self) -> List[UserCommand]:
@@ -1066,7 +1084,7 @@ class PluginRegistry:
                     if user_commands:
                         commands.extend(user_commands)
             except Exception as exc:
-                _trace(f" Error getting user commands from '{name}': {exc}")
+                _trace(f" Error getting user commands from '{name}': {exc}", include_traceback=True)
         return commands
 
     def get_plugin_for_tool(self, tool_name: str) -> Optional['ToolPlugin']:
@@ -1091,7 +1109,7 @@ class PluginRegistry:
                     _trace(f" get_plugin_for_tool: FOUND '{tool_name}' in plugin '{name}'")
                     return plugin
             except Exception as exc:
-                _trace(f" get_plugin_for_tool: error getting executors from '{name}': {exc}")
+                _trace(f" get_plugin_for_tool: error getting executors from '{name}': {exc}", include_traceback=True)
         _trace(f" get_plugin_for_tool: '{tool_name}' NOT FOUND in any plugin")
         return None
 
@@ -1265,7 +1283,7 @@ class PluginRegistry:
                         plugin.subscribes_to_prompt_enrichment()):
                     subscribers.append(plugin)
             except Exception as exc:
-                _trace(f" Error checking enrichment subscription for '{name}': {exc}")
+                _trace(f" Error checking enrichment subscription for '{name}': {exc}", include_traceback=True)
 
         # Sort by priority (lower values first)
         subscribers.sort(key=self._get_enrichment_priority)
@@ -1308,7 +1326,7 @@ class PluginRegistry:
                         if notif:
                             notifications.append(notif)
             except Exception as exc:
-                _trace(f" Error in prompt enrichment for '{plugin.name}': {exc}")
+                _trace(f" Error in prompt enrichment for '{plugin.name}': {exc}", include_traceback=True)
 
         # Emit notifications
         self._emit_enrichment_notifications(notifications)

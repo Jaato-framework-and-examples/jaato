@@ -5,6 +5,7 @@ while sharing resources from the parent JaatoRuntime.
 """
 
 import json
+import logging
 import os
 import re
 import tempfile
@@ -16,6 +17,8 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .message_queue import MessageQueue, QueuedMessage, SourceType
+
+logger = logging.getLogger(__name__)
 
 from .ai_tool_runner import ToolExecutor
 from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig
@@ -1640,6 +1643,14 @@ class JaatoSession:
             if on_output and response.thinking:
                 self._trace(f"SESSION_THINKING_OUTPUT len={len(response.thinking)}")
                 on_output("thinking", response.thinking, "write")
+
+            # Check finish_reason for abnormal termination
+            if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE, FinishReason.CANCELLED):
+                logger.warning(f"Model stopped with finish_reason={response.finish_reason}")
+                if response.text:
+                    return f"{response.text}\n\n[Model stopped: {response.finish_reason}]"
+                else:
+                    return f"[Model stopped unexpectedly: {response.finish_reason}]"
 
             # Check for cancellation after initial message (including parent)
             if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
@@ -3347,8 +3358,7 @@ class JaatoSession:
 
             from .plugins.model_provider.types import FinishReason
             if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE):
-                import sys
-                print(f"[warning] Model stopped with finish_reason={response.finish_reason}", file=sys.stderr)
+                logger.warning(f"Model stopped with finish_reason={response.finish_reason}")
                 if response.text:
                     return f"{response.text}\n\n[Model stopped: {response.finish_reason}]"
                 else:

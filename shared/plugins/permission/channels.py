@@ -6,10 +6,12 @@ approval for tool execution.
 """
 
 import json
+import logging
 import os
 import readline
 import sys
 import time
+import traceback
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -17,6 +19,8 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..base import PermissionDisplayInfo, OutputCallback
@@ -700,6 +704,7 @@ class WebhookChannel(Channel):
                 )
 
         except requests.Timeout:
+            logger.warning(f"Permission webhook timeout after {self._timeout}s for request {request.request_id}")
             default_decision = ChannelDecision.DENY
             if request.default_on_timeout == "allow":
                 default_decision = ChannelDecision.ALLOW
@@ -711,10 +716,11 @@ class WebhookChannel(Channel):
             )
 
         except requests.RequestException as e:
+            logger.error(f"Permission webhook request failed for {request.request_id}", exc_info=True)
             return ChannelResponse(
                 request_id=request.request_id,
                 decision=ChannelDecision.DENY,
-                reason=f"Webhook request failed: {e}",
+                reason=f"Webhook request failed: {e}\nTraceback: {traceback.format_exc()}",
             )
 
 
@@ -796,10 +802,11 @@ class FileChannel(Channel):
                     response_file.unlink(missing_ok=True)
                     return ChannelResponse.from_dict(data)
                 except (json.JSONDecodeError, IOError) as e:
+                    logger.error(f"Failed to read permission response file for {request.request_id}", exc_info=True)
                     return ChannelResponse(
                         request_id=request.request_id,
                         decision=ChannelDecision.DENY,
-                        reason=f"Failed to read response file: {e}",
+                        reason=f"Failed to read response file: {e}\nTraceback: {traceback.format_exc()}",
                     )
 
             time.sleep(self._poll_interval)

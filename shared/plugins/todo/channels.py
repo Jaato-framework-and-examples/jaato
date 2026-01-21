@@ -7,12 +7,16 @@ Channels handle progress reporting through different transport protocols:
 """
 
 import json
+import logging
 import os
 import sys
+import traceback
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 try:
     import requests
@@ -373,7 +377,8 @@ class WebhookReporter(TodoReporter):
                 timeout=self._timeout,
             )
             return response.status_code == 200
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            logger.warning(f"Failed to send webhook event: {exc}")
             return False
 
     def report_plan_created(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
@@ -614,24 +619,24 @@ class MultiReporter(TodoReporter):
         for reporter in self._reporters:
             try:
                 reporter.report_plan_created(plan, agent_id)
-            except Exception:
-                pass  # Don't let one reporter failure stop others
+            except Exception as exc:
+                logger.warning(f"Reporter {type(reporter).__name__} failed on plan_created: {exc}")
 
     def report_step_update(self, plan: TodoPlan, step: TodoStep, agent_id: Optional[str] = None) -> None:
         """Report to all underlying reporters."""
         for reporter in self._reporters:
             try:
                 reporter.report_step_update(plan, step, agent_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(f"Reporter {type(reporter).__name__} failed on step_update: {exc}")
 
     def report_plan_completed(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
         """Report to all underlying reporters."""
         for reporter in self._reporters:
             try:
                 reporter.report_plan_completed(plan, agent_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(f"Reporter {type(reporter).__name__} failed on plan_completed: {exc}")
 
 
 def create_reporter(

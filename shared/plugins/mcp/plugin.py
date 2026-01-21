@@ -2,15 +2,19 @@
 
 import asyncio
 import json
+import logging
 import os
 import queue
 import sys
 import threading
 import time
+import traceback
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Any, Callable, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from ..base import UserCommand, CommandParameter, CommandCompletion
 from ..model_provider.types import ToolSchema
@@ -206,7 +210,8 @@ class MCPToolPlugin:
         level: str,
         event: str,
         server: Optional[str] = None,
-        details: Optional[str] = None
+        details: Optional[str] = None,
+        include_traceback: bool = False
     ) -> None:
         """Add an entry to the interaction log.
 
@@ -215,7 +220,17 @@ class MCPToolPlugin:
             event: Brief description of the event
             server: Optional server name this event relates to
             details: Optional additional details
+            include_traceback: If True, append current exception traceback to details
         """
+        # Capture traceback if requested
+        if include_traceback:
+            tb = traceback.format_exc()
+            if tb and tb.strip() != "NoneType: None":
+                if details:
+                    details = f"{details}\nTraceback:\n{tb}"
+                else:
+                    details = f"Traceback:\n{tb}"
+
         entry = LogEntry(
             timestamp=datetime.now(),
             level=level,
@@ -226,12 +241,36 @@ class MCPToolPlugin:
         with self._log_lock:
             self._log.append(entry)
 
+        # Also log to standard logger for visibility
+        log_msg = f"[MCP] {event}"
+        if server:
+            log_msg = f"[MCP:{server}] {event}"
+        if details:
+            log_msg = f"{log_msg} - {details[:200]}"
+
+        if level == LOG_ERROR:
+            if include_traceback:
+                logger.error(log_msg, exc_info=True)
+            else:
+                logger.error(log_msg)
+        elif level == LOG_WARN:
+            logger.warning(log_msg)
+        elif level == LOG_DEBUG:
+            logger.debug(log_msg)
+        else:
+            logger.info(log_msg)
+
     @property
     def name(self) -> str:
         return "mcp"
 
-    def _trace(self, msg: str) -> None:
-        """Write trace message to log file for debugging."""
+    def _trace(self, msg: str, include_traceback: bool = False) -> None:
+        """Write trace message to log file for debugging.
+
+        Args:
+            msg: The message to log.
+            include_traceback: If True, append the current exception traceback.
+        """
         import tempfile
         trace_path = os.environ.get(
             'JAATO_TRACE_LOG',
@@ -249,9 +288,18 @@ class MCPToolPlugin:
                         parts.append(f"@{self._agent_name}")
                     prefix = "".join(parts)
                     f.write(f"[{ts}] [{prefix}] {msg}\n")
+                    if include_traceback:
+                        tb = traceback.format_exc()
+                        if tb and tb.strip() != "NoneType: None":
+                            f.write(f"[{ts}] [{prefix}] Traceback:\n{tb}\n")
                     f.flush()
             except (IOError, OSError):
                 pass
+        # Also log to standard logger for visibility
+        if include_traceback:
+            logger.error(msg, exc_info=True)
+        else:
+            logger.debug(msg)
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the MCP plugin by starting the background thread.
@@ -346,7 +394,7 @@ class MCPToolPlugin:
                     )
                     schemas.append(schema)
                 except Exception as exc:
-                    self._log_event(LOG_ERROR, f"Error creating schema for {tool.name}", server=server_name, details=str(exc))
+                    self._log_event(LOG_ERROR, f"Error creating schema for {tool.name}", server=server_name, details=str(exc), include_traceback=True)
 
         schema_names = [s.name for s in schemas]
         self._trace(f"get_tool_schemas: returning {len(schemas)} schemas: {schema_names[:10]}...")
@@ -771,8 +819,10 @@ Examples:
             return f"Connected to '{server_name}' successfully ({tool_count} tools available)."
 
         except queue.Empty:
+            self._log_event(LOG_ERROR, "Connection queue timeout", server=server_name, details="Queue get operation timed out")
             return f"Connection to '{server_name}' timed out."
         except Exception as exc:
+            self._log_event(LOG_ERROR, f"Error connecting to server", server=server_name, details=str(exc), include_traceback=True)
             return f"Error connecting to '{server_name}': {exc}"
 
     def _cmd_disconnect(self, server_name: str) -> str:
@@ -799,8 +849,10 @@ Examples:
             return f"Disconnected from '{server_name}'."
 
         except queue.Empty:
+            self._log_event(LOG_ERROR, "Disconnect queue timeout", server=server_name, details="Queue get operation timed out")
             return f"Disconnect from '{server_name}' timed out."
         except Exception as exc:
+            self._log_event(LOG_ERROR, f"Error disconnecting from server", server=server_name, details=str(exc), include_traceback=True)
             return f"Error disconnecting from '{server_name}': {exc}"
 
     def _cmd_reload(self) -> str:
@@ -889,8 +941,10 @@ Examples:
             return msg
 
         except queue.Empty:
+            self._log_event(LOG_ERROR, "Reload queue timeout", details="Queue get operation timed out")
             return "Configuration reload timed out."
         except Exception as exc:
+            self._log_event(LOG_ERROR, f"Error reloading configuration", details=str(exc), include_traceback=True)
             return f"Error reloading configuration: {exc}"
 
     def _cmd_logs(self, args_str: str) -> str:
@@ -982,6 +1036,7 @@ Examples:
             self._config_path = path
             return None
         except Exception as exc:
+            self._log_event(LOG_ERROR, f"Failed to save configuration to {path}", details=str(exc), include_traceback=True)
             return f"Failed to save configuration to {path}: {exc}"
 
     def _ensure_mcp_patch(self):
@@ -1114,8 +1169,8 @@ Examples:
                     self._config_path = path
                     self._log_event(LOG_INFO, f"Loaded config from {path}")
                     return data
-                except Exception as e:
-                    self._log_event(LOG_WARN, f"Failed to load {path}: {e}")
+                except Exception as exc:
+                    self._log_event(LOG_WARN, f"Failed to load config from {path}", details=str(exc), include_traceback=True)
                     continue
         return {}
 
@@ -1203,7 +1258,7 @@ Examples:
                 except Exception as exc:
                     error_msg = str(exc)
                     self._failed_servers[name] = error_msg
-                    self._log_event(LOG_ERROR, "Connection failed", server=name, details=error_msg)
+                    self._log_event(LOG_ERROR, "Connection failed", server=name, details=error_msg, include_traceback=True)
                     return False, error_msg
 
             # Helper to update tool cache
@@ -1263,7 +1318,7 @@ Examples:
                                 self._response_queue.put(('ok', res))
                             except Exception as exc:
                                 self._log_event(LOG_ERROR, f"Tool execution failed: {toolname}", server=server_name,
-                                              details=str(exc))
+                                              details=str(exc), include_traceback=True)
                                 self._response_queue.put(('error', str(exc)))
 
                         elif msg_type == MSG_CONNECT_SERVER:
@@ -1295,7 +1350,7 @@ Examples:
                                 self._log_event(LOG_INFO, "Disconnected successfully", server=name)
                                 self._response_queue.put(('ok', {}))
                             except Exception as exc:
-                                self._log_event(LOG_ERROR, "Disconnect failed", server=name, details=str(exc))
+                                self._log_event(LOG_ERROR, "Disconnect failed", server=name, details=str(exc), include_traceback=True)
                                 self._response_queue.put(('error', str(exc)))
 
                         elif msg_type == MSG_RELOAD_CONFIG:
@@ -1316,7 +1371,7 @@ Examples:
                                     await manager.disconnect(name)
                                 except Exception as exc:
                                     self._log_event(LOG_WARN, "Disconnect during reload failed", server=name,
-                                                  details=str(exc))
+                                                  details=str(exc), include_traceback=True)
                             self._connected_servers.clear()
                             self._failed_servers.clear()
 
@@ -1376,7 +1431,7 @@ Examples:
         try:
             self._loop.run_until_complete(run_mcp_server())
         except Exception as exc:
-            self._log_event(LOG_ERROR, "MCP thread crashed", details=str(exc))
+            self._log_event(LOG_ERROR, "MCP thread crashed", details=str(exc), include_traceback=True)
         finally:
             # Cleanup: cancel all remaining tasks
             try:
@@ -1387,8 +1442,8 @@ Examples:
                 # Wait for cancellations to complete
                 if pending:
                     self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            except Exception:
-                pass  # Ignore errors during cleanup
+            except Exception as exc:
+                logger.debug(f"Ignoring error during MCP cleanup: {exc}")
 
             # On Windows, give subprocess cleanup time to complete
             if sys.platform == 'win32':
@@ -1398,8 +1453,8 @@ Examples:
             # Close the event loop
             try:
                 self._loop.close()
-            except Exception:
-                pass  # Ignore errors when closing loop
+            except Exception as exc:
+                logger.debug(f"Ignoring error when closing MCP event loop: {exc}")
 
     def _ensure_thread(self):
         """Start the MCP background thread if not already running."""
@@ -1468,8 +1523,10 @@ Examples:
             return {'result': out}
 
         except queue.Empty:
+            self._log_event(LOG_ERROR, f"Tool call timed out: {toolname}", details="Queue get operation timed out after 30s")
             return {'error': 'MCP tool call timed out'}
         except Exception as exc:
+            self._log_event(LOG_ERROR, f"Tool call failed: {toolname}", details=str(exc), include_traceback=True)
             return {'error': f"{type(exc).__name__}: {exc}"}
 
 
