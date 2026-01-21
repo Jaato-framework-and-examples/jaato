@@ -2049,22 +2049,26 @@ class OutputBuffer:
             height += 1  # Header
             for tool in block.tools:
                 height += 1  # Tool line
-                # Output preview if tool has output and is expanded
-                if tool.expanded and tool.output_lines:
-                    display_count = min(len(tool.output_lines), tool.output_display_lines)
+                # Output preview - always shown when block is expanded
+                # Match _render_tool_output_lines: overhead=2 for ToolBlocks, then max(3, visible-overhead)
+                if tool.output_lines:
+                    total_lines = len(tool.output_lines)
+                    overhead = 2  # Separator + header (same as _calculate_tool_output_overhead returns for ToolBlocks)
+                    max_display_lines = max(3, self._visible_height - overhead)
+                    display_count = min(total_lines, max_display_lines)
                     height += display_count
-                    # Scroll indicators
-                    if len(tool.output_lines) > tool.output_display_lines:
-                        height += 2
+                    # Truncation indicator if content exceeds display
+                    if total_lines > max_display_lines:
+                        height += 1
                 # Error message
                 if not tool.success and tool.error_message:
                     height += 1
-                # Clarification summary (Q&A table when expanded)
-                if tool.expanded and tool.clarification_summary:
+                # Clarification summary (Q&A table) - always shown when block is expanded
+                if tool.clarification_summary:
                     height += 1  # header ("Answers (N)")
                     height += len(tool.clarification_summary)  # One line per Q&A pair
-                # File output content (preserved from permission prompt when expanded)
-                if tool.expanded and tool.file_output_lines:
+                # File output content - always shown when block is expanded
+                if tool.file_output_lines:
                     height += 1  # header ("Content")
                     total_lines = len(tool.file_output_lines)
                     # Use 70% of visible height for file content display
@@ -2537,8 +2541,14 @@ class OutputBuffer:
         """Calculate lines of overhead before tool output content.
 
         Similar to _calculate_prompt_overhead but for tool output display.
+        For finalized ToolBlocks (no active tools/placeholder), returns minimal overhead.
         """
         overhead = 0
+
+        # For finalized ToolBlocks, _tool_placeholder_index is None
+        # Return minimal overhead (just the header line)
+        if self._tool_placeholder_index is None:
+            return 2  # Separator + header
 
         # Context lines kept at top by scroll logic
         lines_before_tree = sum(
@@ -3137,6 +3147,69 @@ class OutputBuffer:
         line._rendered_cache = content
         line._cache_width = wrap_width
 
+    def _wrap_ansi_text(self, text: str, width: int) -> Text:
+        """Parse ANSI text and wrap it to the specified width.
+
+        Args:
+            text: Text containing ANSI escape codes.
+            width: Maximum width for wrapping.
+
+        Returns:
+            Wrapped Text object with styles preserved.
+        """
+        # Parse ANSI codes into Rich Text
+        content = Text.from_ansi(text)
+
+        # Wrap using Rich's text wrapping (requires a console for measurement)
+        if self._measure_console is None:
+            self._measure_console = Console(width=width, force_terminal=True)
+
+        wrapped_lines = content.wrap(self._measure_console, width)
+
+        # Join wrapped lines back into a single Text with newlines
+        result = Text()
+        for i, wrapped_line in enumerate(wrapped_lines):
+            if i > 0:
+                result.append("\n")
+            result.append_text(wrapped_line)
+
+        return result
+
+    def _add_debug_line_numbers(self, output: Text, start_line: int) -> Text:
+        """Add debug line numbers to output text for debugging scroll/height issues.
+
+        Each line gets prefixed with its display line number (1-based) to help
+        identify where scroll calculation issues occur.
+
+        Args:
+            output: The rendered Text object.
+            start_line: The starting display line number (0-based) for the visible range.
+
+        Returns:
+            New Text object with line numbers prepended to each line.
+        """
+        # Split preserves Rich styling on each line
+        lines = output.split('\n')
+
+        if not lines:
+            return output
+
+        # Calculate width for line numbers (based on max line number)
+        max_line = start_line + len(lines)
+        num_width = max(4, len(str(max_line)))  # Minimum 4 chars for padding
+
+        # Build new output with line numbers
+        result = Text()
+        for i, line_text in enumerate(lines):
+            line_num = start_line + i + 1  # 1-based display line number
+            if i > 0:
+                result.append("\n")
+            # Prepend line number using semantic style (themeable)
+            result.append(f"{line_num:>{num_width}}│ ", style=self._style("debug_line_number", "dim"))
+            result.append_text(line_text)  # Preserve original styling
+
+        return result
+
     def render(self, height: Optional[int] = None, width: Optional[int] = None) -> RenderableType:
         """Render the output buffer as Rich Text.
 
@@ -3192,6 +3265,7 @@ class OutputBuffer:
             all_items.insert(insert_pos, ActiveToolsMarker())
 
         items_to_show: List[Union[OutputLine, ToolBlock, ActiveToolsMarker]] = []
+        start_display_line = 0  # Track starting display line for debug numbering
 
         if height:
             # Tools render inline via ActiveToolsMarker - no separate space reservation needed
@@ -3236,6 +3310,11 @@ class OutputBuffer:
 
         # Calculate available width for content (accounting for prefixes)
         wrap_width = self._console_width if self._console_width > 20 else 80
+
+        # When debug line numbers are enabled, reduce wrap width to account for prefix
+        # Prefix format: "{num:>4}│ " = 6 chars minimum (4-digit number + │ + space)
+        if os.environ.get('JAATO_DEBUG_LINE_NUMBERS', '').lower() in ('1', 'true', 'yes'):
+            wrap_width = max(20, wrap_width - 6)
 
         # Define wrap_text helper before the loops
         def wrap_text(text: str, prefix_width: int = 0) -> List[str]:
@@ -3334,8 +3413,8 @@ class OutputBuffer:
                     if cached is not None:
                         output.append_text(cached)
                     elif has_ansi:
-                        # Text contains ANSI codes from syntax highlighting
-                        content = Text.from_ansi(line.text)
+                        # Text contains ANSI codes from syntax highlighting - wrap to width
+                        content = self._wrap_ansi_text(line.text, wrap_width)
                         self._cache_line_content(line, content, wrap_width)
                         output.append_text(content)
                     else:
@@ -3354,8 +3433,8 @@ class OutputBuffer:
                     if cached is not None:
                         output.append_text(cached)
                     elif has_ansi:
-                        # Text contains ANSI codes from syntax highlighting
-                        content = Text.from_ansi(line.text)
+                        # Text contains ANSI codes from syntax highlighting - wrap to width
+                        content = self._wrap_ansi_text(line.text, wrap_width)
                         self._cache_line_content(line, content, wrap_width)
                         output.append_text(content)
                     else:
@@ -3470,6 +3549,10 @@ class OutputBuffer:
             frame = self.SPINNER_FRAMES[self._spinner_index]
             output.append(f"  {frame} ", style=self._style("spinner", "cyan"))
             output.append("thinking...", style=self._style("hint", "dim italic"))
+
+        # Add debug line numbers if enabled (checked at runtime for .env support)
+        if os.environ.get('JAATO_DEBUG_LINE_NUMBERS', '').lower() in ('1', 'true', 'yes'):
+            output = self._add_debug_line_numbers(output, start_display_line)
 
         return output
 
