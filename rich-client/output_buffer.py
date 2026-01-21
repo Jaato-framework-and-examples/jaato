@@ -2484,10 +2484,6 @@ class OutputBuffer:
         """
         # Split content into lines
         lines = content.split('\n')
-        # Skip leading empty lines (e.g., from code block formatter's leading \n)
-        # to ensure first actual content line doesn't get continuation prefix
-        while lines and not lines[0].strip():
-            lines = lines[1:]
         if not lines:
             return
 
