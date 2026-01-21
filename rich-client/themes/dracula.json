@@ -134,6 +134,7 @@
     "panel_border": {"fg": "primary"},
     "tree_connector": {"dim": true},
     "truncation": {"fg": "primary", "dim": true, "italic": true},
+    "debug_line_number": {"fg": "muted", "dim": true},
 
     "completion_bg": {"bg": "surface", "fg": "text"},
     "completion_selected": {"bg": "#bd93f9", "fg": "text"},

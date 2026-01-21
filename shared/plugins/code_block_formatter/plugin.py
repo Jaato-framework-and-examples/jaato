@@ -25,6 +25,9 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from rich.console import Console
 from rich.syntax import Syntax
+from rich.text import Text
+
+from shared.plugins.table_formatter.plugin import _display_width
 
 
 # Common language aliases mapping
@@ -48,6 +51,83 @@ LANGUAGE_ALIASES = {
 
 # Priority for pipeline ordering (40-59 = syntax highlighting)
 DEFAULT_PRIORITY = 40
+
+
+def _get_content_width(line: str) -> int:
+    """Get the display width of actual content in a line (excluding trailing whitespace).
+
+    Args:
+        line: The line (may contain ANSI codes).
+
+    Returns:
+        Display width of content (excluding trailing spaces).
+    """
+    if not line:
+        return 0
+
+    # Parse ANSI codes to get plain text
+    if '\x1b[' in line:
+        text = Text.from_ansi(line)
+        plain = text.plain
+    else:
+        plain = line
+
+    # Strip trailing spaces and measure content width
+    content = plain.rstrip()
+    if not content:
+        return 0
+
+    return _display_width(content)
+
+
+def _trim_line_to_width(line: str, target_width: int) -> str:
+    """Trim a line to target_width, preserving ANSI codes and styling.
+
+    This removes trailing background padding while keeping the actual content
+    and its styling intact.
+
+    Args:
+        line: The line to trim (may contain ANSI codes).
+        target_width: The width to trim to.
+
+    Returns:
+        The line trimmed to target_width, as an ANSI string.
+    """
+    if not line:
+        return ""
+
+    # Parse ANSI codes to get styled text
+    if '\x1b[' in line:
+        text = Text.from_ansi(line)
+    else:
+        text = Text(line)
+
+    plain = text.plain
+
+    if target_width <= 0:
+        return ""
+
+    # Find the character index that corresponds to target_width display columns
+    current_width = 0
+    char_count = 0
+    for char in plain:
+        char_width = _display_width(char)
+        if current_width + char_width > target_width:
+            break
+        current_width += char_width
+        char_count += 1
+
+    # Slice the styled text to preserve styling
+    if char_count > 0:
+        result = text[:char_count]
+    else:
+        result = Text()
+
+    # Convert back to ANSI string
+    console = Console(force_terminal=True, no_color=False, highlight=False)
+    with console.capture() as capture:
+        console.print(result, end="")
+    return capture.get()
 
 
 class CodeBlockFormatterPlugin:
@@ -229,6 +309,19 @@ class CodeBlockFormatterPlugin:
         indent = "    "  # 4 spaces
 
         try:
+            # Calculate natural width from raw code to prevent wrapping
+            code_lines = code.split('\n')
+            max_code_width = max((_display_width(line) for line in code_lines), default=0)
+
+            # Account for line numbers if enabled (Rich format: " NUM │ ")
+            if self._line_numbers and code_lines:
+                num_lines = len(code_lines)
+                line_number_width = len(str(num_lines)) + 4  # padding + separator
+                max_code_width += line_number_width
+
+            # Use content width as console width (prevents wrapping)
+            render_width = max(40, max_code_width + 1)
+
             syntax = Syntax(
                 code,
                 lang,
@@ -240,7 +333,7 @@ class CodeBlockFormatterPlugin:
 
             # Render to ANSI string using a temporary console
             console = Console(
-                width=max(40, self._console_width - len(indent)),
+                width=render_width,
                 force_terminal=True,
                 no_color=False,
                 highlight=False,
@@ -248,10 +341,20 @@ class CodeBlockFormatterPlugin:
             with console.capture() as capture:
                 console.print(syntax, end="")
 
-            # Add block indent to each line
             rendered = capture.get()
-            indented_lines = [indent + line for line in rendered.split('\n')]
-            return '\n' + '\n'.join(indented_lines) + '\n'
+            lines = rendered.split('\n')
+
+            # Find the natural width of content (max content width across all lines)
+            # This ensures background styling only extends to the widest content line
+            natural_width = max((_get_content_width(line) for line in lines), default=0)
+
+            # Trim each line to the natural width, then add indent
+            trimmed_lines = []
+            for line in lines:
+                trimmed = _trim_line_to_width(line, natural_width)
+                trimmed_lines.append(indent + trimmed)
+
+            return '\n' + '\n'.join(trimmed_lines) + '\n'
 
         except Exception:
             # Fallback: return code as-is with indent if highlighting fails
