@@ -390,6 +390,7 @@ DEFAULT_SEMANTIC_STYLES = {
     "panel_border": StyleSpec(fg="primary"),
     "tree_connector": StyleSpec(dim=True),
     "truncation": StyleSpec(fg="primary", dim=True, italic=True),
+    "debug_line_number": StyleSpec(fg="muted", dim=True),
 
     # Completion menu
     "completion_bg": StyleSpec(bg="surface", fg="text"),
