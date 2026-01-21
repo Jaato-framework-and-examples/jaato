@@ -2,10 +2,12 @@
 
 from typing import Dict, List, Optional, Any, TYPE_CHECKING
 from jaato import ToolSchema
+from datetime import datetime, timezone
 import json
 import os
 import platform
 import shutil
+import time
 
 if TYPE_CHECKING:
     from shared.jaato_session import JaatoSession
@@ -18,7 +20,7 @@ class EnvironmentPlugin:
     and internal context (token usage, GC thresholds) when a session is set.
     """
 
-    VALID_ASPECTS = ["os", "shell", "arch", "cwd", "terminal", "context", "session", "all"]
+    VALID_ASPECTS = ["os", "shell", "arch", "cwd", "terminal", "context", "session", "datetime", "all"]
 
     @property
     def name(self) -> str:
@@ -71,6 +73,7 @@ class EnvironmentPlugin:
                                 "'terminal' = terminal emulation and capabilities, "
                                 "'context' = token usage and GC thresholds, "
                                 "'session' = current session identifier and agent info, "
+                                "'datetime' = current date, time, timezone, and UTC offset, "
                                 "'all' = everything (default)"
                             )
                         }
@@ -127,6 +130,9 @@ class EnvironmentPlugin:
 
         if aspect in ("session", "all"):
             result["session"] = self._get_session_info()
+
+        if aspect in ("datetime", "all"):
+            result["datetime"] = self._get_datetime_info()
 
         # For single aspect (not "all"), flatten the response
         if aspect != "all" and len(result) == 1:
@@ -341,6 +347,47 @@ class EnvironmentPlugin:
             result["env_session_id"] = env_session_id
 
         return result
+
+    def _get_datetime_info(self) -> Dict[str, Any]:
+        """Get current date, time, timezone, and UTC offset information.
+
+        Returns:
+            Dict containing local datetime, UTC datetime, timezone name, and UTC offset.
+        """
+        now = datetime.now()
+        utc_now = datetime.now(timezone.utc)
+
+        # Get timezone name from time module (more reliable than datetime.tzname)
+        # Use tm_zone if available (Unix), otherwise use tzname tuple (Windows)
+        local_time = time.localtime()
+        if hasattr(local_time, 'tm_zone'):
+            tz_name = local_time.tm_zone
+        else:
+            # Fallback for platforms without tm_zone
+            tz_name = time.tzname[local_time.tm_isdst] if local_time.tm_isdst >= 0 else time.tzname[0]
+
+        # Calculate UTC offset
+        # time.timezone is seconds west of UTC (negative for east)
+        # time.daylight indicates if DST is defined, local_time.tm_isdst if DST is active
+        if local_time.tm_isdst > 0 and time.daylight:
+            utc_offset_seconds = -time.altzone
+        else:
+            utc_offset_seconds = -time.timezone
+
+        # Format offset as ±HH:MM
+        offset_hours, offset_remainder = divmod(abs(utc_offset_seconds), 3600)
+        offset_minutes = offset_remainder // 60
+        offset_sign = '+' if utc_offset_seconds >= 0 else '-'
+        utc_offset_str = f"{offset_sign}{offset_hours:02d}:{offset_minutes:02d}"
+
+        return {
+            "local": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "utc": utc_now.strftime("%Y-%m-%d %H:%M:%S"),
+            "timezone": tz_name,
+            "utc_offset": utc_offset_str,
+            "iso_local": now.isoformat(),
+            "iso_utc": utc_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
 
     # ==================== Required Protocol Methods ====================
 
