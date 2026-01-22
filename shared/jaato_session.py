@@ -1689,8 +1689,9 @@ class JaatoSession:
             # Check finish_reason for abnormal termination
             if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE, FinishReason.CANCELLED):
                 logger.warning(f"Model stopped with finish_reason={response.finish_reason}")
-                if response.text:
-                    return f"{response.text}\n\n[Model stopped: {response.finish_reason}]"
+                response_text = response.get_text()
+                if response_text:
+                    return f"{response_text}\n\n[Model stopped: {response.finish_reason}]"
                 else:
                     return f"[Model stopped unexpectedly: {response.finish_reason}]"
 
@@ -2936,6 +2937,8 @@ class JaatoSession:
         # Proactive rate limiting
         self._pacer.pace()
 
+        self._trace(f"MID_TURN_PROMPT: About to call provider, cancel_token.is_cancelled={self._cancel_token.is_cancelled if self._cancel_token else 'None'}")
+
         # Send the prompt to the model with telemetry
         with self._telemetry.llm_span(
             model=self._model_name or "unknown",
@@ -2958,6 +2961,7 @@ class JaatoSession:
                         self._trace(f"MID_TURN_THINKING_CALLBACK len={len(thinking)}")
                         on_output("thinking", thinking, "write")
 
+                self._trace("MID_TURN_PROMPT: Calling with_retry for streaming...")
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_message_streaming(
                         prompt,
@@ -2971,6 +2975,7 @@ class JaatoSession:
                     cancel_token=self._cancel_token,
                     provider=self._provider
                 )
+                self._trace(f"MID_TURN_PROMPT: Provider returned, finish_reason={response.finish_reason if response else 'None'}")
             else:
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_message(prompt),
@@ -3452,15 +3457,17 @@ class JaatoSession:
             from .plugins.model_provider.types import FinishReason
             if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE):
                 logger.warning(f"Model stopped with finish_reason={response.finish_reason}")
-                if response.text:
-                    return f"{response.text}\n\n[Model stopped: {response.finish_reason}]"
+                response_text = response.get_text()
+                if response_text:
+                    return f"{response_text}\n\n[Model stopped: {response.finish_reason}]"
                 else:
                     return f"[Model stopped unexpectedly: {response.finish_reason}]"
 
             function_calls = list(response.function_calls) if response.function_calls else []
             while function_calls:
-                if response.text and on_output:
-                    on_output("model", response.text, "write")
+                response_text = response.get_text()
+                if response_text and on_output:
+                    on_output("model", response_text, "write")
 
                 tool_results: List[ToolResult] = []
 
@@ -3555,10 +3562,11 @@ class JaatoSession:
                             llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
                 function_calls = list(response.function_calls) if response.function_calls else []
 
-            if response.text and on_output:
-                on_output("model", response.text, "write")
+            final_text = response.get_text()
+            if final_text and on_output:
+                on_output("model", final_text, "write")
 
-            return response.text or ''
+            return final_text or ''
 
         except Exception as exc:
             # Route provider errors through output callback before re-raising
