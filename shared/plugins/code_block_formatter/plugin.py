@@ -377,7 +377,8 @@ class CodeBlockFormatterPlugin:
                 trimmed = _trim_line_to_width(line, natural_width)
                 trimmed_lines.append(indent + trimmed)
 
-            return '\n' + '\n'.join(trimmed_lines) + '\n'
+            # Ensure ANSI reset at end to prevent styling from bleeding into subsequent text
+            return '\n' + '\n'.join(trimmed_lines) + '\x1b[0m\n'
 
         except Exception:
             # Fallback: return code as-is with indent if highlighting fails
