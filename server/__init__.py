@@ -41,6 +41,7 @@ from .events import (
     TurnCompletedEvent,
     SystemMessageEvent,
     ErrorEvent,
+    RetryEvent,
     SessionListEvent,
     SessionInfoEvent,
     # Client -> Server events
@@ -84,6 +85,7 @@ __all__ = [
     "TurnCompletedEvent",
     "SystemMessageEvent",
     "ErrorEvent",
+    "RetryEvent",
     "SessionListEvent",
     "SessionInfoEvent",
     "SendMessageRequest",

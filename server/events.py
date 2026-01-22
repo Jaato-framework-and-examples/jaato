@@ -74,6 +74,7 @@ class EventType(str, Enum):
     SYSTEM_MESSAGE = "system.message"
     ERROR = "error"
     INIT_PROGRESS = "init.progress"  # Initialization step progress
+    RETRY = "retry"  # API retry with exponential backoff
 
     # Session management (Server -> Client)
     SESSION_LIST = "session.list"  # For user display (updates local cache too)
@@ -468,6 +469,21 @@ class ErrorEvent(Event):
 
 
 @dataclass
+class RetryEvent(Event):
+    """API retry notification with exponential backoff.
+
+    Sent when a transient error (rate limit, server error) is encountered
+    and the system is retrying the request.
+    """
+    type: EventType = field(default=EventType.RETRY)
+    message: str = ""  # Human-readable retry message
+    attempt: int = 0  # Current attempt number (1-indexed)
+    max_attempts: int = 0  # Maximum attempts configured
+    delay: float = 0.0  # Delay in seconds before next attempt
+    error_type: str = ""  # Type of error (rate_limit, transient)
+
+
+@dataclass
 class SessionListEvent(Event):
     """List of available sessions - for user display."""
     type: EventType = field(default=EventType.SESSION_LIST)
@@ -694,6 +710,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.SYSTEM_MESSAGE.value: SystemMessageEvent,
     EventType.INIT_PROGRESS.value: InitProgressEvent,
     EventType.ERROR.value: ErrorEvent,
+    EventType.RETRY.value: RetryEvent,
     EventType.SESSION_LIST.value: SessionListEvent,
     EventType.SESSION_INFO.value: SessionInfoEvent,
     EventType.SESSION_DESCRIPTION_UPDATED.value: SessionDescriptionUpdatedEvent,

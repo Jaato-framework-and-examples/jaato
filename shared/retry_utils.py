@@ -80,6 +80,15 @@ except ImportError:
     ANTHROPIC_RATE_LIMIT_CLASSES = ()
     ANTHROPIC_TRANSIENT_CLASSES = ()
 
+# Import Google GenAI SDK errors for detection (newer python-genai SDK)
+# These are different from google.api_core.exceptions used by older libraries
+try:
+    from google.genai import errors as genai_errors
+    # ClientError wraps HTTP 4xx errors including 429 rate limits
+    GENAI_RATE_LIMIT_CLASSES: Tuple[Type[Exception], ...] = (genai_errors.ClientError,)
+except ImportError:
+    GENAI_RATE_LIMIT_CLASSES = ()
+
 
 T = TypeVar('T')
 
@@ -117,12 +126,21 @@ def classify_error(exc: Exception) -> Dict[str, bool]:
     rate_like = False
     infra_like = False
 
-    # Check Google exceptions
+    # Check Google api_core exceptions (older google-generativeai SDK)
     if GOOGLE_TRANSIENT_CLASSES and isinstance(exc, GOOGLE_TRANSIENT_CLASSES):
         if GOOGLE_RATE_LIMIT_CLASSES and isinstance(exc, GOOGLE_RATE_LIMIT_CLASSES):
             rate_like = True
         else:
             infra_like = True
+    # Check Google GenAI ClientError (newer python-genai SDK)
+    # ClientError wraps all 4xx errors, so check message for specific codes
+    elif GENAI_RATE_LIMIT_CLASSES and isinstance(exc, GENAI_RATE_LIMIT_CLASSES):
+        lower = str(exc).lower()
+        if any(p in lower for p in ["429", "resource exhausted", "resource_exhausted", "rate limit", "quota"]):
+            rate_like = True
+        elif any(p in lower for p in ["503", "500", "service unavailable", "internal"]):
+            infra_like = True
+        # For other 4xx ClientErrors, don't retry by default (auth errors, bad requests, etc.)
     # Check GitHub rate limit
     elif GITHUB_RATE_LIMIT_CLASSES and isinstance(exc, GITHUB_RATE_LIMIT_CLASSES):
         rate_like = True
