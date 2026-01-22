@@ -13,6 +13,7 @@ Key differences from other providers:
 
 import base64
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from ..types import (
@@ -31,13 +32,66 @@ from ..types import (
 
 # ==================== Tool Schema Conversion ====================
 
+# Regex pattern for valid Anthropic tool names
+_ANTHROPIC_TOOL_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,128}$')
+
+# Thread-local storage for tool name mapping (sanitized -> original)
+# This allows reverse lookup when receiving function calls from Anthropic
+_tool_name_mapping: Dict[str, str] = {}
+
+
+def sanitize_tool_name(name: str) -> str:
+    """Sanitize tool name to match Anthropic's pattern ^[a-zA-Z0-9_-]{1,128}$.
+
+    Replaces invalid characters (like dots, colons, spaces) with underscores
+    and truncates to 128 characters if needed.
+
+    Args:
+        name: Original tool name.
+
+    Returns:
+        Sanitized tool name safe for Anthropic API.
+    """
+    if _ANTHROPIC_TOOL_NAME_PATTERN.match(name):
+        return name
+    # Replace invalid characters with underscores
+    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+    # Truncate to 128 characters max
+    return sanitized[:128]
+
+
+def get_original_tool_name(sanitized_name: str) -> str:
+    """Get the original tool name from a sanitized name.
+
+    Args:
+        sanitized_name: The sanitized tool name received from Anthropic.
+
+    Returns:
+        Original tool name if mapping exists, otherwise returns the input unchanged.
+    """
+    return _tool_name_mapping.get(sanitized_name, sanitized_name)
+
+
+def clear_tool_name_mapping() -> None:
+    """Clear the tool name mapping. Call when tools are reconfigured."""
+    _tool_name_mapping.clear()
+
+
 def tool_schema_to_anthropic(schema: ToolSchema) -> Dict[str, Any]:
     """Convert ToolSchema to Anthropic tool format.
 
     Note: Anthropic uses `input_schema` instead of `parameters`.
+    Tool names are sanitized to match ^[a-zA-Z0-9_-]{1,128}$.
+    A mapping from sanitized to original names is maintained for reverse lookup.
     """
+    sanitized = sanitize_tool_name(schema.name)
+
+    # Track the mapping if sanitization changed the name
+    if sanitized != schema.name:
+        _tool_name_mapping[sanitized] = schema.name
+
     return {
-        "name": schema.name,
+        "name": sanitized,
         "description": schema.description,
         "input_schema": schema.parameters,
     }
@@ -324,9 +378,11 @@ def content_block_to_part(block: Dict[str, Any]) -> Optional[Part]:
         return Part(text=block.get("text", ""))
 
     if block_type == "tool_use":
+        # Restore original tool name if it was sanitized
+        original_name = get_original_tool_name(block.get("name", ""))
         return Part(function_call=FunctionCall(
             id=block.get("id", ""),
-            name=block.get("name", ""),
+            name=original_name,
             args=block.get("input", {}),
         ))
 
@@ -454,7 +510,11 @@ def extract_thinking_from_response(response: Any) -> Optional[str]:
 
 
 def extract_function_calls_from_response(response: Any) -> List[FunctionCall]:
-    """Extract function calls from Anthropic response."""
+    """Extract function calls from Anthropic response.
+
+    Tool names are restored to their original (pre-sanitization) form
+    using the tool name mapping maintained during schema conversion.
+    """
     calls = []
 
     if not response or not hasattr(response, "content"):
@@ -462,9 +522,11 @@ def extract_function_calls_from_response(response: Any) -> List[FunctionCall]:
 
     for block in response.content:
         if hasattr(block, "type") and block.type == "tool_use":
+            # Restore original tool name if it was sanitized
+            original_name = get_original_tool_name(block.name)
             calls.append(FunctionCall(
                 id=block.id,
-                name=block.name,
+                name=original_name,
                 args=block.input if hasattr(block, "input") else {},
             ))
 
@@ -530,9 +592,11 @@ def response_from_anthropic(response: Any) -> ProviderResponse:
                 if block.type == "text":
                     parts.append(Part.from_text(block.text))
                 elif block.type == "tool_use":
+                    # Restore original tool name if it was sanitized
+                    original_name = get_original_tool_name(block.name)
                     fc = FunctionCall(
                         id=block.id,
-                        name=block.name,
+                        name=original_name,
                         args=block.input if hasattr(block, "input") else {},
                     )
                     parts.append(Part.from_function_call(fc))
