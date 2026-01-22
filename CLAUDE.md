@@ -193,6 +193,36 @@ Model uses `list_tools()` → `get_tool_schemas()` workflow to discover tools.
 - Enabled by default (`JAATO_DEFERRED_TOOLS=true`)
 - Core tools: introspection, file_edit, cli, filesystem_query, todo, clarification
 
+### UI Rendering Architecture (Separation of Concerns)
+
+The UI rendering follows a strict separation between data production and presentation:
+
+**Pipeline Layer** (`shared/plugins/`, `server/`):
+- Produces **structured data** (e.g., Q&A pairs, tool results, plan steps)
+- Emits **lifecycle events** with semantic content
+- Is UI-agnostic - no formatting, colors, or layout decisions
+
+**Client Presentation Layer** (`rich-client/output_buffer.py`):
+- Receives structured data from pipeline
+- Chooses **optimal UX presentation** based on terminal size, theme, context
+- Handles formatting, truncation, tables, colors, layout
+- May adapt presentation dynamically (e.g., compact vs expanded based on space)
+
+**Example - Clarification Plugin:**
+```
+Pipeline (clarification/plugin.py):
+  → Emits: on_resolved(tool_name, qa_pairs=[(question, answer), ...])
+
+Client (output_buffer.py):
+  → Receives qa_pairs, decides: table? stacked? inline?
+  → Applies theme colors, calculates column widths, handles wrapping
+```
+
+This separation ensures:
+- Pipeline code remains testable without UI dependencies
+- Multiple clients can present the same data differently
+- Presentation can evolve without changing pipeline logic
+
 ### Plugin Auto-Wiring
 
 Plugins are automatically wired during initialization - no manual wiring needed:
