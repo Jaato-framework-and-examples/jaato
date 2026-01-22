@@ -74,10 +74,13 @@ def _buffer_trace(msg: str) -> None:
         pass  # Silently ignore trace errors
 
 
+from io import StringIO
 from rich.console import Console, RenderableType
 from rich.text import Text
 from rich.panel import Panel
 from rich.align import Align
+from rich.table import Table
+from rich import box
 
 from shared.plugins.table_formatter.plugin import _display_width
 
@@ -2892,6 +2895,30 @@ class OutputBuffer:
 
         return result
 
+    def _render_table_to_text(self, table: Table, width: Optional[int] = None) -> Text:
+        """Render a Rich Table to a Text object for appending to output.
+
+        This utility enables using Rich's Table features (word-wrap, alignment,
+        borders) while still composing output as Text objects.
+
+        Args:
+            table: Rich Table to render.
+            width: Console width for rendering. Defaults to self._console_width.
+
+        Returns:
+            Text object containing the rendered table with ANSI styling preserved.
+        """
+        render_width = width or self._console_width or 80
+        string_io = StringIO()
+        temp_console = Console(
+            file=string_io,
+            force_terminal=True,
+            width=render_width,
+            no_color=False,
+        )
+        temp_console.print(table, end="")
+        return Text.from_ansi(string_io.getvalue())
+
     def _render_permission_prompt(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
         """Render permission prompt for a tool awaiting approval."""
         continuation = "   " if is_last else "│  "
@@ -3058,7 +3085,10 @@ class OutputBuffer:
             output.append(line, style=self._style("clarification_label", "cyan"))
 
     def _render_clarification_summary(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
-        """Render clarification summary table (Q&A pairs) for a completed tool."""
+        """Render clarification summary table (Q&A pairs) for a completed tool.
+
+        Uses Rich Table with word-wrapping for full question/answer display.
+        """
         continuation = "   " if is_last else "│  "
         prefix = "    "
         qa_pairs = tool.clarification_summary or []
@@ -3071,20 +3101,35 @@ class OutputBuffer:
         output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
         output.append(f"  📋 Answers ({len(qa_pairs)})", style=self._style("clarification_resolved", "bold green"))
 
-        # Render Q&A table
-        max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
-        for i, (question, answer) in enumerate(qa_pairs):
-            output.append("\n")
-            output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
+        # Calculate available width for table (account for tree indentation)
+        indent_width = len(prefix) + len(continuation) + 2  # +2 for spacing
+        table_width = max(40, (self._console_width or 80) - indent_width)
 
-            # Truncate question if needed
-            q_display = question if len(question) <= 30 else question[:27] + "..."
-            # Truncate answer if needed
-            a_display = answer if len(answer) <= (max_line_width - 35) else answer[:max_line_width - 38] + "..."
+        # Build Rich Table with word-wrapping
+        table = Table(
+            show_header=False,
+            box=box.SIMPLE,
+            padding=(0, 1),
+            collapse_padding=True,
+            width=table_width,
+        )
+        table.add_column("Question", ratio=7, overflow="fold", style=self._style("clarification_question", "cyan"))
+        table.add_column("Answer", ratio=3, overflow="fold", style=self._style("clarification_answer", "green"))
 
-            output.append(f"{q_display}", style=self._style("clarification_question", "cyan"))
-            output.append(" → ", style=self._style("muted", "dim"))
-            output.append(f"{a_display}", style=self._style("clarification_answer", "green"))
+        for question, answer in qa_pairs:
+            table.add_row(question, answer)
+
+        # Render table to text and append with proper indentation
+        table_text = self._render_table_to_text(table, width=table_width)
+
+        # Split rendered table into lines while preserving styling
+        # Text.split() preserves Rich styling on each segment
+        table_lines = table_text.split("\n")
+        for styled_line in table_lines:
+            if styled_line.plain.strip():  # Skip empty/whitespace-only lines
+                output.append("\n")
+                output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
+                output.append_text(styled_line)
 
     def _render_file_output(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
         """Render preserved file output content for a completed tool."""
