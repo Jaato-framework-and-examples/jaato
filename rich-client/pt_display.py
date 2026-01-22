@@ -1199,21 +1199,43 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("permission_next"), eager=True)
         def handle_permission_next(event):
-            """Handle TAB - cycle to next permission option."""
+            """Handle TAB - cycle to next permission option, or complete in normal mode."""
             if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
-                # Cycle to next option (wrap around)
+                # Permission mode: cycle to next option (wrap around)
                 self._permission_focus_index = (self._permission_focus_index + 1) % len(self._permission_response_options)
+                # Update output buffer for inline highlighting (use correct buffer from agent registry)
+                buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
+                buffer.set_permission_focus(
+                    self._permission_response_options,
+                    self._permission_focus_index
+                )
                 self._app.invalidate()
-            # In normal mode, TAB is handled by prompt_toolkit for completion
+            else:
+                # Normal mode: trigger tab completion
+                buff = event.app.current_buffer
+                if buff.complete_state:
+                    buff.complete_next()
+                else:
+                    buff.start_completion()
 
         @kb.add(*keys.get_key_args("permission_prev"), eager=True)
         def handle_permission_prev(event):
-            """Handle Shift+TAB - cycle to previous permission option."""
+            """Handle Shift+TAB - cycle to previous permission option, or complete prev in normal mode."""
             if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
-                # Cycle to previous option (wrap around)
+                # Permission mode: cycle to previous option (wrap around)
                 self._permission_focus_index = (self._permission_focus_index - 1) % len(self._permission_response_options)
+                # Update output buffer for inline highlighting (use correct buffer from agent registry)
+                buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
+                buffer.set_permission_focus(
+                    self._permission_response_options,
+                    self._permission_focus_index
+                )
                 self._app.invalidate()
-            # In normal mode, Shift+TAB is not used
+            else:
+                # Normal mode: trigger previous completion
+                buff = event.app.current_buffer
+                if buff.complete_state:
+                    buff.complete_previous()
 
         @kb.add(*keys.get_key_args("cancel"))
         def handle_ctrl_c(event):
@@ -1597,16 +1619,6 @@ class PTDisplay:
             filter=Condition(lambda: len(self._pending_prompts) > 0),
         )
 
-        # Permission options bar (shown above input when waiting for permission)
-        permission_options_bar = ConditionalContainer(
-            Window(
-                FormattedTextControl(self._get_permission_options_bar_content),
-                height=1,
-                style="class:permission-bar",
-            ),
-            filter=Condition(lambda: getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options is not None),
-        )
-
         # Plan popup (floating overlay, shown with Ctrl+P)
         def get_popup_height():
             """Calculate popup height by rendering content and counting lines."""
@@ -1661,7 +1673,6 @@ class PTDisplay:
                 status_bar,              # Status bar
                 output_window,           # Output panel (fills remaining space)
                 pending_prompts_bar,     # Queued prompts (dynamic, above input)
-                permission_options_bar,  # Permission options (dynamic, above input)
                 input_row,               # Input area
             ]),
             floats=[
@@ -2547,9 +2558,12 @@ class PTDisplay:
             self._last_valid_permission_input = ""
             self._permission_response_options = None
             self._permission_focus_index = 0
-        # Toggle permission completion mode on the input handler with options
-        if self._input_handler:
-            self._input_handler.set_permission_mode(waiting, response_options)
+        # Update output buffer with focus state for inline highlighting (use correct buffer)
+        buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
+        buffer.set_permission_focus(
+            self._permission_response_options,
+            self._permission_focus_index
+        )
         self.refresh()
 
     def _select_focused_permission_option(self) -> None:
@@ -2567,58 +2581,3 @@ class PTDisplay:
 
         # Submit the selection via input callback
         self._input_callback(short)
-
-    def _get_permission_options_bar_content(self) -> list:
-        """Get permission options bar content as formatted text with focus highlight.
-
-        Returns a list of (style, text) tuples for prompt_toolkit.
-        The currently focused option is shown with reverse video.
-        """
-        if not self._permission_response_options:
-            return []
-
-        result = []
-        result.append(("class:permission-bar", " "))
-
-        for i, option in enumerate(self._permission_response_options):
-            # Extract option properties (handle both dict and object forms)
-            if isinstance(option, dict):
-                short = option.get('key', option.get('short', ''))
-                full = option.get('label', option.get('full', ''))
-            else:
-                short = getattr(option, 'short', getattr(option, 'key', ''))
-                full = getattr(option, 'full', getattr(option, 'label', ''))
-
-            is_focused = (i == self._permission_focus_index)
-
-            # Build the option text: [y]es or [once]
-            if short != full:
-                # Format: [y]es - short is prefix of full
-                option_text = f"[{short}]{full[len(short):]}"
-            else:
-                # Format: [once] - short equals full
-                option_text = f"[{full}]"
-
-            # Apply style based on focus state
-            if is_focused:
-                # Reverse video for focused option
-                result.append(("class:permission-bar.focused reverse", option_text))
-            else:
-                result.append(("class:permission-bar.option", option_text))
-
-            # Add separator between options
-            if i < len(self._permission_response_options) - 1:
-                result.append(("class:permission-bar", "  "))
-
-        result.append(("class:permission-bar", " "))
-
-        # Add hint text
-        result.append(("class:permission-bar.hint", "  TAB: cycle  ENTER/SPACE: select"))
-
-        return result
-
-    def _get_permission_options_bar_height(self) -> int:
-        """Get the height of the permission options bar (1 if visible, 0 if not)."""
-        if self._waiting_for_channel_input and self._permission_response_options:
-            return 1
-        return 0
