@@ -213,6 +213,11 @@ class JaatoServer:
         # Terminal width for formatting (default 80)
         self._terminal_width: int = 80
 
+        # Session-specific environment variables (isolated per session)
+        # These are loaded from the session's .env file and NOT applied to
+        # global os.environ, keeping each session's configuration isolated.
+        self._session_env: Dict[str, str] = {}
+
         # Formatter pipeline for server-side output formatting
         # Initialized in _setup_formatter_pipeline() after registry is available
         # The pipeline handles buffering internally for streaming
@@ -279,6 +284,46 @@ class JaatoServer:
         finally:
             os.chdir(original_cwd)
             logger.debug(f"Restored to: {original_cwd}")
+
+    @contextlib.contextmanager
+    def _with_session_env(self):
+        """Context manager to apply session environment variables.
+
+        Applies session-specific environment variables to os.environ for the
+        duration of the context. This is necessary for components that read
+        from os.environ (like provider SDKs, telemetry, etc.).
+
+        Since all env-dependent operations happen within session contexts,
+        we simply apply the session's env vars without restoration - the next
+        session will apply its own env vars when needed.
+        """
+        # Apply session env vars (no restoration needed - next session will
+        # apply its own env vars anyway)
+        for key, value in self._session_env.items():
+            if value is not None:
+                os.environ[key] = value
+        yield
+
+    def get_session_env(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Get an environment variable, checking session env first.
+
+        Args:
+            key: Environment variable name.
+            default: Default value if not found.
+
+        Returns:
+            Value from session env, falling back to global os.environ,
+            then to the default value.
+        """
+        return self._session_env.get(key) or os.environ.get(key) or default
+
+    def get_all_session_env(self) -> Dict[str, str]:
+        """Get all session-specific environment variables.
+
+        Returns:
+            Copy of session environment dictionary.
+        """
+        return dict(self._session_env)
 
     def _update_plugin_workspace(self, path: Optional[str]) -> None:
         """Update workspace-aware plugins with the new workspace path.
@@ -393,20 +438,16 @@ class JaatoServer:
         # Step 1: Load configuration
         self._emit_init_progress("Loading configuration", "running", 1, total_steps)
 
-        # Read session's env file without modifying global os.environ permanently
-        # This allows each session to have its own config
+        # Read session's env file into session-specific storage (NOT global os.environ)
+        # This keeps each session's configuration isolated from other sessions.
         from dotenv import dotenv_values
-        session_env = dotenv_values(self.env_file) if self.env_file else {}
+        raw_session_env = dotenv_values(self.env_file) if self.env_file else {}
+        # Filter out None values and store as session env
+        self._session_env = {k: v for k, v in raw_session_env.items() if v is not None}
 
         def get_config(key: str) -> Optional[str]:
             """Get config value from session env, falling back to global env."""
-            return session_env.get(key) or os.environ.get(key)
-
-        # Apply session env vars for the duration of the session
-        # These persist so that provider tracing and other runtime features work
-        for key, value in session_env.items():
-            if value is not None:
-                os.environ[key] = value
+            return self._session_env.get(key) or os.environ.get(key)
 
         try:
             active_bundle = active_cert_bundle(verbose=False)
@@ -433,11 +474,13 @@ class JaatoServer:
 
             # Step 2: Connect to model provider
             # Credential validation is handled by each provider during connect()
+            # Use session env context so provider can access session-specific API keys
             self._emit_init_progress("Connecting to model provider", "running", 2, total_steps)
-            self._jaato = JaatoClient(provider_name=provider_to_use)
-            # Pass project/location for providers that need them (Google/Vertex)
-            # Other providers ignore these and use their own env vars
-            self._jaato.connect(project_id, location, model_name)
+            with self._with_session_env():
+                self._jaato = JaatoClient(provider_name=provider_to_use)
+                # Pass project/location for providers that need them (Google/Vertex)
+                # Other providers ignore these and use their own env vars
+                self._jaato.connect(project_id, location, model_name)
         except Exception as e:
             self._emit_init_progress("Connecting to model provider", "error", 2, total_steps,
                                      str(e))
@@ -527,7 +570,9 @@ class JaatoServer:
             self.emit(SystemMessageEvent(message=msg, style="info"))
 
         try:
-            auth_ok = self._jaato.verify_auth(allow_interactive=True, on_message=auth_message)
+            # Use session env context so auth can access session-specific credentials
+            with self._with_session_env():
+                auth_ok = self._jaato.verify_auth(allow_interactive=True, on_message=auth_message)
 
             if not auth_ok:
                 # Credentials not found - try to use provider-specific auth plugin
@@ -579,8 +624,10 @@ class JaatoServer:
             return True
 
         # Step 5: Configure tools (only if auth is complete)
+        # Use session env context so plugins can access session-specific config
         self._emit_init_progress("Configuring tools", "running", 5, total_steps)
-        self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
+        with self._with_session_env():
+            self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
         gc_result = load_gc_from_file()
         gc_threshold = None
@@ -1489,7 +1536,8 @@ class JaatoServer:
             server._model_running = True
             try:
                 # Run in workspace context so file operations use client's CWD
-                with server._in_workspace():
+                # Also apply session env so provider/tools can access session-specific config
+                with server._with_session_env(), server._in_workspace():
                     server._jaato.send_message(
                         prompt,
                         on_output=output_callback,
@@ -1875,9 +1923,10 @@ class JaatoServer:
 
         self._trace("[auth] Checking if auth is now complete...")
 
-        # Try to verify auth again
+        # Try to verify auth again (use session env context for credentials)
         try:
-            auth_ok = self._jaato.verify_auth(allow_interactive=False)
+            with self._with_session_env():
+                auth_ok = self._jaato.verify_auth(allow_interactive=False)
             if auth_ok:
                 self._trace("[auth] Auth completed successfully, finishing initialization...")
                 self._auth_pending = False
@@ -1885,9 +1934,10 @@ class JaatoServer:
                 # Complete the remaining initialization steps that were skipped
                 self._emit_init_progress("Verifying authentication", "done", 4, 6)
 
-                # Step 5: Configure tools
+                # Step 5: Configure tools (use session env context for plugin config)
                 self._emit_init_progress("Configuring tools", "running", 5, 6)
-                self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
+                with self._with_session_env():
+                    self._jaato.configure_tools(self.registry, self.permission_plugin, self.ledger)
 
                 gc_result = load_gc_from_file()
                 gc_threshold = None
