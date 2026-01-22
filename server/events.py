@@ -103,6 +103,7 @@ class EventType(str, Enum):
     # Mid-turn prompts (Server -> Client)
     MID_TURN_PROMPT_QUEUED = "mid_turn_prompt.queued"
     MID_TURN_PROMPT_INJECTED = "mid_turn_prompt.injected"
+    MID_TURN_INTERRUPT = "mid_turn_prompt.interrupt"  # Streaming interrupted for user prompt
 
 
 # =============================================================================
@@ -676,6 +677,19 @@ class MidTurnPromptInjectedEvent(Event):
     text: str = ""
 
 
+@dataclass
+class MidTurnInterruptEvent(Event):
+    """Sent when streaming is interrupted to process a mid-turn user prompt.
+
+    This notifies the client that the model's current generation was interrupted
+    because a user prompt arrived and needs to be processed immediately.
+    The partial response is preserved and the user's prompt is being processed.
+    """
+    type: EventType = field(default=EventType.MID_TURN_INTERRUPT)
+    partial_response_chars: int = 0  # How much of the response was generated before interrupt
+    user_prompt_preview: str = ""  # First 100 chars of the user's prompt
+
+
 # =============================================================================
 # Serialization Helpers
 # =============================================================================
@@ -727,6 +741,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.CLIENT_CONFIG.value: ClientConfigRequest,
     EventType.MID_TURN_PROMPT_QUEUED.value: MidTurnPromptQueuedEvent,
     EventType.MID_TURN_PROMPT_INJECTED.value: MidTurnPromptInjectedEvent,
+    EventType.MID_TURN_INTERRUPT.value: MidTurnInterruptEvent,
 }
 
 

@@ -354,6 +354,9 @@ DEFAULT_SEMANTIC_STYLES = {
     "notebook_output_label": StyleSpec(fg="primary", bold=True),  # Out [n]:
     "notebook_error_label": StyleSpec(fg="error", bold=True),     # Err [n]:
 
+    # Output - basic line style (used by output_buffer for plain text lines)
+    "line": StyleSpec(fg="text"),
+
     # Output - misc
     "permission_prompt": StyleSpec(fg="warning", bold=True),
     "permission_text": StyleSpec(fg="primary"),

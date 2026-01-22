@@ -101,6 +101,8 @@
     "notebook_output_label": {"fg": "#8be9fd", "bold": true},
     "notebook_error_label": {"fg": "error", "bold": true},
 
+    "line": {"fg": "text"},
+
     "permission_prompt": {"fg": "warning", "bold": true},
     "permission_text": {"fg": "primary"},
     "permission_denied": {"fg": "error", "dim": true},
