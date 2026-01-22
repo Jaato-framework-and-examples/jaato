@@ -545,6 +545,10 @@ class PTDisplay:
         self._valid_input_prefixes: set = set()  # All valid prefixes for permission responses
         self._last_valid_permission_input: str = ""  # Track last valid input for reverting
 
+        # Permission keyboard navigation state
+        self._permission_response_options: Optional[list] = None  # Current response options
+        self._permission_focus_index: int = 0  # Currently focused option index
+
         # Stop callback for interrupting model generation
         self._stop_callback: Optional[Callable[[], bool]] = None
         self._is_running_callback: Optional[Callable[[], bool]] = None
@@ -1174,7 +1178,7 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("pager_next"), eager=True)
         def handle_space(event):
-            """Handle space key - pager advance, tool expand toggle, or insert space."""
+            """Handle space key - pager advance, tool expand toggle, permission select, or insert space."""
             if getattr(self, '_pager_active', False):
                 # In pager mode - advance page
                 self._advance_pager_page()
@@ -1186,8 +1190,52 @@ class PTDisplay:
                 buffer.toggle_selected_tool_expanded()
                 self._app.invalidate()
                 return
+            # Check for permission mode - select focused option
+            if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
+                self._select_focused_permission_option()
+                return
             # Normal mode - insert space character
             event.current_buffer.insert_text(" ")
+
+        @kb.add(*keys.get_key_args("permission_next"), eager=True)
+        def handle_permission_next(event):
+            """Handle TAB - cycle to next permission option, or complete in normal mode."""
+            if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
+                # Permission mode: cycle to next option (wrap around)
+                self._permission_focus_index = (self._permission_focus_index + 1) % len(self._permission_response_options)
+                # Update output buffer for inline highlighting (use correct buffer from agent registry)
+                buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
+                buffer.set_permission_focus(
+                    self._permission_response_options,
+                    self._permission_focus_index
+                )
+                self._app.invalidate()
+            else:
+                # Normal mode: trigger tab completion
+                buff = event.app.current_buffer
+                if buff.complete_state:
+                    buff.complete_next()
+                else:
+                    buff.start_completion()
+
+        @kb.add(*keys.get_key_args("permission_prev"), eager=True)
+        def handle_permission_prev(event):
+            """Handle Shift+TAB - cycle to previous permission option, or complete prev in normal mode."""
+            if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
+                # Permission mode: cycle to previous option (wrap around)
+                self._permission_focus_index = (self._permission_focus_index - 1) % len(self._permission_response_options)
+                # Update output buffer for inline highlighting (use correct buffer from agent registry)
+                buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
+                buffer.set_permission_focus(
+                    self._permission_response_options,
+                    self._permission_focus_index
+                )
+                self._app.invalidate()
+            else:
+                # Normal mode: trigger previous completion
+                buff = event.app.current_buffer
+                if buff.complete_state:
+                    buff.complete_previous()
 
         @kb.add(*keys.get_key_args("cancel"))
         def handle_ctrl_c(event):
@@ -1616,16 +1664,16 @@ class PTDisplay:
             filter=Condition(lambda: self._agent_tab_bar is not None and self._agent_tab_bar.is_popup_visible),
         )
 
-        # Root layout with session bar at top, then tab bar, status bar, output, pending prompts, input
+        # Root layout with session bar at top, then tab bar, status bar, output, bars, input
         from prompt_toolkit.layout.containers import FloatContainer, Float
         root = FloatContainer(
             content=HSplit([
-                session_bar,           # Session info bar (top)
-                agent_tab_bar,         # Agent tabs (conditional)
-                status_bar,            # Status bar
-                output_window,         # Output panel (fills remaining space)
-                pending_prompts_bar,   # Queued prompts (dynamic, above input)
-                input_row,             # Input area
+                session_bar,             # Session info bar (top)
+                agent_tab_bar,           # Agent tabs (conditional)
+                status_bar,              # Status bar
+                output_window,           # Output panel (fills remaining space)
+                pending_prompts_bar,     # Queued prompts (dynamic, above input)
+                input_row,               # Input area
             ]),
             floats=[
                 Float(
@@ -2502,10 +2550,34 @@ class PTDisplay:
         if waiting and response_options:
             self._valid_input_prefixes = self._compute_valid_prefixes(response_options)
             self._last_valid_permission_input = ""  # Reset for new permission prompt
+            # Store options for keyboard navigation
+            self._permission_response_options = response_options
+            self._permission_focus_index = 0  # Default focus on first option (yes)
         else:
             self._valid_input_prefixes = set()
             self._last_valid_permission_input = ""
-        # Toggle permission completion mode on the input handler with options
-        if self._input_handler:
-            self._input_handler.set_permission_mode(waiting, response_options)
+            self._permission_response_options = None
+            self._permission_focus_index = 0
+        # Update output buffer with focus state for inline highlighting (use correct buffer)
+        buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
+        buffer.set_permission_focus(
+            self._permission_response_options,
+            self._permission_focus_index
+        )
         self.refresh()
+
+    def _select_focused_permission_option(self) -> None:
+        """Select the currently focused permission option and submit it."""
+        if not self._permission_response_options or not self._input_callback:
+            return
+
+        # Get the focused option
+        option = self._permission_response_options[self._permission_focus_index]
+        # Get the short form (the key to submit)
+        if isinstance(option, dict):
+            short = option.get('key', option.get('short', ''))
+        else:
+            short = getattr(option, 'short', getattr(option, 'key', ''))
+
+        # Submit the selection via input callback
+        self._input_callback(short)
