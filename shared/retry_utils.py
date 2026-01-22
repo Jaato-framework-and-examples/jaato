@@ -80,6 +80,15 @@ except ImportError:
     ANTHROPIC_RATE_LIMIT_CLASSES = ()
     ANTHROPIC_TRANSIENT_CLASSES = ()
 
+# Import Google GenAI SDK errors for detection (newer python-genai SDK)
+# These are different from google.api_core.exceptions used by older libraries
+try:
+    from google.genai import errors as genai_errors
+    # ClientError wraps HTTP 4xx errors including 429 rate limits
+    GENAI_RATE_LIMIT_CLASSES: Tuple[Type[Exception], ...] = (genai_errors.ClientError,)
+except ImportError:
+    GENAI_RATE_LIMIT_CLASSES = ()
+
 
 T = TypeVar('T')
 
@@ -117,12 +126,21 @@ def classify_error(exc: Exception) -> Dict[str, bool]:
     rate_like = False
     infra_like = False
 
-    # Check Google exceptions
+    # Check Google api_core exceptions (older google-generativeai SDK)
     if GOOGLE_TRANSIENT_CLASSES and isinstance(exc, GOOGLE_TRANSIENT_CLASSES):
         if GOOGLE_RATE_LIMIT_CLASSES and isinstance(exc, GOOGLE_RATE_LIMIT_CLASSES):
             rate_like = True
         else:
             infra_like = True
+    # Check Google GenAI ClientError (newer python-genai SDK)
+    # ClientError wraps all 4xx errors, so check message for specific codes
+    elif GENAI_RATE_LIMIT_CLASSES and isinstance(exc, GENAI_RATE_LIMIT_CLASSES):
+        lower = str(exc).lower()
+        if any(p in lower for p in ["429", "resource exhausted", "resource_exhausted", "rate limit", "quota"]):
+            rate_like = True
+        elif any(p in lower for p in ["503", "500", "service unavailable", "internal"]):
+            infra_like = True
+        # For other 4xx ClientErrors, don't retry by default (auth errors, bad requests, etc.)
     # Check GitHub rate limit
     elif GITHUB_RATE_LIMIT_CLASSES and isinstance(exc, GITHUB_RATE_LIMIT_CLASSES):
         rate_like = True
@@ -246,6 +264,7 @@ def with_retry(
     context: str = "API call",
     on_retry: Optional[RetryCallback] = None,
     cancel_token: Optional['CancelToken'] = None,
+    provider: Optional[Any] = None,
 ) -> Tuple[T, RetryStats]:
     """Execute a function with automatic retry on transient errors.
 
@@ -259,6 +278,10 @@ def with_retry(
             If not provided, messages are printed to console (unless config.silent).
         cancel_token: Optional CancelToken to check for cancellation.
             If cancelled, raises CancelledException.
+        provider: Optional model provider instance for provider-specific error
+            classification. If the provider implements classify_error() and/or
+            get_retry_after(), those methods will be used instead of the global
+            fallback functions.
 
     Returns:
         Tuple of (result, RetryStats).
@@ -316,8 +339,15 @@ def with_retry(
             last_exc = exc
             stats.last_error = exc
 
-            # Classify the error
-            classification = classify_error(exc)
+            # Classify the error - try provider-specific first, then fallback
+            classification = None
+            if provider is not None and hasattr(provider, 'classify_error'):
+                try:
+                    classification = provider.classify_error(exc)
+                except Exception:
+                    pass  # Provider method failed, use fallback
+            if classification is None:
+                classification = classify_error(exc)
 
             # Record error details
             stats.errors.append({
@@ -336,9 +366,16 @@ def with_retry(
             if not classification["transient"] or attempt == config.max_attempts:
                 raise
 
-            # Calculate and apply backoff
-            retry_after = get_retry_after(exc)
-            delay = calculate_backoff(attempt, config, retry_after)
+            # Extract retry-after hint - try provider-specific first, then fallback
+            retry_after_hint = None
+            if provider is not None and hasattr(provider, 'get_retry_after'):
+                try:
+                    retry_after_hint = provider.get_retry_after(exc)
+                except Exception:
+                    pass  # Provider method failed, use fallback
+            if retry_after_hint is None:
+                retry_after_hint = get_retry_after(exc)
+            delay = calculate_backoff(attempt, config, retry_after_hint)
             stats.total_delay += delay
 
             # Build retry message
