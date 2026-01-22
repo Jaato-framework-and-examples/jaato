@@ -401,6 +401,12 @@ DEFAULT_SEMANTIC_STYLES = {
     "pending_prompt": StyleSpec(fg="primary"),
     "pending_prompt_overflow": StyleSpec(fg="muted", italic=True),
 
+    # Permission options bar
+    "permission_bar_bg": StyleSpec(bg="surface"),
+    "permission_bar_option": StyleSpec(fg="primary"),
+    "permission_bar_focused": StyleSpec(fg="background", bg="primary"),  # Reverse video
+    "permission_bar_hint": StyleSpec(fg="muted", italic=True),
+
     # Input area
     "input_text": StyleSpec(fg="text"),
     "input_prompt": StyleSpec(fg="primary", bold=True),
@@ -692,6 +698,11 @@ class ThemeConfig:
             "pending-prompts-bar": "session_bar_bg",
             "pending-prompt": "pending_prompt",
             "pending-prompt.overflow": "pending_prompt_overflow",
+            # Permission options bar
+            "permission-bar": "permission_bar_bg",
+            "permission-bar.option": "permission_bar_option",
+            "permission-bar.focused": "permission_bar_focused",
+            "permission-bar.hint": "permission_bar_hint",
             # Status bar
             "status-bar": "status_bar_bg",
             "status-bar.label": "status_bar_label",
