@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GC Plugins - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="../jaato-session.html">JaatoSession</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../tool-executor.html">ToolExecutor</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../providers/index.html">Overview</a></li>
+          <li><a href="../providers/google-genai.html">Google GenAI</a></li>
+          <li><a href="../providers/anthropic.html">Anthropic</a></li>
+          <li><a href="../providers/github-models.html">GitHub Models</a></li>
+          <li><a href="../providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="../providers/antigravity.html">Antigravity</a></li>
+          <li><a href="../providers/ollama.html">Ollama</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="cli.html">CLI</a></li>
+          <li><a href="file-edit.html">File Edit</a></li>
+          <li><a href="filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="todo.html">Todo</a></li>
+          <li><a href="web-search.html">Web Search</a></li>
+          <li><a href="mcp.html">MCP</a></li>
+          <li><a href="permission.html">Permission</a></li>
+          <li><a href="session.html">Session</a></li>
+          <li><a href="gc.html" class="active">GC</a></li>
+          <li><a href="other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>GC Plugins</h1>
+          <p class="lead">
+            Context Garbage Collection plugins manage conversation history to prevent
+            context window overflow. When the context approaches its limit, GC plugins
+            automatically reduce history size while preserving important context.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Module</strong></td><td><code>shared.plugins.gc</code></td></tr>
+              <tr><td><strong>Kind</strong></td><td><code>gc</code></td></tr>
+              <tr><td><strong>Auto-trigger</strong></td><td>Yes (threshold-based)</td></tr>
+            </tbody>
+          </table>
+
+          <h2 id="strategies">Available Strategies</h2>
+          <table>
+            <thead>
+              <tr><th>Plugin</th><th>Strategy</th><th>Best For</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>gc_truncate</code></td>
+                <td>Remove oldest turns</td>
+                <td>Simple, fast, predictable</td>
+              </tr>
+              <tr>
+                <td><code>gc_summarize</code></td>
+                <td>Compress old turns into summaries</td>
+                <td>Preserve context, slower</td>
+              </tr>
+              <tr>
+                <td><code>gc_hybrid</code></td>
+                <td>Summarize middle, truncate oldest</td>
+                <td>Balanced approach</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick start</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc import load_gc_plugin, GCConfig
+
+# Load truncate strategy
+gc = load_gc_plugin("gc_truncate", {
+    "preserve_recent_turns": 10
+})
+
+# Configure auto-trigger threshold
+config = GCConfig(
+    threshold_percent=80.0,  # Trigger at 80% context
+    auto_trigger=True
+)
+
+# Set on client
+client.set_gc_plugin(gc, config)
+
+# Conversation now auto-manages context!</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">File-based configuration</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc import load_gc_from_file
+
+# Load from .jaato/gc.json
+result = load_gc_from_file()
+if result:
+    gc_plugin, gc_config = result
+    client.set_gc_plugin(gc_plugin, gc_config)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- GCConfig -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="config">GCConfig</h2>
+
+          <p>
+            Configuration for when and how GC triggers.
+          </p>
+
+          <table>
+            <thead>
+              <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>threshold_percent</code></td>
+                <td>float</td>
+                <td>80.0</td>
+                <td>Context usage % to trigger GC</td>
+              </tr>
+              <tr>
+                <td><code>max_turns</code></td>
+                <td>int</td>
+                <td>None</td>
+                <td>Max turns before GC (optional)</td>
+              </tr>
+              <tr>
+                <td><code>preserve_recent_turns</code></td>
+                <td>int</td>
+                <td>5</td>
+                <td>Turns to keep after GC</td>
+              </tr>
+              <tr>
+                <td><code>auto_trigger</code></td>
+                <td>bool</td>
+                <td>True</td>
+                <td>Auto-trigger during streaming</td>
+              </tr>
+              <tr>
+                <td><code>plugin_config</code></td>
+                <td>dict</td>
+                <td>{}</td>
+                <td>Plugin-specific options</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Proactive GC</div>
+            When <code>auto_trigger=True</code>, GC monitors context usage during
+            streaming and triggers automatically when the threshold is crossed.
+            This prevents context overflow mid-response.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">GCConfig examples</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc import GCConfig
+
+# Conservative: trigger early, keep more context
+conservative = GCConfig(
+    threshold_percent=70.0,
+    preserve_recent_turns=10
+)
+
+# Aggressive: maximize context usage
+aggressive = GCConfig(
+    threshold_percent=90.0,
+    preserve_recent_turns=3
+)
+
+# Turn-based trigger
+turn_based = GCConfig(
+    max_turns=20,  # GC after 20 turns
+    preserve_recent_turns=5
+)
+
+# Disable auto-trigger (manual only)
+manual = GCConfig(
+    auto_trigger=False
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Truncate Strategy -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="truncate">gc_truncate</h2>
+
+          <p>
+            Simple truncation strategy. Removes oldest turns first, keeping the
+            most recent turns. Fast and predictable.
+          </p>
+
+          <h3>Configuration</h3>
+          <table>
+            <thead>
+              <tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>preserve_recent_turns</code></td>
+                <td>int</td>
+                <td>5</td>
+                <td>Turns to keep</td>
+              </tr>
+              <tr>
+                <td><code>notify_on_gc</code></td>
+                <td>bool</td>
+                <td>True</td>
+                <td>Add notification to context</td>
+              </tr>
+              <tr>
+                <td><code>agent_name</code></td>
+                <td>str</td>
+                <td>None</td>
+                <td>Agent name for logging</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Pros & Cons</h3>
+          <ul>
+            <li><strong>Pro:</strong> Fast, no API calls</li>
+            <li><strong>Pro:</strong> Predictable behavior</li>
+            <li><strong>Con:</strong> Loses old context completely</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Use truncate strategy</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc_truncate import create_plugin as create_gc
+
+gc = create_gc()
+gc.initialize({
+    "preserve_recent_turns": 10,
+    "notify_on_gc": True
+})
+
+client.set_gc_plugin(gc, GCConfig(
+    threshold_percent=80.0
+))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Summarize Strategy -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="summarize">gc_summarize</h2>
+
+          <p>
+            Summarization strategy. Compresses old turns into a summary message,
+            preserving semantic context while reducing token count.
+          </p>
+
+          <h3>Configuration</h3>
+          <table>
+            <thead>
+              <tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>preserve_recent_turns</code></td>
+                <td>int</td>
+                <td>5</td>
+                <td>Turns to keep verbatim</td>
+              </tr>
+              <tr>
+                <td><code>summarize_prompt</code></td>
+                <td>str</td>
+                <td>(built-in)</td>
+                <td>Custom summarization prompt</td>
+              </tr>
+              <tr>
+                <td><code>max_summary_tokens</code></td>
+                <td>int</td>
+                <td>500</td>
+                <td>Max tokens in summary</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Pros & Cons</h3>
+          <ul>
+            <li><strong>Pro:</strong> Preserves semantic context</li>
+            <li><strong>Pro:</strong> Model remembers key points</li>
+            <li><strong>Con:</strong> Requires API call to summarize</li>
+            <li><strong>Con:</strong> Slower than truncation</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Use summarize strategy</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc_summarize import create_plugin as create_gc
+
+gc = create_gc()
+gc.initialize({
+    "preserve_recent_turns": 5,
+    "max_summary_tokens": 1000
+})
+
+client.set_gc_plugin(gc, GCConfig(
+    threshold_percent=75.0
+))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Hybrid Strategy -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="hybrid">gc_hybrid</h2>
+
+          <p>
+            Combined strategy: summarizes middle turns, truncates oldest turns,
+            preserves recent turns. Best balance of context preservation and
+            efficiency.
+          </p>
+
+          <h3>Configuration</h3>
+          <table>
+            <thead>
+              <tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>preserve_recent_turns</code></td>
+                <td>int</td>
+                <td>5</td>
+                <td>Recent turns to keep verbatim</td>
+              </tr>
+              <tr>
+                <td><code>summarize_middle_turns</code></td>
+                <td>int</td>
+                <td>10</td>
+                <td>Middle turns to summarize</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>How It Works</h3>
+          <pre>
+History: [T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12]
+                ^^^^^^^^^^^^^    ^^^^^^^^^^^^^^^    ^^^^^^^
+               truncated        summarized        preserved
+
+After GC: [Summary, T10, T11, T12]
+          </pre>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Use hybrid strategy</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc_hybrid import create_plugin as create_gc
+
+gc = create_gc()
+gc.initialize({
+    "preserve_recent_turns": 5,
+    "summarize_middle_turns": 10
+})
+
+client.set_gc_plugin(gc, GCConfig(
+    threshold_percent=80.0
+))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- File Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="file-config">File Configuration</h2>
+
+          <p>
+            Configure GC via <code>.jaato/gc.json</code> for easy project-level
+            settings without code changes.
+          </p>
+
+          <h3>JSON Schema</h3>
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>type</code></td>
+                <td>str</td>
+                <td>"truncate", "summarize", or "hybrid"</td>
+              </tr>
+              <tr>
+                <td><code>threshold_percent</code></td>
+                <td>float</td>
+                <td>Context % to trigger GC</td>
+              </tr>
+              <tr>
+                <td><code>preserve_recent_turns</code></td>
+                <td>int</td>
+                <td>Turns to keep</td>
+              </tr>
+              <tr>
+                <td><code>max_turns</code></td>
+                <td>int</td>
+                <td>Max turns before GC</td>
+              </tr>
+              <tr>
+                <td><code>notify_on_gc</code></td>
+                <td>bool</td>
+                <td>Add notification message</td>
+              </tr>
+              <tr>
+                <td><code>summarize_middle_turns</code></td>
+                <td>int</td>
+                <td>For hybrid strategy</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">.jaato/gc.json</div>
+          <div class="code-block">
+            <pre><code class="language-json">{
+    "type": "hybrid",
+    "threshold_percent": 80.0,
+    "preserve_recent_turns": 5,
+    "summarize_middle_turns": 10,
+    "notify_on_gc": true
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Load from file</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc import load_gc_from_file
+
+result = load_gc_from_file(".jaato/gc.json", agent_name="main")
+if result:
+    gc_plugin, gc_config = result
+    client.set_gc_plugin(gc_plugin, gc_config)
+else:
+    print("No GC config found")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Manual GC -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="manual">Manual GC</h2>
+
+          <p>
+            Trigger GC manually when needed, regardless of threshold.
+          </p>
+
+          <h3>GCResult</h3>
+          <table>
+            <thead>
+              <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>tokens_before</code></td>
+                <td>int</td>
+                <td>Tokens before GC</td>
+              </tr>
+              <tr>
+                <td><code>tokens_after</code></td>
+                <td>int</td>
+                <td>Tokens after GC</td>
+              </tr>
+              <tr>
+                <td><code>tokens_freed</code></td>
+                <td>int</td>
+                <td>Tokens recovered</td>
+              </tr>
+              <tr>
+                <td><code>turns_removed</code></td>
+                <td>int</td>
+                <td>Turns removed/summarized</td>
+              </tr>
+              <tr>
+                <td><code>strategy</code></td>
+                <td>str</td>
+                <td>Strategy used</td>
+              </tr>
+              <tr>
+                <td><code>trigger_reason</code></td>
+                <td>str</td>
+                <td>"manual", "threshold", "max_turns"</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Manual GC</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Trigger GC manually
+result = client.manual_gc()
+
+print(f"Freed {result.tokens_freed} tokens")
+print(f"Removed {result.turns_removed} turns")
+print(f"Before: {result.tokens_before}")
+print(f"After: {result.tokens_after}")
+
+# Check GC history
+for gc in client.get_gc_history():
+    print(f"GC at {gc.timestamp}: {gc.strategy}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Environment Variable -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="env">Environment Variables</h2>
+
+          <table>
+            <thead>
+              <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>JAATO_GC_THRESHOLD</code></td>
+                <td>80.0</td>
+                <td>Default GC threshold %</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">.env</div>
+          <div class="code-block">
+            <pre><code class="language-bash">JAATO_GC_THRESHOLD=75.0</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>

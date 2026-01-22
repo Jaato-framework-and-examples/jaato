@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude CLI Provider - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="../jaato-session.html">JaatoSession</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../tool-executor.html">ToolExecutor</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="anthropic.html">Anthropic</a></li>
+          <li><a href="github-models.html">GitHub Models</a></li>
+          <li><a href="claude-cli.html" class="active">Claude CLI</a></li>
+          <li><a href="antigravity.html">Antigravity</a></li>
+          <li><a href="ollama.html">Ollama</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+          <li><a href="../plugins/filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="../plugins/todo.html">Todo</a></li>
+          <li><a href="../plugins/web-search.html">Web Search</a></li>
+          <li><a href="../plugins/mcp.html">MCP</a></li>
+          <li><a href="../plugins/permission.html">Permission</a></li>
+          <li><a href="../plugins/session.html">Session</a></li>
+          <li><a href="../plugins/gc.html">GC</a></li>
+          <li><a href="../plugins/other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Claude CLI Provider</h1>
+          <p class="lead">
+            Use Claude through the official Claude Code CLI. This provider wraps
+            the CLI, enabling you to use your Claude Pro/Max subscription without
+            consuming API credits.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Provider Name</strong></td><td><code>claude_cli</code></td></tr>
+              <tr><td><strong>Module</strong></td><td><code>shared.plugins.model_provider.claude_cli</code></td></tr>
+              <tr><td><strong>Requires</strong></td><td>Claude Code CLI (<code>claude</code>)</td></tr>
+              <tr><td><strong>Auth</strong></td><td><code>claude login</code></td></tr>
+            </tbody>
+          </table>
+
+          <h2 id="benefits">Benefits</h2>
+          <ul>
+            <li><strong>No API costs</strong> - Uses Pro/Max subscription</li>
+            <li><strong>Built-in tools</strong> - CLI handles Read, Write, Edit, Bash</li>
+            <li><strong>Automatic caching</strong> - CLI manages prompt caching</li>
+            <li><strong>MCP support</strong> - CLI integrates MCP servers</li>
+          </ul>
+
+          <h2 id="modes">Operation Modes</h2>
+          <table>
+            <thead>
+              <tr><th>Mode</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>delegated</code></td>
+                <td>CLI handles tool execution (default)</td>
+              </tr>
+              <tr>
+                <td><code>passthrough</code></td>
+                <td>jaato handles tool execution</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick start</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient
+
+# Uses claude CLI in background
+client = JaatoClient(provider_name="claude_cli")
+client.connect(
+    project=None,
+    location=None,
+    model="claude-sonnet-4-20250514"
+)
+client.configure_tools(registry)
+
+response = client.send_message(
+    "List files in the current directory",
+    on_output=on_output
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Prerequisites</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Install Claude Code CLI
+npm install -g @anthropic-ai/claude-code
+
+# Login (opens browser)
+claude login
+
+# Verify it works
+claude --version</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Configuration</h2>
+
+          <h3>Environment Variables</h3>
+          <table>
+            <thead>
+              <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>JAATO_CLAUDE_CLI_PATH</code></td>
+                <td>From PATH</td>
+                <td>Path to claude CLI executable</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_CLAUDE_CLI_MODE</code></td>
+                <td><code>delegated</code></td>
+                <td>Operation mode: <code>delegated</code> or <code>passthrough</code></td>
+              </tr>
+              <tr>
+                <td><code>JAATO_CLAUDE_CLI_MAX_TURNS</code></td>
+                <td>100</td>
+                <td>Maximum agentic turns</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Delegated Mode</h3>
+          <p>
+            In delegated mode, the CLI handles tool execution using its built-in
+            tools (Read, Write, Edit, Bash). This is the default and recommended
+            mode for most use cases.
+          </p>
+
+          <h3>Passthrough Mode</h3>
+          <p>
+            In passthrough mode, jaato handles tool execution. Use this when you
+            need custom tools or want full control over the tool execution flow.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Environment configuration</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env file
+JAATO_PROVIDER=claude_cli
+JAATO_CLAUDE_CLI_MODE=delegated
+JAATO_CLAUDE_CLI_MAX_TURNS=50
+
+# Optional: explicit path
+JAATO_CLAUDE_CLI_PATH=/usr/local/bin/claude</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Passthrough mode</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Use jaato's tool handling
+JAATO_CLAUDE_CLI_MODE=passthrough</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Authentication -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="authentication">Authentication</h2>
+
+          <p>
+            Authentication is handled by the Claude CLI itself. You need to
+            log in once using <code>claude login</code>, which stores credentials
+            locally.
+          </p>
+
+          <h3>Login Flow</h3>
+          <ol>
+            <li>Run <code>claude login</code></li>
+            <li>Browser opens to Anthropic login page</li>
+            <li>Authenticate with your Claude Pro/Max account</li>
+            <li>Credentials saved to <code>~/.claude/</code></li>
+          </ol>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Subscription Required</div>
+            The Claude CLI requires an active Claude Pro or Claude Max subscription.
+            API keys do not work with this provider.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Initial setup</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Install CLI
+npm install -g @anthropic-ai/claude-code
+
+# Login
+claude login
+
+# Verify authentication
+claude "Hello, can you hear me?"</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Check login status</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Check if logged in
+claude whoami
+
+# Re-login if needed
+claude logout
+claude login</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- How It Works -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="how-it-works">How It Works</h2>
+
+          <p>
+            The claude_cli provider spawns the Claude CLI as a subprocess and
+            communicates with it via JSON messages. The CLI maintains its own
+            conversation state and handles tool execution.
+          </p>
+
+          <h3>Architecture</h3>
+          <pre>
+JaatoClient
+    |
+    v
+claude_cli provider
+    |
+    v (subprocess)
+claude CLI
+    |
+    v (HTTP)
+Anthropic API
+          </pre>
+
+          <h3>Limitations</h3>
+          <ul>
+            <li>Streaming is per-turn, not per-token</li>
+            <li>Custom tools require passthrough mode</li>
+            <li>CLI must be installed and logged in</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Usage example</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient
+
+client = JaatoClient(provider_name="claude_cli")
+client.connect(None, None, "claude-sonnet-4-20250514")
+
+# In delegated mode, CLI handles file operations
+response = client.send_message(
+    "Read the README.md and summarize it",
+    on_output=on_output
+)
+# CLI uses its built-in Read tool</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">With custom tools (passthrough)</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Set passthrough mode
+export JAATO_CLAUDE_CLI_MODE=passthrough</code></pre>
+          </div>
+          <div class="code-block" style="margin-top: 8px;">
+            <pre><code class="language-python"># Now jaato handles tool execution
+client = JaatoClient(provider_name="claude_cli")
+client.connect(None, None, "claude-sonnet-4-20250514")
+client.configure_tools(registry)  # Your custom tools
+
+response = client.send_message(
+    "Use my custom tools to...",
+    on_output=on_output
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Comparison -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="comparison">vs Anthropic Provider</h2>
+
+          <table>
+            <thead>
+              <tr><th>Feature</th><th>claude_cli</th><th>anthropic</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Cost</td>
+                <td>Subscription only</td>
+                <td>API credits</td>
+              </tr>
+              <tr>
+                <td>Authentication</td>
+                <td><code>claude login</code></td>
+                <td>API key / OAuth</td>
+              </tr>
+              <tr>
+                <td>Built-in tools</td>
+                <td>Yes (Read, Write, etc.)</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td>Custom tools</td>
+                <td>Passthrough mode</td>
+                <td>Full support</td>
+              </tr>
+              <tr>
+                <td>Streaming</td>
+                <td>Per-turn</td>
+                <td>Per-token</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>When to Use claude_cli</h3>
+          <ul>
+            <li>You have a Claude Pro/Max subscription</li>
+            <li>You want to avoid API costs</li>
+            <li>Built-in tools are sufficient</li>
+          </ul>
+
+          <h3>When to Use anthropic</h3>
+          <ul>
+            <li>You need per-token streaming</li>
+            <li>You need custom tools</li>
+            <li>You prefer API-based access</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Choose based on use case</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Use subscription quota (no API costs)
+client = JaatoClient(provider_name="claude_cli")
+
+# OR
+
+# Use API credits (more control)
+client = JaatoClient(provider_name="anthropic")</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>

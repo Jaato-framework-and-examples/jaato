@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ollama Provider - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="../jaato-session.html">JaatoSession</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../tool-executor.html">ToolExecutor</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="anthropic.html">Anthropic</a></li>
+          <li><a href="github-models.html">GitHub Models</a></li>
+          <li><a href="claude-cli.html">Claude CLI</a></li>
+          <li><a href="antigravity.html">Antigravity</a></li>
+          <li><a href="ollama.html" class="active">Ollama</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+          <li><a href="../plugins/filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="../plugins/todo.html">Todo</a></li>
+          <li><a href="../plugins/web-search.html">Web Search</a></li>
+          <li><a href="../plugins/mcp.html">MCP</a></li>
+          <li><a href="../plugins/permission.html">Permission</a></li>
+          <li><a href="../plugins/session.html">Session</a></li>
+          <li><a href="../plugins/gc.html">GC</a></li>
+          <li><a href="../plugins/other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Ollama Provider</h1>
+          <p class="lead">
+            Run AI models locally with Ollama. No API costs, complete privacy,
+            and access to a wide variety of open-source models including Qwen,
+            Llama, Mistral, and more.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Provider Name</strong></td><td><code>ollama</code></td></tr>
+              <tr><td><strong>Module</strong></td><td><code>shared.plugins.model_provider.ollama</code></td></tr>
+              <tr><td><strong>Requires</strong></td><td>Ollama v0.14.0+</td></tr>
+              <tr><td><strong>Auth</strong></td><td>None (local)</td></tr>
+            </tbody>
+          </table>
+
+          <h2 id="benefits">Benefits</h2>
+          <ul>
+            <li><strong>No API costs</strong> - Run models for free</li>
+            <li><strong>Privacy</strong> - Data never leaves your machine</li>
+            <li><strong>Offline</strong> - Works without internet</li>
+            <li><strong>Model variety</strong> - Qwen, Llama, Mistral, DeepSeek, etc.</li>
+            <li><strong>Function calling</strong> - Via Anthropic-compatible API</li>
+          </ul>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Hardware Requirements</div>
+            Local models require significant RAM (8GB+) and ideally a GPU.
+            Performance depends on your hardware and model size.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick start</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient
+
+client = JaatoClient(provider_name="ollama")
+client.connect(
+    project=None,
+    location=None,
+    model="qwen3:32b"
+)
+client.configure_tools(registry)
+
+response = client.send_message(
+    "Hello from local Qwen!",
+    on_output=on_output
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Prerequisites</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Install Ollama
+# macOS/Linux: https://ollama.com/download
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Start Ollama server
+ollama serve
+
+# Pull a model
+ollama pull qwen3:32b
+
+# Verify it works
+ollama run qwen3:32b "Hello!"</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Models -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="models">Recommended Models</h2>
+
+          <p>
+            These models work well with function calling. Model choice depends
+            on your hardware capabilities.
+          </p>
+
+          <h3>For Coding Tasks</h3>
+          <table>
+            <thead>
+              <tr><th>Model</th><th>Size</th><th>RAM</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>qwen3:32b</code></td>
+                <td>32B</td>
+                <td>~20GB</td>
+              </tr>
+              <tr>
+                <td><code>qwen3:14b</code></td>
+                <td>14B</td>
+                <td>~10GB</td>
+              </tr>
+              <tr>
+                <td><code>deepseek-coder-v2:16b</code></td>
+                <td>16B</td>
+                <td>~12GB</td>
+              </tr>
+              <tr>
+                <td><code>codellama:13b</code></td>
+                <td>13B</td>
+                <td>~10GB</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>For General Tasks</h3>
+          <table>
+            <thead>
+              <tr><th>Model</th><th>Size</th><th>RAM</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>llama3.3:70b</code></td>
+                <td>70B</td>
+                <td>~40GB</td>
+              </tr>
+              <tr>
+                <td><code>llama3.1:8b</code></td>
+                <td>8B</td>
+                <td>~6GB</td>
+              </tr>
+              <tr>
+                <td><code>mistral:7b</code></td>
+                <td>7B</td>
+                <td>~5GB</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Pull models</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Pull recommended coding model
+ollama pull qwen3:32b
+
+# Or smaller for limited RAM
+ollama pull qwen3:14b
+
+# List available models
+ollama list
+
+# See model details
+ollama show qwen3:32b</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Search for models</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Browse available models
+# https://ollama.com/library
+
+# Search for coding models
+ollama search code
+
+# Pull specific version
+ollama pull qwen3:32b-instruct-q4_K_M</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Configuration</h2>
+
+          <h3>Environment Variables</h3>
+          <table>
+            <thead>
+              <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>OLLAMA_HOST</code></td>
+                <td><code>http://localhost:11434</code></td>
+                <td>Ollama server URL</td>
+              </tr>
+              <tr>
+                <td><code>OLLAMA_MODEL</code></td>
+                <td>-</td>
+                <td>Default model name</td>
+              </tr>
+              <tr>
+                <td><code>OLLAMA_CONTEXT_LENGTH</code></td>
+                <td>32768</td>
+                <td>Context window override</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>ProviderConfig.extra Options</h3>
+          <table>
+            <thead>
+              <tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>host</code></td>
+                <td>str</td>
+                <td>localhost:11434</td>
+                <td>Ollama server URL</td>
+              </tr>
+              <tr>
+                <td><code>context_length</code></td>
+                <td>int</td>
+                <td>32768</td>
+                <td>Context window size</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Environment configuration</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env file
+JAATO_PROVIDER=ollama
+OLLAMA_HOST=http://localhost:11434
+OLLAMA_MODEL=qwen3:32b
+OLLAMA_CONTEXT_LENGTH=32768</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Remote Ollama server</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Connect to remote server
+OLLAMA_HOST=http://192.168.1.100:11434</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Function Calling -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="function-calling">Function Calling</h2>
+
+          <p>
+            Ollama v0.14.0+ supports function calling through the Anthropic-compatible
+            API. The provider automatically converts tool schemas to the correct format.
+          </p>
+
+          <h3>Requirements</h3>
+          <ul>
+            <li>Ollama v0.14.0 or later</li>
+            <li>A model that supports function calling</li>
+          </ul>
+
+          <h3>Supported Models</h3>
+          <p>
+            Most instruction-tuned models support function calling:
+          </p>
+          <ul>
+            <li>Qwen 3 (all sizes)</li>
+            <li>Llama 3.1, 3.3</li>
+            <li>Mistral</li>
+            <li>DeepSeek Coder</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Function calling example</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient
+
+client = JaatoClient(provider_name="ollama")
+client.connect(None, None, "qwen3:32b")
+client.configure_tools(registry)
+
+# Model will use tools as needed
+response = client.send_message(
+    "List the files in the current directory",
+    on_output=on_output
+)
+# Model calls list_files tool</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Check Ollama version</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Verify Ollama version >= 0.14.0
+ollama --version
+
+# Update if needed
+curl -fsSL https://ollama.com/install.sh | sh</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Running Ollama -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="running">Running Ollama</h2>
+
+          <h3>Start Server</h3>
+          <p>
+            Ollama runs as a background server. Start it before using the provider.
+          </p>
+
+          <h3>GPU Acceleration</h3>
+          <p>
+            Ollama automatically uses GPU acceleration when available:
+          </p>
+          <ul>
+            <li><strong>NVIDIA</strong> - CUDA (automatic)</li>
+            <li><strong>AMD</strong> - ROCm (Linux)</li>
+            <li><strong>Apple</strong> - Metal (automatic)</li>
+          </ul>
+
+          <h3>Memory Management</h3>
+          <p>
+            Ollama keeps models loaded in memory. Use <code>ollama stop</code>
+            to unload when not needed.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Start Ollama</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Start server (foreground)
+ollama serve
+
+# Or run as service (Linux)
+sudo systemctl start ollama
+
+# Check if running
+curl http://localhost:11434/api/tags</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Memory management</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># See loaded models
+ollama ps
+
+# Unload a model
+ollama stop qwen3:32b
+
+# Set GPU memory limit
+OLLAMA_GPU_MEMORY=8g ollama serve</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Comparison -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="comparison">vs Cloud Providers</h2>
+
+          <table>
+            <thead>
+              <tr><th>Feature</th><th>Ollama</th><th>Cloud APIs</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Cost</td>
+                <td>Free (hardware only)</td>
+                <td>Pay-per-token</td>
+              </tr>
+              <tr>
+                <td>Privacy</td>
+                <td>100% local</td>
+                <td>Data sent to cloud</td>
+              </tr>
+              <tr>
+                <td>Speed</td>
+                <td>Depends on hardware</td>
+                <td>Generally faster</td>
+              </tr>
+              <tr>
+                <td>Model quality</td>
+                <td>Good (open source)</td>
+                <td>Best (proprietary)</td>
+              </tr>
+              <tr>
+                <td>Offline</td>
+                <td>Yes</td>
+                <td>No</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>When to Use Ollama</h3>
+          <ul>
+            <li>Privacy-sensitive tasks</li>
+            <li>Offline development</li>
+            <li>Cost-conscious usage</li>
+            <li>Experimentation with open models</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Choose based on needs</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Privacy-first (local)
+client = JaatoClient(provider_name="ollama")
+client.connect(None, None, "qwen3:32b")
+
+# Performance-first (cloud)
+client = JaatoClient(provider_name="anthropic")
+client.connect(None, None, "claude-sonnet-4-20250514")</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>
