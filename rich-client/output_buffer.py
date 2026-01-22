@@ -3102,18 +3102,19 @@ class OutputBuffer:
         output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
         output.append(f"  📋 Answers ({len(qa_pairs)})", style=self._style("clarification_resolved", "bold green"))
 
-        # Calculate available width (account for tree indentation)
-        indent_width = len(prefix) + len(continuation) + 2  # +2 for spacing
-        total_width = max(40, (self._console_width or 80) - indent_width)
+        # Use a fixed content width for Q&A layout (not terminal width)
+        # This ensures consistent, readable layout regardless of terminal size
+        # The tool tree already has its own indentation we can't easily measure
+        CONTENT_WIDTH = 70  # Reasonable width for Q&A content
 
         # Dynamic column sizing based on content
-        # Answer column: sized to longest answer (min 10, max 40% of total)
+        # Answer column: sized to longest answer (min 10, max 40% of content width)
         max_answer_len = max(_display_width(a) for _, a in qa_pairs)
-        answer_col_width = max(10, min(max_answer_len, int(total_width * 0.4)))
+        answer_col_width = max(10, min(max_answer_len, int(CONTENT_WIDTH * 0.4)))
 
-        # Question wrap width must leave room for: " " + dots (min 3) + " " + answer
+        # Question column: remaining space minus dots
         min_dots = 3
-        question_wrap_width = total_width - answer_col_width - min_dots - 2
+        question_col_width = CONTENT_WIDTH - answer_col_width - min_dots - 2
 
         question_style = self._style("clarification_question", "cyan")
         answer_style = self._style("clarification_answer", "green")
@@ -3123,8 +3124,8 @@ class OutputBuffer:
             # Normalize question (collapse whitespace, remove newlines)
             question = ' '.join(question.split())
 
-            # Wrap question - all lines same width for visual consistency
-            wrapped = textwrap.wrap(question, width=question_wrap_width) or [question]
+            # Wrap question to fit in question column
+            wrapped = textwrap.wrap(question, width=question_col_width) or [question]
 
             # Render non-last lines (question only, no dots)
             for line in wrapped[:-1]:
@@ -3133,10 +3134,10 @@ class OutputBuffer:
                 output.append(line, style=question_style)
 
             # Last line: question + dots + answer (all on same line)
+            # Dots fill from end of question to answer column start
             last_line = wrapped[-1]
             last_line_width = _display_width(last_line)
-            answer_width = _display_width(answer)
-            dots_needed = total_width - last_line_width - answer_width - 2  # -2 for spaces
+            dots_needed = question_col_width - last_line_width + min_dots
 
             output.append("\n")
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
