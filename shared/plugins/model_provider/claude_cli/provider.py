@@ -7,6 +7,7 @@ protocol for programmatic access to Claude's agentic capabilities.
 import json
 import logging
 import os
+import signal
 import subprocess
 import threading
 import uuid
@@ -984,10 +985,12 @@ class ClaudeCLIProvider:
 
         try:
             for msg in self._stream_cli_messages(prompt, cancel_token):
-                # Check cancellation
+                # Note: Don't break on cancellation - let _stream_cli_messages
+                # send ESC for graceful interrupt and wait for ResultMessage.
+                # This preserves the CLI session state for proper --resume.
                 if cancel_token and cancel_token.is_cancelled:
                     cancelled = True
-                    break
+                    # Continue processing messages until CLI finishes gracefully
 
                 if isinstance(msg, SystemMessage):
                     # Capture CLI session ID for multi-turn conversation
@@ -1158,14 +1161,19 @@ class ClaudeCLIProvider:
         with self._process_lock:
             self._process = process
 
+        interrupt_sent = False  # Track if we've sent graceful interrupt
         try:
             # Read NDJSON lines from stdout
             for line in process.stdout:
-                # Check cancellation
-                if cancel_token and cancel_token.is_cancelled:
-                    logger.debug("Cancellation requested, terminating CLI")
-                    process.terminate()
-                    break
+                # Note: Claude CLI does not support mid-stream graceful interruption
+                # SIGINT kills the process without saving session state (returncode=-2)
+                # ESC via stdin requires stdin=PIPE which breaks CLI startup
+                # So we ignore cancellation during streaming and let it complete naturally
+                # The mid-turn prompt will be processed after streaming finishes
+                if cancel_token and cancel_token.is_cancelled and not interrupt_sent:
+                    self._trace("CANCEL_IGNORED: Claude CLI doesn't support mid-stream interrupt, letting streaming complete")
+                    interrupt_sent = True  # Mark as "handled" so we only log once
+                    # Don't break, don't send signals - just continue streaming
 
                 line = line.strip()
                 if not line:
@@ -1204,7 +1212,9 @@ class ClaudeCLIProvider:
                     continue
 
             # Wait for process to complete
+            self._trace(f"PROCESS_WAIT: Starting wait for CLI process (interrupt_sent={interrupt_sent})")
             process.wait(timeout=5)
+            self._trace(f"PROCESS_WAIT: Process exited with returncode={process.returncode}")
 
             if process.returncode != 0 and not (cancel_token and cancel_token.is_cancelled):
                 stderr = process.stderr.read() if process.stderr else ""
@@ -1218,12 +1228,40 @@ class ClaudeCLIProvider:
                 self._process = None
 
     def _terminate_process(self) -> None:
-        """Terminate any running CLI process."""
+        """Terminate any running CLI process.
+
+        Tries graceful interrupt (ESC) first to preserve session state,
+        then falls back to SIGINT, then terminate/kill if needed.
+        """
         with self._process_lock:
             if self._process:
                 try:
-                    self._process.terminate()
-                    self._process.wait(timeout=2)
+                    # Try graceful interrupt first (ESC preserves session state)
+                    if self._process.stdin:
+                        try:
+                            self._trace("_terminate_process: Sending ESC for graceful interrupt")
+                            self._process.stdin.write('\x1b')
+                            self._process.stdin.flush()
+                            self._process.wait(timeout=3)
+                        except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+                            # ESC failed, try SIGINT
+                            self._trace("_terminate_process: ESC failed, trying SIGINT")
+                            try:
+                                self._process.send_signal(signal.SIGINT)
+                                self._process.wait(timeout=2)
+                            except (ProcessLookupError, OSError, subprocess.TimeoutExpired):
+                                self._trace("_terminate_process: SIGINT failed, terminating")
+                                self._process.terminate()
+                                self._process.wait(timeout=2)
+                    else:
+                        self._process.terminate()
+                        self._process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    try:
+                        self._trace("_terminate_process: Terminate timed out, killing")
+                        self._process.kill()
+                    except Exception:
+                        pass
                 except Exception:
                     try:
                         self._process.kill()

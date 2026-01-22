@@ -3090,6 +3090,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         WorkspaceMismatchResponseRequest,
         MidTurnPromptQueuedEvent,
         MidTurnPromptInjectedEvent,
+        MidTurnInterruptEvent,
     )
 
     # Load keybindings and theme
@@ -3566,6 +3567,15 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
             elif isinstance(event, MidTurnPromptInjectedEvent):
                 # Remove from pending prompts bar when processed
                 display.remove_pending_prompt(event.text)
+
+            elif isinstance(event, MidTurnInterruptEvent):
+                # Streaming was interrupted to process user prompt
+                # Show a brief notification that the model is pivoting to user input
+                ipc_trace(f"  MidTurnInterruptEvent: partial={event.partial_response_chars} chars")
+                display.add_system_message(
+                    f"[Pivoting to your input...]",
+                    style="system_info"
+                )
 
             elif isinstance(event, SessionListEvent):
                 # Store sessions for completion AND display

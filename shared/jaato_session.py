@@ -188,6 +188,10 @@ class JaatoSession:
         self._gc_threshold_crossed: bool = False  # Set when threshold crossed during streaming
         self._gc_threshold_callback: Optional[GCThresholdCallback] = None
 
+        # Mid-turn prompt interrupt tracking
+        # When True, cancellation was triggered by a pending user prompt, not user cancellation
+        self._mid_turn_interrupt: bool = False
+
         # Terminal width for formatting (used by enrichment notifications)
         self._terminal_width: int = 80
 
@@ -204,6 +208,11 @@ class JaatoSession:
         # Callback when a prompt is injected (processed from queue)
         # Used by server to emit MidTurnPromptInjectedEvent
         self._on_prompt_injected: Optional[Callable[[str], None]] = None
+
+        # Callback when streaming is interrupted for mid-turn prompt
+        # Used by server to emit MidTurnInterruptEvent
+        # Callback receives (partial_response_chars, user_prompt_preview)
+        self._on_mid_turn_interrupt: Optional[Callable[[int, str], None]] = None
 
         # Callback when continuation is needed (child messages received while idle)
         # Used by server to trigger a new turn when subagent sends messages
@@ -394,6 +403,22 @@ class JaatoSession:
             callback: Function called with collected child message text.
         """
         self._on_continuation_needed = callback
+
+    def set_mid_turn_interrupt_callback(
+        self,
+        callback: Optional[Callable[[int, str], None]]
+    ) -> None:
+        """Set callback for when streaming is interrupted for mid-turn prompt.
+
+        This callback is invoked when the model's streaming generation is
+        interrupted because a user prompt arrived. The server uses this to
+        emit MidTurnInterruptEvent to notify the client UI.
+
+        Args:
+            callback: Function called with (partial_response_chars, user_prompt_preview)
+                      when streaming is interrupted.
+        """
+        self._on_mid_turn_interrupt = callback
 
     def inject_prompt(
         self,
@@ -1517,6 +1542,7 @@ class JaatoSession:
 
         # Initialize cancellation support
         self._cancel_token = CancelToken()
+        self._mid_turn_interrupt = False  # Reset mid-turn interrupt flag for new message
         self._is_running = True
         cancellation_notified = False  # Track if we've already shown cancellation message
         terminal_event_sent = False  # Track if abnormal termination (CANCELLED/ERROR) occurred
@@ -1578,10 +1604,24 @@ class JaatoSession:
                 if use_streaming:
                     # Track whether we've sent the first chunk (to use "write" vs "append")
                     first_chunk_sent = False
+                    # Track accumulated text for mid-turn interrupt preservation
+                    accumulated_streaming_text: List[str] = []
 
                     # Streaming callback that routes to on_output and forwards to parent
                     def streaming_callback(chunk: str) -> None:
                         nonlocal first_chunk_sent
+                        # Accumulate text for potential mid-turn interrupt preservation
+                        accumulated_streaming_text.append(chunk)
+
+                        # Check for pending mid-turn prompts during streaming
+                        # This allows user input to interrupt the current generation
+                        if self._message_queue.has_parent_messages():
+                            self._trace("MID_TURN_INTERRUPT: Detected pending user prompt during streaming")
+                            self._mid_turn_interrupt = True
+                            if self._cancel_token:
+                                self._cancel_token.cancel()
+                            # Don't return - let the current chunk be processed first
+
                         # Transition to STREAMING phase on first chunk
                         if not first_chunk_sent:
                             self._set_activity_phase(ActivityPhase.STREAMING)
@@ -1649,26 +1689,73 @@ class JaatoSession:
             # Check finish_reason for abnormal termination
             if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE, FinishReason.CANCELLED):
                 logger.warning(f"Model stopped with finish_reason={response.finish_reason}")
-                if response.text:
-                    return f"{response.text}\n\n[Model stopped: {response.finish_reason}]"
+                response_text = response.get_text()
+                if response_text:
+                    return f"{response_text}\n\n[Model stopped: {response.finish_reason}]"
                 else:
                     return f"[Model stopped unexpectedly: {response.finish_reason}]"
 
             # Check for cancellation after initial message (including parent)
             if self._is_cancelled() or response.finish_reason == FinishReason.CANCELLED:
                 partial_text = response.get_text()
-                cancel_msg = "[Generation cancelled]"
-                if on_output and not cancellation_notified:
-                    self._trace(f"CANCEL_NOTIFY: {cancel_msg} (after initial message)")
-                    on_output("system", cancel_msg, "write")
-                    cancellation_notified = True
-                elif cancellation_notified:
-                    self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (after initial message) - already notified!")
-                # Notify model of cancellation for context on next turn
-                self._notify_model_of_cancellation(cancel_msg, partial_text)
-                if partial_text:
-                    return f"{partial_text}\n\n{cancel_msg}"
-                return cancel_msg
+
+                # Check if this was a mid-turn interrupt (user prompt arrived during streaming)
+                if self._mid_turn_interrupt:
+                    self._trace(f"MID_TURN_INTERRUPT: Processing user prompt (partial response: {len(partial_text) if partial_text else 0} chars)")
+                    # Reset the interrupt flag
+                    self._mid_turn_interrupt = False
+                    # Reset the cancel token for subsequent operations
+                    self._cancel_token = CancelToken()
+
+                    # Peek at the pending prompt for the callback (don't pop yet)
+                    pending_prompts = self._message_queue.peek_all()
+                    user_prompt_preview = ""
+                    for msg in pending_prompts:
+                        if msg.source_type in (SourceType.USER, SourceType.PARENT, SourceType.SYSTEM):
+                            user_prompt_preview = msg.text[:100] if msg.text else ""
+                            break
+
+                    # Notify via callback for UI event emission
+                    if self._on_mid_turn_interrupt:
+                        self._on_mid_turn_interrupt(
+                            len(partial_text) if partial_text else 0,
+                            user_prompt_preview
+                        )
+
+                    # Notify UI via output that streaming was interrupted for mid-turn prompt
+                    if on_output:
+                        on_output("system", "[Processing your input...]", "write")
+
+                    # Process the mid-turn prompt - this sends it to the model
+                    # The partial response is preserved in provider history
+                    mid_turn_response = self._check_and_handle_mid_turn_prompt(
+                        use_streaming, on_output, wrapped_usage_callback, turn_data
+                    )
+
+                    if mid_turn_response:
+                        # Update response to continue from the mid-turn prompt response
+                        response = mid_turn_response
+                        # Fall through to normal processing - don't return
+                    else:
+                        # No mid-turn prompt found (race condition?) - return partial
+                        self._trace("MID_TURN_INTERRUPT: No prompt in queue, returning partial")
+                        if partial_text:
+                            return partial_text
+                        return ""
+                else:
+                    # Normal user cancellation
+                    cancel_msg = "[Generation cancelled]"
+                    if on_output and not cancellation_notified:
+                        self._trace(f"CANCEL_NOTIFY: {cancel_msg} (after initial message)")
+                        on_output("system", cancel_msg, "write")
+                        cancellation_notified = True
+                    elif cancellation_notified:
+                        self._trace(f"CANCEL_DUPLICATE: {cancel_msg} (after initial message) - already notified!")
+                    # Notify model of cancellation for context on next turn
+                    self._notify_model_of_cancellation(cancel_msg, partial_text)
+                    if partial_text:
+                        return f"{partial_text}\n\n{cancel_msg}"
+                    return cancel_msg
 
             # Handle function calling loop - process parts in order to support interleaved text/tools
             accumulated_text: List[str] = []
@@ -2850,6 +2937,8 @@ class JaatoSession:
         # Proactive rate limiting
         self._pacer.pace()
 
+        self._trace(f"MID_TURN_PROMPT: About to call provider, cancel_token.is_cancelled={self._cancel_token.is_cancelled if self._cancel_token else 'None'}")
+
         # Send the prompt to the model with telemetry
         with self._telemetry.llm_span(
             model=self._model_name or "unknown",
@@ -2872,6 +2961,7 @@ class JaatoSession:
                         self._trace(f"MID_TURN_THINKING_CALLBACK len={len(thinking)}")
                         on_output("thinking", thinking, "write")
 
+                self._trace("MID_TURN_PROMPT: Calling with_retry for streaming...")
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_message_streaming(
                         prompt,
@@ -2885,6 +2975,7 @@ class JaatoSession:
                     cancel_token=self._cancel_token,
                     provider=self._provider
                 )
+                self._trace(f"MID_TURN_PROMPT: Provider returned, finish_reason={response.finish_reason if response else 'None'}")
             else:
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_message(prompt),
@@ -3366,15 +3457,17 @@ class JaatoSession:
             from .plugins.model_provider.types import FinishReason
             if response.finish_reason not in (FinishReason.STOP, FinishReason.UNKNOWN, FinishReason.TOOL_USE):
                 logger.warning(f"Model stopped with finish_reason={response.finish_reason}")
-                if response.text:
-                    return f"{response.text}\n\n[Model stopped: {response.finish_reason}]"
+                response_text = response.get_text()
+                if response_text:
+                    return f"{response_text}\n\n[Model stopped: {response.finish_reason}]"
                 else:
                     return f"[Model stopped unexpectedly: {response.finish_reason}]"
 
             function_calls = list(response.function_calls) if response.function_calls else []
             while function_calls:
-                if response.text and on_output:
-                    on_output("model", response.text, "write")
+                response_text = response.get_text()
+                if response_text and on_output:
+                    on_output("model", response_text, "write")
 
                 tool_results: List[ToolResult] = []
 
@@ -3469,10 +3562,11 @@ class JaatoSession:
                             llm_telemetry.set_attribute("gen_ai.usage.reasoning_tokens", response.usage.reasoning_tokens)
                 function_calls = list(response.function_calls) if response.function_calls else []
 
-            if response.text and on_output:
-                on_output("model", response.text, "write")
+            final_text = response.get_text()
+            if final_text and on_output:
+                on_output("model", final_text, "write")
 
-            return response.text or ''
+            return final_text or ''
 
         except Exception as exc:
             # Route provider errors through output callback before re-raising
