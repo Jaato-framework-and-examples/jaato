@@ -74,10 +74,13 @@ def _buffer_trace(msg: str) -> None:
         pass  # Silently ignore trace errors
 
 
+from io import StringIO
 from rich.console import Console, RenderableType
 from rich.text import Text
 from rich.panel import Panel
 from rich.align import Align
+from rich.table import Table
+from rich import box
 
 from shared.plugins.table_formatter.plugin import _display_width
 
@@ -2892,6 +2895,30 @@ class OutputBuffer:
 
         return result
 
+    def _render_table_to_text(self, table: Table, width: Optional[int] = None) -> Text:
+        """Render a Rich Table to a Text object for appending to output.
+
+        This utility enables using Rich's Table features (word-wrap, alignment,
+        borders) while still composing output as Text objects.
+
+        Args:
+            table: Rich Table to render.
+            width: Console width for rendering. Defaults to self._console_width.
+
+        Returns:
+            Text object containing the rendered table with ANSI styling preserved.
+        """
+        render_width = width or self._console_width or 80
+        string_io = StringIO()
+        temp_console = Console(
+            file=string_io,
+            force_terminal=True,
+            width=render_width,
+            no_color=False,
+        )
+        temp_console.print(table, end="")
+        return Text.from_ansi(string_io.getvalue())
+
     def _render_permission_prompt(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
         """Render permission prompt for a tool awaiting approval."""
         continuation = "   " if is_last else "│  "
@@ -3058,7 +3085,11 @@ class OutputBuffer:
             output.append(line, style=self._style("clarification_label", "cyan"))
 
     def _render_clarification_summary(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
-        """Render clarification summary table (Q&A pairs) for a completed tool."""
+        """Render clarification summary table (Q&A pairs) for a completed tool.
+
+        Uses manual layout with dynamic column widths and leader dots filling
+        between question and answer on the last line of each question.
+        """
         continuation = "   " if is_last else "│  "
         prefix = "    "
         qa_pairs = tool.clarification_summary or []
@@ -3071,20 +3102,48 @@ class OutputBuffer:
         output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
         output.append(f"  📋 Answers ({len(qa_pairs)})", style=self._style("clarification_resolved", "bold green"))
 
-        # Render Q&A table
-        max_line_width = max(40, self._console_width - 20) if self._console_width > 60 else 40
-        for i, (question, answer) in enumerate(qa_pairs):
+        # Use a fixed content width for Q&A layout (not terminal width)
+        # This ensures consistent, readable layout regardless of terminal size
+        # The tool tree already has its own indentation we can't easily measure
+        CONTENT_WIDTH = 70  # Reasonable width for Q&A content
+
+        # Dynamic column sizing based on content
+        # Answer column: sized to longest answer (min 10, max 40% of content width)
+        max_answer_len = max(_display_width(a) for _, a in qa_pairs)
+        answer_col_width = max(10, min(max_answer_len, int(CONTENT_WIDTH * 0.4)))
+
+        # Question column: remaining space minus dots
+        min_dots = 3
+        question_col_width = CONTENT_WIDTH - answer_col_width - min_dots - 2
+
+        question_style = self._style("clarification_question", "cyan")
+        answer_style = self._style("clarification_answer", "green")
+        dots_style = self._style("muted", "dim")
+
+        for question, answer in qa_pairs:
+            # Normalize question (collapse whitespace, remove newlines)
+            question = ' '.join(question.split())
+
+            # Wrap question to fit in question column
+            wrapped = textwrap.wrap(question, width=question_col_width) or [question]
+
+            # Render non-last lines (question only, no dots)
+            for line in wrapped[:-1]:
+                output.append("\n")
+                output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
+                output.append(line, style=question_style)
+
+            # Last line: question + dots + answer (all on same line)
+            # Dots fill from end of question to answer column start
+            last_line = wrapped[-1]
+            last_line_width = _display_width(last_line)
+            dots_needed = question_col_width - last_line_width + min_dots
+
             output.append("\n")
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
-
-            # Truncate question if needed
-            q_display = question if len(question) <= 30 else question[:27] + "..."
-            # Truncate answer if needed
-            a_display = answer if len(answer) <= (max_line_width - 35) else answer[:max_line_width - 38] + "..."
-
-            output.append(f"{q_display}", style=self._style("clarification_question", "cyan"))
-            output.append(" → ", style=self._style("muted", "dim"))
-            output.append(f"{a_display}", style=self._style("clarification_answer", "green"))
+            output.append(last_line, style=question_style)
+            output.append(" " + "·" * max(min_dots, dots_needed) + " ", style=dots_style)
+            output.append(answer, style=answer_style)
 
     def _render_file_output(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
         """Render preserved file output content for a completed tool."""
