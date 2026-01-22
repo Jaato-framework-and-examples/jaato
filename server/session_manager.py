@@ -546,8 +546,25 @@ class SessionManager:
         else:
             init_callback = lambda e: self._emit_to_session(session_id, e)
 
+        # Determine which env_file to use for this session:
+        # 1. If client_id is provided, use client's env_file from their config
+        # 2. If session has workspace_path, try workspace/.env
+        # 3. Fall back to SessionManager's default env_file
+        session_env_file = self._env_file
+        if client_id:
+            client_config = self._client_config.get(client_id, {})
+            if client_config.get('env_file'):
+                session_env_file = client_config['env_file']
+                logger.debug(f"_load_session: using client's env_file: {session_env_file}")
+        elif state.workspace_path:
+            import os
+            workspace_env = os.path.join(state.workspace_path, '.env')
+            if os.path.exists(workspace_env):
+                session_env_file = workspace_env
+                logger.debug(f"_load_session: using workspace env_file: {session_env_file}")
+
         server = JaatoServer(
-            env_file=self._env_file,
+            env_file=session_env_file,
             provider=self._provider,
             on_event=init_callback,
             session_id=session_id,
