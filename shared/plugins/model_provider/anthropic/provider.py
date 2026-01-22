@@ -49,6 +49,7 @@ from .converters import (
     extract_message_start,
     extract_text_from_stream_event,
     extract_thinking_from_stream_event,
+    get_original_tool_name,
     messages_to_anthropic,
     response_from_anthropic,
     serialize_history,
@@ -1319,9 +1320,11 @@ class AnthropicProvider:
                             # Flush text before adding function call
                             flush_text_block()
 
+                            # Restore original tool name if it was sanitized
+                            original_name = get_original_tool_name(tc["name"])
                             fc = FunctionCall(
                                 id=tc["id"],
-                                name=tc["name"],
+                                name=original_name,
                                 args=args,
                             )
                             # Notify caller about function call detection (for UI positioning)
@@ -1374,7 +1377,9 @@ class AnthropicProvider:
                     args = json.loads(json_str) if json_str else {}
                 except json.JSONDecodeError:
                     args = {}
-                fc = FunctionCall(id=tc["id"], name=tc["name"], args=args)
+                # Restore original tool name if it was sanitized
+                original_name = get_original_tool_name(tc["name"])
+                fc = FunctionCall(id=tc["id"], name=original_name, args=args)
                 # Notify caller about function call detection
                 if on_function_call:
                     on_function_call(fc)
