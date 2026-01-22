@@ -286,38 +286,22 @@ class JaatoServer:
 
     @contextlib.contextmanager
     def _with_session_env(self):
-        """Context manager to temporarily apply session environment variables.
+        """Context manager to apply session environment variables.
 
         Applies session-specific environment variables to os.environ for the
         duration of the context. This is necessary for components that read
-        from os.environ (like provider SDKs, telemetry, etc.) but ensures
-        variables are restored after the operation completes.
+        from os.environ (like provider SDKs, telemetry, etc.).
 
-        This keeps session environments isolated - each session can have its
-        own configuration without affecting other sessions.
+        Since all env-dependent operations happen within session contexts,
+        we simply apply the session's env vars without restoration - the next
+        session will apply its own env vars when needed.
         """
-        if not self._session_env:
-            yield
-            return
-
-        # Save original values and track which keys we added
-        original_values: Dict[str, Optional[str]] = {}
-        for key in self._session_env:
-            original_values[key] = os.environ.get(key)
-
-        try:
-            # Apply session env vars
-            for key, value in self._session_env.items():
-                if value is not None:
-                    os.environ[key] = value
-            yield
-        finally:
-            # Restore original values
-            for key, original in original_values.items():
-                if original is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = original
+        # Apply session env vars (no restoration needed - next session will
+        # apply its own env vars anyway)
+        for key, value in self._session_env.items():
+            if value is not None:
+                os.environ[key] = value
+        yield
 
     def get_session_env(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Get an environment variable, checking session env first.
