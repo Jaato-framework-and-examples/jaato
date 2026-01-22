@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Antigravity Provider - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="../jaato-session.html">JaatoSession</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="anthropic.html">Anthropic</a></li>
+          <li><a href="github-models.html">GitHub Models</a></li>
+          <li><a href="claude-cli.html">Claude CLI</a></li>
+          <li><a href="antigravity.html" class="active">Antigravity</a></li>
+          <li><a href="ollama.html">Ollama</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../plugins/index.html">Overview</a></li>
+          <li><a href="../plugins/cli.html">CLI</a></li>
+          <li><a href="../plugins/file-edit.html">File Edit</a></li>
+          <li><a href="../plugins/other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Antigravity Provider</h1>
+          <p class="lead">
+            Access Google's IDE backend (Antigravity) for Gemini 3 and Claude models
+            through Google infrastructure. Uses Google OAuth for authentication with
+            multi-account rotation support.
+          </p>
+
+          <table>
+            <tbody>
+              <tr><td><strong>Provider Name</strong></td><td><code>antigravity</code></td></tr>
+              <tr><td><strong>Module</strong></td><td><code>shared.plugins.model_provider.antigravity</code></td></tr>
+              <tr><td><strong>Auth</strong></td><td>Google OAuth</td></tr>
+              <tr><td><strong>Quotas</strong></td><td><code>antigravity</code>, <code>gemini-cli</code></td></tr>
+            </tbody>
+          </table>
+
+          <h2 id="features">Features</h2>
+          <ul>
+            <li>Access to Gemini 3 preview models</li>
+            <li>Claude via Google infrastructure</li>
+            <li>Multi-account rotation for quota management</li>
+            <li>Extended thinking support</li>
+            <li>Function calling</li>
+          </ul>
+
+          <div class="callout callout-warning">
+            <div class="callout-title">Experimental</div>
+            This provider uses an unofficial Google API. Model availability
+            and features may change without notice.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Quick start</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient
+
+client = JaatoClient(provider_name="antigravity")
+client.connect(None, None, "antigravity-gemini-3-pro")
+
+# Login with Google OAuth
+client.verify_auth(allow_interactive=True)
+
+client.configure_tools(registry)
+
+response = client.send_message(
+    "Hello from Gemini 3!",
+    on_output=on_output
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Models -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="models">Available Models</h2>
+
+          <h3>Antigravity Quota</h3>
+          <table>
+            <thead>
+              <tr><th>Model</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>antigravity-gemini-3-pro</code></td>
+                <td>Gemini 3 Pro (preview)</td>
+              </tr>
+              <tr>
+                <td><code>antigravity-gemini-3-flash</code></td>
+                <td>Gemini 3 Flash (preview)</td>
+              </tr>
+              <tr>
+                <td><code>antigravity-claude-sonnet-4-5</code></td>
+                <td>Claude Sonnet 4.5 via Google</td>
+              </tr>
+              <tr>
+                <td><code>antigravity-claude-sonnet-4-5-thinking</code></td>
+                <td>Claude Sonnet 4.5 with thinking</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Gemini CLI Quota</h3>
+          <table>
+            <thead>
+              <tr><th>Model</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>gemini-2.5-flash</code></td>
+                <td>Gemini 2.5 Flash</td>
+              </tr>
+              <tr>
+                <td><code>gemini-2.5-pro</code></td>
+                <td>Gemini 2.5 Pro</td>
+              </tr>
+              <tr>
+                <td><code>gemini-3-flash-preview</code></td>
+                <td>Gemini 3 Flash preview</td>
+              </tr>
+              <tr>
+                <td><code>gemini-3-pro-preview</code></td>
+                <td>Gemini 3 Pro preview</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Model selection</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Gemini 3 (antigravity quota)
+client.connect(None, None, "antigravity-gemini-3-pro")
+
+# Claude via Google
+client.connect(None, None, "antigravity-claude-sonnet-4-5")
+
+# Gemini 2.5 (gemini-cli quota)
+client.connect(None, None, "gemini-2.5-flash")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="configuration">Configuration</h2>
+
+          <h3>Environment Variables</h3>
+          <table>
+            <thead>
+              <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>JAATO_ANTIGRAVITY_QUOTA</code></td>
+                <td><code>antigravity</code></td>
+                <td>Quota type: <code>antigravity</code> or <code>gemini-cli</code></td>
+              </tr>
+              <tr>
+                <td><code>JAATO_ANTIGRAVITY_THINKING_LEVEL</code></td>
+                <td>-</td>
+                <td>Gemini 3 thinking: <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code></td>
+              </tr>
+              <tr>
+                <td><code>JAATO_ANTIGRAVITY_THINKING_BUDGET</code></td>
+                <td>8192</td>
+                <td>Claude thinking budget</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_ANTIGRAVITY_AUTO_ROTATE</code></td>
+                <td><code>true</code></td>
+                <td>Enable multi-account rotation</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Environment configuration</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env file
+JAATO_PROVIDER=antigravity
+JAATO_ANTIGRAVITY_QUOTA=antigravity
+JAATO_ANTIGRAVITY_THINKING_LEVEL=medium
+JAATO_ANTIGRAVITY_AUTO_ROTATE=true</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Authentication -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="authentication">Authentication</h2>
+
+          <p>
+            Antigravity uses Google OAuth. The provider can manage multiple
+            Google accounts and automatically rotate between them to maximize
+            available quota.
+          </p>
+
+          <h3>OAuth Flow</h3>
+          <ol>
+            <li>Call <code>oauth_login()</code> or <code>verify_auth(allow_interactive=True)</code></li>
+            <li>Browser opens to Google login</li>
+            <li>Authorize the application</li>
+            <li>Credentials saved locally</li>
+          </ol>
+
+          <h3>Multi-Account Rotation</h3>
+          <p>
+            With <code>JAATO_ANTIGRAVITY_AUTO_ROTATE=true</code>, the provider
+            automatically switches between authenticated accounts when quota
+            is exhausted.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">OAuth login</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.antigravity import oauth_login
+
+# Login with Google
+oauth_login(on_message=lambda msg: print(msg))
+
+# Or via JaatoClient
+client = JaatoClient(provider_name="antigravity")
+client.connect(None, None, "antigravity-gemini-3-pro")
+client.verify_auth(allow_interactive=True)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Add additional account</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Login with another Google account
+oauth_login(on_message=lambda msg: print(msg))
+# Opens browser for new account
+
+# Provider will now rotate between accounts</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Thinking Mode -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="thinking">Thinking Mode</h2>
+
+          <p>
+            Both Gemini 3 and Claude models support extended thinking through
+            this provider, with different configuration options.
+          </p>
+
+          <h3>Gemini 3 Thinking Levels</h3>
+          <table>
+            <thead>
+              <tr><th>Level</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>minimal</code></td><td>Fastest, least reasoning</td></tr>
+              <tr><td><code>low</code></td><td>Light reasoning</td></tr>
+              <tr><td><code>medium</code></td><td>Balanced</td></tr>
+              <tr><td><code>high</code></td><td>Most thorough</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Claude Thinking</h3>
+          <p>
+            Claude models use a token budget for thinking, configured via
+            <code>JAATO_ANTIGRAVITY_THINKING_BUDGET</code>.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Configure thinking</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Gemini 3 thinking level
+JAATO_ANTIGRAVITY_THINKING_LEVEL=high
+
+# Claude thinking budget
+JAATO_ANTIGRAVITY_THINKING_BUDGET=16000</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Runtime configuration</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.types import ThinkingConfig
+
+if client.supports_thinking():
+    client.set_thinking_config(ThinkingConfig(
+        enabled=True,
+        budget=16000
+    ))</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>

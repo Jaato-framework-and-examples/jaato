@@ -58,6 +58,8 @@
         <ul class="sidebar-nav">
           <li><a href="index.html">Overview</a></li>
           <li><a href="jaato-client.html" class="active">JaatoClient</a></li>
+          <li><a href="jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="jaato-session.html">JaatoSession</a></li>
           <li><a href="plugin-registry.html">PluginRegistry</a></li>
           <li><a href="types.html">Types</a></li>
         </ul>
@@ -68,6 +70,11 @@
         <ul class="sidebar-nav">
           <li><a href="providers/index.html">Overview</a></li>
           <li><a href="providers/google-genai.html">Google GenAI</a></li>
+          <li><a href="providers/anthropic.html">Anthropic</a></li>
+          <li><a href="providers/github-models.html">GitHub Models</a></li>
+          <li><a href="providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="providers/antigravity.html">Antigravity</a></li>
+          <li><a href="providers/ollama.html">Ollama</a></li>
         </ul>
       </div>
 
@@ -76,8 +83,15 @@
         <ul class="sidebar-nav">
           <li><a href="plugins/index.html">Overview</a></li>
           <li><a href="plugins/cli.html">CLI</a></li>
-          <li><a href="plugins/mcp.html">MCP</a></li>
           <li><a href="plugins/file-edit.html">File Edit</a></li>
+          <li><a href="plugins/filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="plugins/todo.html">Todo</a></li>
+          <li><a href="plugins/web-search.html">Web Search</a></li>
+          <li><a href="plugins/mcp.html">MCP</a></li>
+          <li><a href="plugins/permission.html">Permission</a></li>
+          <li><a href="plugins/session.html">Session</a></li>
+          <li><a href="plugins/gc.html">GC</a></li>
+          <li><a href="plugins/other.html">Other Plugins</a></li>
         </ul>
       </div>
     </aside>
@@ -131,7 +145,7 @@ response = client.send_message(
 
           <h3>__init__</h3>
           <div class="method-signature">
-            <span class="method-name">JaatoClient</span>(<span class="param">provider_name</span>: <span class="type">str</span> = <span class="token-string">"google_genai"</span>)
+            <span class="method-name">JaatoClient</span>(<span class="param">provider_name</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>)
           </div>
 
           <p>Creates a new JaatoClient instance with the specified provider.</p>
@@ -142,11 +156,50 @@ response = client.send_message(
               <span class="param-type">str</span>
               <span class="param-optional">optional</span>
               <div class="param-desc">
-                The model provider to use. Currently supported: <code>"google_genai"</code>.
+                The model provider to use. If not specified, reads from
+                <code>JAATO_PROVIDER</code> env var, falling back to <code>"google_genai"</code>.
               </div>
-              <div class="param-default">Default: <code>"google_genai"</code></div>
             </li>
           </ul>
+
+          <h3>Supported Providers</h3>
+          <table>
+            <thead>
+              <tr><th>Provider</th><th>Name</th><th>Models</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><a href="providers/google-genai.html">Google GenAI</a></td>
+                <td><code>google_genai</code></td>
+                <td>Gemini 1.5, 2.0, 2.5</td>
+              </tr>
+              <tr>
+                <td><a href="providers/anthropic.html">Anthropic</a></td>
+                <td><code>anthropic</code></td>
+                <td>Claude 3, 3.5, Sonnet 4, Opus 4</td>
+              </tr>
+              <tr>
+                <td><a href="providers/github-models.html">GitHub Models</a></td>
+                <td><code>github_models</code></td>
+                <td>GPT-4o, Claude, Gemini, Llama</td>
+              </tr>
+              <tr>
+                <td><a href="providers/claude-cli.html">Claude CLI</a></td>
+                <td><code>claude_cli</code></td>
+                <td>Uses Claude Pro/Max subscription</td>
+              </tr>
+              <tr>
+                <td><a href="providers/antigravity.html">Antigravity</a></td>
+                <td><code>antigravity</code></td>
+                <td>Gemini 3, Claude (via Google)</td>
+              </tr>
+              <tr>
+                <td><a href="providers/ollama.html">Ollama</a></td>
+                <td><code>ollama</code></td>
+                <td>Local models (Qwen, Llama, etc.)</td>
+              </tr>
+            </tbody>
+          </table>
 
           <div class="returns">
             <div class="returns-label">Returns</div>
@@ -156,14 +209,37 @@ response = client.send_message(
         <div class="panel-code">
           <div class="code-label">Create client</div>
           <div class="code-block">
-            <pre><code class="language-python"># Default provider (Google GenAI)
+            <pre><code class="language-python"># Default: uses JAATO_PROVIDER env var or google_genai
 client = JaatoClient()
 
-# Explicit provider
+# Google GenAI (Vertex AI / AI Studio)
 client = JaatoClient(provider_name="google_genai")
 
-# Future: other providers
-# client = JaatoClient(provider_name="anthropic")</code></pre>
+# Anthropic Claude (API key or OAuth)
+client = JaatoClient(provider_name="anthropic")
+
+# GitHub Models (multi-model access)
+client = JaatoClient(provider_name="github_models")
+
+# Claude CLI (uses subscription, not API credits)
+client = JaatoClient(provider_name="claude_cli")
+
+# Antigravity (Google IDE backend)
+client = JaatoClient(provider_name="antigravity")
+
+# Ollama (local models)
+client = JaatoClient(provider_name="ollama")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Provider selection via env</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># .env file
+JAATO_PROVIDER=anthropic
+MODEL_NAME=claude-sonnet-4-20250514
+
+# Or for Ollama
+JAATO_PROVIDER=ollama
+OLLAMA_MODEL=qwen3:32b</code></pre>
           </div>
         </div>
       </section>
@@ -230,6 +306,44 @@ client = JaatoClient(provider_name="google_genai")
           <p>
             Returns the underlying <code>JaatoSession</code> for direct session manipulation.
           </p>
+
+          <h3 id="verify-auth">verify_auth</h3>
+          <div class="method-signature">
+            <span class="method-name">verify_auth</span>(<br>
+            &nbsp;&nbsp;<span class="param">allow_interactive</span>: <span class="type">bool</span> = <span class="type">False</span>,<br>
+            &nbsp;&nbsp;<span class="param">on_message</span>: <span class="type">Optional[Callable[[str], None]]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">bool</span>
+          </div>
+          <p>
+            Verify authentication before loading tools. Call this <strong>after</strong>
+            <code>connect()</code> but <strong>before</strong> <code>configure_tools()</code>
+            for providers that support interactive login (like Anthropic OAuth).
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">allow_interactive</span>
+              <span class="param-type">bool</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                If True and auth is not configured, attempt interactive login
+                (e.g., browser-based OAuth). Default: False.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">on_message</span>
+              <span class="param-type">Callable[[str], None]</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Callback for status messages during login (e.g., "Opening browser...").
+              </div>
+            </li>
+          </ul>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">bool - True if auth is valid, False if failed or not completed</div>
+          </div>
         </div>
         <div class="panel-code">
           <div class="code-label">Connection</div>
@@ -283,6 +397,24 @@ sub_response = sub_session.send_message("Research...")
 main_session = client.get_session()
 history = main_session.get_history()</code></pre>
           </div>
+
+          <div class="code-label" style="margin-top: 24px;">OAuth authentication flow</div>
+          <div class="code-block">
+            <pre><code class="language-python"># For providers with OAuth (Anthropic, Antigravity)
+client = JaatoClient(provider_name="anthropic")
+client.connect(project=None, location=None, model="claude-sonnet-4-20250514")
+
+# Verify auth - triggers browser OAuth if needed
+if not client.verify_auth(
+    allow_interactive=True,
+    on_message=lambda msg: print(f"Auth: {msg}")
+):
+    print("Authentication failed")
+    return
+
+# Now safe to configure tools
+client.configure_tools(registry, permission_plugin, ledger)</code></pre>
+          </div>
         </div>
       </section>
 
@@ -325,6 +457,21 @@ history = main_session.get_history()</code></pre>
               <div class="param-desc">Token accounting ledger</div>
             </li>
           </ul>
+
+          <h3>configure_plugins_only</h3>
+          <div class="method-signature">
+            <span class="method-name">configure_plugins_only</span>(<br>
+            &nbsp;&nbsp;<span class="param">registry</span>: <span class="type">PluginRegistry</span>,<br>
+            &nbsp;&nbsp;<span class="param">permission_plugin</span>: <span class="type">Optional[PermissionPlugin]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">ledger</span>: <span class="type">Optional[TokenLedger]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+
+          <p>
+            Configure plugins without creating a provider session. Use this when
+            authentication is pending and you need user commands available but
+            can't connect to the model yet.
+          </p>
 
           <h3>configure_custom_tools</h3>
           <div class="method-signature">
@@ -416,13 +563,16 @@ client.configure_custom_tools(
           <div class="method-signature">
             <span class="method-name">send_message</span>(<br>
             &nbsp;&nbsp;<span class="param">message</span>: <span class="type">str</span>,<br>
-            &nbsp;&nbsp;<span class="param">on_output</span>: <span class="type">OutputCallback</span><br>
+            &nbsp;&nbsp;<span class="param">on_output</span>: <span class="type">Optional[OutputCallback]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">on_usage_update</span>: <span class="type">Optional[UsageUpdateCallback]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">on_gc_threshold</span>: <span class="type">Optional[GCThresholdCallback]</span> = <span class="type">None</span><br>
             ) -> <span class="type">str</span>
           </div>
 
           <p>
             Sends a message and returns the final response. Handles the full tool
-            execution loop internally, calling the output callback for real-time streaming.
+            execution loop internally, calling callbacks for real-time streaming
+            and usage updates.
           </p>
 
           <ul class="param-list">
@@ -435,9 +585,26 @@ client.configure_custom_tools(
             <li>
               <span class="param-name">on_output</span>
               <span class="param-type">OutputCallback</span>
-              <span class="param-required">required</span>
+              <span class="param-optional">optional</span>
               <div class="param-desc">
-                Callback function: <code>(source: str, text: str, mode: str) -> None</code>
+                Callback for real-time output: <code>(source: str, text: str, mode: str) -> None</code>
+              </div>
+            </li>
+            <li>
+              <span class="param-name">on_usage_update</span>
+              <span class="param-type">UsageUpdateCallback</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Callback for real-time token usage: <code>(usage: TokenUsage) -> None</code>
+              </div>
+            </li>
+            <li>
+              <span class="param-name">on_gc_threshold</span>
+              <span class="param-type">GCThresholdCallback</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Callback when GC threshold is crossed during streaming:
+                <code>(percent_used: float, threshold: float) -> None</code>
               </div>
             </li>
           </ul>
@@ -769,6 +936,147 @@ client.delete_session(old_session_id)</code></pre>
         </div>
       </section>
 
+      <!-- Thinking Mode -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="thinking-mode">Thinking Mode</h2>
+
+          <p>
+            For providers that support extended thinking (Anthropic Claude, Gemini),
+            you can enable and configure thinking mode to get more thorough reasoning.
+          </p>
+
+          <h3>set_thinking_plugin</h3>
+          <div class="method-signature">
+            <span class="method-name">set_thinking_plugin</span>(<span class="param">plugin</span>: <span class="type">ThinkingPlugin</span>) -> <span class="type">None</span>
+          </div>
+          <p>Set the thinking plugin for controlling reasoning modes.</p>
+
+          <h3>remove_thinking_plugin</h3>
+          <div class="method-signature">
+            <span class="method-name">remove_thinking_plugin</span>() -> <span class="type">None</span>
+          </div>
+          <p>Remove the thinking plugin.</p>
+
+          <h3>set_thinking_config</h3>
+          <div class="method-signature">
+            <span class="method-name">set_thinking_config</span>(<span class="param">config</span>: <span class="type">ThinkingConfig</span>) -> <span class="type">None</span>
+          </div>
+          <p>Set thinking mode configuration directly (bypasses plugin).</p>
+
+          <h3>get_thinking_config</h3>
+          <div class="method-signature">
+            <span class="method-name">get_thinking_config</span>() -> <span class="type">Optional[ThinkingConfig]</span>
+          </div>
+          <p>Get current thinking configuration.</p>
+
+          <h3>supports_thinking</h3>
+          <div class="method-signature">
+            <span class="method-name">supports_thinking</span>() -> <span class="type">bool</span>
+          </div>
+          <p>Check if the current provider supports thinking mode.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Enable thinking mode</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.types import ThinkingConfig
+
+# Check support
+if client.supports_thinking():
+    # Enable thinking with budget
+    client.set_thinking_config(ThinkingConfig(
+        enabled=True,
+        budget=10000  # Max thinking tokens
+    ))
+
+    response = client.send_message(
+        "Analyze this complex problem...",
+        on_output=on_output
+    )
+
+    # Disable thinking
+    client.set_thinking_config(ThinkingConfig(enabled=False))</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Using thinking plugin</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.thinking import create_plugin as create_thinking
+
+# Create and set thinking plugin
+thinking = create_thinking()
+thinking.initialize({"default_budget": 8192})
+client.set_thinking_plugin(thinking)
+
+# User commands now available:
+# /thinking on - enable thinking
+# /thinking off - disable thinking
+# /thinking budget 16000 - set budget</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- UI Hooks -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="ui-hooks">UI Hooks</h2>
+
+          <p>
+            For rich terminal UIs, you can set hooks to receive agent lifecycle
+            events, enabling progress tracking and accounting displays.
+          </p>
+
+          <h3>set_ui_hooks</h3>
+          <div class="method-signature">
+            <span class="method-name">set_ui_hooks</span>(<span class="param">hooks</span>: <span class="type">AgentUIHooks</span>) -> <span class="type">None</span>
+          </div>
+          <p>
+            Set UI hooks for agent lifecycle events. The hooks receive callbacks
+            for agent creation, output, turn completion, context updates, and more.
+          </p>
+
+          <h3>set_terminal_width</h3>
+          <div class="method-signature">
+            <span class="method-name">set_terminal_width</span>(<span class="param">width</span>: <span class="type">int</span>) -> <span class="type">None</span>
+          </div>
+          <p>
+            Set the terminal width for formatting. Affects enrichment notification
+            formatting to properly wrap and align text.
+          </p>
+
+          <h3>get_model_completions</h3>
+          <div class="method-signature">
+            <span class="method-name">get_model_completions</span>(<span class="param">args</span>: <span class="type">List[str]</span>) -> <span class="type">List[CommandCompletion]</span>
+          </div>
+          <p>Get completions for the model command (for shell autocomplete).</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Implementing UI hooks</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.subagent.ui_hooks import AgentUIHooks
+
+class MyUIHooks(AgentUIHooks):
+    def on_agent_created(self, agent_id, agent_name, ...):
+        print(f"Agent {agent_name} created")
+
+    def on_agent_output(self, agent_id, source, text, mode):
+        # Display streaming output
+        print(text, end="")
+
+    def on_agent_turn_completed(self, agent_id, turn_number,
+                                prompt_tokens, output_tokens, ...):
+        print(f"Turn {turn_number}: {output_tokens} tokens")
+
+    def on_agent_context_updated(self, agent_id, total_tokens,
+                                 percent_used, ...):
+        print(f"Context: {percent_used:.1f}% used")
+
+# Set hooks on client
+client.set_ui_hooks(MyUIHooks())
+client.set_terminal_width(120)</code></pre>
+          </div>
+        </div>
+      </section>
+
       <!-- User Commands -->
       <section class="two-panel">
         <div class="panel-explanation">
@@ -1047,6 +1355,103 @@ session.set_retry_callback(None)</code></pre>
                                         │  with_retry  │
                                         │  (reactive)  │
                                         └──────────────┘</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Environment Variables -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="environment-variables">Environment Variables</h2>
+
+          <p>
+            Configure jaato behavior via environment variables. Set these in
+            your <code>.env</code> file or shell environment.
+          </p>
+
+          <h3>Provider Selection</h3>
+          <table class="param-table">
+            <thead>
+              <tr><th>Variable</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>JAATO_PROVIDER</code></td>
+                <td>Default provider: <code>google_genai</code>, <code>anthropic</code>, <code>github_models</code>, <code>claude_cli</code>, <code>antigravity</code>, <code>ollama</code></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>General Settings</h3>
+          <table class="param-table">
+            <thead>
+              <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>AI_USE_CHAT_FUNCTIONS</code></td>
+                <td><code>1</code></td>
+                <td>Enable function calling mode</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_GC_THRESHOLD</code></td>
+                <td><code>80.0</code></td>
+                <td>GC trigger threshold %</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_PARALLEL_TOOLS</code></td>
+                <td><code>true</code></td>
+                <td>Enable parallel tool execution</td>
+              </tr>
+              <tr>
+                <td><code>JAATO_DEFERRED_TOOLS</code></td>
+                <td><code>true</code></td>
+                <td>Enable deferred tool loading</td>
+              </tr>
+              <tr>
+                <td><code>LEDGER_PATH</code></td>
+                <td>-</td>
+                <td>Output path for token accounting JSONL</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Provider-Specific</h3>
+          <p>See individual provider docs for their environment variables.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Example .env file</div>
+          <div class="code-block">
+            <pre><code class="language-bash"># Provider selection
+JAATO_PROVIDER=anthropic
+
+# Google GenAI
+PROJECT_ID=my-gcp-project
+LOCATION=us-central1
+MODEL_NAME=gemini-2.5-flash
+
+# Anthropic
+ANTHROPIC_API_KEY=sk-ant-api03-...
+
+# GitHub Models
+GITHUB_TOKEN=ghp_...
+JAATO_GITHUB_ORGANIZATION=my-org
+
+# Ollama
+OLLAMA_HOST=http://localhost:11434
+OLLAMA_MODEL=qwen3:32b
+
+# General settings
+AI_USE_CHAT_FUNCTIONS=1
+JAATO_PARALLEL_TOOLS=true
+JAATO_DEFERRED_TOOLS=true
+JAATO_GC_THRESHOLD=80.0
+
+# Rate limiting
+AI_REQUEST_INTERVAL=0.5
+AI_RETRY_ATTEMPTS=5
+AI_RETRY_BASE_DELAY=1.0
+AI_RETRY_MAX_DELAY=30.0</code></pre>
           </div>
         </div>
       </section>

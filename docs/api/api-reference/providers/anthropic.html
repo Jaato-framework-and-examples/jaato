@@ -59,8 +59,11 @@
         <ul class="sidebar-nav">
           <li><a href="index.html">Overview</a></li>
           <li><a href="google-genai.html">Google GenAI</a></li>
-          <li><a href="github-models.html">GitHub Models</a></li>
           <li><a href="anthropic.html" class="active">Anthropic</a></li>
+          <li><a href="github-models.html">GitHub Models</a></li>
+          <li><a href="claude-cli.html">Claude CLI</a></li>
+          <li><a href="antigravity.html">Antigravity</a></li>
+          <li><a href="ollama.html">Ollama</a></li>
         </ul>
       </div>
 
@@ -480,64 +483,88 @@ if response.function_calls:
         <div class="panel-explanation">
           <h2 id="authentication">Authentication</h2>
           <p>
-            Anthropic uses API key authentication. Get your key from the
-            <a href="https://console.anthropic.com/" target="_blank">Anthropic Console</a>.
+            Anthropic provider supports three authentication methods (in priority order):
           </p>
 
-          <h3>API Key Setup</h3>
-          <ol>
-            <li>Go to <a href="https://console.anthropic.com/" target="_blank">console.anthropic.com</a></li>
-            <li>Navigate to API Keys section</li>
-            <li>Click "Create Key"</li>
-            <li>Copy the key (starts with <code>sk-ant-</code>)</li>
-            <li>Set as environment variable</li>
-          </ol>
+          <h3>1. PKCE OAuth Login (Recommended)</h3>
+          <p>
+            For Claude Pro/Max subscribers. Uses browser-based OAuth flow.
+            No API key needed, uses your subscription quota.
+          </p>
 
-          <h3>Environment Variable</h3>
+          <h3>2. OAuth Token</h3>
+          <p>
+            Token starting with <code>sk-ant-oat01-...</code> obtained from
+            <code>claude setup-token</code>. Uses subscription quota.
+          </p>
+
+          <h3>3. API Key</h3>
+          <p>
+            Token starting with <code>sk-ant-api03-...</code> from Anthropic Console.
+            Uses API credits (pay-per-use).
+          </p>
+
+          <h3>Environment Variables</h3>
           <table>
             <thead>
-              <tr>
-                <th>Variable</th>
-                <th>Description</th>
-              </tr>
+              <tr><th>Variable</th><th>Description</th></tr>
             </thead>
             <tbody>
               <tr>
                 <td><code>ANTHROPIC_API_KEY</code></td>
-                <td>Anthropic API key (required)</td>
+                <td>API key (<code>sk-ant-api03-...</code>) - uses API credits</td>
+              </tr>
+              <tr>
+                <td><code>ANTHROPIC_AUTH_TOKEN</code></td>
+                <td>OAuth token (<code>sk-ant-oat01-...</code>) - uses subscription</td>
               </tr>
             </tbody>
           </table>
 
-          <div class="callout callout-warning">
-            <div class="callout-title">Keep Your Key Secret</div>
-            Never commit your API key to version control. Use environment
-            variables or a <code>.env</code> file (added to <code>.gitignore</code>).
+          <div class="callout callout-info">
+            <div class="callout-title">Cost Savings</div>
+            OAuth tokens use your Claude Pro/Max subscription instead of API credits.
+            For heavy usage, this can save significant costs.
           </div>
         </div>
         <div class="panel-code">
-          <div class="code-label">Set environment variable</div>
+          <div class="code-label">Environment variables</div>
           <div class="code-block">
-            <pre><code class="language-bash"># In .env file (add to .gitignore)
+            <pre><code class="language-bash"># Option 1: API Key (uses API credits)
 ANTHROPIC_API_KEY=sk-ant-api03-...
 
-# Or export directly (session only)
-export ANTHROPIC_API_KEY=sk-ant-api03-...</code></pre>
+# Option 2: OAuth Token (uses subscription)
+ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-...
+
+# Option 3: PKCE OAuth - no env var needed</code></pre>
           </div>
 
-          <div class="code-label" style="margin-top: 24px;">Auto-detect from environment</div>
+          <div class="code-label" style="margin-top: 24px;">OAuth login (browser-based)</div>
           <div class="code-block">
-            <pre><code class="language-python">from shared import load_provider
+            <pre><code class="language-python">from shared.plugins.model_provider.anthropic import oauth_login
 
-provider = load_provider("anthropic")
-provider.initialize()  # Uses ANTHROPIC_API_KEY</code></pre>
+# Trigger browser-based OAuth
+token = oauth_login(
+    on_message=lambda msg: print(msg)
+)
+# Opens browser, user logs in
+# Token is automatically saved
+
+# Or via JaatoClient
+client = JaatoClient(provider_name="anthropic")
+client.connect(None, None, "claude-sonnet-4-20250514")
+client.verify_auth(allow_interactive=True)</code></pre>
           </div>
 
-          <div class="code-label" style="margin-top: 24px;">Explicit API key</div>
+          <div class="code-label" style="margin-top: 24px;">Get OAuth token via CLI</div>
           <div class="code-block">
-            <pre><code class="language-python">provider.initialize(ProviderConfig(
-    api_key="sk-ant-api03-..."
-))</code></pre>
+            <pre><code class="language-bash"># Install Claude CLI
+npm install -g @anthropic-ai/claude-code
+
+# Get OAuth token
+claude setup-token
+
+# Token saved to ~/.claude/settings.json</code></pre>
           </div>
         </div>
       </section>
