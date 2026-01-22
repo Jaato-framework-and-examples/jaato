@@ -3079,6 +3079,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
         SystemMessageEvent,
         InitProgressEvent,
         ErrorEvent,
+        RetryEvent,
         SessionListEvent,
         SessionInfoEvent,
         SessionDescriptionUpdatedEvent,
@@ -3549,6 +3550,13 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.add_system_message(
                     f"Error: {event.error_type}: {event.error}",
                     style="system_error_bold"
+                )
+
+            elif isinstance(event, RetryEvent):
+                # Show retry notification with countdown
+                display.add_system_message(
+                    f"[Retry {event.attempt}/{event.max_attempts}] {event.error_type}: waiting {event.delay:.1f}s before retry...",
+                    style="system_warning"
                 )
 
             elif isinstance(event, MidTurnPromptQueuedEvent):

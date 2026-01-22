@@ -549,3 +549,54 @@ class ModelProviderPlugin(Protocol):
             Check supports_thinking() to verify capability first.
         """
         ...
+
+    # ==================== Error Classification for Retry ====================
+    # Optional methods for provider-specific error handling in retry logic
+
+    def classify_error(self, exc: Exception) -> Optional[Dict[str, bool]]:
+        """Classify an exception for retry purposes.
+
+        Each provider knows its own error types and can provide precise
+        classification. If not implemented, the global fallback in
+        retry_utils.classify_error() is used.
+
+        Args:
+            exc: The exception to classify.
+
+        Returns:
+            Dict with keys:
+                - transient: True if error is transient (should retry)
+                - rate_limit: True if error is a rate limit (429)
+                - infra: True if error is infrastructure (503, 500)
+            Or None to use global fallback classification.
+
+        Example implementation:
+            def classify_error(self, exc: Exception) -> Optional[Dict[str, bool]]:
+                if isinstance(exc, MyRateLimitError):
+                    return {"transient": True, "rate_limit": True, "infra": False}
+                if isinstance(exc, MyServerError):
+                    return {"transient": True, "rate_limit": False, "infra": True}
+                return None  # Use fallback
+        """
+        ...
+
+    def get_retry_after(self, exc: Exception) -> Optional[float]:
+        """Extract retry-after hint from an exception.
+
+        Many APIs include a Retry-After header or equivalent in their
+        rate limit responses. Providers can extract this for better backoff.
+
+        Args:
+            exc: The exception to extract retry-after from.
+
+        Returns:
+            Suggested delay in seconds, or None if not available.
+
+        Example implementation:
+            def get_retry_after(self, exc: Exception) -> Optional[float]:
+                if hasattr(exc, 'retry_after'):
+                    return float(exc.retry_after)
+                return None
+        """
+        ...
+

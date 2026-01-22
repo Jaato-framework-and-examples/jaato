@@ -83,6 +83,7 @@ from .events import (
     SystemMessageEvent,
     InitProgressEvent,
     ErrorEvent,
+    RetryEvent,
     SessionInfoEvent,
     SessionDescriptionUpdatedEvent,
     SendMessageRequest,
@@ -1430,6 +1431,21 @@ class JaatoServer:
                     server._start_model_thread(child_messages)
 
             session.set_continuation_callback(continuation_callback)
+
+            # Set up callback for retry notifications
+            # This notifies the client when API calls are being retried due to rate limits
+            def retry_callback(message: str, attempt: int, max_attempts: int, delay: float) -> None:
+                # Determine error type from message
+                error_type = "rate_limit" if "rate-limit" in message.lower() else "transient"
+                server.emit(RetryEvent(
+                    message=message,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    delay=delay,
+                    error_type=error_type,
+                ))
+
+            session.set_retry_callback(retry_callback)
 
         def output_callback(source: str, text: str, mode: str) -> None:
             # Skip - output is routed through agent hooks
