@@ -1417,6 +1417,76 @@ class GoogleGenAIProvider:
         """
         return deserialize_history(data)
 
+    # ==================== Error Classification for Retry ====================
+
+    def classify_error(self, exc: Exception) -> Optional[Dict[str, bool]]:
+        """Classify an exception for retry purposes.
+
+        Google GenAI SDK (python-genai) uses google.genai.errors.ClientError
+        for HTTP 4xx errors including rate limits (429).
+
+        Args:
+            exc: The exception to classify.
+
+        Returns:
+            Classification dict or None to use fallback.
+        """
+        # Try to import google.genai.errors for precise classification
+        try:
+            from google.genai import errors as genai_errors
+            if isinstance(exc, genai_errors.ClientError):
+                lower = str(exc).lower()
+                # Rate limit / quota errors
+                if any(p in lower for p in ["429", "resource exhausted", "resource_exhausted", "rate limit", "quota"]):
+                    return {"transient": True, "rate_limit": True, "infra": False}
+                # Server errors that may be retried
+                if any(p in lower for p in ["503", "500", "service unavailable", "internal"]):
+                    return {"transient": True, "rate_limit": False, "infra": True}
+                # Other 4xx errors (auth, bad request) - don't retry
+                return {"transient": False, "rate_limit": False, "infra": False}
+        except ImportError:
+            pass
+
+        # Try google.api_core exceptions (older SDK / fallback)
+        try:
+            from google.api_core import exceptions as google_exceptions
+            if isinstance(exc, (google_exceptions.TooManyRequests, google_exceptions.ResourceExhausted)):
+                return {"transient": True, "rate_limit": True, "infra": False}
+            if isinstance(exc, (google_exceptions.ServiceUnavailable, google_exceptions.InternalServerError,
+                               google_exceptions.DeadlineExceeded, google_exceptions.Aborted)):
+                return {"transient": True, "rate_limit": False, "infra": True}
+        except ImportError:
+            pass
+
+        # Fall back to global classification
+        return None
+
+    def get_retry_after(self, exc: Exception) -> Optional[float]:
+        """Extract retry-after hint from an exception.
+
+        Google's APIs may include retry hints in error messages or headers.
+
+        Args:
+            exc: The exception to extract retry-after from.
+
+        Returns:
+            Suggested delay in seconds, or None if not available.
+        """
+        # Check for retry_after attribute (some wrappers add this)
+        if hasattr(exc, 'retry_after') and exc.retry_after:
+            return float(exc.retry_after)
+
+        # Check for HTTP response with Retry-After header
+        if hasattr(exc, 'response') and hasattr(exc.response, 'headers'):
+            retry_after = exc.response.headers.get('Retry-After')
+            if retry_after:
+                try:
+                    return float(retry_after)
+                except ValueError:
+                    pass
+
+        return None
+
 
 def create_provider() -> GoogleGenAIProvider:
     """Factory function for plugin discovery."""

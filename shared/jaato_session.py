@@ -1616,14 +1616,16 @@ class JaatoSession:
                         ),
                         context="send_message_streaming",
                         on_retry=self._on_retry,
-                        cancel_token=self._cancel_token
+                        cancel_token=self._cancel_token,
+                        provider=self._provider
                     )
                 else:
                     response, _retry_stats = with_retry(
                         lambda: self._provider.send_message(message),
                         context="send_message",
                         on_retry=self._on_retry,
-                        cancel_token=self._cancel_token
+                        cancel_token=self._cancel_token,
+                        provider=self._provider
                     )
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
@@ -2753,14 +2755,16 @@ class JaatoSession:
                     ),
                     context="send_tool_results_streaming",
                     on_retry=self._on_retry,
-                    cancel_token=self._cancel_token
+                    cancel_token=self._cancel_token,
+                    provider=self._provider
                 )
             else:
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_tool_results(tool_results),
                     context="send_tool_results",
                     on_retry=self._on_retry,
-                    cancel_token=self._cancel_token
+                    cancel_token=self._cancel_token,
+                    provider=self._provider
                 )
 
             # Emit thinking content if present (extended thinking from providers)
@@ -2878,14 +2882,16 @@ class JaatoSession:
                     ),
                     context="mid_turn_prompt_streaming",
                     on_retry=self._on_retry,
-                    cancel_token=self._cancel_token
+                    cancel_token=self._cancel_token,
+                    provider=self._provider
                 )
             else:
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_message(prompt),
                     context="mid_turn_prompt",
                     on_retry=self._on_retry,
-                    cancel_token=self._cancel_token
+                    cancel_token=self._cancel_token,
+                    provider=self._provider
                 )
 
                 # Emit thinking content if present
@@ -3341,7 +3347,8 @@ class JaatoSession:
                 response, _retry_stats = with_retry(
                     lambda: self._provider.send_message_with_parts(parts),
                     context="send_message_with_parts",
-                    on_retry=self._on_retry
+                    on_retry=self._on_retry,
+                    provider=self._provider
                 )
                 self._record_token_usage(response)
                 self._accumulate_turn_tokens(response, turn_data)
@@ -3445,7 +3452,8 @@ class JaatoSession:
                     response, _retry_stats = with_retry(
                         lambda: self._provider.send_tool_results(tool_results),
                         context="send_tool_results",
-                        on_retry=self._on_retry
+                        on_retry=self._on_retry,
+                        provider=self._provider
                     )
                     self._record_token_usage(response)
                     self._accumulate_turn_tokens(response, turn_data)

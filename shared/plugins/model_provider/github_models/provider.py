@@ -1231,6 +1231,45 @@ class GitHubModelsProvider:
         """
         return deserialize_history(data)
 
+    # ==================== Error Classification for Retry ====================
+
+    def classify_error(self, exc: Exception) -> Optional[Dict[str, bool]]:
+        """Classify an exception for retry purposes.
+
+        GitHub Models API uses specific error types for rate limits.
+
+        Args:
+            exc: The exception to classify.
+
+        Returns:
+            Classification dict or None to use fallback.
+        """
+        from .errors import RateLimitError
+
+        if isinstance(exc, RateLimitError):
+            return {"transient": True, "rate_limit": True, "infra": False}
+
+        # Fall back to global classification
+        return None
+
+    def get_retry_after(self, exc: Exception) -> Optional[float]:
+        """Extract retry-after hint from an exception.
+
+        GitHub's RateLimitError includes retry_after attribute.
+
+        Args:
+            exc: The exception to extract retry-after from.
+
+        Returns:
+            Suggested delay in seconds, or None if not available.
+        """
+        from .errors import RateLimitError
+
+        if isinstance(exc, RateLimitError) and exc.retry_after:
+            return float(exc.retry_after)
+
+        return None
+
 
 def create_provider() -> GitHubModelsProvider:
     """Factory function for plugin discovery."""
