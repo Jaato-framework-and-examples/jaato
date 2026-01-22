@@ -157,6 +157,10 @@ DEFAULT_KEYBINDINGS = {
     "tool_exit": "escape",    # Exit tool navigation mode
     "tool_output_up": "up",   # Scroll up within expanded tool output (same as nav_up)
     "tool_output_down": "down",  # Scroll down within expanded tool output (same as nav_down)
+
+    # Permission prompt navigation
+    "permission_next": "tab",     # Next permission option
+    "permission_prev": "s-tab",   # Previous permission option
 }
 
 
