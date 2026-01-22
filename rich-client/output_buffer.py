@@ -329,6 +329,9 @@ class OutputBuffer:
         # Pending permission/clarification content (buffered until associated with tool)
         self._pending_permission_content: Optional[str] = None
         self._pending_clarification_content: Optional[str] = None
+        # Permission keyboard navigation state (for focus highlighting in options line)
+        self._permission_response_options: Optional[list] = None
+        self._permission_focus_index: int = 0
         # Formatter pipeline for output processing (optional)
         self._formatter_pipeline: Optional[Any] = None
         # Theme configuration for styling (optional)
@@ -372,6 +375,25 @@ class OutputBuffer:
             config: KeybindingConfig instance from keybindings module.
         """
         self._keybinding_config = config
+
+    def set_permission_focus(self, options: Optional[list], focus_index: int) -> None:
+        """Set permission keyboard navigation state for focus highlighting.
+
+        When permission options and focus index are set, the options line in the
+        permission prompt will be re-rendered with the focused option highlighted.
+
+        Args:
+            options: List of permission response options (or None to clear).
+            focus_index: Index of the currently focused option.
+        """
+        # Check if focus actually changed to avoid unnecessary cache invalidation
+        changed = (self._permission_response_options != options or
+                   self._permission_focus_index != focus_index)
+        self._permission_response_options = options
+        self._permission_focus_index = focus_index
+        # Invalidate render caches so permission prompt re-renders with new focus
+        if changed:
+            self._invalidate_line_caches()
 
     def set_formatter_pipeline(self, pipeline: Any) -> None:
         """Set the formatter pipeline for output processing.
@@ -2936,6 +2958,15 @@ class OutputBuffer:
             indent_width = len(indent)  # 12 chars
             content_lines = tool.permission_content.split('\n')
 
+            # Search for options line from end (may not be exactly last due to trailing empty lines)
+            # Options line typically looks like: "[y]es [n]o [a]lways ..."
+            if self._permission_response_options:
+                for i in range(len(content_lines) - 1, -1, -1):
+                    if self._is_options_line(content_lines[i]):
+                        # Replace options line with focused version
+                        content_lines[i] = self._render_focused_options_line()
+                        break
+
             # Calculate available width for content
             max_width = max(20, self._console_width - indent_width)
 
@@ -3028,6 +3059,76 @@ class OutputBuffer:
             output.append("\n")
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
             output.append("└" + "─" * (box_width - 2) + "┘", style=self._style("permission_text", "yellow"))
+
+    def _is_options_line(self, line: str) -> bool:
+        """Check if a line is the permission options line.
+
+        The options line contains bracketed shortcuts like [y]es [n]o [a]lways.
+        We detect it by looking for the pattern of multiple bracketed items.
+
+        Args:
+            line: The line to check.
+
+        Returns:
+            True if this appears to be an options line.
+        """
+        import re
+        # Strip ANSI codes for pattern matching
+        clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line)
+        # Options line has multiple [x]word patterns
+        # Pattern: [letter(s)]rest_of_word repeated multiple times
+        pattern = r'\[[a-z]+\][a-z]*'
+        matches = re.findall(pattern, clean_line.lower())
+        # Need at least 3 options to be considered an options line
+        return len(matches) >= 3
+
+    def _render_focused_options_line(self) -> str:
+        """Render the permission options line with the focused option highlighted.
+
+        Uses ANSI escape codes for styling since the output is processed with preserve_ansi=True.
+
+        Returns:
+            The options line with the focused option highlighted using reverse video.
+        """
+        if not self._permission_response_options:
+            return ""
+
+        # ANSI escape codes for styling
+        REVERSE = "\x1b[7m"  # Reverse video
+        BOLD = "\x1b[1m"
+        RESET = "\x1b[0m"
+        DIM = "\x1b[2m"
+
+        parts = []
+        for i, option in enumerate(self._permission_response_options):
+            # Extract option properties (handle both dict and object forms)
+            if isinstance(option, dict):
+                short = option.get('key', option.get('short', ''))
+                full = option.get('label', option.get('full', ''))
+            else:
+                short = getattr(option, 'short', getattr(option, 'key', ''))
+                full = getattr(option, 'full', getattr(option, 'label', ''))
+
+            is_focused = (i == self._permission_focus_index)
+
+            # Build the option text: [y]es or [once]
+            if short != full and full.startswith(short):
+                # Format: [y]es - short is prefix of full
+                option_text = f"[{short}]{full[len(short):]}"
+            else:
+                # Format: [once] - short equals full or doesn't match
+                option_text = f"[{full}]"
+
+            # Apply styling based on focus state
+            if is_focused:
+                parts.append(f"{BOLD}{REVERSE} {option_text} {RESET}")
+            else:
+                parts.append(f"{DIM}{option_text}{RESET}")
+
+        # Add hint at the end
+        hint = f"{DIM}  ⇥ cycle  ↵ select{RESET}"
+
+        return " ".join(parts) + hint
 
     def _render_clarification_prompt(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
         """Render clarification prompt for a tool awaiting user input."""
