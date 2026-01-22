@@ -3108,19 +3108,23 @@ class OutputBuffer:
 
         # Dynamic column sizing based on content
         # Answer column: sized to longest answer (min 10, max 40% of total)
-        max_answer_len = max(_display_width(answer) for _, answer in qa_pairs)
-        answer_width = max(10, min(max_answer_len, int(total_width * 0.4)))
+        max_answer_len = max(_display_width(a) for _, a in qa_pairs)
+        answer_col_width = max(10, min(max_answer_len, int(total_width * 0.4)))
 
-        # Question area gets remaining space (minus 3 for " · " minimum between Q and A)
-        question_width = total_width - answer_width - 3
+        # Question wrap width must leave room for: " " + dots (min 3) + " " + answer
+        min_dots = 3
+        question_wrap_width = total_width - answer_col_width - min_dots - 2
 
         question_style = self._style("clarification_question", "cyan")
         answer_style = self._style("clarification_answer", "green")
         dots_style = self._style("muted", "dim")
 
         for question, answer in qa_pairs:
-            # Wrap question to fit available width
-            wrapped = textwrap.wrap(question, width=question_width) or [question]
+            # Normalize question (collapse whitespace, remove newlines)
+            question = ' '.join(question.split())
+
+            # Wrap question - all lines same width for visual consistency
+            wrapped = textwrap.wrap(question, width=question_wrap_width) or [question]
 
             # Render non-last lines (question only, no dots)
             for line in wrapped[:-1]:
@@ -3128,15 +3132,16 @@ class OutputBuffer:
                 output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
                 output.append(line, style=question_style)
 
-            # Last line: question + dots + answer
+            # Last line: question + dots + answer (all on same line)
             last_line = wrapped[-1]
             last_line_width = _display_width(last_line)
-            dots_needed = total_width - last_line_width - _display_width(answer) - 2  # -2 for spaces around dots
+            answer_width = _display_width(answer)
+            dots_needed = total_width - last_line_width - answer_width - 2  # -2 for spaces
 
             output.append("\n")
             output.append(f"{prefix}{continuation}  ", style=self._style("tree_connector", "dim"))
             output.append(last_line, style=question_style)
-            output.append(" " + "·" * max(1, dots_needed) + " ", style=dots_style)
+            output.append(" " + "·" * max(min_dots, dots_needed) + " ", style=dots_style)
             output.append(answer, style=answer_style)
 
     def _render_file_output(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
