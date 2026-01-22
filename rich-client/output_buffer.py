@@ -3087,7 +3087,8 @@ class OutputBuffer:
     def _render_clarification_summary(self, output: Text, tool: 'ActiveToolCall', is_last: bool) -> None:
         """Render clarification summary table (Q&A pairs) for a completed tool.
 
-        Uses Rich Table with word-wrapping for full question/answer display.
+        Uses Rich Table with dynamic column widths and leader dots filling
+        between question and answer on the last line of each question.
         """
         continuation = "   " if is_last else "│  "
         prefix = "    "
@@ -3101,11 +3102,19 @@ class OutputBuffer:
         output.append(f"{prefix}{continuation}", style=self._style("tree_connector", "dim"))
         output.append(f"  📋 Answers ({len(qa_pairs)})", style=self._style("clarification_resolved", "bold green"))
 
-        # Calculate available width for table (account for tree indentation)
+        # Calculate available width (account for tree indentation + table padding)
         indent_width = len(prefix) + len(continuation) + 2  # +2 for spacing
         table_width = max(40, (self._console_width or 80) - indent_width)
 
-        # Build Rich Table with word-wrapping
+        # Dynamic column sizing based on content
+        # Answer column: sized to longest answer (min 10, max 40% of total)
+        max_answer_len = max(_display_width(answer) for _, answer in qa_pairs)
+        answer_col_width = max(10, min(max_answer_len + 2, int(table_width * 0.4)))
+
+        # Question column gets remaining space (minus padding for dots)
+        question_col_width = table_width - answer_col_width - 4  # -4 for table padding/borders
+
+        # Build Rich Table
         table = Table(
             show_header=False,
             box=box.SIMPLE,
@@ -3113,17 +3122,36 @@ class OutputBuffer:
             collapse_padding=True,
             width=table_width,
         )
-        table.add_column("Question", ratio=7, overflow="fold", style=self._style("clarification_question", "cyan"))
-        table.add_column("Answer", ratio=3, overflow="fold", style=self._style("clarification_answer", "green"))
+        table.add_column("Question", width=question_col_width, overflow="fold", no_wrap=False)
+        table.add_column("Answer", width=answer_col_width, overflow="fold",
+                        style=self._style("clarification_answer", "green"))
+
+        question_style = self._style("clarification_question", "cyan")
+        dots_style = self._style("muted", "dim")
 
         for question, answer in qa_pairs:
-            table.add_row(question, answer)
+            # Wrap question to fit column, then add leader dots to last line
+            wrapped = textwrap.wrap(question, width=question_col_width - 3) or [question]
+
+            # Build styled question cell with dots on last line
+            q_cell = Text()
+            for i, line in enumerate(wrapped):
+                if i > 0:
+                    q_cell.append("\n")
+                q_cell.append(line, style=question_style)
+                if i == len(wrapped) - 1:
+                    # Last line: fill remaining width with dots
+                    line_width = _display_width(line)
+                    dots_needed = question_col_width - line_width - 1
+                    if dots_needed > 1:
+                        q_cell.append(" " + "·" * dots_needed, style=dots_style)
+
+            table.add_row(q_cell, answer)
 
         # Render table to text and append with proper indentation
         table_text = self._render_table_to_text(table, width=table_width)
 
         # Split rendered table into lines while preserving styling
-        # Text.split() preserves Rich styling on each segment
         table_lines = table_text.split("\n")
         for styled_line in table_lines:
             if styled_line.plain.strip():  # Skip empty/whitespace-only lines
