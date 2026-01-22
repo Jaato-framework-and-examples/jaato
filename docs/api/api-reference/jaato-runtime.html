@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JaatoRuntime - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="jaato-client.html">JaatoClient</a></li>
+          <li><a href="jaato-runtime.html" class="active">JaatoRuntime</a></li>
+          <li><a href="jaato-session.html">JaatoSession</a></li>
+          <li><a href="plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="tool-executor.html">ToolExecutor</a></li>
+          <li><a href="types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="providers/index.html">Overview</a></li>
+          <li><a href="providers/google-genai.html">Google GenAI</a></li>
+          <li><a href="providers/anthropic.html">Anthropic</a></li>
+          <li><a href="providers/github-models.html">GitHub Models</a></li>
+          <li><a href="providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="providers/antigravity.html">Antigravity</a></li>
+          <li><a href="providers/ollama.html">Ollama</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="plugins/index.html">Overview</a></li>
+          <li><a href="plugins/cli.html">CLI</a></li>
+          <li><a href="plugins/file-edit.html">File Edit</a></li>
+          <li><a href="plugins/filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="plugins/todo.html">Todo</a></li>
+          <li><a href="plugins/web-search.html">Web Search</a></li>
+          <li><a href="plugins/mcp.html">MCP</a></li>
+          <li><a href="plugins/permission.html">Permission</a></li>
+          <li><a href="plugins/session.html">Session</a></li>
+          <li><a href="plugins/gc.html">GC</a></li>
+          <li><a href="plugins/other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>JaatoRuntime</h1>
+          <p class="lead">
+            Shared runtime environment for the jaato framework. JaatoRuntime manages
+            resources that are shared across the main agent and any subagents,
+            including provider configuration, plugin registry, permissions, and
+            token accounting.
+          </p>
+
+          <div class="method-signature">
+            <span class="token-keyword">from</span> shared <span class="token-keyword">import</span> JaatoRuntime
+          </div>
+
+          <table>
+            <tbody>
+              <tr>
+                <td><strong>Module</strong></td>
+                <td><code>shared.jaato_runtime</code></td>
+              </tr>
+              <tr>
+                <td><strong>Relationship</strong></td>
+                <td>Parent of <code>JaatoSession</code></td>
+              </tr>
+              <tr>
+                <td><strong>Used by</strong></td>
+                <td><code>JaatoClient</code> (facade wrapper)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h2 id="when-to-use">When to Use JaatoRuntime</h2>
+          <p>
+            Most users should use <code>JaatoClient</code> which wraps the runtime
+            automatically. Access the runtime directly when you need to:
+          </p>
+          <ul>
+            <li>Create subagent sessions with different models or tool subsets</li>
+            <li>Share resources across multiple independent sessions</li>
+            <li>Register additional providers for cross-provider subagents</li>
+            <li>Access telemetry configuration</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Basic usage (via JaatoClient)</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoClient
+
+# JaatoClient creates runtime internally
+client = JaatoClient()
+client.connect(project, location, model)
+client.configure_tools(registry)
+
+# Access runtime for subagent creation
+runtime = client.get_runtime()
+sub_session = runtime.create_session(
+    model="gemini-2.5-flash",
+    tools=["cli", "web_search"],
+    system_instructions="You are a researcher."
+)
+sub_response = sub_session.send_message("Research...")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Direct runtime usage</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoRuntime, PluginRegistry
+
+# Create runtime directly
+runtime = JaatoRuntime(provider_name="anthropic")
+runtime.connect(project=None, location=None)
+
+# Configure plugins
+registry = PluginRegistry()
+registry.discover()
+registry.expose_tool("cli")
+runtime.configure_plugins(registry)
+
+# Create sessions
+main = runtime.create_session(model="claude-sonnet-4-20250514")
+helper = runtime.create_session(
+    model="claude-sonnet-4-20250514",
+    tools=["web_search"],
+    system_instructions="Search assistant"
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Constructor -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="constructor">Constructor</h2>
+
+          <h3>__init__</h3>
+          <div class="method-signature">
+            <span class="method-name">JaatoRuntime</span>(<span class="param">provider_name</span>: <span class="type">str</span> = <span class="token-string">"google_genai"</span>)
+          </div>
+
+          <p>Creates a new JaatoRuntime instance with the specified provider.</p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">provider_name</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Name of the model provider to use. Supported providers:
+                <code>google_genai</code>, <code>anthropic</code>, <code>github_models</code>,
+                <code>claude_cli</code>, <code>antigravity</code>, <code>ollama</code>.
+              </div>
+              <div class="param-default">Default: <code>"google_genai"</code></div>
+            </li>
+          </ul>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">JaatoRuntime</div>
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Create runtime</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Default provider (Google GenAI)
+runtime = JaatoRuntime()
+
+# Explicit provider
+runtime = JaatoRuntime(provider_name="anthropic")
+
+# Cross-provider support
+runtime = JaatoRuntime(provider_name="google_genai")
+runtime.register_provider("anthropic")  # For subagents</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Connection -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="connection">Connection</h2>
+
+          <h3>connect</h3>
+          <div class="method-signature">
+            <span class="method-name">connect</span>(<span class="param">project</span>: <span class="type">str</span>, <span class="param">location</span>: <span class="type">str</span>) -> <span class="type">None</span>
+          </div>
+
+          <p>
+            Establishes the provider configuration. For some providers (Google),
+            project and location are required. For others (Anthropic), they can be None.
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">project</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Cloud project ID (required for Vertex AI, optional for others)</div>
+            </li>
+            <li>
+              <span class="param-name">location</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Provider region (e.g., <code>us-central1</code>, <code>global</code>)</div>
+            </li>
+          </ul>
+
+          <h3 id="is-connected">is_connected <span class="badge badge-property">property</span></h3>
+          <p>Returns <code>True</code> if runtime is connected.</p>
+
+          <h3 id="provider-name">provider_name <span class="badge badge-property">property</span></h3>
+          <p>Returns the model provider name.</p>
+
+          <h3>verify_auth</h3>
+          <div class="method-signature">
+            <span class="method-name">verify_auth</span>(<br>
+            &nbsp;&nbsp;<span class="param">allow_interactive</span>: <span class="type">bool</span> = <span class="type">False</span>,<br>
+            &nbsp;&nbsp;<span class="param">on_message</span>: <span class="type">Optional[Callable[[str], None]]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">provider_name</span>: <span class="type">Optional[str]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">bool</span>
+          </div>
+          <p>
+            Verify authentication before loading tools. For providers with OAuth
+            support, this can trigger interactive login.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Connection</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Google GenAI (Vertex AI)
+runtime = JaatoRuntime(provider_name="google_genai")
+runtime.connect(
+    project="my-gcp-project",
+    location="us-central1"
+)
+
+# Anthropic (API key or OAuth)
+runtime = JaatoRuntime(provider_name="anthropic")
+runtime.connect(project=None, location=None)
+
+# Verify auth with interactive login
+if not runtime.verify_auth(allow_interactive=True):
+    print("Authentication failed")
+    return</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Plugin Configuration -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="plugin-configuration">Plugin Configuration</h2>
+
+          <h3>configure_plugins</h3>
+          <div class="method-signature">
+            <span class="method-name">configure_plugins</span>(<br>
+            &nbsp;&nbsp;<span class="param">registry</span>: <span class="type">PluginRegistry</span>,<br>
+            &nbsp;&nbsp;<span class="param">permission_plugin</span>: <span class="type">Optional[PermissionPlugin]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">ledger</span>: <span class="type">Optional[TokenLedger]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+
+          <p>
+            Configure plugins for the runtime. Sets up the shared plugin registry,
+            permission plugin, and ledger that will be available to all sessions.
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">registry</span>
+              <span class="param-type">PluginRegistry</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Registry with exposed plugins</div>
+            </li>
+            <li>
+              <span class="param-name">permission_plugin</span>
+              <span class="param-type">PermissionPlugin</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Permission plugin for access control</div>
+            </li>
+            <li>
+              <span class="param-name">ledger</span>
+              <span class="param-type">TokenLedger</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Token ledger for accounting</div>
+            </li>
+          </ul>
+
+          <h3 id="registry">registry <span class="badge badge-property">property</span></h3>
+          <p>Get the plugin registry.</p>
+
+          <h3 id="permission-plugin">permission_plugin <span class="badge badge-property">property</span></h3>
+          <p>Get the permission plugin.</p>
+
+          <h3 id="ledger">ledger <span class="badge badge-property">property</span></h3>
+          <p>Get the token ledger.</p>
+
+          <h3>refresh_tool_cache</h3>
+          <div class="method-signature">
+            <span class="method-name">refresh_tool_cache</span>() -> <span class="type">None</span>
+          </div>
+          <p>Refresh the cached tool configuration after enabling/disabling tools.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Configure plugins</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import (
+    JaatoRuntime,
+    PluginRegistry,
+    PermissionPlugin,
+    TokenLedger
+)
+
+runtime = JaatoRuntime()
+runtime.connect(project, location)
+
+# Setup registry
+registry = PluginRegistry()
+registry.discover()
+registry.expose_tool("cli")
+registry.expose_tool("file_edit")
+registry.expose_tool("web_search")
+
+# Optional: permission control
+perm = PermissionPlugin()
+perm.initialize({"config_path": "perms.json"})
+
+# Optional: token accounting
+ledger = TokenLedger()
+
+# Configure
+runtime.configure_plugins(
+    registry,
+    permission_plugin=perm,
+    ledger=ledger
+)
+
+# Access shared resources
+print(f"Registry: {runtime.registry}")
+print(f"Ledger: {runtime.ledger}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Session Creation -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="session-creation">Session Creation</h2>
+
+          <h3>create_session</h3>
+          <div class="method-signature">
+            <span class="method-name">create_session</span>(<br>
+            &nbsp;&nbsp;<span class="param">model</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">tools</span>: <span class="type">Optional[List[str]]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">system_instructions</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">plugin_configs</span>: <span class="type">Optional[Dict[str, Dict]]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">provider_name</span>: <span class="type">Optional[str]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">JaatoSession</span>
+          </div>
+
+          <p>
+            Create a new session from this runtime. Sessions share the runtime's
+            resources but have their own conversation history and can use different
+            models or tool subsets.
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">model</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">Model name to use for this session</div>
+            </li>
+            <li>
+              <span class="param-name">tools</span>
+              <span class="param-type">List[str]</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                List of plugin names to expose. If None, uses all exposed plugins.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">system_instructions</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Additional system instructions to prepend to base instructions.
+              </div>
+            </li>
+            <li>
+              <span class="param-name">plugin_configs</span>
+              <span class="param-type">Dict[str, Dict]</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">Per-plugin configuration overrides.</div>
+            </li>
+            <li>
+              <span class="param-name">provider_name</span>
+              <span class="param-type">str</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Provider override for cross-provider subagents. If specified,
+                uses a different AI provider than the runtime default.
+              </div>
+            </li>
+          </ul>
+
+          <div class="returns">
+            <div class="returns-label">Returns</div>
+            <div class="returns-type">JaatoSession - Configured session ready for messaging</div>
+          </div>
+
+          <div class="callout callout-info">
+            <div class="callout-title">Session Resource Sharing</div>
+            Sessions created from the same runtime share:
+            <ul>
+              <li>Provider configuration</li>
+              <li>Plugin registry</li>
+              <li>Permission plugin</li>
+              <li>Token ledger (aggregated accounting)</li>
+            </ul>
+            Each session maintains its own conversation history.
+          </div>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Create sessions</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Main agent session (all tools)
+main = runtime.create_session(
+    model="gemini-2.5-flash"
+)
+
+# Research subagent (specific tools)
+researcher = runtime.create_session(
+    model="gemini-2.5-flash",
+    tools=["web_search", "web_fetch"],
+    system_instructions="You are a research assistant."
+)
+
+# Code review subagent
+reviewer = runtime.create_session(
+    model="gemini-2.5-flash",
+    tools=["file_edit", "cli"],
+    system_instructions="You are a code reviewer."
+)
+
+# Send messages to each
+main_response = main.send_message("Hello", on_output)
+research = researcher.send_message("Find info on...", on_output)
+review = reviewer.send_message("Review this code...", on_output)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Cross-provider subagent</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Main agent uses Google GenAI
+runtime = JaatoRuntime(provider_name="google_genai")
+runtime.connect(project, location)
+runtime.configure_plugins(registry)
+
+# Register Anthropic for subagents
+runtime.register_provider("anthropic")
+
+# Create session with different provider
+claude_session = runtime.create_session(
+    model="claude-sonnet-4-20250514",
+    provider_name="anthropic",
+    tools=["cli"],
+    system_instructions="You are a Claude assistant."
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Multi-Provider Support -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="multi-provider">Multi-Provider Support</h2>
+
+          <h3>register_provider</h3>
+          <div class="method-signature">
+            <span class="method-name">register_provider</span>(<br>
+            &nbsp;&nbsp;<span class="param">provider_name</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">config</span>: <span class="type">Optional[ProviderConfig]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+
+          <p>
+            Register an additional provider for cross-provider subagent support.
+            Allows subagents to use different AI providers than the parent agent.
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">provider_name</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">
+                Name of the provider (e.g., <code>'anthropic'</code>, <code>'google_genai'</code>).
+              </div>
+            </li>
+            <li>
+              <span class="param-name">config</span>
+              <span class="param-type">ProviderConfig</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Optional ProviderConfig. If None, creates a default config.
+                Providers will use environment variables for auth.
+              </div>
+            </li>
+          </ul>
+
+          <h3>create_provider</h3>
+          <div class="method-signature">
+            <span class="method-name">create_provider</span>(<br>
+            &nbsp;&nbsp;<span class="param">model</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">provider_name</span>: <span class="type">Optional[str]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">ModelProviderPlugin</span>
+          </div>
+
+          <p>
+            Create a new provider instance for a session. Each session gets its
+            own provider instance to maintain independent conversation state.
+          </p>
+
+          <h3>list_available_models</h3>
+          <div class="method-signature">
+            <span class="method-name">list_available_models</span>(<br>
+            &nbsp;&nbsp;<span class="param">prefix</span>: <span class="type">Optional[str]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">provider_name</span>: <span class="type">Optional[str]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">List[str]</span>
+          </div>
+
+          <p>List available models from a provider, optionally filtered by prefix.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Multi-provider setup</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import JaatoRuntime
+from shared.plugins.model_provider.base import ProviderConfig
+
+# Create runtime with primary provider
+runtime = JaatoRuntime(provider_name="google_genai")
+runtime.connect(project, location)
+
+# Register additional providers
+runtime.register_provider("anthropic")
+runtime.register_provider("ollama")
+
+# List models from each provider
+gemini_models = runtime.list_available_models(
+    prefix="gemini",
+    provider_name="google_genai"
+)
+claude_models = runtime.list_available_models(
+    prefix="claude",
+    provider_name="anthropic"
+)
+local_models = runtime.list_available_models(
+    provider_name="ollama"
+)
+
+print(f"Gemini: {gemini_models}")
+print(f"Claude: {claude_models}")
+print(f"Local: {local_models}")</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Custom provider config</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Register with custom config
+runtime.register_provider("google_genai", ProviderConfig(
+    project="different-project",
+    location="europe-west1"
+))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tool Access -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="tool-access">Tool Access</h2>
+
+          <h3>get_tool_schemas</h3>
+          <div class="method-signature">
+            <span class="method-name">get_tool_schemas</span>(<br>
+            &nbsp;&nbsp;<span class="param">plugin_names</span>: <span class="type">Optional[List[str]]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">List[ToolSchema]</span>
+          </div>
+
+          <p>Get tool schemas, optionally filtered by plugin names.</p>
+
+          <h3>get_executors</h3>
+          <div class="method-signature">
+            <span class="method-name">get_executors</span>(<br>
+            &nbsp;&nbsp;<span class="param">plugin_names</span>: <span class="type">Optional[List[str]]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">Dict[str, Callable]</span>
+          </div>
+
+          <p>Get executors, optionally filtered by plugin names.</p>
+
+          <h3>get_system_instructions</h3>
+          <div class="method-signature">
+            <span class="method-name">get_system_instructions</span>(<br>
+            &nbsp;&nbsp;<span class="param">plugin_names</span>: <span class="type">Optional[List[str]]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">additional</span>: <span class="type">Optional[str]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">Optional[str]</span>
+          </div>
+
+          <p>
+            Get system instructions. Assembles from base instructions
+            (<code>.jaato/system_instructions.md</code>), additional instructions,
+            and plugin instructions.
+          </p>
+
+          <h3 id="deferred-tools">deferred_tools_enabled <span class="badge badge-property">property</span></h3>
+          <p>
+            Check if deferred tool loading is enabled. When True, only 'core'
+            tools are loaded into the initial model context. Controlled by
+            <code>JAATO_DEFERRED_TOOLS</code> environment variable.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Access tools</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Get all tool schemas
+schemas = runtime.get_tool_schemas()
+for schema in schemas:
+    print(f"{schema.name}: {schema.description}")
+
+# Get specific plugin tools
+cli_schemas = runtime.get_tool_schemas(plugin_names=["cli"])
+
+# Get executors
+executors = runtime.get_executors()
+print(f"Available tools: {list(executors.keys())}")
+
+# Get system instructions
+instructions = runtime.get_system_instructions(
+    additional="Focus on code quality."
+)
+
+# Check deferred loading
+if runtime.deferred_tools_enabled:
+    print("Only core tools in initial context")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Telemetry -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="telemetry">Telemetry</h2>
+
+          <h3 id="telemetry-prop">telemetry <span class="badge badge-property">property</span></h3>
+          <p>Get the telemetry plugin.</p>
+
+          <h3>set_telemetry_plugin</h3>
+          <div class="method-signature">
+            <span class="method-name">set_telemetry_plugin</span>(<span class="param">plugin</span>: <span class="type">TelemetryPlugin</span>) -> <span class="type">None</span>
+          </div>
+
+          <p>
+            Set a custom telemetry plugin for OpenTelemetry tracing. The plugin
+            should be initialized before setting.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Configure telemetry</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.telemetry import create_otel_plugin
+
+# Create and configure telemetry plugin
+telemetry = create_otel_plugin()
+telemetry.initialize({
+    "enabled": True,
+    "exporter": "otlp",
+    "endpoint": "http://localhost:4317",
+    "service_name": "my-jaato-app",
+})
+
+# Set on runtime
+runtime.set_telemetry_plugin(telemetry)
+
+# Telemetry will now trace:
+# - jaato.turn spans
+# - jaato.tool spans
+# - jaato.permission spans</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>

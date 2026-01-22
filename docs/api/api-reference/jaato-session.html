@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JaatoSession - jaato docs</title>
+  <link rel="stylesheet" href="../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../getting-started/quickstart.html">Quickstart</a>
+      <a href="index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../core-concepts/client.html">Client</a></li>
+          <li><a href="../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="jaato-client.html">JaatoClient</a></li>
+          <li><a href="jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="jaato-session.html" class="active">JaatoSession</a></li>
+          <li><a href="plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="tool-executor.html">ToolExecutor</a></li>
+          <li><a href="types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="providers/index.html">Overview</a></li>
+          <li><a href="providers/google-genai.html">Google GenAI</a></li>
+          <li><a href="providers/anthropic.html">Anthropic</a></li>
+          <li><a href="providers/github-models.html">GitHub Models</a></li>
+          <li><a href="providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="providers/antigravity.html">Antigravity</a></li>
+          <li><a href="providers/ollama.html">Ollama</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="plugins/index.html">Overview</a></li>
+          <li><a href="plugins/cli.html">CLI</a></li>
+          <li><a href="plugins/file-edit.html">File Edit</a></li>
+          <li><a href="plugins/filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="plugins/todo.html">Todo</a></li>
+          <li><a href="plugins/web-search.html">Web Search</a></li>
+          <li><a href="plugins/mcp.html">MCP</a></li>
+          <li><a href="plugins/permission.html">Permission</a></li>
+          <li><a href="plugins/session.html">Session</a></li>
+          <li><a href="plugins/gc.html">GC</a></li>
+          <li><a href="plugins/other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>JaatoSession</h1>
+          <p class="lead">
+            Per-agent conversation state in the jaato framework. JaatoSession
+            manages individual conversation history, tool execution, and model
+            interaction for a single agent (main or subagent).
+          </p>
+
+          <div class="method-signature">
+            <span class="token-keyword">from</span> shared <span class="token-keyword">import</span> JaatoSession
+          </div>
+
+          <table>
+            <tbody>
+              <tr>
+                <td><strong>Module</strong></td>
+                <td><code>shared.jaato_session</code></td>
+              </tr>
+              <tr>
+                <td><strong>Parent</strong></td>
+                <td><code>JaatoRuntime</code></td>
+              </tr>
+              <tr>
+                <td><strong>Wrapped by</strong></td>
+                <td><code>JaatoClient</code> (facade)</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h2 id="when-to-use">When to Use JaatoSession</h2>
+          <p>
+            Sessions are created via <code>JaatoRuntime.create_session()</code>.
+            Use sessions directly when you need to:
+          </p>
+          <ul>
+            <li>Manage multiple independent conversations (subagents)</li>
+            <li>Access session-specific state</li>
+            <li>Set per-session retry callbacks or streaming settings</li>
+            <li>Work with subagent plugin implementations</li>
+          </ul>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Creating sessions</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Via JaatoClient (most common)
+client = JaatoClient()
+client.connect(project, location, model)
+client.configure_tools(registry)
+session = client.get_session()
+
+# Via JaatoRuntime (for subagents)
+runtime = client.get_runtime()
+sub_session = runtime.create_session(
+    model="gemini-2.5-flash",
+    tools=["cli", "web_search"],
+    system_instructions="You are a researcher."
+)
+
+# Each session has independent history
+main_response = session.send_message("Hello", on_output)
+sub_response = sub_session.send_message("Search...", on_output)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Messaging -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="messaging">Messaging</h2>
+
+          <h3>send_message</h3>
+          <div class="method-signature">
+            <span class="method-name">send_message</span>(<br>
+            &nbsp;&nbsp;<span class="param">message</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">on_output</span>: <span class="type">Optional[OutputCallback]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">on_usage_update</span>: <span class="type">Optional[UsageUpdateCallback]</span> = <span class="type">None</span>,<br>
+            &nbsp;&nbsp;<span class="param">on_gc_threshold</span>: <span class="type">Optional[GCThresholdCallback]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">str</span>
+          </div>
+
+          <p>
+            Send a message to the model and return the final response. Handles
+            the full tool execution loop internally.
+          </p>
+
+          <ul class="param-list">
+            <li>
+              <span class="param-name">message</span>
+              <span class="param-type">str</span>
+              <span class="param-required">required</span>
+              <div class="param-desc">The user's message text</div>
+            </li>
+            <li>
+              <span class="param-name">on_output</span>
+              <span class="param-type">OutputCallback</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Callback for streaming output: <code>(source, text, mode) -> None</code>
+              </div>
+            </li>
+            <li>
+              <span class="param-name">on_usage_update</span>
+              <span class="param-type">UsageUpdateCallback</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Callback for token usage: <code>(usage: TokenUsage) -> None</code>
+              </div>
+            </li>
+            <li>
+              <span class="param-name">on_gc_threshold</span>
+              <span class="param-type">GCThresholdCallback</span>
+              <span class="param-optional">optional</span>
+              <div class="param-desc">
+                Callback when GC threshold is crossed during streaming
+              </div>
+            </li>
+          </ul>
+
+          <h3>send_message_with_parts</h3>
+          <div class="method-signature">
+            <span class="method-name">send_message_with_parts</span>(<br>
+            &nbsp;&nbsp;<span class="param">parts</span>: <span class="type">List[Part]</span>,<br>
+            &nbsp;&nbsp;<span class="param">on_output</span>: <span class="type">OutputCallback</span><br>
+            ) -> <span class="type">str</span>
+          </div>
+
+          <p>Send a multimodal message with multiple parts (text, images, etc.).</p>
+
+          <h3>generate</h3>
+          <div class="method-signature">
+            <span class="method-name">generate</span>(<span class="param">prompt</span>: <span class="type">str</span>) -> <span class="type">str</span>
+          </div>
+
+          <p>Simple one-shot generation without tools or conversation history.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Send messages</div>
+          <div class="code-block">
+            <pre><code class="language-python">def on_output(source, text, mode):
+    """
+    source: "model", plugin name, or "system"
+    text: output text
+    mode: "write" (new) or "append" (continue)
+    """
+    if mode == "write":
+        print(f"\n[{source}]", end=" ")
+    print(text, end="")
+
+# Send message
+response = session.send_message(
+    "List files in current directory",
+    on_output=on_output
+)
+
+# With usage tracking
+def on_usage(usage):
+    print(f"Tokens: {usage.total}")
+
+response = session.send_message(
+    "Explain this code",
+    on_output=on_output,
+    on_usage_update=on_usage
+)</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Multimodal message</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared import Part, Attachment
+
+# Create parts with image
+parts = [
+    Part.from_text("What's in this image?"),
+    Part(inline_data=Attachment(
+        mime_type="image/png",
+        data=open("image.png", "rb").read()
+    ))
+]
+
+response = session.send_message_with_parts(
+    parts,
+    on_output=on_output
+)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- History Management -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="history">History Management</h2>
+
+          <h3>get_history</h3>
+          <div class="method-signature">
+            <span class="method-name">get_history</span>() -> <span class="type">List[Message]</span>
+          </div>
+          <p>Returns the full conversation history as a list of Message objects.</p>
+
+          <h3>reset_session</h3>
+          <div class="method-signature">
+            <span class="method-name">reset_session</span>(<span class="param">history</span>: <span class="type">Optional[List[Message]]</span> = <span class="type">None</span>) -> <span class="type">None</span>
+          </div>
+          <p>Clears the current session. Optionally initializes with a new history.</p>
+
+          <h3>get_turn_boundaries</h3>
+          <div class="method-signature">
+            <span class="method-name">get_turn_boundaries</span>() -> <span class="type">List[int]</span>
+          </div>
+          <p>Returns indices marking the start of each turn in the history.</p>
+
+          <h3>revert_to_turn</h3>
+          <div class="method-signature">
+            <span class="method-name">revert_to_turn</span>(<span class="param">turn_id</span>: <span class="type">int</span>) -> <span class="type">Dict[str, Any]</span>
+          </div>
+          <p>Reverts the conversation to a specific turn, removing subsequent messages.</p>
+
+          <h3>get_turn_accounting</h3>
+          <div class="method-signature">
+            <span class="method-name">get_turn_accounting</span>() -> <span class="type">List[Dict[str, Any]]</span>
+          </div>
+          <p>Returns per-turn statistics including token counts and timing.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">History operations</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Get conversation history
+history = session.get_history()
+for msg in history:
+    print(f"{msg.role}: {msg.text[:50]}...")
+
+# Check turn info
+turns = session.get_turn_boundaries()
+print(f"Conversation has {len(turns)} turns")
+
+# Get per-turn stats
+accounting = session.get_turn_accounting()
+for turn in accounting:
+    print(f"Turn {turn['turn_id']}: "
+          f"{turn['tokens']} tokens")
+
+# Revert to earlier turn
+session.revert_to_turn(2)
+
+# Clear and start fresh
+session.reset_session()
+
+# Reset with custom history
+session.reset_session(history=custom_history)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Context Management -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="context">Context Management</h2>
+
+          <h3>get_context_limit</h3>
+          <div class="method-signature">
+            <span class="method-name">get_context_limit</span>() -> <span class="type">int</span>
+          </div>
+          <p>Returns the model's context window size in tokens.</p>
+
+          <h3>get_context_usage</h3>
+          <div class="method-signature">
+            <span class="method-name">get_context_usage</span>() -> <span class="type">Dict[str, Any]</span>
+          </div>
+          <p>
+            Returns current context usage statistics including total tokens,
+            prompt tokens, output tokens, turns, and percent used.
+          </p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Context management</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Check context limits
+limit = session.get_context_limit()
+usage = session.get_context_usage()
+
+print(f"Model: {usage['model']}")
+print(f"Limit: {limit:,} tokens")
+print(f"Used: {usage['total_tokens']:,} tokens")
+print(f"Percent: {usage['percent_used']:.1f}%")
+print(f"Remaining: {usage['tokens_remaining']:,}")
+print(f"Turns: {usage['turns']}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Cancellation -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="cancellation">Cancellation & Streaming</h2>
+
+          <h3>request_stop</h3>
+          <div class="method-signature">
+            <span class="method-name">request_stop</span>() -> <span class="type">bool</span>
+          </div>
+          <p>
+            Request cancellation of the current operation. Returns True if
+            a cancellation was requested.
+          </p>
+
+          <h3 id="is-running">is_running <span class="badge badge-property">property</span></h3>
+          <p>Returns True if send_message() is in progress.</p>
+
+          <h3 id="supports-stop">supports_stop <span class="badge badge-property">property</span></h3>
+          <p>Returns True if the provider supports mid-turn cancellation.</p>
+
+          <h3>set_streaming_enabled</h3>
+          <div class="method-signature">
+            <span class="method-name">set_streaming_enabled</span>(<span class="param">enabled</span>: <span class="type">bool</span>) -> <span class="type">None</span>
+          </div>
+          <p>Enable or disable streaming mode for real-time output.</p>
+
+          <h3>set_retry_callback</h3>
+          <div class="method-signature">
+            <span class="method-name">set_retry_callback</span>(<span class="param">callback</span>: <span class="type">Optional[RetryCallback]</span>) -> <span class="type">None</span>
+          </div>
+          <p>Set a callback for retry notifications instead of console output.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Cancellation</div>
+          <div class="code-block">
+            <pre><code class="language-python">import threading
+import time
+
+# Enable streaming for cancellation support
+session.set_streaming_enabled(True)
+
+# Start message in background
+def run():
+    try:
+        response = session.send_message(
+            "Write a very long essay...",
+            on_output=on_output
+        )
+    except CancelledException:
+        print("Cancelled!")
+
+thread = threading.Thread(target=run)
+thread.start()
+
+# Cancel after 5 seconds
+time.sleep(5)
+if session.is_running:
+    session.request_stop()
+
+thread.join()</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Custom retry callback</div>
+          <div class="code-block">
+            <pre><code class="language-python"># Route retry messages to status bar
+session.set_retry_callback(
+    lambda msg, attempt, max_att, delay:
+        status_bar.update(f"Retry {attempt}/{max_att}")
+)
+
+# Revert to console output
+session.set_retry_callback(None)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- User Commands -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="user-commands">User Commands</h2>
+
+          <h3>get_user_commands</h3>
+          <div class="method-signature">
+            <span class="method-name">get_user_commands</span>() -> <span class="type">Dict[str, UserCommand]</span>
+          </div>
+          <p>Returns all available user commands from exposed plugins.</p>
+
+          <h3>execute_user_command</h3>
+          <div class="method-signature">
+            <span class="method-name">execute_user_command</span>(<br>
+            &nbsp;&nbsp;<span class="param">command_name</span>: <span class="type">str</span>,<br>
+            &nbsp;&nbsp;<span class="param">args</span>: <span class="type">Optional[Dict]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">tuple[Any, bool]</span>
+          </div>
+          <p>Executes a user command and returns (result, share_with_model).</p>
+
+          <h3>get_model_completions</h3>
+          <div class="method-signature">
+            <span class="method-name">get_model_completions</span>(<span class="param">args</span>: <span class="type">List[str]</span>) -> <span class="type">List[CommandCompletion]</span>
+          </div>
+          <p>Get completions for the model command (shell autocomplete).</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">User commands</div>
+          <div class="code-block">
+            <pre><code class="language-python"># List available commands
+commands = session.get_user_commands()
+for name, cmd in commands.items():
+    print(f"/{name}: {cmd.description}")
+
+# Execute a command
+result, share = session.execute_user_command(
+    "plan",
+    args=None
+)
+
+print(result)
+# share indicates if result should be added to conversation</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- GC Plugin -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="gc">Garbage Collection</h2>
+
+          <h3>set_gc_plugin</h3>
+          <div class="method-signature">
+            <span class="method-name">set_gc_plugin</span>(<br>
+            &nbsp;&nbsp;<span class="param">plugin</span>: <span class="type">GCPlugin</span>,<br>
+            &nbsp;&nbsp;<span class="param">config</span>: <span class="type">Optional[GCConfig]</span> = <span class="type">None</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+          <p>Set the GC plugin for context management.</p>
+
+          <h3>remove_gc_plugin</h3>
+          <div class="method-signature">
+            <span class="method-name">remove_gc_plugin</span>() -> <span class="type">None</span>
+          </div>
+          <p>Remove the GC plugin.</p>
+
+          <h3>manual_gc</h3>
+          <div class="method-signature">
+            <span class="method-name">manual_gc</span>() -> <span class="type">GCResult</span>
+          </div>
+          <p>Manually trigger garbage collection.</p>
+
+          <h3>get_gc_history</h3>
+          <div class="method-signature">
+            <span class="method-name">get_gc_history</span>() -> <span class="type">List[GCResult]</span>
+          </div>
+          <p>Get history of GC operations.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">GC setup</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.gc_truncate import create_plugin
+from shared.plugins.gc import GCConfig
+
+# Create and configure GC plugin
+gc_plugin = create_plugin()
+gc_plugin.initialize({"preserve_recent_turns": 10})
+
+# Set with threshold configuration
+session.set_gc_plugin(gc_plugin, GCConfig(
+    threshold_percent=75.0,
+    auto_trigger=True
+))
+
+# Manual GC
+result = session.manual_gc()
+print(f"Freed {result.tokens_freed} tokens")
+
+# Check history
+for gc in session.get_gc_history():
+    print(f"GC at turn {gc.turn}")</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- Thinking Mode -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="thinking">Thinking Mode</h2>
+
+          <h3>set_thinking_plugin</h3>
+          <div class="method-signature">
+            <span class="method-name">set_thinking_plugin</span>(<span class="param">plugin</span>: <span class="type">ThinkingPlugin</span>) -> <span class="type">None</span>
+          </div>
+          <p>Set the thinking plugin for extended reasoning.</p>
+
+          <h3>set_thinking_config</h3>
+          <div class="method-signature">
+            <span class="method-name">set_thinking_config</span>(<span class="param">config</span>: <span class="type">ThinkingConfig</span>) -> <span class="type">None</span>
+          </div>
+          <p>Set thinking configuration directly.</p>
+
+          <h3>get_thinking_config</h3>
+          <div class="method-signature">
+            <span class="method-name">get_thinking_config</span>() -> <span class="type">Optional[ThinkingConfig]</span>
+          </div>
+          <p>Get current thinking configuration.</p>
+
+          <h3>supports_thinking</h3>
+          <div class="method-signature">
+            <span class="method-name">supports_thinking</span>() -> <span class="type">bool</span>
+          </div>
+          <p>Check if provider supports thinking mode.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">Thinking mode</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.model_provider.types import ThinkingConfig
+
+# Check support
+if session.supports_thinking():
+    # Enable thinking
+    session.set_thinking_config(ThinkingConfig(
+        enabled=True,
+        budget=10000
+    ))
+
+    # Complex reasoning task
+    response = session.send_message(
+        "Analyze this complex problem...",
+        on_output=on_output
+    )
+
+    # Disable thinking
+    session.set_thinking_config(ThinkingConfig(enabled=False))</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- UI Hooks -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h2 id="ui-hooks">UI Hooks</h2>
+
+          <h3>set_ui_hooks</h3>
+          <div class="method-signature">
+            <span class="method-name">set_ui_hooks</span>(<br>
+            &nbsp;&nbsp;<span class="param">hooks</span>: <span class="type">AgentUIHooks</span>,<br>
+            &nbsp;&nbsp;<span class="param">agent_id</span>: <span class="type">str</span><br>
+            ) -> <span class="type">None</span>
+          </div>
+          <p>
+            Set UI hooks for agent lifecycle events. The agent_id is used
+            to identify this session in hook callbacks.
+          </p>
+
+          <h3>set_terminal_width</h3>
+          <div class="method-signature">
+            <span class="method-name">set_terminal_width</span>(<span class="param">width</span>: <span class="type">int</span>) -> <span class="type">None</span>
+          </div>
+          <p>Set terminal width for formatting.</p>
+        </div>
+        <div class="panel-code">
+          <div class="code-label">UI hooks</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.subagent.ui_hooks import AgentUIHooks
+
+class MyHooks(AgentUIHooks):
+    def on_agent_output(self, agent_id, source, text, mode):
+        print(f"[{agent_id}] {text}", end="")
+
+    def on_agent_turn_completed(self, agent_id, turn_number,
+                                prompt_tokens, output_tokens, ...):
+        print(f"[{agent_id}] Turn {turn_number} complete")
+
+# Set hooks on session
+session.set_ui_hooks(MyHooks(), agent_id="sub_1")
+session.set_terminal_width(120)</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../assets/js/docs.js"></script>
+</body>
+</html>
