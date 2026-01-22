@@ -144,7 +144,13 @@ def _trim_line_to_width(line: str, target_width: int) -> str:
     console = Console(width=10000, force_terminal=True, no_color=False, highlight=False)
     with console.capture() as capture:
         console.print(result, end="")
-    return capture.get()
+    output = capture.get()
+
+    # Always append ANSI reset code to ensure styling doesn't bleed across lines
+    # when the text is later split by newlines and stored/rendered separately
+    if output and '\x1b[' in output and not output.endswith('\x1b[0m'):
+        output += '\x1b[0m'
+    return output
 
 
 class CodeBlockFormatterPlugin:
