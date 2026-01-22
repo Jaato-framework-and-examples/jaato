@@ -330,6 +330,10 @@ class KeybindingConfig:
     tool_output_up: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_output_up"])
     tool_output_down: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["tool_output_down"])
 
+    # Permission prompt navigation
+    permission_next: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["permission_next"])
+    permission_prev: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["permission_prev"])
+
     # Profile metadata (not a keybinding)
     _profile: str = field(default="default")
     _profile_source: str = field(default="default")  # Where profile was loaded from
