@@ -93,6 +93,7 @@ from .events import (
     CommandRequest,
     MidTurnPromptQueuedEvent,
     MidTurnPromptInjectedEvent,
+    MidTurnInterruptEvent,
     serialize_event,
     deserialize_event,
 )
@@ -1493,6 +1494,16 @@ class JaatoServer:
                 ))
 
             session.set_retry_callback(retry_callback)
+
+            # Set up callback for when streaming is interrupted for mid-turn prompt
+            def mid_turn_interrupt_callback(partial_chars: int, prompt_preview: str):
+                server._trace(f"MID_TURN_INTERRUPT: partial={partial_chars}, preview={prompt_preview[:50]}...")
+                server.emit(MidTurnInterruptEvent(
+                    partial_response_chars=partial_chars,
+                    user_prompt_preview=prompt_preview,
+                ))
+
+            session.set_mid_turn_interrupt_callback(mid_turn_interrupt_callback)
 
         def output_callback(source: str, text: str, mode: str) -> None:
             # Skip - output is routed through agent hooks
