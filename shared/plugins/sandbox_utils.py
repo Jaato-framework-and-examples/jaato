@@ -220,15 +220,17 @@ def check_path_with_jaato_containment(
     """Check if a path is allowed, with special .jaato containment handling.
 
     This is the main entry point for path validation that respects:
-    1. Standard workspace sandboxing (paths must be within workspace)
-    2. Special .jaato handling (symlink allowed, but contained)
-    3. Plugin registry authorization (for external paths)
-    4. System temp directories (/tmp) when allow_tmp=True
+    1. Denied paths (checked first, takes precedence over all other rules)
+    2. Standard workspace sandboxing (paths must be within workspace)
+    3. Special .jaato handling (symlink allowed, but contained)
+    4. Plugin registry authorization (for external paths)
+    5. System temp directories (/tmp) when allow_tmp=True
 
     Args:
         path: Path to check (absolute or will be made absolute).
         workspace_root: The workspace root directory.
-        plugin_registry: Optional PluginRegistry for external path authorization.
+        plugin_registry: Optional PluginRegistry for external path authorization
+                        and denial checking.
         allow_tmp: Whether to allow /tmp/** access (default: True).
 
     Returns:
@@ -240,6 +242,11 @@ def check_path_with_jaato_containment(
 
     # Make path absolute
     abs_path = os.path.abspath(path)
+
+    # Check if path is explicitly denied (takes precedence over all other rules)
+    if plugin_registry and hasattr(plugin_registry, 'is_path_denied'):
+        if plugin_registry.is_path_denied(abs_path):
+            return False
 
     # Check if path is under /tmp (allowed by default)
     if allow_tmp and is_under_temp_path(abs_path):
