@@ -59,7 +59,11 @@
         <ul class="sidebar-nav">
           <li><a href="index.html" class="active">Overview</a></li>
           <li><a href="google-genai.html">Google GenAI</a></li>
+          <li><a href="anthropic.html">Anthropic</a></li>
           <li><a href="github-models.html">GitHub Models</a></li>
+          <li><a href="claude-cli.html">Claude CLI</a></li>
+          <li><a href="antigravity.html">Antigravity</a></li>
+          <li><a href="ollama.html">Ollama</a></li>
         </ul>
       </div>
 
@@ -104,22 +108,34 @@
                 <td>Gemini 1.5, 2.0, 2.5</td>
               </tr>
               <tr>
+                <td><strong><a href="anthropic.html">Anthropic</a></strong></td>
+                <td><code>anthropic</code></td>
+                <td>Available</td>
+                <td>Claude 3, 3.5, Sonnet 4, Opus 4</td>
+              </tr>
+              <tr>
                 <td><strong><a href="github-models.html">GitHub Models</a></strong></td>
                 <td><code>github_models</code></td>
                 <td>Available</td>
                 <td>GPT-4o, Claude 3.5, Gemini, Llama</td>
               </tr>
               <tr>
-                <td><strong>Anthropic</strong></td>
-                <td><code>anthropic</code></td>
-                <td>Planned</td>
-                <td>Claude 3, 3.5, 4</td>
+                <td><strong><a href="claude-cli.html">Claude CLI</a></strong></td>
+                <td><code>claude_cli</code></td>
+                <td>Available</td>
+                <td>Claude (via subscription)</td>
               </tr>
               <tr>
-                <td><strong>OpenAI</strong></td>
-                <td><code>openai</code></td>
-                <td>Planned</td>
-                <td>GPT-4, GPT-4o</td>
+                <td><strong><a href="antigravity.html">Antigravity</a></strong></td>
+                <td><code>antigravity</code></td>
+                <td>Available</td>
+                <td>Gemini 3, Claude (via Google)</td>
+              </tr>
+              <tr>
+                <td><strong><a href="ollama.html">Ollama</a></strong></td>
+                <td><code>ollama</code></td>
+                <td>Available</td>
+                <td>Qwen, Llama, Mistral (local)</td>
               </tr>
             </tbody>
           </table>
@@ -138,20 +154,28 @@
                 <td>Google GenAI (AI Studio) - free tier available</td>
               </tr>
               <tr>
+                <td>Claude Pro/Max subscriber</td>
+                <td>Claude CLI - uses subscription, not API credits</td>
+              </tr>
+              <tr>
+                <td>Complex reasoning tasks</td>
+                <td>Anthropic - Claude with extended thinking</td>
+              </tr>
+              <tr>
                 <td>Multi-model access</td>
                 <td>GitHub Models - GPT, Claude, Gemini via single API</td>
               </tr>
               <tr>
-                <td>GitHub Enterprise</td>
-                <td>GitHub Models - integrated billing, SSO support</td>
+                <td>Privacy / Local models</td>
+                <td>Ollama - run models locally, no API costs</td>
               </tr>
               <tr>
                 <td>GCP integration</td>
                 <td>Google GenAI (Vertex AI)</td>
               </tr>
               <tr>
-                <td>AWS integration</td>
-                <td>Anthropic (via Bedrock) - planned</td>
+                <td>Access to Gemini 3</td>
+                <td>Antigravity - Google IDE backend</td>
               </tr>
             </tbody>
           </table>
@@ -161,20 +185,21 @@
           <div class="code-block">
             <pre><code class="language-python">from shared import JaatoClient
 
-# Default provider (google_genai)
+# Uses JAATO_PROVIDER env var or google_genai
 client = JaatoClient()
-client.connect(
-    project="my-project",
-    location="us-central1",
-    model="gemini-2.5-flash"
-)
+client.connect(project, location, model)
 
 # Explicit provider selection
-client = JaatoClient(provider_name="google_genai")
+client = JaatoClient(provider_name="anthropic")
+client.connect(None, None, "claude-sonnet-4-20250514")
 
-# Future: other providers
-# client = JaatoClient(provider_name="anthropic")
-# client = JaatoClient(provider_name="openai")</code></pre>
+# Ollama (local models)
+client = JaatoClient(provider_name="ollama")
+client.connect(None, None, "qwen3:32b")
+
+# Claude CLI (uses subscription)
+client = JaatoClient(provider_name="claude_cli")
+client.connect(None, None, "claude-sonnet-4-20250514")</code></pre>
           </div>
 
           <div class="code-label" style="margin-top: 24px;">Discover available providers</div>
@@ -183,11 +208,12 @@ client = JaatoClient(provider_name="google_genai")
 
 # Find what's available
 providers = discover_providers()
-print(f"Available: {providers}")
-# ['google_genai', 'github_models']
+print(f"Available: {list(providers.keys())}")
+# ['google_genai', 'anthropic', 'github_models',
+#  'claude_cli', 'antigravity', 'ollama']
 
 # Load a specific provider
-provider = load_provider("google_genai")
+provider = load_provider("anthropic")
 print(f"Loaded: {provider.name}")</code></pre>
           </div>
         </div>
@@ -286,6 +312,14 @@ client.connect(model="gemini-2.5-flash")</code></pre>
             <li><strong>Best for:</strong> GCP users, long context needs (1M+ tokens)</li>
           </ul>
 
+          <h3>Anthropic</h3>
+          <ul>
+            <li><strong>Endpoints:</strong> Direct API</li>
+            <li><strong>Auth:</strong> API key (<code>sk-ant-api03-...</code>) or OAuth token (<code>sk-ant-oat01-...</code>)</li>
+            <li><strong>Features:</strong> Function calling, extended thinking, prompt caching</li>
+            <li><strong>Best for:</strong> Complex reasoning, code generation</li>
+          </ul>
+
           <h3>GitHub Models</h3>
           <ul>
             <li><strong>Endpoints:</strong> GitHub Models API (unified)</li>
@@ -294,20 +328,28 @@ client.connect(model="gemini-2.5-flash")</code></pre>
             <li><strong>Best for:</strong> GitHub Enterprise users, multi-model experimentation</li>
           </ul>
 
-          <h3>Anthropic (Planned)</h3>
+          <h3>Claude CLI</h3>
           <ul>
-            <li><strong>Endpoints:</strong> Direct API, AWS Bedrock</li>
-            <li><strong>Auth:</strong> API key</li>
-            <li><strong>Features:</strong> Function calling, multimodal</li>
-            <li><strong>Best for:</strong> AWS users, complex reasoning tasks</li>
+            <li><strong>Endpoints:</strong> Claude Code CLI wrapper</li>
+            <li><strong>Auth:</strong> <code>claude login</code> (uses Pro/Max subscription)</li>
+            <li><strong>Features:</strong> Built-in tools, automatic prompt caching</li>
+            <li><strong>Best for:</strong> Claude subscribers wanting to avoid API costs</li>
           </ul>
 
-          <h3>OpenAI (Planned)</h3>
+          <h3>Antigravity</h3>
           <ul>
-            <li><strong>Endpoints:</strong> Direct API, Azure OpenAI</li>
-            <li><strong>Auth:</strong> API key</li>
-            <li><strong>Features:</strong> Function calling, multimodal</li>
-            <li><strong>Best for:</strong> Azure users, broad ecosystem</li>
+            <li><strong>Endpoints:</strong> Google IDE backend</li>
+            <li><strong>Auth:</strong> Google OAuth (via <code>oauth_login()</code>)</li>
+            <li><strong>Features:</strong> Access to Gemini 3, Claude via Google infrastructure</li>
+            <li><strong>Best for:</strong> Early access to Gemini 3 models</li>
+          </ul>
+
+          <h3>Ollama</h3>
+          <ul>
+            <li><strong>Endpoints:</strong> Local Ollama server (localhost:11434)</li>
+            <li><strong>Auth:</strong> None (local)</li>
+            <li><strong>Features:</strong> Run models locally, no API costs, privacy</li>
+            <li><strong>Best for:</strong> Privacy-sensitive use cases, offline work</li>
           </ul>
         </div>
         <div class="panel-code">
