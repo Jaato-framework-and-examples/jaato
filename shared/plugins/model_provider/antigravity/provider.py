@@ -1067,10 +1067,17 @@ class AntigravityProvider:
         try:
             for line in response.iter_lines(decode_unicode=True):
                 if cancel_token and cancel_token.is_cancelled:
-                    # Flush accumulated text before cancelling
+                    # Flush accumulated text before returning
                     if accumulated_text:
                         parts.append(Part.from_text("".join(accumulated_text)))
-                    raise CancelledException()
+                    # Return response with CANCELLED finish reason (matches other providers)
+                    # This allows mid-turn prompt handling to work at the session level
+                    return ProviderResponse(
+                        parts=parts,
+                        usage=usage,
+                        finish_reason=FinishReason.CANCELLED,
+                        thinking="\n".join(thinking_text) if thinking_text else None,
+                    )
 
                 if not line:
                     continue
