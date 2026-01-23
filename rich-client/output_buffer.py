@@ -2751,6 +2751,9 @@ class OutputBuffer:
                 else:
                     output.append(line, style=text_style)
 
+            # Add blank line after warnings for visual separation from code block
+            output.append("\n")
+
         return remaining_content
 
     def _render_with_security_warnings(self, output: Text, content: str, prefix: str, continuation: str, is_last: bool) -> None:
