@@ -445,28 +445,29 @@ class NotebookPlugin(StreamingCapable):
                             break
 
             # Analyze code for security risks
-            analysis_info = ""
+            warnings_text = None
+            warning_level = None
             if self._sandbox_mode != SandboxMode.DISABLED and self._code_analyzer:
                 analysis = self._code_analyzer.analyze(code)
                 self._last_analysis = analysis
 
                 if analysis.has_risks:
-                    # Build risk summary for permission display
-                    risk_lines = [
-                        "",
-                        "--- Security Analysis ---",
-                        analysis.get_summary(),
-                    ]
+                    # Build warnings for separate display
+                    risk_lines = [analysis.get_summary()]
                     if analysis.external_paths:
                         risk_lines.append(f"External paths: {', '.join(analysis.external_paths[:3])}")
                     risk_lines.append("")
                     risk_lines.append(analysis.format_risks(max_items=5))
-                    analysis_info = "\n".join(risk_lines)
+                    warnings_text = "\n".join(risk_lines)
 
-            # Combine code and analysis
-            details = code
-            if analysis_info:
-                details = code + "\n" + analysis_info
+                    # Map risk level to warning level
+                    max_level = analysis.max_risk_level
+                    if max_level in (RiskLevel.CRITICAL, RiskLevel.HIGH):
+                        warning_level = "error"
+                    elif max_level == RiskLevel.MEDIUM:
+                        warning_level = "warning"
+                    else:
+                        warning_level = "info"
 
             summary = f"Execute IPython ({backend_name}): {notebook_id}"
             if self._last_analysis and self._last_analysis.has_risks:
@@ -476,9 +477,11 @@ class NotebookPlugin(StreamingCapable):
 
             return PermissionDisplayInfo(
                 summary=summary,
-                details=details,
+                details=code,
                 format_hint="code",
                 language="ipython",
+                warnings=warnings_text,
+                warning_level=warning_level,
             )
         return None
 

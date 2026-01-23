@@ -239,6 +239,8 @@ class PermissionRequestedEvent(Event):
     # ^ List of {key, label, action, description?}
     prompt_lines: Optional[List[str]] = None  # Pre-formatted prompt (with diff)
     format_hint: Optional[str] = None  # "diff" for colored diff display
+    warnings: Optional[str] = None  # Security/analysis warnings to display separately
+    warning_level: Optional[str] = None  # "info", "warning", "error"
 
 
 @dataclass

@@ -2471,8 +2471,14 @@ class OutputBuffer:
         prefix = "    "
         content_lines = tool.output_lines
 
-        # Check if content contains notebook row markers
+        # Check if content contains security warning markers
         content_text = "\n".join(content_lines)
+        if "<security-warning " in content_text:
+            # Extract and render security warnings separately, then render remaining content
+            self._render_with_security_warnings(output, content_text, prefix, continuation, is_last)
+            return
+
+        # Check if content contains notebook row markers
         if "<nb-row " in content_text:
             self._render_notebook_rows(output, content_text, prefix, continuation, is_last)
             return
@@ -2675,6 +2681,89 @@ class OutputBuffer:
                     output.append(line[:max_content_width - 1] + "…")
                 else:
                     output.append(line)
+
+    def _render_with_security_warnings(self, output: Text, content: str, prefix: str, continuation: str, is_last: bool) -> None:
+        """Render content that contains security warning markers.
+
+        Extracts <security-warning> blocks and renders them with colored styling
+        (yellow for warning, red for error), then renders remaining content normally.
+
+        Format:
+            ⚠ Security Analysis
+            Detected: 1 medium, 1 low
+            [MEDIUM] Import of 'os' module (line 1)
+        """
+        import re
+
+        # Pattern to extract security warning blocks
+        warning_pattern = re.compile(
+            r'<security-warning\s+level="([^"]+)">\n?(.*?)\n?</security-warning>',
+            re.DOTALL
+        )
+
+        # Find all warnings
+        warnings = warning_pattern.findall(content)
+        # Remove warning blocks from content
+        remaining_content = warning_pattern.sub('', content).strip()
+
+        indent = f"{prefix}{continuation}     "
+        indent_width = len(indent)
+        max_width = max(20, self._console_width - indent_width)
+
+        # Render warnings first with colored styling
+        for level, warning_text in warnings:
+            # Choose style and icon based on level
+            if level == "error":
+                icon = "⚠"
+                header_style = self._style("error", "bold red")
+                text_style = self._style("error", "red")
+            elif level == "warning":
+                icon = "⚠"
+                header_style = self._style("warning", "bold yellow")
+                text_style = self._style("warning", "yellow")
+            else:  # info
+                icon = "ℹ"
+                header_style = self._style("info", "bold cyan")
+                text_style = self._style("info", "cyan")
+
+            # Render header
+            output.append("\n")
+            output.append(indent, style=self._style("tree_connector", "dim"))
+            output.append(f"{icon} Security Analysis", style=header_style)
+
+            # Render warning lines
+            for line in warning_text.strip().split('\n'):
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                # Style the bracketed level markers
+                if line.startswith('['):
+                    bracket_end = line.find(']')
+                    if bracket_end > 0:
+                        marker = line[:bracket_end + 1]
+                        rest = line[bracket_end + 1:]
+                        output.append(marker, style=header_style)
+                        output.append(rest, style=text_style)
+                    else:
+                        output.append(line, style=text_style)
+                else:
+                    output.append(line, style=text_style)
+
+            output.append("\n")  # Blank line after warnings
+
+        # Render remaining content (code block, etc.)
+        if remaining_content:
+            remaining_lines = remaining_content.split('\n')
+            # Check for notebook rows in remaining content
+            if "<nb-row " in remaining_content:
+                self._render_notebook_rows(output, remaining_content, prefix, continuation, is_last)
+            else:
+                for line in remaining_lines:
+                    output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    if len(line) > max_width:
+                        output.append(line[:max_width - 3] + "...", style=self._style("tool_output", "dim"))
+                    else:
+                        output.append(line, style=self._style("tool_output", "dim"))
 
     def _calculate_tool_output_overhead(self, tool: 'ActiveToolCall') -> int:
         """Calculate lines of overhead before tool output content.
