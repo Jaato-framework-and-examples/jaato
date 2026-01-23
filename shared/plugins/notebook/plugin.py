@@ -75,6 +75,7 @@ class NotebookPlugin(StreamingCapable):
         self._workspace_root: Optional[str] = None
         self._sandbox_mode: SandboxMode = SandboxMode.WARN
         self._code_analyzer: Optional[CodeAnalyzer] = None
+        self._plugin_registry = None  # Set via set_plugin_registry() for path authorization
         # Cache last analysis for permission display
         self._last_analysis: Optional[AnalysisResult] = None
 
@@ -124,8 +125,8 @@ class NotebookPlugin(StreamingCapable):
         except ValueError:
             self._sandbox_mode = SandboxMode.WARN
 
-        # Create code analyzer
-        self._code_analyzer = CodeAnalyzer(workspace_root=self._workspace_root)
+        # Create code analyzer (will be rebuilt when plugin_registry is set)
+        self._rebuild_code_analyzer()
 
         # Always initialize local backend
         local_backend = LocalJupyterBackend()
@@ -198,9 +199,33 @@ class NotebookPlugin(StreamingCapable):
             path: Absolute path to the workspace root directory.
         """
         self._workspace_root = path
-        # Recreate analyzer with new workspace root
-        self._code_analyzer = CodeAnalyzer(workspace_root=path)
+        self._rebuild_code_analyzer()
         self._trace(f"Workspace path set to: {path}")
+
+    def set_plugin_registry(self, registry) -> None:
+        """Set the plugin registry for checking external path authorization.
+
+        This is called during plugin registration to enable path authorization
+        checks via the registry (e.g., for whitelisted external paths).
+
+        Args:
+            registry: The PluginRegistry instance.
+        """
+        self._plugin_registry = registry
+        self._rebuild_code_analyzer()
+        self._trace("set_plugin_registry: registry set")
+
+    def _rebuild_code_analyzer(self) -> None:
+        """Rebuild the code analyzer with current configuration.
+
+        Called when workspace_root or plugin_registry changes to ensure
+        the analyzer uses the latest sandbox settings.
+        """
+        self._code_analyzer = CodeAnalyzer(
+            workspace_root=self._workspace_root,
+            plugin_registry=self._plugin_registry,
+            allow_tmp=True,  # Allow /tmp access like other sandboxed tools
+        )
 
     def set_tool_output_callback(self, callback: Optional[Callable[[str], None]]) -> None:
         """Set the callback for streaming output during execution.

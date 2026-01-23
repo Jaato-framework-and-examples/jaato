@@ -21,7 +21,13 @@ import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional, Set, Tuple
+from typing import Any, List, Optional, Set, Tuple
+
+try:
+    from ..sandbox_utils import check_path_with_jaato_containment
+except ImportError:
+    # Fallback for direct module execution (testing)
+    from shared.plugins.sandbox_utils import check_path_with_jaato_containment
 
 
 class RiskLevel(Enum):
@@ -252,6 +258,8 @@ class CodeAnalyzer:
         workspace_root: Optional[str] = None,
         allowed_paths: Optional[List[str]] = None,
         strict_mode: bool = False,
+        plugin_registry: Any = None,
+        allow_tmp: bool = True,
     ):
         """Initialize the analyzer.
 
@@ -259,10 +267,14 @@ class CodeAnalyzer:
             workspace_root: The allowed workspace directory (for path validation).
             allowed_paths: Additional paths that are allowed.
             strict_mode: If True, flag more patterns as risky.
+            plugin_registry: Optional PluginRegistry for external path authorization.
+            allow_tmp: Whether to allow /tmp/** access (default: True).
         """
         self.workspace_root = workspace_root
         self.allowed_paths = allowed_paths or []
         self.strict_mode = strict_mode
+        self.plugin_registry = plugin_registry
+        self.allow_tmp = allow_tmp
 
         # Track imports seen during analysis
         self._imported_names: Set[str] = set()
@@ -584,25 +596,36 @@ class CodeAnalyzer:
                 ))
 
     def _is_external_path(self, path: str) -> bool:
-        """Check if a path appears to be external to workspace."""
+        """Check if a path is external using the shared sandbox utility.
+
+        Uses check_path_with_jaato_containment() which handles:
+        - Workspace boundary checking
+        - .jaato symlink escape (contained within .jaato boundary)
+        - /tmp access allowance (configurable)
+        - Plugin registry authorization for external paths
+        """
         if not path:
             return False
 
-        # Check against external path patterns
-        for pattern in EXTERNAL_PATH_PATTERNS:
-            if re.match(pattern, path):
-                # If we have a workspace root, check if it's actually inside
-                if self.workspace_root:
-                    try:
-                        abs_path = os.path.abspath(path)
-                        ws_abs = os.path.abspath(self.workspace_root)
-                        if abs_path.startswith(ws_abs + os.sep) or abs_path == ws_abs:
-                            return False
-                    except Exception:
-                        pass
-                return True
+        # If no workspace root configured, we can't determine if path is external
+        # Use pattern-based fallback for obvious external paths
+        if not self.workspace_root:
+            for pattern in EXTERNAL_PATH_PATTERNS:
+                if re.match(pattern, path):
+                    return True
+            return False
 
-        return False
+        # Use the shared sandbox utility for consistent path validation
+        # This respects .jaato symlinks, /tmp access, and plugin registry auth
+        is_allowed = check_path_with_jaato_containment(
+            path=path,
+            workspace_root=self.workspace_root,
+            plugin_registry=self.plugin_registry,
+            allow_tmp=self.allow_tmp,
+        )
+
+        # If path is NOT allowed by sandbox, it's external
+        return not is_allowed
 
     def _extract_string_value(self, node: ast.AST) -> Optional[str]:
         """Try to extract a string value from an AST node."""
@@ -636,15 +659,23 @@ class CodeAnalyzer:
 def analyze_code(
     code: str,
     workspace_root: Optional[str] = None,
+    plugin_registry: Any = None,
+    allow_tmp: bool = True,
 ) -> AnalysisResult:
     """Convenience function to analyze code.
 
     Args:
         code: Python source code to analyze.
         workspace_root: Optional workspace root for path validation.
+        plugin_registry: Optional PluginRegistry for external path authorization.
+        allow_tmp: Whether to allow /tmp/** access (default: True).
 
     Returns:
         AnalysisResult with detected risks.
     """
-    analyzer = CodeAnalyzer(workspace_root=workspace_root)
+    analyzer = CodeAnalyzer(
+        workspace_root=workspace_root,
+        plugin_registry=plugin_registry,
+        allow_tmp=allow_tmp,
+    )
     return analyzer.analyze(code)
