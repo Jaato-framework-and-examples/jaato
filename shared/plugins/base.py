@@ -101,6 +101,8 @@ class PermissionDisplayInfo:
         language: Programming language for syntax highlighting (when format_hint="code")
         truncated: Whether details were truncated due to size
         original_lines: Original line count before truncation (if truncated)
+        warnings: Optional security/analysis warnings to display separately
+        warning_level: Severity level for warnings ("info", "warning", "error")
     """
     summary: str
     details: str
@@ -108,6 +110,8 @@ class PermissionDisplayInfo:
     language: Optional[str] = None
     truncated: bool = False
     original_lines: Optional[int] = None
+    warnings: Optional[str] = None
+    warning_level: Optional[str] = None
 
 
 class CommandCompletion(NamedTuple):

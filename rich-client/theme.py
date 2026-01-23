@@ -368,6 +368,14 @@ DEFAULT_SEMANTIC_STYLES = {
     "clarification_question": StyleSpec(dim=True),
     "clarification_resolved": StyleSpec(fg="success", bold=True),
 
+    # Security analysis warnings (notebook sandbox)
+    "security_error_header": StyleSpec(fg="error", bold=True),
+    "security_error_text": StyleSpec(fg="error"),
+    "security_warning_header": StyleSpec(fg="warning", bold=True),
+    "security_warning_text": StyleSpec(fg="warning"),
+    "security_info_header": StyleSpec(fg="primary", bold=True),
+    "security_info_text": StyleSpec(fg="primary"),
+
     # System messages
     "system_info": StyleSpec(dim=True),  # Default system message
     "system_highlight": StyleSpec(fg="primary"),  # Informational highlights

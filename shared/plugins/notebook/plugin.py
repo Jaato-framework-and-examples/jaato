@@ -5,6 +5,7 @@ This plugin provides interactive Python notebook capabilities:
 - Multiple backend support (local, Kaggle GPU)
 - Variable inspection and notebook management
 - Streaming output support for real-time execution feedback
+- Security analysis for sandbox compliance
 """
 
 import asyncio
@@ -14,6 +15,7 @@ import queue
 import tempfile
 import threading
 from datetime import datetime
+from enum import Enum
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from ..base import UserCommand, PermissionDisplayInfo
@@ -21,7 +23,16 @@ from ..model_provider.types import ToolSchema
 from ..streaming.protocol import StreamingCapable, StreamChunk, ChunkCallback
 from .types import ExecutionStatus, OutputType
 from .backends import NotebookBackend, LocalJupyterBackend, KaggleBackend, _KAGGLE_AVAILABLE
+from .code_analyzer import CodeAnalyzer, AnalysisResult, RiskLevel
 from shared.ai_tool_runner import get_current_tool_output_callback
+
+
+class SandboxMode(Enum):
+    """Sandbox enforcement mode for notebook execution."""
+    DISABLED = "disabled"      # No analysis, execute everything
+    WARN = "warn"              # Analyze and show risks, but allow execution
+    BLOCK_CRITICAL = "block_critical"  # Block CRITICAL risks, warn others
+    STRICT = "strict"          # Block HIGH and CRITICAL risks
 
 
 # Default to local backend
@@ -60,6 +71,13 @@ class NotebookPlugin(StreamingCapable):
         self._kaggle_init_attempted: bool = False  # Lazy init flag
         # Callback for streaming output during execution (tail -f style)
         self._tool_output_callback: Optional[Callable[[str], None]] = None
+        # Sandbox configuration
+        self._workspace_root: Optional[str] = None
+        self._sandbox_mode: SandboxMode = SandboxMode.WARN
+        self._code_analyzer: Optional[CodeAnalyzer] = None
+        self._plugin_registry = None  # Set via set_plugin_registry() for path authorization
+        # Cache last analysis for permission display
+        self._last_analysis: Optional[AnalysisResult] = None
 
     @property
     def name(self) -> str:
@@ -90,12 +108,25 @@ class NotebookPlugin(StreamingCapable):
                 - enable_kaggle: Whether to enable Kaggle backend
                 - max_output_length: Max output chars to return
                 - agent_name: Agent name for trace logging
+                - workspace_root: Workspace root for sandbox path validation
+                - sandbox_mode: 'disabled', 'warn', 'block_critical', or 'strict'
         """
         config = config or {}
         self._config = config  # Store for lazy kaggle init
         self._agent_name = config.get("agent_name")
         self._max_output_length = config.get("max_output_length", MAX_OUTPUT_LENGTH)
         self._kaggle_enabled = config.get("enable_kaggle", True)
+
+        # Initialize sandbox configuration
+        self._workspace_root = config.get("workspace_root")
+        sandbox_mode_str = config.get("sandbox_mode", "warn")
+        try:
+            self._sandbox_mode = SandboxMode(sandbox_mode_str)
+        except ValueError:
+            self._sandbox_mode = SandboxMode.WARN
+
+        # Create code analyzer (will be rebuilt when plugin_registry is set)
+        self._rebuild_code_analyzer()
 
         # Always initialize local backend
         local_backend = LocalJupyterBackend()
@@ -157,6 +188,44 @@ class NotebookPlugin(StreamingCapable):
         self._current_notebook_id = None
         self._initialized = False
         self._kaggle_init_attempted = False
+
+    def set_workspace_path(self, path: str) -> None:
+        """Set workspace root path (auto-wired by PluginRegistry).
+
+        This is called during plugin registration to enable sandbox path
+        validation for notebook code execution.
+
+        Args:
+            path: Absolute path to the workspace root directory.
+        """
+        self._workspace_root = path
+        self._rebuild_code_analyzer()
+        self._trace(f"Workspace path set to: {path}")
+
+    def set_plugin_registry(self, registry) -> None:
+        """Set the plugin registry for checking external path authorization.
+
+        This is called during plugin registration to enable path authorization
+        checks via the registry (e.g., for whitelisted external paths).
+
+        Args:
+            registry: The PluginRegistry instance.
+        """
+        self._plugin_registry = registry
+        self._rebuild_code_analyzer()
+        self._trace("set_plugin_registry: registry set")
+
+    def _rebuild_code_analyzer(self) -> None:
+        """Rebuild the code analyzer with current configuration.
+
+        Called when workspace_root or plugin_registry changes to ensure
+        the analyzer uses the latest sandbox settings.
+        """
+        self._code_analyzer = CodeAnalyzer(
+            workspace_root=self._workspace_root,
+            plugin_registry=self._plugin_registry,
+            allow_tmp=True,  # Allow /tmp access like other sandboxed tools
+        )
 
     def set_tool_output_callback(self, callback: Optional[Callable[[str], None]]) -> None:
         """Set the callback for streaming output during execution.
@@ -308,6 +377,21 @@ class NotebookPlugin(StreamingCapable):
             gpu_info = f"GPU: {caps.gpu_type}" if caps.supports_gpu else "No GPU"
             backends_info.append(f"- {name}: {gpu_info}")
 
+        # Sandbox information
+        sandbox_info = ""
+        if self._sandbox_mode != SandboxMode.DISABLED:
+            sandbox_info = f"""
+
+**Sandbox Restrictions (mode: {self._sandbox_mode.value}):**
+- Code is analyzed for security risks before execution
+- File access should use workspace-relative paths only
+- Shell commands (!) and subprocess are flagged as high risk
+- External path references (e.g., /home/, /etc/) will be blocked
+- Use the file_edit or filesystem_query tools for file operations instead
+"""
+            if self._workspace_root:
+                sandbox_info += f"- Workspace root: {self._workspace_root}\n"
+
         return f"""You have access to Python notebook tools for executing code:
 
 **Available Backends:**
@@ -329,7 +413,7 @@ class NotebookPlugin(StreamingCapable):
 - 30 hours/week free GPU (P100/T4)
 - Execution is async (may take 1-5 minutes)
 - Best for: ML training, large computations
-"""
+{sandbox_info}"""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Read-only tools are auto-approved."""
@@ -360,11 +444,44 @@ class NotebookPlugin(StreamingCapable):
                             backend_name = name
                             break
 
+            # Analyze code for security risks
+            warnings_text = None
+            warning_level = None
+            if self._sandbox_mode != SandboxMode.DISABLED and self._code_analyzer:
+                analysis = self._code_analyzer.analyze(code)
+                self._last_analysis = analysis
+
+                if analysis.has_risks:
+                    # Build warnings for separate display
+                    risk_lines = [analysis.get_summary()]
+                    if analysis.external_paths:
+                        risk_lines.append(f"External paths: {', '.join(analysis.external_paths[:3])}")
+                    risk_lines.append("")
+                    risk_lines.append(analysis.format_risks(max_items=5))
+                    warnings_text = "\n".join(risk_lines)
+
+                    # Map risk level to warning level
+                    max_level = analysis.max_risk_level
+                    if max_level in (RiskLevel.CRITICAL, RiskLevel.HIGH):
+                        warning_level = "error"
+                    elif max_level == RiskLevel.MEDIUM:
+                        warning_level = "warning"
+                    else:
+                        warning_level = "info"
+
+            summary = f"Execute IPython ({backend_name}): {notebook_id}"
+            if self._last_analysis and self._last_analysis.has_risks:
+                max_level = self._last_analysis.max_risk_level
+                if max_level:
+                    summary += f" [{max_level.value.upper()} RISK]"
+
             return PermissionDisplayInfo(
-                summary=f"Execute IPython ({backend_name}): {notebook_id}",
+                summary=summary,
                 details=code,
                 format_hint="code",
                 language="ipython",
+                warnings=warnings_text,
+                warning_level=warning_level,
             )
         return None
 
@@ -383,6 +500,35 @@ class NotebookPlugin(StreamingCapable):
 
         if not code.strip():
             return {"error": "No code provided"}
+
+        # Analyze code for security risks (if sandbox is enabled)
+        if self._sandbox_mode != SandboxMode.DISABLED and self._code_analyzer:
+            analysis = self._code_analyzer.analyze(code)
+            self._last_analysis = analysis
+
+            if analysis.has_risks:
+                max_level = analysis.max_risk_level
+
+                # Check if we should block execution
+                should_block = False
+                if self._sandbox_mode == SandboxMode.STRICT:
+                    should_block = max_level in (RiskLevel.HIGH, RiskLevel.CRITICAL)
+                elif self._sandbox_mode == SandboxMode.BLOCK_CRITICAL:
+                    should_block = max_level == RiskLevel.CRITICAL
+
+                if should_block:
+                    self._trace(f"Blocked code execution: {analysis.get_summary()}")
+                    return {
+                        "error": "Code blocked by sandbox",
+                        "reason": analysis.get_summary(),
+                        "details": analysis.format_risks(max_items=10),
+                        "external_paths": analysis.external_paths,
+                        "hint": "Code contains patterns that could bypass workspace sandboxing. "
+                                "Use workspace-relative paths and avoid subprocess/shell commands.",
+                    }
+
+                # Log warning for non-blocking risks
+                self._trace(f"Code analysis warning: {analysis.get_summary()}")
 
         # Auto-create notebook if needed
         if not notebook_id:

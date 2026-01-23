@@ -1074,11 +1074,18 @@ class JaatoServer:
             # Get formatted prompt from permission plugin
             prompt_lines = None
             format_hint = None
+            warnings = None
+            warning_level = None
             if hasattr(server.permission_plugin, 'get_formatted_prompt'):
                 try:
-                    prompt_lines, format_hint, language, raw_details = server.permission_plugin.get_formatted_prompt(
+                    result = server.permission_plugin.get_formatted_prompt(
                         tool_name, tool_args or {}, "ipc"
                     )
+                    # Handle both old (4-tuple) and new (6-tuple) return formats
+                    if len(result) >= 6:
+                        prompt_lines, format_hint, language, raw_details, warnings, warning_level = result
+                    else:
+                        prompt_lines, format_hint, language, raw_details = result
 
                     if server._formatter_pipeline:
                         # First, flush any buffered model output and emit it separately
@@ -1108,6 +1115,13 @@ class JaatoServer:
                             server._formatter_pipeline.reset()
                             if formatted_code:
                                 content_parts.append("".join(formatted_code))
+
+                        # Add security warnings with special markers for client styling
+                        if warnings:
+                            # Use XML-style markers that client can parse and style separately
+                            level_marker = warning_level or "warning"
+                            warnings_block = f"<security-warning level=\"{level_marker}\">\n{warnings}\n</security-warning>\n"
+                            content_parts.append(warnings_block)
 
                         # Format the permission prompt summary + options
                         if prompt_lines:

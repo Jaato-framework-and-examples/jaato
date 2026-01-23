@@ -2471,8 +2471,14 @@ class OutputBuffer:
         prefix = "    "
         content_lines = tool.output_lines
 
-        # Check if content contains notebook row markers
+        # Check if content contains security warning markers
         content_text = "\n".join(content_lines)
+        if "<security-warning " in content_text:
+            # Extract and render security warnings separately, then render remaining content
+            self._render_with_security_warnings(output, content_text, prefix, continuation, is_last)
+            return
+
+        # Check if content contains notebook row markers
         if "<nb-row " in content_text:
             self._render_notebook_rows(output, content_text, prefix, continuation, is_last)
             return
@@ -2675,6 +2681,184 @@ class OutputBuffer:
                     output.append(line[:max_content_width - 1] + "…")
                 else:
                     output.append(line)
+
+    def _extract_and_render_security_warnings(self, output: Text, content: str, prefix: str, continuation: str) -> str:
+        """Extract and render security warnings, returning remaining content.
+
+        Extracts <security-warning> blocks, renders them with colored styling,
+        and returns the content with warning blocks removed so normal rendering
+        can continue.
+
+        Args:
+            output: Text object to append rendered warnings to.
+            content: Content that may contain security warning markers.
+            prefix: Line prefix for indentation.
+            continuation: Continuation character for tree structure.
+
+        Returns:
+            Content with security warning blocks removed.
+        """
+        import re
+
+        indent = f"{prefix}{continuation}     "
+
+        # Pattern to extract security warning blocks
+        # Note: Use (?:\n) instead of \n? to preserve leading spaces in content
+        warning_pattern = re.compile(
+            r'<security-warning\s+level="([^"]+)">(?:\n)(.*?)(?:\n)?</security-warning>(?:\n)?',
+            re.DOTALL
+        )
+
+        # Find all warnings
+        warnings = warning_pattern.findall(content)
+        # Remove warning blocks from content, strip only newlines to preserve leading spaces
+        remaining_content = warning_pattern.sub('', content)
+        remaining_content = remaining_content.strip('\n')
+        # Normalize multiple consecutive newlines to single newlines
+        import re as re_inner
+        remaining_content = re_inner.sub(r'\n{3,}', '\n\n', remaining_content)
+
+        # Render warnings with colored styling
+        for level, warning_text in warnings:
+            # Choose style and icon based on level
+            if level == "error":
+                icon = "⚠"
+                header_style = self._style("security_error_header", "bold red")
+                text_style = self._style("security_error_text", "red")
+            elif level == "warning":
+                icon = "⚠"
+                header_style = self._style("security_warning_header", "bold yellow")
+                text_style = self._style("security_warning_text", "yellow")
+            else:  # info
+                icon = "ℹ"
+                header_style = self._style("security_info_header", "bold cyan")
+                text_style = self._style("security_info_text", "cyan")
+
+            # Render header
+            output.append("\n")
+            output.append(indent, style=self._style("tree_connector", "dim"))
+            output.append(f"{icon} Security Analysis", style=header_style)
+
+            # Render warning lines
+            for line in warning_text.strip().split('\n'):
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                # Style the bracketed level markers
+                if line.startswith('['):
+                    bracket_end = line.find(']')
+                    if bracket_end > 0:
+                        marker = line[:bracket_end + 1]
+                        rest = line[bracket_end + 1:]
+                        output.append(marker, style=header_style)
+                        output.append(rest, style=text_style)
+                    else:
+                        output.append(line, style=text_style)
+                else:
+                    output.append(line, style=text_style)
+
+        # Add blank line after warnings to separate from code block
+        if warnings:
+            output.append("\n")
+
+        return remaining_content
+
+    def _render_with_security_warnings(self, output: Text, content: str, prefix: str, continuation: str, is_last: bool) -> None:
+        """Render content that contains security warning markers.
+
+        Extracts <security-warning> blocks and renders them with colored styling
+        (yellow for warning, red for error), then renders remaining content normally.
+
+        Format:
+            ⚠ Security Analysis
+            Detected: 1 medium, 1 low
+            [MEDIUM] Import of 'os' module (line 1)
+        """
+        import re
+
+        # Pattern to extract security warning blocks
+        # Note: Use (?:\n) instead of \n? to preserve leading spaces in content
+        warning_pattern = re.compile(
+            r'<security-warning\s+level="([^"]+)">(?:\n)(.*?)(?:\n)?</security-warning>(?:\n)?',
+            re.DOTALL
+        )
+
+        # Find all warnings
+        warnings = warning_pattern.findall(content)
+        # Remove warning blocks from content, strip only newlines to preserve leading spaces
+        remaining_content = warning_pattern.sub('', content)
+        remaining_content = remaining_content.strip('\n')
+        # Normalize multiple consecutive newlines to single newlines
+        import re as re_inner
+        remaining_content = re_inner.sub(r'\n{3,}', '\n\n', remaining_content)
+
+        indent = f"{prefix}{continuation}     "
+        indent_width = len(indent)
+        max_width = max(20, self._console_width - indent_width)
+
+        # Render warnings first with colored styling
+        # Use semantic styles from theme for consistent theming
+        for level, warning_text in warnings:
+            # Choose style and icon based on level
+            if level == "error":
+                icon = "⚠"
+                header_style = self._style("security_error_header", "bold red")
+                text_style = self._style("security_error_text", "red")
+            elif level == "warning":
+                icon = "⚠"
+                header_style = self._style("security_warning_header", "bold yellow")
+                text_style = self._style("security_warning_text", "yellow")
+            else:  # info
+                icon = "ℹ"
+                header_style = self._style("security_info_header", "bold cyan")
+                text_style = self._style("security_info_text", "cyan")
+
+            # Render header
+            output.append("\n")
+            output.append(indent, style=self._style("tree_connector", "dim"))
+            output.append(f"{icon} Security Analysis", style=header_style)
+
+            # Render warning lines
+            for line in warning_text.strip().split('\n'):
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                # Style the bracketed level markers
+                if line.startswith('['):
+                    bracket_end = line.find(']')
+                    if bracket_end > 0:
+                        marker = line[:bracket_end + 1]
+                        rest = line[bracket_end + 1:]
+                        output.append(marker, style=header_style)
+                        output.append(rest, style=text_style)
+                    else:
+                        output.append(line, style=text_style)
+                else:
+                    output.append(line, style=text_style)
+
+            output.append("\n")  # Blank line after warnings
+
+        # Render remaining content (code block, permission prompt, options)
+        if remaining_content:
+            remaining_lines = remaining_content.split('\n')
+
+            # Handle options line focus highlighting if permission options are set
+            if self._permission_response_options:
+                for i in range(len(remaining_lines) - 1, -1, -1):
+                    if self._is_options_line(remaining_lines[i]):
+                        # Replace options line with focused version
+                        remaining_lines[i] = self._render_focused_options_line()
+                        break
+
+            # Check for notebook rows in remaining content
+            if "<nb-row " in remaining_content:
+                self._render_notebook_rows(output, remaining_content, prefix, continuation, is_last)
+            else:
+                for line in remaining_lines:
+                    output.append("\n")
+                    output.append(indent, style=self._style("tree_connector", "dim"))
+                    if len(line) > max_width:
+                        output.append(line[:max_width - 3] + "...", style=self._style("tool_output", "dim"))
+                    else:
+                        output.append(line, style=self._style("tool_output", "dim"))
 
     def _calculate_tool_output_overhead(self, tool: 'ActiveToolCall') -> int:
         """Calculate lines of overhead before tool output content.
@@ -2954,9 +3138,15 @@ class OutputBuffer:
 
         # Unified flow: permission_content contains formatted content to render inline
         if tool.permission_content:
+            content_text = tool.permission_content
+
+            # Extract and render security warnings with colored styling, then continue with remaining content
+            if "<security-warning " in content_text:
+                content_text = self._extract_and_render_security_warnings(output, content_text, prefix, continuation)
+
             indent = f"{prefix}{continuation}     "
             indent_width = len(indent)  # 12 chars
-            content_lines = tool.permission_content.split('\n')
+            content_lines = content_text.split('\n')
 
             # Search for options line from end (may not be exactly last due to trailing empty lines)
             # Options line typically looks like: "[y]es [n]o [a]lways ..."
