@@ -2751,9 +2751,18 @@ class OutputBuffer:
 
             output.append("\n")  # Blank line after warnings
 
-        # Render remaining content (code block, etc.)
+        # Render remaining content (code block, permission prompt, options)
         if remaining_content:
             remaining_lines = remaining_content.split('\n')
+
+            # Handle options line focus highlighting if permission options are set
+            if self._permission_response_options:
+                for i in range(len(remaining_lines) - 1, -1, -1):
+                    if self._is_options_line(remaining_lines[i]):
+                        # Replace options line with focused version
+                        remaining_lines[i] = self._render_focused_options_line()
+                        break
+
             # Check for notebook rows in remaining content
             if "<nb-row " in remaining_content:
                 self._render_notebook_rows(output, remaining_content, prefix, continuation, is_last)
@@ -3044,9 +3053,16 @@ class OutputBuffer:
 
         # Unified flow: permission_content contains formatted content to render inline
         if tool.permission_content:
+            content_text = tool.permission_content
+
+            # Check if content contains security warning markers - render with special styling
+            if "<security-warning " in content_text:
+                self._render_with_security_warnings(output, content_text, prefix, continuation, is_last=True)
+                return
+
             indent = f"{prefix}{continuation}     "
             indent_width = len(indent)  # 12 chars
-            content_lines = tool.permission_content.split('\n')
+            content_lines = content_text.split('\n')
 
             # Search for options line from end (may not be exactly last due to trailing empty lines)
             # Options line typically looks like: "[y]es [n]o [a]lways ..."
