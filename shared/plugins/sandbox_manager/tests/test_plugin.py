@@ -455,6 +455,45 @@ class TestUserCommands:
         assert any("/test/path" in p for p in allowed_paths)
         assert not any("/test/path" in p for p in denied_paths)
 
+    def test_sandbox_remove_symmetric_with_add(self, initialized_plugin):
+        """Test that sandbox remove is symmetric with add for session paths.
+
+        If a path was added to session's allowed_paths, removing it should
+        just remove from allowed_paths (status: "removed"), not add to
+        denied_paths (status: "denied").
+        """
+        plugin, workspace = initialized_plugin
+
+        # First add a path
+        result = plugin._execute_sandbox_command({
+            "subcommand": "add",
+            "path": "/session/added/path"
+        })
+        assert result["status"] == "added"
+
+        # Verify it's in allowed_paths
+        config_path = workspace / ".jaato" / "sessions" / "test-session" / "sandbox.json"
+        config = json.loads(config_path.read_text())
+        allowed_paths = [p["path"] if isinstance(p, dict) else p for p in config["allowed_paths"]]
+        assert any("/session/added/path" in p for p in allowed_paths)
+
+        # Now remove it - should be symmetric (just remove, not deny)
+        result = plugin._execute_sandbox_command({
+            "subcommand": "remove",
+            "path": "/session/added/path"
+        })
+        assert result["status"] == "removed"  # Not "denied"
+        assert result["source"] == "session"
+
+        # Verify it's NOT in allowed_paths anymore
+        config = json.loads(config_path.read_text())
+        allowed_paths = [p["path"] if isinstance(p, dict) else p for p in config.get("allowed_paths", [])]
+        denied_paths = [p["path"] if isinstance(p, dict) else p for p in config.get("denied_paths", [])]
+
+        assert not any("/session/added/path" in p for p in allowed_paths)
+        # And also NOT in denied_paths (symmetric undo)
+        assert not any("/session/added/path" in p for p in denied_paths)
+
     def test_sandbox_unknown_subcommand(self, initialized_plugin):
         """Test that unknown subcommand returns error."""
         plugin, workspace = initialized_plugin
