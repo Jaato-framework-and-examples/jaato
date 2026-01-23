@@ -1143,7 +1143,7 @@ If permission is denied, do not attempt to proceed with that action."""
         tool_name: str,
         args: Dict[str, Any],
         channel_type: str = "ipc"
-    ) -> Tuple[List[str], Optional[str], Optional[str], Optional[str]]:
+    ) -> Tuple[List[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
         """Get formatted prompt lines for a permission request.
 
         This is used by the server to include pre-formatted prompts
@@ -1155,17 +1155,21 @@ If permission is denied, do not attempt to proceed with that action."""
             channel_type: Type of channel ("console", "ipc", etc.)
 
         Returns:
-            Tuple of (prompt_lines, format_hint, language, raw_details).
+            Tuple of (prompt_lines, format_hint, language, raw_details, warnings, warning_level).
             - prompt_lines: The formatted permission prompt
             - format_hint: "diff" for colored diff, "code" for code, None otherwise
             - language: Programming language when format_hint="code" (e.g., "python")
             - raw_details: Original details content when excluded from prompt_lines
                 (e.g., code to be rendered separately)
+            - warnings: Security/analysis warnings to display separately
+            - warning_level: Severity level ("info", "warning", "error")
         """
         display_info = self._get_display_info(tool_name, args, channel_type)
         format_hint = display_info.format_hint if display_info else None
         language = display_info.language if display_info else None
         raw_details = None
+        warnings = display_info.warnings if display_info else None
+        warning_level = display_info.warning_level if display_info else None
 
         # When format_hint is "code", exclude details from prompt so they can be
         # rendered separately with syntax highlighting
@@ -1174,7 +1178,7 @@ If permission is denied, do not attempt to proceed with that action."""
             raw_details = display_info.details
 
         lines = self._build_prompt_lines(tool_name, args, display_info, include_details=include_details, include_options=True)
-        return lines, format_hint, language, raw_details
+        return lines, format_hint, language, raw_details, warnings, warning_level
 
     def get_execution_log(self) -> List[Dict[str, Any]]:
         """Get the log of permission decisions."""

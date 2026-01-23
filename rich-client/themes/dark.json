@@ -113,6 +113,13 @@
     "clarification_question": {"dim": true},
     "clarification_resolved": {"fg": "success", "bold": true},
 
+    "security_error_header": {"fg": "error", "bold": true},
+    "security_error_text": {"fg": "error"},
+    "security_warning_header": {"fg": "warning", "bold": true},
+    "security_warning_text": {"fg": "warning"},
+    "security_info_header": {"fg": "primary", "bold": true},
+    "security_info_text": {"fg": "primary"},
+
     "system_info": {"dim": true},
     "system_highlight": {"fg": "primary"},
     "system_error": {"fg": "error"},
