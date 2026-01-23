@@ -2682,6 +2682,77 @@ class OutputBuffer:
                 else:
                     output.append(line)
 
+    def _extract_and_render_security_warnings(self, output: Text, content: str, prefix: str, continuation: str) -> str:
+        """Extract and render security warnings, returning remaining content.
+
+        Extracts <security-warning> blocks, renders them with colored styling,
+        and returns the content with warning blocks removed so normal rendering
+        can continue.
+
+        Args:
+            output: Text object to append rendered warnings to.
+            content: Content that may contain security warning markers.
+            prefix: Line prefix for indentation.
+            continuation: Continuation character for tree structure.
+
+        Returns:
+            Content with security warning blocks removed.
+        """
+        import re
+
+        indent = f"{prefix}{continuation}     "
+
+        # Pattern to extract security warning blocks
+        warning_pattern = re.compile(
+            r'<security-warning\s+level="([^"]+)">\n?(.*?)\n?</security-warning>',
+            re.DOTALL
+        )
+
+        # Find all warnings
+        warnings = warning_pattern.findall(content)
+        # Remove warning blocks from content
+        remaining_content = warning_pattern.sub('', content).strip()
+
+        # Render warnings with colored styling
+        for level, warning_text in warnings:
+            # Choose style and icon based on level
+            if level == "error":
+                icon = "⚠"
+                header_style = self._style("security_error_header", "bold red")
+                text_style = self._style("security_error_text", "red")
+            elif level == "warning":
+                icon = "⚠"
+                header_style = self._style("security_warning_header", "bold yellow")
+                text_style = self._style("security_warning_text", "yellow")
+            else:  # info
+                icon = "ℹ"
+                header_style = self._style("security_info_header", "bold cyan")
+                text_style = self._style("security_info_text", "cyan")
+
+            # Render header
+            output.append("\n")
+            output.append(indent, style=self._style("tree_connector", "dim"))
+            output.append(f"{icon} Security Analysis", style=header_style)
+
+            # Render warning lines
+            for line in warning_text.strip().split('\n'):
+                output.append("\n")
+                output.append(indent, style=self._style("tree_connector", "dim"))
+                # Style the bracketed level markers
+                if line.startswith('['):
+                    bracket_end = line.find(']')
+                    if bracket_end > 0:
+                        marker = line[:bracket_end + 1]
+                        rest = line[bracket_end + 1:]
+                        output.append(marker, style=header_style)
+                        output.append(rest, style=text_style)
+                    else:
+                        output.append(line, style=text_style)
+                else:
+                    output.append(line, style=text_style)
+
+        return remaining_content
+
     def _render_with_security_warnings(self, output: Text, content: str, prefix: str, continuation: str, is_last: bool) -> None:
         """Render content that contains security warning markers.
 
@@ -3055,10 +3126,9 @@ class OutputBuffer:
         if tool.permission_content:
             content_text = tool.permission_content
 
-            # Check if content contains security warning markers - render with special styling
+            # Extract and render security warnings with colored styling, then continue with remaining content
             if "<security-warning " in content_text:
-                self._render_with_security_warnings(output, content_text, prefix, continuation, is_last=True)
-                return
+                content_text = self._extract_and_render_security_warnings(output, content_text, prefix, continuation)
 
             indent = f"{prefix}{continuation}     "
             indent_width = len(indent)  # 12 chars
