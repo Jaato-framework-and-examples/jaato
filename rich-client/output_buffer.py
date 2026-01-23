@@ -2703,15 +2703,20 @@ class OutputBuffer:
         indent = f"{prefix}{continuation}     "
 
         # Pattern to extract security warning blocks
+        # Note: Use (?:\n) instead of \n? to preserve leading spaces in content
         warning_pattern = re.compile(
-            r'<security-warning\s+level="([^"]+)">\n?(.*?)\n?</security-warning>',
+            r'<security-warning\s+level="([^"]+)">(?:\n)(.*?)(?:\n)?</security-warning>(?:\n)?',
             re.DOTALL
         )
 
         # Find all warnings
         warnings = warning_pattern.findall(content)
-        # Remove warning blocks from content
-        remaining_content = warning_pattern.sub('', content).strip()
+        # Remove warning blocks from content, strip only newlines to preserve leading spaces
+        remaining_content = warning_pattern.sub('', content)
+        remaining_content = remaining_content.strip('\n')
+        # Normalize multiple consecutive newlines to single newlines
+        import re as re_inner
+        remaining_content = re_inner.sub(r'\n{3,}', '\n\n', remaining_content)
 
         # Render warnings with colored styling
         for level, warning_text in warnings:
@@ -2751,6 +2756,10 @@ class OutputBuffer:
                 else:
                     output.append(line, style=text_style)
 
+        # Add blank line after warnings to separate from code block
+        if warnings:
+            output.append("\n")
+
         return remaining_content
 
     def _render_with_security_warnings(self, output: Text, content: str, prefix: str, continuation: str, is_last: bool) -> None:
@@ -2767,15 +2776,20 @@ class OutputBuffer:
         import re
 
         # Pattern to extract security warning blocks
+        # Note: Use (?:\n) instead of \n? to preserve leading spaces in content
         warning_pattern = re.compile(
-            r'<security-warning\s+level="([^"]+)">\n?(.*?)\n?</security-warning>',
+            r'<security-warning\s+level="([^"]+)">(?:\n)(.*?)(?:\n)?</security-warning>(?:\n)?',
             re.DOTALL
         )
 
         # Find all warnings
         warnings = warning_pattern.findall(content)
-        # Remove warning blocks from content
-        remaining_content = warning_pattern.sub('', content).strip()
+        # Remove warning blocks from content, strip only newlines to preserve leading spaces
+        remaining_content = warning_pattern.sub('', content)
+        remaining_content = remaining_content.strip('\n')
+        # Normalize multiple consecutive newlines to single newlines
+        import re as re_inner
+        remaining_content = re_inner.sub(r'\n{3,}', '\n\n', remaining_content)
 
         indent = f"{prefix}{continuation}     "
         indent_width = len(indent)
