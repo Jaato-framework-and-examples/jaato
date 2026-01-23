@@ -138,6 +138,8 @@ class PluginRegistry:
         self._terminal_width: int = 80
         # Authorized external paths: path -> source plugin name
         self._authorized_external_paths: Dict[str, str] = {}
+        # Denied external paths: path -> source plugin name (takes precedence over authorized)
+        self._denied_external_paths: Dict[str, str] = {}
         # Core tools: framework-provided tools not from plugins
         self._core_tools: Dict[str, ToolSchema] = {}
         self._core_executors: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
@@ -1239,6 +1241,128 @@ class PluginRegistry:
             Dict mapping normalized paths to the source plugin that authorized them.
         """
         return dict(self._authorized_external_paths)
+
+    # ==================== External Path Denial ====================
+
+    def deny_external_path(self, path: str, source_plugin: str) -> None:
+        """Deny an external path, blocking model access even if otherwise allowed.
+
+        Denied paths take precedence over authorized paths. This is used by
+        the sandbox_manager plugin to implement session-level path blocking.
+
+        Args:
+            path: Absolute path to deny (will be normalized).
+            source_plugin: Name of the plugin denying access.
+        """
+        # Normalize to absolute path
+        normalized = os.path.realpath(os.path.abspath(path))
+        self._denied_external_paths[normalized] = source_plugin
+        _trace(f"deny_external_path: {normalized} (from {source_plugin})")
+
+    def deny_external_paths(self, paths: List[str], source_plugin: str) -> None:
+        """Deny multiple external paths.
+
+        Args:
+            paths: List of absolute paths to deny.
+            source_plugin: Name of the plugin denying access.
+        """
+        for path in paths:
+            self.deny_external_path(path, source_plugin)
+
+    def is_path_denied(self, path: str) -> bool:
+        """Check if a path is denied for model access.
+
+        This checks both exact path matches and parent directory matches
+        (if a directory is denied, all files within it are denied).
+
+        Denial takes precedence over authorization - a path can be both
+        authorized and denied, and denial wins.
+
+        Args:
+            path: Path to check (will be normalized).
+
+        Returns:
+            True if the path or a parent directory is denied.
+        """
+        if not self._denied_external_paths:
+            return False
+
+        # Normalize the path
+        normalized = os.path.realpath(os.path.abspath(path))
+
+        # Check exact match
+        if normalized in self._denied_external_paths:
+            return True
+
+        # Check if any denied path is a parent directory
+        for denied_path in self._denied_external_paths:
+            # Check if normalized path is under a denied directory
+            denied_with_sep = denied_path.rstrip(os.sep) + os.sep
+            if normalized.startswith(denied_with_sep):
+                return True
+
+        return False
+
+    def get_path_denial_source(self, path: str) -> Optional[str]:
+        """Get the plugin that denied a path.
+
+        Args:
+            path: Path to check (will be normalized).
+
+        Returns:
+            Name of the plugin that denied this path, or None if not denied.
+        """
+        if not self._denied_external_paths:
+            return None
+
+        normalized = os.path.realpath(os.path.abspath(path))
+
+        # Check exact match
+        if normalized in self._denied_external_paths:
+            return self._denied_external_paths[normalized]
+
+        # Check parent directories
+        for denied_path, source in self._denied_external_paths.items():
+            denied_with_sep = denied_path.rstrip(os.sep) + os.sep
+            if normalized.startswith(denied_with_sep):
+                return source
+
+        return None
+
+    def clear_denied_paths(self, source_plugin: Optional[str] = None) -> int:
+        """Clear denied external paths.
+
+        Args:
+            source_plugin: If specified, only clear paths from this plugin.
+                          If None, clear all denied paths.
+
+        Returns:
+            Number of paths cleared.
+        """
+        if source_plugin is None:
+            count = len(self._denied_external_paths)
+            self._denied_external_paths.clear()
+            _trace(f"clear_denied_paths: cleared all {count} paths")
+            return count
+
+        # Clear only paths from the specified plugin
+        to_remove = [
+            path for path, source in self._denied_external_paths.items()
+            if source == source_plugin
+        ]
+        for path in to_remove:
+            del self._denied_external_paths[path]
+
+        _trace(f"clear_denied_paths: cleared {len(to_remove)} paths from {source_plugin}")
+        return len(to_remove)
+
+    def list_denied_paths(self) -> Dict[str, str]:
+        """List all denied external paths.
+
+        Returns:
+            Dict mapping normalized paths to the source plugin that denied them.
+        """
+        return dict(self._denied_external_paths)
 
     # ==================== Prompt Enrichment ====================
 

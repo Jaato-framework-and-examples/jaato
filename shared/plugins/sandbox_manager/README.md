@@ -1,64 +1,103 @@
+# Sandbox Manager Plugin
 
-# Sandbox Command (`sandbox`)
-
-This document provides user-facing documentation for the `sandbox` command.
+This plugin provides runtime management of filesystem sandbox permissions through user commands.
 
 ## Overview
 
-The `sandbox` command is a runtime tool for managing the filesystem paths that the `jaato` agent is allowed to access during a specific session. It allows you to grant temporary permissions or create temporary blocks for paths that are outside the standard workspace.
-
-This system operates on a three-tiered configuration model.
+The `sandbox` command allows users to dynamically grant or revoke filesystem access during a session. It operates on a three-tiered configuration model where session-level settings have the highest precedence.
 
 ## Configuration Levels
 
-The effective sandbox is determined by merging configurations from three sources. The `sandbox list` command will show you the complete, unified view.
+| Level | Path | Precedence | Persistence |
+|-------|------|------------|-------------|
+| **Global** | `~/.jaato/sandbox_paths.json` | Lowest | User-managed |
+| **Workspace** | `<workspace>/.jaato/sandbox.json` | Medium | Project-managed |
+| **Session** | `<workspace>/.jaato/sessions/<id>/sandbox.json` | Highest | Runtime-managed |
 
-### 1. Global Configuration (Lowest Precedence)
+The `sandbox list` command shows the merged, effective view from all three levels.
 
-This file is for your personal, user-specific settings that apply to all your projects.
-
-- **Path:** `~/.jaato/sandbox_paths.json`
-- **Usage:** Manually edit this file to add paths that you want to be available in every `jaato` session.
-
-### 2. Workspace Configuration
-
-This file is for project-specific settings and can be shared with your team.
-
-- **Path:** `<workspace_root>/.jaato/sandbox.json`
-- **Usage:** Manually edit this file to define allowed paths that are relevant to this specific project.
-
-### 3. Session Configuration (Highest Precedence)
-
-This is a temporary configuration that applies only to the current, active session. The `sandbox` command exclusively reads from and writes to this level.
-
-- **Path:** `<workspace_root>/.jaato/sessions/<session_id>/sandbox.json`
-- **Usage:** Use the `sandbox add` and `sandbox remove` commands to modify this file at runtime.
-
-## Commands
+## User Commands
 
 ### `sandbox list`
 
-Displays a complete, read-only list of all currently active sandbox paths from all three configuration levels.
+Displays all currently active sandbox paths from all configuration levels.
 
-- **Example Output:**
-  ```
-  Effective Sandbox Paths for this Session:
+```
+Effective Sandbox Paths:
 
-  [ALLOW] /tmp/temp_data_for_this_session (Session)
-  [ALLOW] /var/www/my_project/assets    (Workspace)
-  [DENY]  /home/user/project_assets     (Blocked in Session, allowed by Workspace)
-  [ALLOW] /opt/company_tools              (Global)
-  ```
+Path                              Action   Source
+/opt/company_tools                ALLOW    global
+/var/www/project/assets           ALLOW    workspace
+/tmp/temp_data                    ALLOW    session
+/home/user/sensitive              DENY     session
+```
 
 ### `sandbox add <path>`
 
-Grants access to a new path for the current session only.
+Grants access to a path for the current session.
 
-- **Action:** Adds the specified `<path>` to the `allowed_paths` list in the session's `sandbox.json` file.
+- Adds `<path>` to `allowed_paths` in session config
+- Removes from `denied_paths` if present
+- Takes effect immediately
 
 ### `sandbox remove <path>`
 
-Temporarily blocks access to a path for the current session, even if it is allowed by the Global or Workspace configuration.
+Blocks access to a path for the current session, even if allowed at global/workspace level.
 
-- **Action:** Adds the specified `<path>` to the `denied_paths` list in the session's `sandbox.json` file. This acts as a session-level override.
+- Adds `<path>` to `denied_paths` in session config
+- Removes from `allowed_paths` if present
+- Takes effect immediately
 
+## Configuration File Format
+
+All three configuration files use the same JSON format:
+
+```json
+{
+  "allowed_paths": [
+    "/path/to/allow",
+    {"path": "/another/path", "added_at": "2024-01-15T10:30:00Z"}
+  ],
+  "denied_paths": [
+    "/path/to/deny"
+  ]
+}
+```
+
+Both simple strings and objects with metadata are supported.
+
+## Registry Integration
+
+The plugin integrates with `PluginRegistry` for path validation:
+
+1. **On initialization**: Loads all config files and syncs to registry
+2. **Allowed paths**: Registered via `registry.authorize_external_path()`
+3. **Denied paths**: Registered via `registry.deny_external_path()`
+4. **Precedence**: Session denials override workspace/global allows
+
+Path validation in `sandbox_utils.check_path_with_jaato_containment()` checks denied paths first, so denial always takes precedence.
+
+## Initialization
+
+The plugin requires both workspace path and session ID to be set:
+
+```python
+from shared.plugins.sandbox_manager import create_plugin
+
+plugin = create_plugin()
+plugin.initialize({"session_id": "my-session-123"})
+plugin.set_workspace_path("/path/to/workspace")
+```
+
+When used through the registry, these are set automatically via auto-wiring.
+
+## Plugin Protocol
+
+| Method | Returns |
+|--------|---------|
+| `get_tool_schemas()` | `[]` (no model tools) |
+| `get_user_commands()` | `[UserCommand("sandbox", ...)]` |
+| `get_auto_approved_tools()` | `["sandbox"]` |
+| `get_system_instructions()` | `None` |
+
+This is a **user-command-only plugin** - it provides commands for users to invoke directly, not tools for the model to call.
