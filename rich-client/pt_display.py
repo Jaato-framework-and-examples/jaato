@@ -1109,20 +1109,25 @@ class PTDisplay:
 
         @kb.add(*keys.get_key_args("submit"), eager=True)
         def handle_enter(event):
-            """Handle enter key - submit input or advance pager."""
+            """Handle enter key - submit input, select permission option, or advance pager."""
             if getattr(self, '_pager_active', False):
                 # In pager mode - advance page
                 self._advance_pager_page()
                 return
-            else:
-                # Normal mode - submit input
-                text = self._input_buffer.text.strip()
-                # Add to history before reset (like PromptSession does)
-                if text and self._input_buffer.history:
-                    self._input_buffer.history.append_string(text)
-                self._input_buffer.reset()
-                if self._input_callback:
-                    self._input_callback(text)
+            # Check for permission mode - if input is empty, select focused option
+            text = self._input_buffer.text.strip()
+            if (not text and
+                getattr(self, '_waiting_for_channel_input', False) and
+                self._permission_response_options):
+                self._select_focused_permission_option()
+                return
+            # Normal mode - submit input
+            # Add to history before reset (like PromptSession does)
+            if text and self._input_buffer.history:
+                self._input_buffer.history.append_string(text)
+            self._input_buffer.reset()
+            if self._input_callback:
+                self._input_callback(text)
 
         @kb.add(*keys.get_key_args("newline"))
         def handle_alt_enter(event):
