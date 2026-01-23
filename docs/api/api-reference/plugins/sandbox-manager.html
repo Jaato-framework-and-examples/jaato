@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sandbox Manager Plugin - jaato docs</title>
+  <link rel="stylesheet" href="../../assets/css/style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="../../index.html" class="header-logo">
+      jaato <span>docs</span>
+    </a>
+    <nav class="header-nav">
+      <a href="../../getting-started/quickstart.html">Quickstart</a>
+      <a href="../index.html">API Reference</a>
+      <a href="https://github.com/apanoia/jaato" target="_blank">GitHub</a>
+      <div class="header-search">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" placeholder="Search docs... (press /)">
+      </div>
+    </nav>
+  </header>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Getting Started</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../getting-started/quickstart.html">Quickstart</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Core Concepts</div>
+        <ul class="sidebar-nav">
+          <li><a href="../../core-concepts/client.html">Client</a></li>
+          <li><a href="../../core-concepts/plugins.html">Plugins</a></li>
+          <li><a href="../../core-concepts/tools.html">Tools</a></li>
+          <li><a href="../../core-concepts/providers.html">Providers</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">API Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../index.html">Overview</a></li>
+          <li><a href="../jaato-client.html">JaatoClient</a></li>
+          <li><a href="../jaato-runtime.html">JaatoRuntime</a></li>
+          <li><a href="../jaato-session.html">JaatoSession</a></li>
+          <li><a href="../plugin-registry.html">PluginRegistry</a></li>
+          <li><a href="../tool-executor.html">ToolExecutor</a></li>
+          <li><a href="../types.html">Types</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Provider Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="../providers/index.html">Overview</a></li>
+          <li><a href="../providers/google-genai.html">Google GenAI</a></li>
+          <li><a href="../providers/anthropic.html">Anthropic</a></li>
+          <li><a href="../providers/github-models.html">GitHub Models</a></li>
+          <li><a href="../providers/claude-cli.html">Claude CLI</a></li>
+          <li><a href="../providers/antigravity.html">Antigravity</a></li>
+          <li><a href="../providers/ollama.html">Ollama</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Plugin Reference</div>
+        <ul class="sidebar-nav">
+          <li><a href="index.html">Overview</a></li>
+          <li><a href="cli.html">CLI</a></li>
+          <li><a href="file-edit.html">File Edit</a></li>
+          <li><a href="filesystem-query.html">Filesystem Query</a></li>
+          <li><a href="todo.html">Todo</a></li>
+          <li><a href="web-search.html">Web Search</a></li>
+          <li><a href="mcp.html">MCP</a></li>
+          <li><a href="permission.html">Permission</a></li>
+          <li><a href="sandbox-manager.html" class="active">Sandbox Manager</a></li>
+          <li><a href="session.html">Session</a></li>
+          <li><a href="gc.html">GC</a></li>
+          <li><a href="other.html">Other Plugins</a></li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <!-- Overview -->
+      <section class="two-panel">
+        <div class="panel-explanation">
+          <h1>Sandbox Manager Plugin</h1>
+          <p class="lead">
+            Runtime management of filesystem sandbox permissions through user commands.
+            Grant or revoke path access dynamically during a session.
+          </p>
+
+          <div class="note">
+            <strong>User Commands Only:</strong> This plugin provides commands for users
+            to invoke directly. It does not expose tools for the model to call.
+          </div>
+
+          <h2 id="overview">Overview</h2>
+          <p>
+            The sandbox manager allows users to dynamically control which filesystem paths
+            the model can access during a session. It operates on a three-tiered configuration
+            model where session-level settings have the highest precedence.
+          </p>
+
+          <h2 id="configuration-levels">Configuration Levels</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Level</th>
+                <th>Path</th>
+                <th>Precedence</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Global</strong></td>
+                <td><code>~/.jaato/sandbox_paths.json</code></td>
+                <td>Lowest</td>
+              </tr>
+              <tr>
+                <td><strong>Workspace</strong></td>
+                <td><code>&lt;workspace&gt;/.jaato/sandbox.json</code></td>
+                <td>Medium</td>
+              </tr>
+              <tr>
+                <td><strong>Session</strong></td>
+                <td><code>&lt;workspace&gt;/.jaato/sessions/&lt;id&gt;/sandbox.json</code></td>
+                <td>Highest</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            Session-level configurations can override global and workspace settings.
+            A path denied at the session level will be blocked even if allowed globally.
+          </p>
+
+          <h2 id="user-commands">User Commands</h2>
+
+          <h3><code>sandbox list</code></h3>
+          <p>
+            Displays all effective sandbox paths merged from all configuration levels.
+            Shows the path, action (ALLOW/DENY), and source level.
+          </p>
+
+          <h3><code>sandbox add &lt;path&gt;</code></h3>
+          <p>
+            Grants access to a path for the current session only.
+          </p>
+          <ul>
+            <li>Adds <code>&lt;path&gt;</code> to session's <code>allowed_paths</code></li>
+            <li>Removes from <code>denied_paths</code> if present</li>
+            <li>Changes take effect immediately</li>
+          </ul>
+
+          <h3><code>sandbox remove &lt;path&gt;</code></h3>
+          <p>
+            Blocks access to a path for the current session, even if allowed at
+            global or workspace level.
+          </p>
+          <ul>
+            <li>Adds <code>&lt;path&gt;</code> to session's <code>denied_paths</code></li>
+            <li>Removes from <code>allowed_paths</code> if present</li>
+            <li>Changes take effect immediately</li>
+          </ul>
+
+          <h2 id="registry-integration">Registry Integration</h2>
+          <p>
+            The plugin integrates with <code>PluginRegistry</code> for path validation:
+          </p>
+          <ul>
+            <li><strong>Allowed paths</strong>: Registered via <code>registry.authorize_external_path()</code></li>
+            <li><strong>Denied paths</strong>: Registered via <code>registry.deny_external_path()</code></li>
+            <li><strong>Validation</strong>: <code>sandbox_utils.check_path_with_jaato_containment()</code>
+                checks denied paths first, so denial always takes precedence</li>
+          </ul>
+
+          <h2 id="plugin-protocol">Plugin Protocol</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Returns</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>get_tool_schemas()</code></td>
+                <td><code>[]</code> (no model tools)</td>
+              </tr>
+              <tr>
+                <td><code>get_user_commands()</code></td>
+                <td><code>[UserCommand("sandbox", ...)]</code></td>
+              </tr>
+              <tr>
+                <td><code>get_auto_approved_tools()</code></td>
+                <td><code>["sandbox"]</code></td>
+              </tr>
+              <tr>
+                <td><code>get_system_instructions()</code></td>
+                <td><code>None</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="panel-code">
+          <div class="code-label">Configuration file format</div>
+          <div class="code-block">
+            <pre><code class="language-json">{
+  "allowed_paths": [
+    "/path/to/allow",
+    {
+      "path": "/another/path",
+      "added_at": "2024-01-15T10:30:00Z"
+    }
+  ],
+  "denied_paths": [
+    "/path/to/deny"
+  ]
+}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Example: sandbox list output</div>
+          <div class="code-block">
+            <pre><code class="language-text">Effective Sandbox Paths:
+
+Path                        Action   Source
+/opt/company_tools          ALLOW    global
+/var/www/project/assets     ALLOW    workspace
+/tmp/temp_data              ALLOW    session
+/home/user/sensitive        DENY     session</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Programmatic usage</div>
+          <div class="code-block">
+            <pre><code class="language-python">from shared.plugins.sandbox_manager import create_plugin
+
+# Create and initialize
+plugin = create_plugin()
+plugin.initialize({
+    "session_id": "my-session-123"
+})
+plugin.set_workspace_path("/path/to/workspace")
+
+# Execute commands
+result = plugin._execute_sandbox_command({
+    "subcommand": "add",
+    "path": "/external/data"
+})
+# Returns: {"status": "added", "path": "...", "source": "session"}
+
+result = plugin._execute_sandbox_command({
+    "subcommand": "list"
+})
+# Returns: {"effective_paths": [...], "summary": {...}}</code></pre>
+          </div>
+
+          <div class="code-label" style="margin-top: 24px;">Registry integration</div>
+          <div class="code-block">
+            <pre><code class="language-python"># The plugin syncs to registry automatically
+# Other plugins use sandbox_utils for validation:
+
+from shared.plugins.sandbox_utils import (
+    check_path_with_jaato_containment
+)
+
+# This checks denied paths first
+is_allowed = check_path_with_jaato_containment(
+    path="/some/path",
+    workspace_root="/workspace",
+    plugin_registry=registry,  # Has deny methods
+    allow_tmp=True
+)</code></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/lunr@2.3.9/lunr.min.js"></script>
+  <script src="../../assets/js/docs.js"></script>
+</body>
+</html>
