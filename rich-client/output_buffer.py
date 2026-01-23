@@ -2711,21 +2711,21 @@ class OutputBuffer:
         max_width = max(20, self._console_width - indent_width)
 
         # Render warnings first with colored styling
-        # Use raw Rich styles directly for reliable colored output
+        # Use semantic styles from theme for consistent theming
         for level, warning_text in warnings:
             # Choose style and icon based on level
             if level == "error":
                 icon = "⚠"
-                header_style = "bold red"
-                text_style = "red"
+                header_style = self._style("security_error_header", "bold red")
+                text_style = self._style("security_error_text", "red")
             elif level == "warning":
                 icon = "⚠"
-                header_style = "bold yellow"
-                text_style = "yellow"
+                header_style = self._style("security_warning_header", "bold yellow")
+                text_style = self._style("security_warning_text", "yellow")
             else:  # info
                 icon = "ℹ"
-                header_style = "bold cyan"
-                text_style = "cyan"
+                header_style = self._style("security_info_header", "bold cyan")
+                text_style = self._style("security_info_text", "cyan")
 
             # Render header
             output.append("\n")
