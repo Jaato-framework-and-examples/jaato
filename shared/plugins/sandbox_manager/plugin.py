@@ -522,8 +522,9 @@ class SandboxManagerPlugin:
     def _cmd_remove(self, path: str) -> Dict[str, Any]:
         """Execute 'sandbox remove <path>' command.
 
-        This adds the path to the session's denied_paths, blocking access
-        even if the path is allowed at global or workspace level.
+        Behavior is symmetric with 'sandbox add':
+        - If the path was added to session's allowed_paths, just remove it
+        - If the path is allowed at global/workspace level, add to denied_paths
         """
         if not self._workspace_path:
             return {"error": "No workspace configured"}
@@ -547,17 +548,27 @@ class SandboxManagerPlugin:
         if path in existing_denied:
             return {"status": "already_denied", "path": path}
 
-        # Remove from allowed_paths if present
-        session_config["allowed_paths"] = [
-            p for p in session_config.get("allowed_paths", [])
-            if (p["path"] if isinstance(p, dict) else p) != path
+        # Check if path was added to session's allowed_paths
+        existing_allowed = [
+            p["path"] if isinstance(p, dict) else p
+            for p in session_config.get("allowed_paths", [])
         ]
+        was_session_allowed = path in existing_allowed
 
-        # Add to denied_paths
-        session_config.setdefault("denied_paths", []).append({
-            "path": path,
-            "added_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        })
+        if was_session_allowed:
+            # Symmetric undo: just remove from allowed_paths, don't add to denied
+            session_config["allowed_paths"] = [
+                p for p in session_config.get("allowed_paths", [])
+                if (p["path"] if isinstance(p, dict) else p) != path
+            ]
+            status = "removed"
+        else:
+            # Path is allowed at global/workspace level, add to denied_paths to block it
+            session_config.setdefault("denied_paths", []).append({
+                "path": path,
+                "added_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            })
+            status = "denied"
 
         # Save
         if not self._save_session_config(session_config):
@@ -566,7 +577,7 @@ class SandboxManagerPlugin:
         # Reload and sync
         self._load_all_configs()
 
-        return {"status": "denied", "path": path, "source": "session"}
+        return {"status": status, "path": path, "source": "session"}
 
 
 def create_plugin() -> SandboxManagerPlugin:
