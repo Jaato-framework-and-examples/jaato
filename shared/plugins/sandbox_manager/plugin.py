@@ -142,6 +142,30 @@ class SandboxManagerPlugin:
         if self._initialized and self._workspace_path:
             self._load_all_configs()
 
+    def _get_current_session_id(self) -> Optional[str]:
+        """Get the current session ID.
+
+        First checks if set directly via set_session_id(), then queries
+        the session plugin via registry for the active session ID.
+
+        Returns:
+            Current session ID or None if no session is active.
+        """
+        # Check if set directly
+        if self._session_id:
+            return self._session_id
+
+        # Query session plugin via registry
+        if self._registry:
+            session_plugin = self._registry.get_plugin("session")
+            if session_plugin and hasattr(session_plugin, 'get_current_session_id'):
+                session_id = session_plugin.get_current_session_id()
+                if session_id:
+                    self._trace(f"_get_current_session_id: got {session_id} from session plugin")
+                    return session_id
+
+        return None
+
     # ==================== Config Loading ====================
 
     def _get_global_config_path(self) -> Path:
@@ -156,11 +180,12 @@ class SandboxManagerPlugin:
 
     def _get_session_config_path(self) -> Optional[Path]:
         """Get path to session config file."""
-        if not self._workspace_path or not self._session_id:
+        session_id = self._get_current_session_id()
+        if not self._workspace_path or not session_id:
             return None
         return (
             Path(self._workspace_path) / ".jaato" / "sessions" /
-            self._session_id / SESSION_CONFIG_FILE
+            session_id / SESSION_CONFIG_FILE
         )
 
     def _load_config_file(self, path: Path, source: str) -> tuple[List[SandboxPath], List[SandboxPath]]:
@@ -454,8 +479,8 @@ class SandboxManagerPlugin:
         if not self._workspace_path:
             return {"error": "No workspace configured"}
 
-        if not self._session_id:
-            return {"error": "No session ID configured. Cannot add session-level paths."}
+        if not self._get_current_session_id():
+            return {"error": "No active session. Start or resume a session first."}
 
         # Normalize path
         if not os.path.isabs(path):
@@ -502,8 +527,8 @@ class SandboxManagerPlugin:
         if not self._workspace_path:
             return {"error": "No workspace configured"}
 
-        if not self._session_id:
-            return {"error": "No session ID configured. Cannot modify session-level paths."}
+        if not self._get_current_session_id():
+            return {"error": "No active session. Start or resume a session first."}
 
         # Normalize path
         if not os.path.isabs(path):
