@@ -38,6 +38,7 @@ class IntrospectionPlugin:
     def __init__(self):
         self._initialized = False
         self._registry = None  # Set via set_plugin_registry()
+        self._session = None  # Set via set_session() for tool activation
         self._accessed_tools: Set[str] = set()  # Track tools model has requested
 
     @property
@@ -66,6 +67,18 @@ class IntrospectionPlugin:
             registry: The PluginRegistry instance.
         """
         self._registry = registry
+
+    def set_session(self, session) -> None:
+        """Receive the session for tool activation.
+
+        This is called automatically by the plugin wiring system. When tools
+        are discovered via get_tool_schemas, they need to be activated in
+        the session so the provider can use them.
+
+        Args:
+            session: The JaatoSession instance.
+        """
+        self._session = session
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for introspection tools.
@@ -306,12 +319,19 @@ class IntrospectionPlugin:
         schemas = []
         not_found = []
 
+        # Collect tools that need activation (discoverable tools not yet in provider)
+        tools_to_activate = []
+
         for tool_name in names:
             if tool_name in schema_map:
                 target_schema = schema_map[tool_name]
 
                 # Track this access
                 self._accessed_tools.add(tool_name)
+
+                # Check if this is a discoverable tool that needs activation
+                if getattr(target_schema, 'discoverability', 'discoverable') == 'discoverable':
+                    tools_to_activate.append(tool_name)
 
                 # Find plugin source
                 plugin = self._registry.get_plugin_for_tool(tool_name)
@@ -355,6 +375,14 @@ class IntrospectionPlugin:
             if suggestions:
                 result["suggestions"] = suggestions
             result["hint"] = "Use list_tools() to see available tools."
+
+        # Activate discovered tools so the model can actually call them
+        # This adds the tool schemas to the provider's declared tools
+        if tools_to_activate and self._session:
+            activated = self._session.activate_discovered_tools(tools_to_activate)
+            if activated:
+                result["activated"] = activated
+                result["activation_note"] = "These tools are now available to call."
 
         return result
 

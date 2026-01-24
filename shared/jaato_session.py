@@ -1000,6 +1000,52 @@ class JaatoSession:
         history = self.get_history()
         self._create_provider_session(history)
 
+    def activate_discovered_tools(self, tool_names: List[str]) -> List[str]:
+        """Activate discovered tools so the model can call them.
+
+        When deferred tool loading is enabled, discoverable tools are not
+        initially sent to the provider. When the model discovers tools via
+        get_tool_schemas, this method activates them by adding their schemas
+        to the provider's declared tools.
+
+        Args:
+            tool_names: Names of tools to activate.
+
+        Returns:
+            List of tool names that were actually activated (not already active).
+        """
+        if not self._provider or not self._runtime.registry:
+            return []
+
+        # Get current tool names for dedup
+        current_tool_names = {t.name for t in (self._tools or [])}
+        activated = []
+
+        # Get schemas for requested tools from registry
+        all_schemas = self._runtime.registry.get_exposed_tool_schemas()
+        schema_map = {s.name: s for s in all_schemas}
+
+        for tool_name in tool_names:
+            if tool_name in current_tool_names:
+                continue  # Already active
+            if tool_name not in schema_map:
+                continue  # Tool doesn't exist
+
+            schema = schema_map[tool_name]
+            if self._tools is None:
+                self._tools = []
+            self._tools.append(schema)
+            current_tool_names.add(tool_name)
+            activated.append(tool_name)
+
+        # If we activated any tools, recreate the provider session
+        if activated:
+            self._trace(f"Activating discovered tools: {activated}")
+            history = self.get_history()
+            self._create_provider_session(history)
+
+        return activated
+
     def _register_model_command(self) -> None:
         """Register the built-in model command for listing and switching models."""
         from .plugins.base import CommandParameter
