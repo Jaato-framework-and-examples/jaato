@@ -55,9 +55,8 @@ class TodoPlugin:
         # This allows multiple agents to have their own active plans
         self._current_plan_ids: Dict[Optional[str], str] = {}
 
-        # Session reference for getting agent_id (preferred over thread-local)
-        # This is set by the plugin wiring system via set_session()
-        self._session: Optional[Any] = None
+        # Note: session is stored in thread-local storage via set_session()
+        # This prevents subagent sessions from overwriting the parent's reference
 
         # Event bus for cross-agent task collaboration
         self._event_bus: Optional[TaskEventBus] = None
@@ -68,13 +67,13 @@ class TodoPlugin:
     def _agent_name(self) -> Optional[str]:
         """Get the agent name/ID for the current context.
 
-        Prefers session.agent_id if available (works across threads),
-        falls back to thread-local storage for backward compatibility.
+        Uses thread-local session reference to get agent_id. This ensures
+        each thread (main agent vs subagent) sees its own session context.
         """
-        # Prefer session's agent_id - it's thread-safe and works with parallel tools
-        if self._session is not None:
-            return self._session.agent_id
-        # Fall back to thread-local (legacy behavior)
+        session = getattr(_thread_local, 'session', None)
+        if session is not None:
+            return session.agent_id
+        # Fall back to legacy thread-local agent_name
         return getattr(_thread_local, 'agent_name', None)
 
     @_agent_name.setter
@@ -83,16 +82,16 @@ class TodoPlugin:
         _thread_local.agent_name = value
 
     def set_session(self, session: Any) -> None:
-        """Set the session for agent context.
+        """Set the session for agent context in thread-local storage.
 
-        This is called by the plugin wiring system. The session provides
-        thread-safe access to agent_id, which is essential for parallel
-        tool execution.
+        This is called by the plugin wiring system. Using thread-local storage
+        ensures that when subagents (running in different threads) call this,
+        they don't overwrite the parent agent's session reference.
 
         Args:
             session: The JaatoSession instance.
         """
-        self._session = session
+        _thread_local.session = session
 
     @property
     def name(self) -> str:

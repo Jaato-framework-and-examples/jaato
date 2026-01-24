@@ -9,10 +9,15 @@ The plugin supports deferred tool loading for token economy:
 - Models request schemas on-demand, reducing initial context overhead
 """
 
+import threading
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from ..model_provider.types import ToolSchema, TOOL_CATEGORIES
 from ..streaming import StreamingCapable
+
+# Thread-local storage for session reference per agent context
+# This prevents subagents from overwriting parent's session reference
+_thread_local = threading.local()
 
 
 class IntrospectionPlugin:
@@ -38,12 +43,21 @@ class IntrospectionPlugin:
     def __init__(self):
         self._initialized = False
         self._registry = None  # Set via set_plugin_registry()
-        self._session = None  # Set via set_session() for tool activation
         self._accessed_tools: Set[str] = set()  # Track tools model has requested
 
     @property
     def name(self) -> str:
         return "introspection"
+
+    @property
+    def _session(self):
+        """Get the session for the current thread context.
+
+        Uses thread-local storage so each agent (main or subagent) gets
+        its own session reference, preventing subagents from overwriting
+        the parent's session.
+        """
+        return getattr(_thread_local, 'session', None)
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the introspection plugin.
@@ -75,10 +89,12 @@ class IntrospectionPlugin:
         are discovered via get_tool_schemas, they need to be activated in
         the session so the provider can use them.
 
+        Stores in thread-local storage so each agent context gets its own session.
+
         Args:
             session: The JaatoSession instance.
         """
-        self._session = session
+        _thread_local.session = session
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for introspection tools.
