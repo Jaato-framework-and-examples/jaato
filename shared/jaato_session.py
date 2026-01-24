@@ -292,6 +292,15 @@ class JaatoSession:
         """Check if session is configured and ready."""
         return self._provider is not None
 
+    @property
+    def agent_id(self) -> str:
+        """Get the agent ID for this session.
+
+        Returns:
+            The unique agent ID (e.g., "main", "subagent_1", etc.)
+        """
+        return self._agent_id
+
     def set_agent_context(
         self,
         agent_type: str = "main",

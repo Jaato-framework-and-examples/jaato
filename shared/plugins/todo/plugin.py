@@ -54,7 +54,10 @@ class TodoPlugin:
         # Track current plan per agent (agent_name -> plan_id)
         # This allows multiple agents to have their own active plans
         self._current_plan_ids: Dict[Optional[str], str] = {}
-        # Note: agent_name is stored in thread-local storage, not instance
+
+        # Session reference for getting agent_id (preferred over thread-local)
+        # This is set by the plugin wiring system via set_session()
+        self._session: Optional[Any] = None
 
         # Event bus for cross-agent task collaboration
         self._event_bus: Optional[TaskEventBus] = None
@@ -63,17 +66,33 @@ class TodoPlugin:
 
     @property
     def _agent_name(self) -> Optional[str]:
-        """Get the agent name for the current thread.
+        """Get the agent name/ID for the current context.
 
-        Uses thread-local storage so each agent session (running in its
-        own thread) has its own agent_name context.
+        Prefers session.agent_id if available (works across threads),
+        falls back to thread-local storage for backward compatibility.
         """
+        # Prefer session's agent_id - it's thread-safe and works with parallel tools
+        if self._session is not None:
+            return self._session.agent_id
+        # Fall back to thread-local (legacy behavior)
         return getattr(_thread_local, 'agent_name', None)
 
     @_agent_name.setter
     def _agent_name(self, value: Optional[str]) -> None:
-        """Set the agent name for the current thread."""
+        """Set the agent name for the current thread (legacy)."""
         _thread_local.agent_name = value
+
+    def set_session(self, session: Any) -> None:
+        """Set the session for agent context.
+
+        This is called by the plugin wiring system. The session provides
+        thread-safe access to agent_id, which is essential for parallel
+        tool execution.
+
+        Args:
+            session: The JaatoSession instance.
+        """
+        self._session = session
 
     @property
     def name(self) -> str:
