@@ -622,37 +622,64 @@ class JaatoRuntime:
         provider.connect(model)
         return provider
 
+    def _get_core_plugins(self) -> List[str]:
+        """Find all plugins that provide tools with discoverability='core'.
+
+        These plugins are essential for the framework to function and should
+        always be included regardless of profile configuration.
+
+        Returns:
+            List of plugin names that have at least one core tool.
+        """
+        if not self._registry:
+            return []
+
+        core_plugins = []
+        for plugin_name, plugin in self._registry._plugins.items():
+            if not hasattr(plugin, 'get_tool_schemas'):
+                continue
+            try:
+                schemas = plugin.get_tool_schemas()
+                for schema in schemas:
+                    if getattr(schema, 'discoverability', None) == 'core':
+                        core_plugins.append(plugin_name)
+                        break  # Found one core tool, plugin qualifies
+            except Exception:
+                pass  # Skip plugins that fail to provide schemas
+
+        return core_plugins
+
     def _get_essential_plugins(self, plugin_names: List[str]) -> List[str]:
-        """Get plugin list with essential plugins added when deferred tools is enabled.
+        """Get plugin list with core plugins added automatically.
 
-        When deferred tool loading is enabled, the introspection plugin is essential
-        for agents to discover available tools. This method ensures introspection
-        is always included even if not explicitly specified in the plugin list.
+        Plugins that provide tools with discoverability='core' are essential
+        for the framework to function (e.g., introspection for tool discovery).
+        These plugins are automatically included even if not explicitly listed
+        in profile definitions.
 
-        Also ensures essential plugins are properly exposed (initialized) in the
+        Also ensures core plugins are properly exposed (initialized) in the
         registry so they function correctly.
 
         Args:
-            plugin_names: Original list of plugin names.
+            plugin_names: Original list of plugin names from profile.
 
         Returns:
-            Plugin list with essential plugins added (if not already present).
+            Plugin list with core plugins added (if not already present).
         """
-        if not _is_deferred_tools_enabled():
-            return plugin_names
+        # Find all plugins with core tools
+        core_plugins = self._get_core_plugins()
 
-        # Essential plugins when deferred tools is enabled
-        essential = ["introspection"]
         result = list(plugin_names)
-        for name in essential:
+        for name in core_plugins:
             if name not in result:
                 result.append(name)
-            # Ensure essential plugin is exposed (initialized with registry access)
+            # Ensure core plugin is exposed (initialized with registry access)
             if self._registry and name not in self._registry._exposed:
                 try:
                     self._registry.expose_tool(name)
                 except ValueError:
                     pass  # Plugin not discovered, skip
+
         return result
 
     def get_tool_schemas(

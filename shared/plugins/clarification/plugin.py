@@ -213,7 +213,7 @@ class ClarificationPlugin:
                     "required": ["context", "questions"],
                 },
                 category="communication",
-                discoverability="core",
+                discoverability="discoverable",
             )
         ]
 
