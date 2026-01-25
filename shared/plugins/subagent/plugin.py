@@ -991,17 +991,18 @@ class SubagentPlugin:
                 'message': 'No subagent_id provided'
             }
 
-        if subagent_id not in self._active_sessions:
-            return {
-                'success': False,
-                'message': f'No active session found with ID: {subagent_id}'
-            }
+        with self._sessions_lock:
+            if subagent_id not in self._active_sessions:
+                return {
+                    'success': False,
+                    'message': f'No active session found with ID: {subagent_id}'
+                }
 
-        self._close_session(subagent_id)
-        return {
-            'success': True,
-            'message': f'Session {subagent_id} closed successfully'
-        }
+            self._close_session_unlocked(subagent_id)
+            return {
+                'success': True,
+                'message': f'Session {subagent_id} closed successfully'
+            }
 
     def _execute_cancel_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Cancel a running subagent operation.
@@ -1092,7 +1093,7 @@ class SubagentPlugin:
                 phase_started = session.phase_started_at.isoformat() if session and session.phase_started_at else None
 
                 sessions.append({
-                    'agent_id': agent_id,
+                    'subagent_id': agent_id,  # Match parameter name for close/cancel/send tools
                     'profile': info['profile'].name,
                     'status': 'running' if is_running else 'idle',
                     'activity_phase': activity_phase,
@@ -1189,7 +1190,16 @@ class SubagentPlugin:
         return '\n'.join(parts)
 
     def _close_session(self, agent_id: str) -> None:
-        """Close and cleanup a subagent session.
+        """Close and cleanup a subagent session (thread-safe).
+
+        Args:
+            agent_id: ID of the session to close.
+        """
+        with self._sessions_lock:
+            self._close_session_unlocked(agent_id)
+
+    def _close_session_unlocked(self, agent_id: str) -> None:
+        """Close and cleanup a subagent session (caller must hold lock).
 
         Args:
             agent_id: ID of the session to close.
@@ -1362,10 +1372,10 @@ class SubagentPlugin:
             parent_cwd
         )
 
-        # Return immediately with agent_id
+        # Return immediately with subagent_id (matches parameter name for close/cancel/send tools)
         return {
             'success': True,
-            'agent_id': agent_id,
+            'subagent_id': agent_id,
             'status': 'spawned',
             'message': f'Subagent {agent_id} spawned and running in background. END YOUR TURN NOW. Do NOT continue generating text. Do NOT write fake completion events. Real events will be sent to you automatically.'
         }
