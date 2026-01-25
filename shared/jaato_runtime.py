@@ -688,6 +688,11 @@ class JaatoRuntime:
     ) -> List[ToolSchema]:
         """Get tool schemas, optionally filtered by plugin names.
 
+        When deferred tool loading is enabled, only 'core' tools are returned
+        in the initial context. Other tools must be discovered via introspection
+        (list_tools, get_tool_schemas). This applies to both main agents and
+        subagents for consistent behavior.
+
         Args:
             plugin_names: Optional list of plugin names to include.
                          If None, returns all exposed tool schemas.
@@ -707,14 +712,29 @@ class JaatoRuntime:
 
         # Filter to specific plugins
         schemas = []
+        deferred_enabled = _is_deferred_tools_enabled()
         for name in effective_plugins:
             plugin = self._registry.get_plugin(name)
             if plugin and hasattr(plugin, 'get_tool_schemas'):
-                schemas.extend(plugin.get_tool_schemas())
+                plugin_schemas = plugin.get_tool_schemas()
+                if deferred_enabled:
+                    # Filter to core tools only - others discovered via introspection
+                    plugin_schemas = [
+                        s for s in plugin_schemas
+                        if getattr(s, 'discoverability', 'discoverable') == 'core'
+                    ]
+                schemas.extend(plugin_schemas)
 
         # Add permission plugin schemas if permission plugin is configured
         if self._permission_plugin:
-            schemas.extend(self._permission_plugin.get_tool_schemas())
+            permission_schemas = self._permission_plugin.get_tool_schemas()
+            if deferred_enabled:
+                # Permission tools should be core (always available)
+                permission_schemas = [
+                    s for s in permission_schemas
+                    if getattr(s, 'discoverability', 'discoverable') == 'core'
+                ]
+            schemas.extend(permission_schemas)
 
         return schemas
 
