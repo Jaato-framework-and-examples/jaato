@@ -43,6 +43,10 @@ The demo below shows creating an execution plan for refactoring the authenticati
 
 - **Plan Registration**: Register multi-step execution plans before starting tasks
 - **Progress Tracking**: Report progress on individual steps as work proceeds
+- **Cross-Agent Collaboration**: Coordinate between parent agents and subagents with automatic dependency resolution
+  - Event-driven architecture via TaskEventBus
+  - Auto-unblock when dependencies complete
+  - Structured output passing between agents
 - **Multiple Transport Protocols**: Same transport protocol support as the permissions plugin
   - **Console**: Visual progress in terminal with progress bars
   - **Webhook**: HTTP POST to external systems
@@ -52,6 +56,8 @@ The demo below shows creating an execution plan for refactoring the authenticati
 - **Auto-Approved**: Most TODO tools are auto-whitelisted (except `startPlan` which requires user approval)
 
 ## Tools Exposed
+
+### Core Planning Tools
 
 | Tool | Description | Auto-Approved |
 |------|-------------|---------------|
@@ -63,6 +69,20 @@ The demo below shows creating an execution plan for refactoring the authenticati
 | `completePlan` | Mark plan as completed, failed, or cancelled | ✓ |
 
 **Note:** `startPlan` intentionally requires user permission. This ensures the user can review and approve the proposed plan before the model begins execution.
+
+### Cross-Agent Collaboration Tools
+
+These tools enable coordination between parent agents and subagents:
+
+| Tool | Description | Auto-Approved |
+|------|-------------|---------------|
+| `subscribeToTasks` | Subscribe to task events from other agents | ✓ |
+| `addDependentStep` | Add a step that waits for tasks from other agents (auto-unblocks) | ✓ |
+| `completeStepWithOutput` | Complete a step AND pass structured data to dependent tasks | ✓ |
+| `getBlockedSteps` | See which steps are waiting on other agents | ✓ |
+| `getTaskEvents` | Review recent cross-agent activity | ✓ |
+| `listSubscriptions` | List active event subscriptions | ✓ |
+| `unsubscribe` | Remove an event subscription | ✓ |
 
 ## Required Workflow
 
@@ -130,6 +150,106 @@ The plugin enforces these rules with guards:
 | addStep before startPlan | "Plan not started. Call startPlan first to get user approval." |
 | completePlan(completed) before startPlan | "Cannot mark plan as 'completed' - plan was never started. Use 'cancelled' if the plan was rejected." |
 | startPlan on already started plan | "Plan already started. Proceed with updateStep." |
+
+## Cross-Agent Collaboration
+
+The TODO plugin supports coordination between parent agents and subagents through an event-driven architecture with **automatic dependency resolution**.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            TaskEventBus (Singleton)                          │
+│                                                                              │
+│   ┌─────────────────┐    Events     ┌─────────────────┐                     │
+│   │  Parent Agent   │──────────────▶│  Event History  │                     │
+│   │                 │               │                 │                     │
+│   │ subscribeToTasks│◀──────────────│  Subscribers    │                     │
+│   │ addDependentStep│               │  Dependencies   │                     │
+│   └────────┬────────┘               └────────┬────────┘                     │
+│            │                                 │                              │
+│            │ BLOCKED step                    │ Auto-resolve                 │
+│            │                                 │ on completion                │
+│            ▼                                 ▼                              │
+│   ┌─────────────────┐    step_completed  ┌─────────────────┐               │
+│   │  Subagent 1     │───────────────────▶│  Dependency     │               │
+│   │                 │                    │  Resolution     │───▶ UNBLOCK   │
+│   │ completeStep    │                    │                 │               │
+│   │ WithOutput      │                    └─────────────────┘               │
+│   └─────────────────┘                                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Auto-Unblock Mechanism
+
+When a parent agent adds a dependent step:
+
+1. **Registration**: `addDependentStep` registers the dependency with the event bus
+2. **Blocking**: The step is created with status `BLOCKED`
+3. **Completion**: When the subagent calls `completeStepWithOutput`, a `step_completed` event is published
+4. **Resolution**: The event bus automatically resolves the dependency
+5. **Unblocking**: The parent's step transitions from `BLOCKED` → `PENDING`
+6. **Output Delivery**: The subagent's output is stored in `received_outputs`
+
+This happens automatically - no polling required.
+
+### Workflow Example
+
+```
+┌──────────────────┐                         ┌──────────────────┐
+│   Parent Agent   │                         │   Subagent       │
+└────────┬─────────┘                         └────────┬─────────┘
+         │                                            │
+         │  1. subscribeToTasks(                      │
+         │       event_types=['plan_created',         │
+         │                    'step_completed'])      │
+         │                                            │
+         │  2. spawn subagent ───────────────────────▶│
+         │                                            │
+         │                                            │  3. createPlan(...)
+         │◀── [event: plan_created] ──────────────────│
+         │     (shows subagent step IDs)              │
+         │                                            │
+         │  4. addDependentStep(                      │
+         │       depends_on=[{agent_id: 'subagent',   │
+         │                    step_id: 'step_1'}])    │
+         │     → Step created as BLOCKED              │
+         │                                            │
+         │     [waiting...]                           │  5. updateStep(...)
+         │                                            │     [working...]
+         │                                            │
+         │                                            │  6. completeStepWithOutput(
+         │                                            │       step_id='step_1',
+         │                                            │       output={result: 'data'})
+         │                                            │
+         │◀── [AUTO-UNBLOCK] ─────────────────────────│
+         │     Step BLOCKED → PENDING                 │
+         │     received_outputs: {result: 'data'}     │
+         │                                            │
+         │  7. getPlanStatus()                        │
+         │     → See received_outputs                 │
+         │                                            │
+         ▼                                            ▼
+```
+
+### Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| **BLOCKED status** | Step waiting for dependencies from other agents |
+| **depends_on** | List of `{agent_id, step_id}` references this step waits for |
+| **blocked_by** | Same as depends_on - tracks unresolved dependencies |
+| **received_outputs** | Map of outputs from completed dependencies |
+| **Auto-unblock** | Automatic BLOCKED→PENDING transition when all dependencies complete |
+
+### Thread Safety
+
+The plugin uses thread-local storage to maintain correct agent context:
+
+- Each agent (running in its own thread) gets its own session context
+- The `_get_agent_name()` method reads from thread-local session
+- Events are published with the correct agent ID
+- Dependency resolution matches the correct agent's waiters
 
 ## Quick Start
 
@@ -441,11 +561,17 @@ class TodoStep:
     step_id: str              # UUID
     sequence: int             # Order in plan (1-based)
     description: str          # What this step does
-    status: StepStatus        # pending|in_progress|completed|failed|skipped
+    status: StepStatus        # pending|in_progress|completed|failed|skipped|blocked
     started_at: Optional[str] # ISO8601
     completed_at: Optional[str]
     result: Optional[str]     # Outcome/notes
     error: Optional[str]      # Error message if failed
+    # Cross-agent collaboration fields
+    depends_on: List[TaskRef] # Dependencies (agent_id, step_id pairs)
+    blocked_by: List[TaskRef] # Unresolved dependencies (auto-updated)
+    received_outputs: Dict[str, Any]  # Outputs from completed dependencies
+    output: Optional[Dict]    # Structured output for dependent steps
+    provides: Optional[str]   # Named output key
 ```
 
 ### TodoPlan
@@ -475,6 +601,7 @@ class TodoPlan:
 | `completed` | Finished successfully |
 | `failed` | Failed with error |
 | `skipped` | Skipped (not needed) |
+| `blocked` | Waiting for dependencies from other agents (auto-transitions to `pending` when resolved) |
 
 ### Plan Status Values
 

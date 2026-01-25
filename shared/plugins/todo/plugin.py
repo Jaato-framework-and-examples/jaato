@@ -111,11 +111,31 @@ class TodoPlugin:
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    agent_name = self._get_agent_name()
+                    agent_prefix = f"@{agent_name}" if agent_name != "main" else ""
                     f.write(f"[{ts}] [TODO{agent_prefix}] {msg}\n")
                     f.flush()
             except (IOError, OSError):
                 pass
+
+    def _get_agent_name(self) -> str:
+        """Get current agent name from thread-local session or fallback to config.
+
+        This is thread-safe: each agent running in its own thread will get
+        the correct agent name from its thread-local session.
+
+        Unlike the _agent_name property which may return None, this method
+        always returns a valid string, defaulting to "main" if no agent
+        name can be determined.
+        """
+        session = getattr(_thread_local, 'session', None)
+        if session:
+            # Try agent_id first, then session_name as fallback
+            name = getattr(session, 'agent_id', None) or getattr(session, 'session_name', None)
+            if name:
+                return name
+        # Fall back to legacy thread-local agent_name, then "main"
+        return getattr(_thread_local, 'agent_name', None) or "main"
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the TODO plugin.
@@ -762,11 +782,11 @@ class TodoPlugin:
             self._storage.save_plan(plan)
 
         # Set as current plan for this agent
-        self._current_plan_ids[self._agent_name] = plan.plan_id
+        self._current_plan_ids[self._get_agent_name()] = plan.plan_id
 
         # Report creation
         if self._reporter:
-            self._reporter.report_plan_created(plan, agent_id=self._agent_name)
+            self._reporter.report_plan_created(plan, agent_id=self._get_agent_name())
 
         # Publish plan_created event for cross-agent collaboration
         self._publish_event(
@@ -848,7 +868,7 @@ class TodoPlugin:
         status_str = args.get("status", "")
         result = args.get("result")
         error = args.get("error")
-        self._trace(f"updateStep: step_id={step_id}, status={status_str}, agent_name={self._agent_name}")
+        self._trace(f"updateStep: step_id={step_id}, status={status_str}, agent_name={self._get_agent_name()}")
 
         if not step_id:
             return {"error": "step_id is required"}
@@ -867,9 +887,10 @@ class TodoPlugin:
         plan = self._get_current_plan()
         if not plan:
             # Enhanced debugging: show what plan IDs exist
+            agent_name = self._get_agent_name()
             known_agents = list(self._current_plan_ids.keys())
-            self._trace(f"updateStep ERROR: No plan for agent={self._agent_name}, known_agents={known_agents}")
-            return {"error": f"No active plan. Create a plan first with createPlan. (agent={self._agent_name})"}
+            self._trace(f"updateStep ERROR: No plan for agent={agent_name}, known_agents={known_agents}")
+            return {"error": f"No active plan. Create a plan first with createPlan. (agent={agent_name})"}
 
         if not plan.started:
             return {"error": "Plan not started. Call startPlan first to get user approval."}
@@ -899,7 +920,7 @@ class TodoPlugin:
 
         # Report update
         if self._reporter:
-            self._reporter.report_step_update(plan, step, agent_id=self._agent_name)
+            self._reporter.report_step_update(plan, step, agent_id=self._get_agent_name())
 
         # Publish step event for cross-agent collaboration
         event_type_map = {
@@ -960,7 +981,7 @@ class TodoPlugin:
     def _execute_get_plan_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the getPlanStatus tool."""
         plan_id = args.get("plan_id")
-        self._trace(f"getPlanStatus: plan_id={plan_id}, agent_name={self._agent_name}")
+        self._trace(f"getPlanStatus: plan_id={plan_id}, agent_name={self._get_agent_name()}")
 
         # Get plan by explicit ID or current plan for this agent
         if plan_id and self._storage:
@@ -971,7 +992,8 @@ class TodoPlugin:
 
         if not plan:
             # Provide helpful context about why no plan was found
-            agent_context = f" (agent: {self._agent_name})" if self._agent_name else ""
+            agent_name = self._get_agent_name()
+            agent_context = f" (agent: {agent_name})" if agent_name != "main" else ""
             return {
                 "error": f"No plan found for this agent{agent_context}. "
                          f"Create a plan first with createPlan."
@@ -1040,7 +1062,7 @@ class TodoPlugin:
 
         # Report completion
         if self._reporter:
-            self._reporter.report_plan_completed(plan, agent_id=self._agent_name)
+            self._reporter.report_plan_completed(plan, agent_id=self._get_agent_name())
 
         # Publish plan completion event
         event_type_map = {
@@ -1056,7 +1078,7 @@ class TodoPlugin:
             )
 
         # Clear current plan for this agent
-        self._current_plan_ids.pop(self._agent_name, None)
+        self._current_plan_ids.pop(self._get_agent_name(), None)
 
         return {
             "plan_id": plan.plan_id,
@@ -1093,7 +1115,7 @@ class TodoPlugin:
 
         # Report the addition
         if self._reporter:
-            self._reporter.report_step_update(plan, new_step, agent_id=self._agent_name)
+            self._reporter.report_step_update(plan, new_step, agent_id=self._get_agent_name())
 
         # Publish step_added event
         self._publish_event(TaskEventType.STEP_ADDED, plan, new_step)
@@ -1109,7 +1131,7 @@ class TodoPlugin:
 
     def _get_current_plan(self) -> Optional[TodoPlan]:
         """Get the current active plan for this agent."""
-        plan_id = self._current_plan_ids.get(self._agent_name)
+        plan_id = self._current_plan_ids.get(self._get_agent_name())
         if not plan_id or not self._storage:
             return None
         return self._storage.get_plan(plan_id)
@@ -1147,10 +1169,10 @@ class TodoPlugin:
         if self._storage:
             self._storage.save_plan(plan)
 
-        self._current_plan_ids[self._agent_name] = plan.plan_id
+        self._current_plan_ids[self._get_agent_name()] = plan.plan_id
 
         if self._reporter:
-            self._reporter.report_plan_created(plan, agent_id=self._agent_name)
+            self._reporter.report_plan_created(plan, agent_id=self._get_agent_name())
 
         return plan
 
@@ -1194,7 +1216,7 @@ class TodoPlugin:
             self._storage.save_plan(plan)
 
         if self._reporter:
-            self._reporter.report_step_update(plan, step, agent_id=self._agent_name)
+            self._reporter.report_step_update(plan, step, agent_id=self._get_agent_name())
 
         return step
 
@@ -1327,7 +1349,7 @@ class TodoPlugin:
         # contain the subagent's session, not the parent's
         import threading
         subscriber_session = getattr(_thread_local, 'session', None)
-        subscriber_agent_name = self._agent_name or "main"
+        subscriber_agent_name = self._get_agent_name()
         thread_id = threading.current_thread().ident
 
         self._trace(
@@ -1390,9 +1412,10 @@ class TodoPlugin:
         )
 
         # Track subscription for this agent
-        if self._agent_name not in self._agent_subscriptions:
-            self._agent_subscriptions[self._agent_name] = []
-        self._agent_subscriptions[self._agent_name].append(sub_id)
+        agent_name = self._get_agent_name()
+        if agent_name not in self._agent_subscriptions:
+            self._agent_subscriptions[agent_name] = []
+        self._agent_subscriptions[agent_name].append(sub_id)
 
         return {
             "subscription_id": sub_id,
@@ -1443,7 +1466,7 @@ class TodoPlugin:
             for dep in depends_on:
                 self._event_bus.register_dependency(
                     dependency_ref=dep,
-                    waiting_agent=self._agent_name or "main",
+                    waiting_agent=self._get_agent_name(),
                     waiting_plan_id=plan.plan_id,
                     waiting_step_id=new_step.step_id
                 )
@@ -1454,13 +1477,13 @@ class TodoPlugin:
 
         # Report the addition
         if self._reporter:
-            self._reporter.report_step_update(plan, new_step, agent_id=self._agent_name)
+            self._reporter.report_step_update(plan, new_step, agent_id=self._get_agent_name())
 
         # Publish step_blocked event
         if self._event_bus:
             event = TaskEvent.create(
                 event_type=TaskEventType.STEP_BLOCKED,
-                agent_id=self._agent_name or "main",
+                agent_id=self._get_agent_name(),
                 plan=plan,
                 step=new_step,
                 payload={
@@ -1516,13 +1539,13 @@ class TodoPlugin:
 
         # Report update
         if self._reporter:
-            self._reporter.report_step_update(plan, step, agent_id=self._agent_name)
+            self._reporter.report_step_update(plan, step, agent_id=self._get_agent_name())
 
         # Publish step_completed event with output
         if self._event_bus:
             event = TaskEvent.create(
                 event_type=TaskEventType.STEP_COMPLETED,
-                agent_id=self._agent_name or "main",
+                agent_id=self._get_agent_name(),
                 plan=plan,
                 step=step,
                 payload={
@@ -1621,7 +1644,7 @@ class TodoPlugin:
         if not self._event_bus:
             return {"error": "Event bus not initialized"}
 
-        subs = self._event_bus.get_subscriptions(agent_id=self._agent_name)
+        subs = self._event_bus.get_subscriptions(agent_id=self._get_agent_name())
 
         return {
             "subscriptions": [s.to_dict() for s in subs],
@@ -1644,9 +1667,10 @@ class TodoPlugin:
 
         if success:
             # Remove from agent's tracked subscriptions
-            if self._agent_name in self._agent_subscriptions:
-                if sub_id in self._agent_subscriptions[self._agent_name]:
-                    self._agent_subscriptions[self._agent_name].remove(sub_id)
+            agent_name = self._get_agent_name()
+            if agent_name in self._agent_subscriptions:
+                if sub_id in self._agent_subscriptions[agent_name]:
+                    self._agent_subscriptions[agent_name].remove(sub_id)
 
         return {
             "success": success,
@@ -1746,7 +1770,7 @@ class TodoPlugin:
 
         event = TaskEvent.create(
             event_type=event_type,
-            agent_id=self._agent_name or "main",
+            agent_id=self._get_agent_name(),
             plan=plan,
             step=step,
             payload=payload

@@ -338,11 +338,12 @@ class TestRegistryShutdownCleanup:
             "steps": ["Step 1", "Step 2"]
         })
         # Plugin now uses dict mapping agent_name -> plan_id for multi-agent support
-        assert plugin._current_plan_ids.get(None) is not None
+        # With no session set, _get_agent_name() defaults to "main"
+        assert plugin._current_plan_ids.get("main") is not None
 
         registry.unexpose_tool("todo")
 
         # After shutdown, current plan should be PRESERVED
         # (design changed for cross-agent collaboration - plans persist
         # when one agent shuts down while others continue)
-        assert plugin._current_plan_ids.get(None) is not None
+        assert plugin._current_plan_ids.get("main") is not None

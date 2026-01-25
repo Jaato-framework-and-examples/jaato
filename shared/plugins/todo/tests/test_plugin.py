@@ -177,8 +177,8 @@ class TestCreatePlanExecutor:
         })
 
         # Plugin now uses dict mapping agent_name -> plan_id for multi-agent support
-        # With no session set, agent_name is None
-        assert plugin._current_plan_ids.get(None) == result["plan_id"]
+        # With no session set, _get_agent_name() defaults to "main"
+        assert plugin._current_plan_ids.get("main") == result["plan_id"]
 
     def test_create_plan_reports_creation(self):
         plugin = TodoPlugin()
@@ -471,12 +471,13 @@ class TestCompletePlanExecutor:
         })
 
         # Plugin now uses dict mapping agent_name -> plan_id for multi-agent support
-        assert plugin._current_plan_ids.get(None) is not None
+        # With no session set, _get_agent_name() defaults to "main"
+        assert plugin._current_plan_ids.get("main") is not None
 
         executors["startPlan"]({})  # Must start before completing
         executors["completePlan"]({"status": "completed"})
 
-        assert plugin._current_plan_ids.get(None) is None
+        assert plugin._current_plan_ids.get("main") is None
 
     def test_complete_plan_no_plan(self):
         plugin = TodoPlugin()
