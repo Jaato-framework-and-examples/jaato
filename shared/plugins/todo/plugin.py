@@ -999,6 +999,27 @@ class TodoPlugin:
                          f"Create a plan first with createPlan."
             }
 
+        steps_data = []
+        for s in plan.steps:
+            step_data = {
+                "step_id": s.step_id,
+                "sequence": s.sequence,
+                "description": s.description,
+                "status": s.status.value,
+                "started_at": s.started_at,
+                "completed_at": s.completed_at,
+                "result": s.result,
+                "error": s.error,
+            }
+            # Include dependency info for visibility
+            if s.blocked_by:
+                step_data["blocked_by"] = [ref.to_dict() for ref in s.blocked_by]
+            if s.depends_on:
+                step_data["depends_on"] = [ref.to_dict() for ref in s.depends_on]
+            if s.received_outputs:
+                step_data["received_outputs"] = list(s.received_outputs.keys())
+            steps_data.append(step_data)
+
         return {
             "plan_id": plan.plan_id,
             "title": plan.title,
@@ -1007,19 +1028,7 @@ class TodoPlugin:
             "completed_at": plan.completed_at,
             "summary": plan.summary,
             "current_step": plan.current_step,
-            "steps": [
-                {
-                    "step_id": s.step_id,
-                    "sequence": s.sequence,
-                    "description": s.description,
-                    "status": s.status.value,
-                    "started_at": s.started_at,
-                    "completed_at": s.completed_at,
-                    "result": s.result,
-                    "error": s.error,
-                }
-                for s in plan.steps
-            ],
+            "steps": steps_data,
             "progress": plan.get_progress(),
         }
 
