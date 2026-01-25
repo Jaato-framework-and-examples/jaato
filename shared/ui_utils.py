@@ -4,7 +4,191 @@ This module provides common UI formatting functions that can be used
 by both IPC mode (client-side) and direct mode (embedded) code.
 """
 
+import os
 from typing import Any, Dict, List, Optional, Union
+
+
+# =============================================================================
+# Path Ellipsization
+# =============================================================================
+
+
+def ellipsize_path(
+    path: str,
+    max_width: int,
+    *,
+    keep_first: int = 1,
+    keep_last: int = 2,
+    ellipsis: str = "...",
+) -> str:
+    """Ellipsize a file path in the middle to fit within max_width.
+
+    Uses a "middle-ellipsis with smart segmentation" strategy that preserves:
+    - First `keep_first` path segments (project/module context)
+    - Last `keep_last` path segments (immediate parent + filename)
+    - Collapses middle segments with ellipsis
+
+    Examples:
+        >>> ellipsize_path("customer-domain-api/src/main/java/com/bank/model/Customer.java", 50)
+        'customer-domain-api/.../model/Customer.java'
+
+        >>> ellipsize_path("/home/user/project/src/components/Button.tsx", 40)
+        '/home/.../components/Button.tsx'
+
+        >>> ellipsize_path("short/path.txt", 50)  # No ellipsis needed
+        'short/path.txt'
+
+    Args:
+        path: The file path to ellipsize.
+        max_width: Maximum width in characters. Must be positive.
+        keep_first: Number of leading path segments to preserve (default: 1).
+        keep_last: Number of trailing path segments to preserve (default: 2).
+        ellipsis: The ellipsis string to use (default: "...").
+
+    Returns:
+        The ellipsized path if it exceeds max_width, otherwise the original path.
+        If even the minimal form (first + ellipsis + last) exceeds max_width,
+        falls back to showing just the filename with left-ellipsis.
+    """
+    if not path or max_width <= 0:
+        return path
+
+    # Fast path: no truncation needed
+    if len(path) <= max_width:
+        return path
+
+    # Normalize path separators for consistent handling
+    sep = os.sep
+    # Handle both Unix and Windows paths
+    if "/" in path and "\\" not in path:
+        sep = "/"
+    elif "\\" in path:
+        sep = "\\"
+
+    # Split into segments, preserving leading separator for absolute paths
+    has_leading_sep = path.startswith(sep)
+    segments = [s for s in path.split(sep) if s]
+
+    if not segments:
+        return path
+
+    # If we have very few segments, can't do middle ellipsis meaningfully
+    total_segments = len(segments)
+    if total_segments <= keep_first + keep_last:
+        # Not enough segments to ellipsize in the middle
+        # Fall back to filename-only with left ellipsis if still too long
+        filename = segments[-1]
+        if len(filename) <= max_width:
+            return path if len(path) <= max_width else ellipsis + filename
+        # Even filename is too long - truncate it
+        return ellipsis + filename[-(max_width - len(ellipsis)):]
+
+    # Build the ellipsized path
+    first_segments = segments[:keep_first]
+    last_segments = segments[-keep_last:]
+
+    # Construct with middle ellipsis
+    first_part = sep.join(first_segments)
+    last_part = sep.join(last_segments)
+
+    if has_leading_sep:
+        first_part = sep + first_part
+
+    # Try: first/.../ last
+    candidate = f"{first_part}{sep}{ellipsis}{sep}{last_part}"
+
+    if len(candidate) <= max_width:
+        return candidate
+
+    # Still too long - progressively reduce keep_first
+    for reduced_first in range(keep_first - 1, -1, -1):
+        if reduced_first > 0:
+            first_segments = segments[:reduced_first]
+            first_part = sep.join(first_segments)
+            if has_leading_sep:
+                first_part = sep + first_part
+            candidate = f"{first_part}{sep}{ellipsis}{sep}{last_part}"
+        else:
+            # No first segments - just ellipsis + last
+            candidate = f"{ellipsis}{sep}{last_part}"
+
+        if len(candidate) <= max_width:
+            return candidate
+
+    # Still too long - progressively reduce keep_last
+    for reduced_last in range(keep_last - 1, 0, -1):
+        last_segments = segments[-reduced_last:]
+        last_part = sep.join(last_segments)
+        candidate = f"{ellipsis}{sep}{last_part}"
+
+        if len(candidate) <= max_width:
+            return candidate
+
+    # Last resort: just the filename with left ellipsis
+    filename = segments[-1]
+    if len(ellipsis) + len(filename) <= max_width:
+        return ellipsis + filename
+
+    # Even filename is too long - truncate it from the left
+    available = max_width - len(ellipsis)
+    if available > 0:
+        return ellipsis + filename[-available:]
+
+    # Pathological case: max_width is tiny
+    return path[:max_width]
+
+
+def ellipsize_path_pair(
+    source: str,
+    dest: str,
+    max_width: int,
+    *,
+    separator: str = " -> ",
+    keep_first: int = 1,
+    keep_last: int = 2,
+    ellipsis: str = "...",
+) -> str:
+    """Ellipsize a source->destination path pair to fit within max_width.
+
+    Useful for move/rename operations. Allocates space proportionally
+    between source and destination paths.
+
+    Example:
+        >>> ellipsize_path_pair("/long/source/path/file.txt", "/long/dest/path/new.txt", 50)
+        '.../path/file.txt -> .../path/new.txt'
+
+    Args:
+        source: Source file path.
+        dest: Destination file path.
+        max_width: Maximum total width.
+        separator: String between source and dest (default: " -> ").
+        keep_first: Segments to keep at start (default: 1).
+        keep_last: Segments to keep at end (default: 2).
+        ellipsis: Ellipsis string (default: "...").
+
+    Returns:
+        Formatted "source -> dest" string, ellipsized if needed.
+    """
+    full = f"{source}{separator}{dest}"
+    if len(full) <= max_width:
+        return full
+
+    # Allocate space: separator is fixed, split remaining between paths
+    available = max_width - len(separator)
+    if available <= 0:
+        return full[:max_width]
+
+    # Give each path half the available space
+    per_path = available // 2
+
+    source_ellipsized = ellipsize_path(
+        source, per_path, keep_first=keep_first, keep_last=keep_last, ellipsis=ellipsis
+    )
+    dest_ellipsized = ellipsize_path(
+        dest, per_path, keep_first=keep_first, keep_last=keep_last, ellipsis=ellipsis
+    )
+
+    return f"{source_ellipsized}{separator}{dest_ellipsized}"
 
 
 def format_permission_options(

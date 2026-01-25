@@ -8,9 +8,15 @@ import difflib
 from pathlib import Path
 from typing import Optional, Tuple
 
+from shared.ui_utils import ellipsize_path
+
 
 # Default maximum lines to show in diff preview
 DEFAULT_MAX_LINES = 50
+
+# Default maximum width for file paths in summaries
+# Uses middle-ellipsis to preserve project context and filename
+DEFAULT_MAX_PATH_WIDTH = 50
 
 
 def generate_unified_diff(
@@ -220,18 +226,27 @@ def generate_move_file_diff(
     return diff_text, truncated, total_lines
 
 
-def summarize_diff(old_content: str, new_content: str, file_path: str) -> str:
+def summarize_diff(
+    old_content: str,
+    new_content: str,
+    file_path: str,
+    max_path_width: int = DEFAULT_MAX_PATH_WIDTH
+) -> str:
     """Generate a brief summary of changes.
 
     Args:
         old_content: Original content
         new_content: New content
         file_path: Path to the file
+        max_path_width: Maximum width for file path display (uses middle-ellipsis)
 
     Returns:
         Human-readable summary string
     """
     stats = get_diff_stats(old_content, new_content)
+
+    # Ellipsize path for display (preserves project context and filename)
+    display_path = ellipsize_path(file_path, max_path_width)
 
     parts = []
     if stats["lines_added"] > 0:
@@ -241,6 +256,6 @@ def summarize_diff(old_content: str, new_content: str, file_path: str) -> str:
 
     if parts:
         change_str = ", ".join(parts)
-        return f"Update {file_path} ({change_str} lines)"
+        return f"Update {display_path} ({change_str} lines)"
     else:
-        return f"Update {file_path} (no line changes)"
+        return f"Update {display_path} (no line changes)"
