@@ -16,11 +16,15 @@ import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from .models import PlanStatus, StepStatus, TodoPlan, TodoStep
+from .models import (
+    PlanStatus, StepStatus, TodoPlan, TodoStep,
+    TaskEventType, TaskEvent, TaskRef, EventFilter, Subscription
+)
 from ..model_provider.types import ToolSchema
 from .storage import TodoStorage, create_storage, InMemoryStorage
 from .channels import TodoReporter, ConsoleReporter, create_reporter
 from .config_loader import load_config, TodoConfig
+from .event_bus import TaskEventBus, get_event_bus
 from ..base import UserCommand
 
 
@@ -50,21 +54,48 @@ class TodoPlugin:
         # Track current plan per agent (agent_name -> plan_id)
         # This allows multiple agents to have their own active plans
         self._current_plan_ids: Dict[Optional[str], str] = {}
-        # Note: agent_name is stored in thread-local storage, not instance
+
+        # Note: session is stored in thread-local storage via set_session()
+        # This prevents subagent sessions from overwriting the parent's reference
+
+        # Event bus for cross-agent task collaboration
+        self._event_bus: Optional[TaskEventBus] = None
+        # Track subscriptions created by this agent (for cleanup)
+        self._agent_subscriptions: Dict[Optional[str], List[str]] = {}
 
     @property
     def _agent_name(self) -> Optional[str]:
-        """Get the agent name for the current thread.
+        """Get the agent name/ID for the current context.
 
-        Uses thread-local storage so each agent session (running in its
-        own thread) has its own agent_name context.
+        Uses thread-local session reference to get agent_id. This ensures
+        each thread (main agent vs subagent) sees its own session context.
         """
+        session = getattr(_thread_local, 'session', None)
+        if session is not None:
+            return session.agent_id
+        # Fall back to legacy thread-local agent_name
         return getattr(_thread_local, 'agent_name', None)
 
     @_agent_name.setter
     def _agent_name(self, value: Optional[str]) -> None:
-        """Set the agent name for the current thread."""
+        """Set the agent name for the current thread (legacy)."""
         _thread_local.agent_name = value
+
+    def set_session(self, session: Any) -> None:
+        """Set the session for agent context in thread-local storage.
+
+        This is called by the plugin wiring system. Using thread-local storage
+        ensures that when subagents (running in different threads) call this,
+        they don't overwrite the parent agent's session reference.
+
+        Args:
+            session: The JaatoSession instance.
+        """
+        import threading
+        agent_id = getattr(session, 'agent_id', None) if session else None
+        thread_id = threading.current_thread().ident
+        self._trace(f"set_session: agent_id={agent_id}, thread_id={thread_id}")
+        _thread_local.session = session
 
     @property
     def name(self) -> str:
@@ -80,11 +111,31 @@ class TodoPlugin:
             try:
                 with open(trace_path, "a") as f:
                     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                    agent_prefix = f"@{self._agent_name}" if self._agent_name else ""
+                    agent_name = self._get_agent_name()
+                    agent_prefix = f"@{agent_name}" if agent_name != "main" else ""
                     f.write(f"[{ts}] [TODO{agent_prefix}] {msg}\n")
                     f.flush()
             except (IOError, OSError):
                 pass
+
+    def _get_agent_name(self) -> str:
+        """Get current agent name from thread-local session or fallback to config.
+
+        This is thread-safe: each agent running in its own thread will get
+        the correct agent name from its thread-local session.
+
+        Unlike the _agent_name property which may return None, this method
+        always returns a valid string, defaulting to "main" if no agent
+        name can be determined.
+        """
+        session = getattr(_thread_local, 'session', None)
+        if session:
+            # Try agent_id first, then session_name as fallback
+            name = getattr(session, 'agent_id', None) or getattr(session, 'session_name', None)
+            if name:
+                return name
+        # Fall back to legacy thread-local agent_name, then "main"
+        return getattr(_thread_local, 'agent_name', None) or "main"
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the TODO plugin.
@@ -162,6 +213,11 @@ class TodoPlugin:
                 print(f"Warning: Failed to initialize {reporter_type} reporter: {e}")
                 print("Falling back to console reporter")
                 self._reporter = ConsoleReporter()
+
+        # Initialize event bus for cross-agent collaboration
+        self._event_bus = get_event_bus()
+        # Register dependency resolver callback
+        self._event_bus.set_dependency_resolver(self._on_dependency_resolved)
 
         self._initialized = True
         self._trace(f"initialize: storage={storage_type}, reporter={reporter_type}")
@@ -319,6 +375,251 @@ class TodoPlugin:
                 category="planning",
                 discoverability="core",
             ),
+            # === Cross-agent collaboration tools ===
+            ToolSchema(
+                name="subscribeToTasks",
+                description=(
+                    "Subscribe to task events from other agents. "
+                    "CALL THIS BEFORE spawning subagents to enable coordination.\n\n"
+                    "RECOMMENDED: Subscribe early in your workflow:\n"
+                    "  subscribeToTasks(event_types=['plan_created', 'step_completed'])\n\n"
+                    "This enables you to:\n"
+                    "- See subagent plan structures when they call createPlan\n"
+                    "- React when subagents complete steps with outputs\n"
+                    "- Add dependent steps that link to their work\n\n"
+                    "Events arrive as [SUBAGENT event=X] messages. Don't poll - just wait."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "Agent to subscribe to. Use '*' for any agent. Omit for any."
+                        },
+                        "plan_id": {
+                            "type": "string",
+                            "description": "Specific plan ID to filter (optional)"
+                        },
+                        "step_id": {
+                            "type": "string",
+                            "description": "Specific step ID to filter (optional)"
+                        },
+                        "event_types": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "plan_created", "plan_started", "plan_completed",
+                                    "plan_failed", "plan_cancelled",
+                                    "step_added", "step_started", "step_completed",
+                                    "step_failed", "step_skipped",
+                                    "step_blocked", "step_unblocked"
+                                ]
+                            },
+                            "description": "Event types to subscribe to"
+                        }
+                    },
+                    "required": ["event_types"]
+                },
+                category="planning",
+                discoverability="core",
+            ),
+            ToolSchema(
+                name="addDependentStep",
+                description=(
+                    "Add a step that waits for tasks from other agents. The step will be "
+                    "BLOCKED until ALL dependencies complete, then auto-unblocks.\n\n"
+                    "WHEN TO USE: After receiving a [SUBAGENT event=plan_created] message "
+                    "showing subagent step IDs, call this to link your plan to their work.\n\n"
+                    "WORKFLOW:\n"
+                    "1. Subscribe to events (subscribeToTasks)\n"
+                    "2. Spawn subagents\n"
+                    "3. When you see plan_created events with step IDs, call addDependentStep\n"
+                    "4. Wait - your step auto-unblocks when dependencies complete\n"
+                    "5. Check getPlanStatus to see received_outputs from subagents\n\n"
+                    "Example (single dependency):\n"
+                    "  addDependentStep(\n"
+                    "    description='Review implementation results',\n"
+                    "    depends_on=[{agent_id: 'implementer', step_id: 'final_step'}]\n"
+                    "  )\n\n"
+                    "Example (multiple dependencies - all must complete):\n"
+                    "  addDependentStep(\n"
+                    "    description='Check all validations passed',\n"
+                    "    depends_on=[\n"
+                    "      {agent_id: 'type_checker', step_id: 'check'},\n"
+                    "      {agent_id: 'test_runner', step_id: 'run'},\n"
+                    "      {agent_id: 'linter', step_id: 'lint'}\n"
+                    "    ]\n"
+                    "  )"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": "Description of the step"
+                        },
+                        "depends_on": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "agent_id": {
+                                        "type": "string",
+                                        "description": "Agent that owns the dependency"
+                                    },
+                                    "plan_id": {
+                                        "type": "string",
+                                        "description": "Plan ID (optional - matches latest if omitted)"
+                                    },
+                                    "step_id": {
+                                        "type": "string",
+                                        "description": "Step ID to depend on"
+                                    }
+                                },
+                                "required": ["agent_id", "step_id"]
+                            },
+                            "description": "Tasks this step depends on"
+                        },
+                        "after_step_id": {
+                            "type": "string",
+                            "description": "Insert after this step (optional)"
+                        },
+                        "provides": {
+                            "type": "string",
+                            "description": "Named output key for this step (optional)"
+                        }
+                    },
+                    "required": ["description", "depends_on"]
+                },
+                category="planning",
+                discoverability="core",
+            ),
+            ToolSchema(
+                name="completeStepWithOutput",
+                description=(
+                    "Complete a step AND pass structured data to tasks depending on it. "
+                    "This is how subagents report results back to parent agents.\n\n"
+                    "SUBAGENTS: Use this for your FINAL step to return structured results:\n"
+                    "  completeStepWithOutput(\n"
+                    "    step_id='final',\n"
+                    "    output={passed: true, results: [...], errors: []}\n"
+                    "  )\n\n"
+                    "The parent agent's dependent step will:\n"
+                    "- Auto-unblock when this completes\n"
+                    "- Receive your output in received_outputs (visible in getPlanStatus)\n"
+                    "- Be able to make decisions based on your data (e.g., iterate on failures)\n\n"
+                    "VALIDATION PATTERN: Return pass/fail status so parent can iterate:\n"
+                    "  completeStepWithOutput(\n"
+                    "    step_id='validation',\n"
+                    "    output={passed: false, errors: ['Type error in foo.ts:42']}\n"
+                    "  )\n\n"
+                    "Use regular updateStep(status='completed') for steps that don't need "
+                    "to pass data to other agents."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "step_id": {
+                            "type": "string",
+                            "description": "ID of the step to complete"
+                        },
+                        "output": {
+                            "type": "object",
+                            "description": "Structured output to pass to dependent steps"
+                        },
+                        "result": {
+                            "type": "string",
+                            "description": "Optional text result/notes"
+                        }
+                    },
+                    "required": ["step_id", "output"]
+                },
+                category="planning",
+                discoverability="core",
+            ),
+            ToolSchema(
+                name="getBlockedSteps",
+                description=(
+                    "See which of your steps are waiting on other agents.\n\n"
+                    "USE THIS when you want to check coordination status:\n"
+                    "- What steps are blocked and why\n"
+                    "- Which dependencies have resolved (received_outputs)\n"
+                    "- Which are still pending (blocked_by)\n\n"
+                    "Steps auto-unblock when all dependencies complete - you don't need to poll."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "plan_id": {
+                            "type": "string",
+                            "description": "Plan ID (optional, defaults to current plan)"
+                        }
+                    },
+                    "required": []
+                },
+                category="planning",
+                discoverability="core",
+            ),
+            ToolSchema(
+                name="getTaskEvents",
+                description=(
+                    "Review recent cross-agent activity. Shows plan/step events from all agents.\n\n"
+                    "USE THIS to:\n"
+                    "- See subagent progress after spawning them\n"
+                    "- Debug why a dependency hasn't resolved\n"
+                    "- Review what happened while you were working\n\n"
+                    "If subscribed to events, you'll see them inline - this is for history review."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "Filter by source agent (optional)"
+                        },
+                        "event_types": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Filter by event types (optional)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum events to return (default: 20)"
+                        }
+                    },
+                    "required": []
+                },
+                category="planning",
+                discoverability="core",
+            ),
+            ToolSchema(
+                name="listSubscriptions",
+                description="List your active event subscriptions. Shows what events you're listening for.",
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                },
+                category="planning",
+                discoverability="core",
+            ),
+            ToolSchema(
+                name="unsubscribe",
+                description="Remove an event subscription.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "subscription_id": {
+                            "type": "string",
+                            "description": "ID of the subscription to remove"
+                        }
+                    },
+                    "required": ["subscription_id"]
+                },
+                category="planning",
+                discoverability="core",
+            ),
         ]
 
     def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
@@ -332,68 +633,101 @@ class TodoPlugin:
             "addStep": self._execute_add_step,
             # User command alias for getPlanStatus
             "plan": self._execute_get_plan_status,
+            # Cross-agent collaboration tools
+            "subscribeToTasks": self._execute_subscribe_to_tasks,
+            "addDependentStep": self._execute_add_dependent_step,
+            "completeStepWithOutput": self._execute_complete_step_with_output,
+            "getBlockedSteps": self._execute_get_blocked_steps,
+            "getTaskEvents": self._execute_get_task_events,
+            "listSubscriptions": self._execute_list_subscriptions,
+            "unsubscribe": self._execute_unsubscribe,
         }
 
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for the TODO plugin."""
         return (
-            "You have access to plan tracking tools.\n\n"
-            "WHEN TO USE:\n"
-            "- Only use these tools if the user explicitly requests a plan\n"
-            "- Do NOT automatically create plans for every task\n"
-            "- If the user does not ask for a plan, just do the task directly\n\n"
-            "**IMPORTANT**: When you decide to present a plan to the user, you MUST use the `createPlan` tool. "
-            "Do NOT write the plan as text in your response - always use the tool instead. "
-            "This ensures proper plan tracking and user approval workflow.\n\n"
-            "BEFORE CREATING A PLAN:\n"
-            "- Think carefully about what steps are actually needed to achieve the goal\n"
-            "- Break down the task into minimal, concrete steps you can realistically complete\n"
-            "- Consider what tools and information you have available\n"
-            "- Do NOT propose a plan you cannot achieve - be trustworthy\n"
-            "- Each step should be specific and actionable, not vague\n"
-            "- If a step will use a specific tool, include the tool name and command in the description\n"
-            "  Example: 'List files sorted by date using cli_based_tool: ls -lt'\n"
-            "  Example: 'Search for Python files using cli_based_tool: find . -name \"*.py\"'\n"
-            "- This helps the user understand exactly what will be executed before approving\n\n"
-            "VALIDATE TOOL AVAILABILITY:\n"
-            "- BEFORE including any tool in a plan step, you MUST verify:\n"
-            "  1. The tool exists and is available in the current session\n"
-            "  2. You are allowed/permitted to use that tool\n"
-            "  3. The tool can perform the action described in the step\n"
-            "- Do NOT assume a tool exists - check your available tools first\n"
-            "- Do NOT include steps that rely on tools you cannot access or are not permitted to use\n"
-            "- If unsure whether a tool is available, either check first or choose an alternative approach\n"
-            "- Steps that fail due to unavailable tools waste user time and erode trust\n\n"
-            "WORKFLOW:\n"
-            "1. createPlan - Register your execution plan with ordered steps\n"
-            "2. startPlan - Request user approval (REQUIRED before any execution)\n"
-            "3. updateStep - Report progress on each step (only after startPlan approved)\n"
-            "4. addStep - Add new steps if needed during execution\n"
-            "5. completePlan - Mark plan as finished\n\n"
-            "RULES:\n"
-            "- You MUST call startPlan after createPlan and wait for approval\n"
-            "- You CANNOT execute ANY other tools until startPlan is approved, unless necessary to compose the plan\n"
-            "- You CANNOT call updateStep or addStep until startPlan is approved\n"
-            "- Only use status='completed' or 'failed' for plans that were started\n"
-            "- Use status='cancelled' for plans the user rejected\n\n"
-            "STEP STATUS RULES (be honest about outcomes):\n"
-            "- 'completed': ONLY if the step was FULLY accomplished with the expected outcome\n"
-            "- 'failed': If you could NOT achieve the step's goal for ANY reason (errors, limitations, partial results)\n"
-            "- 'skipped': If the step became unnecessary or was intentionally bypassed\n"
-            "- DO NOT mark a step as 'completed' if the outcome was partial, unsuccessful, or had errors\n"
-            "- If you say 'could not', 'unable to', 'failed to', or similar in the result, the status MUST be 'failed'\n"
-            "- Being honest about failures is more valuable than false completion reports\n\n"
-            "OUTPUT REQUIREMENTS:\n"
-            "- When a step produces data/results, you MUST include the actual output in your response\n"
-            "- Do NOT just report 'completed' - show what was found/created/computed\n"
-            "- If the user asked for a table, list, or specific information, your final response MUST contain it\n"
-            "- Saying 'the table above shows...' when no table was shown is WRONG - include the actual table\n"
-            "- The plan completion message is NOT a substitute for showing results to the user\n\n"
-            "WHEN startPlan IS DENIED:\n"
-            "- Immediately call completePlan with status='cancelled' on the current plan\n"
-            "- Do NOT create a new plan and retry - the user does not want plan tracking\n"
-            "- Ask the user how they would like to proceed instead\n"
-            "- You may proceed with the task without plan tracking if appropriate"
+            "You have access to plan tracking and cross-agent coordination tools.\n\n"
+            "# WHEN TO USE PLANS\n"
+            "- Use plans when the user explicitly requests one, OR when coordinating subagents\n"
+            "- For simple single-agent tasks, just do the work directly\n"
+            "- When spawning subagents, ALWAYS use plans to coordinate their work\n\n"
+            "# PLAN WORKFLOW (Single Agent)\n"
+            "1. createPlan → 2. startPlan (wait for approval) → 3. updateStep → 4. completePlan\n\n"
+            "# CROSS-AGENT COORDINATION (Multi-Agent)\n\n"
+            "When delegating work to subagents, use this pattern:\n\n"
+            "**Step 1: Subscribe to events BEFORE spawning subagents**\n"
+            "```\n"
+            "subscribeToTasks(event_types=['plan_created', 'step_completed'])\n"
+            "```\n"
+            "This lets you see subagent plans and react when they complete work.\n\n"
+            "**Step 2: Create your master plan with placeholder steps**\n"
+            "```\n"
+            "createPlan(title='Main Task', steps=[\n"
+            "  'Analyze requirements and spawn workers',\n"
+            "  'Await and integrate results',  // Will become dependent step\n"
+            "  'Validate and iterate'\n"
+            "])\n"
+            "```\n\n"
+            "**Step 3: Spawn subagents for parallel work**\n"
+            "```\n"
+            "spawn_subagent(name='implementer', task='...')\n"
+            "spawn_subagent(name='validator', task='...')\n"
+            "```\n\n"
+            "**Step 4: When you receive plan_created events, add dependent steps**\n"
+            "After receiving `[SUBAGENT event=plan_created]` with step IDs:\n"
+            "```\n"
+            "addDependentStep(\n"
+            "  description='Integrate implementation results',\n"
+            "  depends_on=[{agent_id: 'implementer', step_id: '<final_step>'}]\n"
+            ")\n"
+            "```\n"
+            "This step will be BLOCKED until the subagent completes that step.\n\n"
+            "**Step 5: Subagents use completeStepWithOutput for structured results**\n"
+            "Subagents should complete their final steps with:\n"
+            "```\n"
+            "completeStepWithOutput(step_id='...', output={results: [...], passed: true})\n"
+            "```\n"
+            "This output flows to dependent steps via received_outputs.\n\n"
+            "**Step 6: Your blocked steps auto-unblock with data**\n"
+            "When dependencies complete, your step unblocks and you can:\n"
+            "- Check getPlanStatus() to see received_outputs\n"
+            "- Access the structured data from subagents\n"
+            "- Make decisions based on their results (e.g., iterate on failures)\n\n"
+            "# VALIDATION & ITERATION PATTERN\n\n"
+            "For tasks requiring validation:\n"
+            "1. Spawn implementation subagent\n"
+            "2. Spawn validation subagents (type checker, test runner, linter)\n"
+            "3. Add step depending on ALL validators:\n"
+            "   ```\n"
+            "   addDependentStep(\n"
+            "     description='Check all validations passed',\n"
+            "     depends_on=[\n"
+            "       {agent_id: 'type_checker', step_id: 'final'},\n"
+            "       {agent_id: 'test_runner', step_id: 'final'},\n"
+            "       {agent_id: 'linter', step_id: 'final'}\n"
+            "     ]\n"
+            "   )\n"
+            "   ```\n"
+            "4. When unblocked, check received_outputs for pass/fail\n"
+            "5. If any failed: send_to_subagent with fixes, re-run validators\n"
+            "6. Repeat until all validators report {passed: true}\n\n"
+            "# KEY BEHAVIORS\n\n"
+            "- **Don't poll** - blocked steps auto-unblock when dependencies complete\n"
+            "- **Use structured outputs** - completeStepWithOutput passes typed data\n"
+            "- **Check getBlockedSteps()** to see what's waiting on what\n"
+            "- **Check getTaskEvents()** to review cross-agent activity\n"
+            "- **Subagents see each other's events** - they can coordinate peer-to-peer\n\n"
+            "# STEP STATUS RULES\n\n"
+            "- 'completed': ONLY if fully accomplished\n"
+            "- 'failed': Could not achieve goal (errors, limitations, partial)\n"
+            "- 'skipped': Step became unnecessary\n"
+            "- 'blocked': Waiting on cross-agent dependencies (automatic)\n"
+            "- Be honest - failed steps are more valuable than false completions\n\n"
+            "# RULES\n\n"
+            "- MUST call startPlan after createPlan and wait for approval\n"
+            "- CANNOT updateStep until startPlan is approved\n"
+            "- If startPlan denied: call completePlan(status='cancelled')\n"
+            "- When using completeStepWithOutput, the output is passed to dependent steps"
         )
 
     def get_auto_approved_tools(self) -> List[str]:
@@ -404,7 +738,13 @@ class TodoPlugin:
 
         The 'plan' user command is also included since it's just a status query.
         """
-        return ["createPlan", "updateStep", "getPlanStatus", "completePlan", "addStep", "plan"]
+        return [
+            # Core plan management
+            "createPlan", "updateStep", "getPlanStatus", "completePlan", "addStep", "plan",
+            # Cross-agent collaboration (read/write plan state, no side effects)
+            "subscribeToTasks", "addDependentStep", "completeStepWithOutput",
+            "getBlockedSteps", "getTaskEvents", "listSubscriptions", "unsubscribe",
+        ]
 
     def get_user_commands(self) -> List[UserCommand]:
         """Return user-facing commands for direct invocation.
@@ -442,11 +782,27 @@ class TodoPlugin:
             self._storage.save_plan(plan)
 
         # Set as current plan for this agent
-        self._current_plan_ids[self._agent_name] = plan.plan_id
+        self._current_plan_ids[self._get_agent_name()] = plan.plan_id
 
         # Report creation
         if self._reporter:
-            self._reporter.report_plan_created(plan, agent_id=self._agent_name)
+            self._reporter.report_plan_created(plan, agent_id=self._get_agent_name())
+
+        # Publish plan_created event for cross-agent collaboration
+        self._publish_event(
+            TaskEventType.PLAN_CREATED,
+            plan,
+            payload={
+                "steps": [
+                    {
+                        "step_id": s.step_id,
+                        "sequence": s.sequence,
+                        "description": s.description,
+                    }
+                    for s in plan.steps
+                ]
+            }
+        )
 
         return {
             "plan_id": plan.plan_id,
@@ -489,6 +845,9 @@ class TodoPlugin:
         if self._storage:
             self._storage.save_plan(plan)
 
+        # Publish plan_started event
+        self._publish_event(TaskEventType.PLAN_STARTED, plan)
+
         return {
             "approved": True,
             "plan_id": plan.plan_id,
@@ -509,7 +868,7 @@ class TodoPlugin:
         status_str = args.get("status", "")
         result = args.get("result")
         error = args.get("error")
-        self._trace(f"updateStep: step_id={step_id}, status={status_str}, agent_name={self._agent_name}")
+        self._trace(f"updateStep: step_id={step_id}, status={status_str}, agent_name={self._get_agent_name()}")
 
         if not step_id:
             return {"error": "step_id is required"}
@@ -528,9 +887,10 @@ class TodoPlugin:
         plan = self._get_current_plan()
         if not plan:
             # Enhanced debugging: show what plan IDs exist
+            agent_name = self._get_agent_name()
             known_agents = list(self._current_plan_ids.keys())
-            self._trace(f"updateStep ERROR: No plan for agent={self._agent_name}, known_agents={known_agents}")
-            return {"error": f"No active plan. Create a plan first with createPlan. (agent={self._agent_name})"}
+            self._trace(f"updateStep ERROR: No plan for agent={agent_name}, known_agents={known_agents}")
+            return {"error": f"No active plan. Create a plan first with createPlan. (agent={agent_name})"}
 
         if not plan.started:
             return {"error": "Plan not started. Call startPlan first to get user approval."}
@@ -560,7 +920,22 @@ class TodoPlugin:
 
         # Report update
         if self._reporter:
-            self._reporter.report_step_update(plan, step, agent_id=self._agent_name)
+            self._reporter.report_step_update(plan, step, agent_id=self._get_agent_name())
+
+        # Publish step event for cross-agent collaboration
+        event_type_map = {
+            StepStatus.IN_PROGRESS: TaskEventType.STEP_STARTED,
+            StepStatus.COMPLETED: TaskEventType.STEP_COMPLETED,
+            StepStatus.FAILED: TaskEventType.STEP_FAILED,
+            StepStatus.SKIPPED: TaskEventType.STEP_SKIPPED,
+        }
+        if new_status in event_type_map:
+            payload = {"result": step.result, "error": step.error}
+            if step.output is not None:
+                payload["output"] = step.output
+            if step.provides:
+                payload["provides"] = step.provides
+            self._publish_event(event_type_map[new_status], plan, step, payload)
 
         # Build response with continuation prompt
         progress = plan.get_progress()
@@ -606,7 +981,7 @@ class TodoPlugin:
     def _execute_get_plan_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the getPlanStatus tool."""
         plan_id = args.get("plan_id")
-        self._trace(f"getPlanStatus: plan_id={plan_id}, agent_name={self._agent_name}")
+        self._trace(f"getPlanStatus: plan_id={plan_id}, agent_name={self._get_agent_name()}")
 
         # Get plan by explicit ID or current plan for this agent
         if plan_id and self._storage:
@@ -617,11 +992,33 @@ class TodoPlugin:
 
         if not plan:
             # Provide helpful context about why no plan was found
-            agent_context = f" (agent: {self._agent_name})" if self._agent_name else ""
+            agent_name = self._get_agent_name()
+            agent_context = f" (agent: {agent_name})" if agent_name != "main" else ""
             return {
                 "error": f"No plan found for this agent{agent_context}. "
                          f"Create a plan first with createPlan."
             }
+
+        steps_data = []
+        for s in plan.steps:
+            step_data = {
+                "step_id": s.step_id,
+                "sequence": s.sequence,
+                "description": s.description,
+                "status": s.status.value,
+                "started_at": s.started_at,
+                "completed_at": s.completed_at,
+                "result": s.result,
+                "error": s.error,
+            }
+            # Include dependency info for visibility
+            if s.blocked_by:
+                step_data["blocked_by"] = [ref.to_dict() for ref in s.blocked_by]
+            if s.depends_on:
+                step_data["depends_on"] = [ref.to_dict() for ref in s.depends_on]
+            if s.received_outputs:
+                step_data["received_outputs"] = list(s.received_outputs.keys())
+            steps_data.append(step_data)
 
         return {
             "plan_id": plan.plan_id,
@@ -631,19 +1028,7 @@ class TodoPlugin:
             "completed_at": plan.completed_at,
             "summary": plan.summary,
             "current_step": plan.current_step,
-            "steps": [
-                {
-                    "step_id": s.step_id,
-                    "sequence": s.sequence,
-                    "description": s.description,
-                    "status": s.status.value,
-                    "started_at": s.started_at,
-                    "completed_at": s.completed_at,
-                    "result": s.result,
-                    "error": s.error,
-                }
-                for s in plan.steps
-            ],
+            "steps": steps_data,
             "progress": plan.get_progress(),
         }
 
@@ -686,10 +1071,23 @@ class TodoPlugin:
 
         # Report completion
         if self._reporter:
-            self._reporter.report_plan_completed(plan, agent_id=self._agent_name)
+            self._reporter.report_plan_completed(plan, agent_id=self._get_agent_name())
+
+        # Publish plan completion event
+        event_type_map = {
+            "completed": TaskEventType.PLAN_COMPLETED,
+            "failed": TaskEventType.PLAN_FAILED,
+            "cancelled": TaskEventType.PLAN_CANCELLED,
+        }
+        if status_str in event_type_map:
+            self._publish_event(
+                event_type_map[status_str],
+                plan,
+                payload={"summary": plan.summary, "progress": plan.get_progress()}
+            )
 
         # Clear current plan for this agent
-        self._current_plan_ids.pop(self._agent_name, None)
+        self._current_plan_ids.pop(self._get_agent_name(), None)
 
         return {
             "plan_id": plan.plan_id,
@@ -726,7 +1124,10 @@ class TodoPlugin:
 
         # Report the addition
         if self._reporter:
-            self._reporter.report_step_update(plan, new_step, agent_id=self._agent_name)
+            self._reporter.report_step_update(plan, new_step, agent_id=self._get_agent_name())
+
+        # Publish step_added event
+        self._publish_event(TaskEventType.STEP_ADDED, plan, new_step)
 
         return {
             "step_id": new_step.step_id,
@@ -739,7 +1140,7 @@ class TodoPlugin:
 
     def _get_current_plan(self) -> Optional[TodoPlan]:
         """Get the current active plan for this agent."""
-        plan_id = self._current_plan_ids.get(self._agent_name)
+        plan_id = self._current_plan_ids.get(self._get_agent_name())
         if not plan_id or not self._storage:
             return None
         return self._storage.get_plan(plan_id)
@@ -777,10 +1178,10 @@ class TodoPlugin:
         if self._storage:
             self._storage.save_plan(plan)
 
-        self._current_plan_ids[self._agent_name] = plan.plan_id
+        self._current_plan_ids[self._get_agent_name()] = plan.plan_id
 
         if self._reporter:
-            self._reporter.report_plan_created(plan, agent_id=self._agent_name)
+            self._reporter.report_plan_created(plan, agent_id=self._get_agent_name())
 
         return plan
 
@@ -824,7 +1225,7 @@ class TodoPlugin:
             self._storage.save_plan(plan)
 
         if self._reporter:
-            self._reporter.report_step_update(plan, step, agent_id=self._agent_name)
+            self._reporter.report_step_update(plan, step, agent_id=self._get_agent_name())
 
         return step
 
@@ -881,6 +1282,509 @@ class TodoPlugin:
         from .channels import create_reporter
         reporter_config = channel_config or {}
         self._reporter = create_reporter(channel_type, reporter_config)
+
+    # === Cross-agent collaboration executors ===
+
+    def _format_event_notification(self, event: TaskEvent) -> str:
+        """Format an event as a notification message for injection.
+
+        Args:
+            event: The TaskEvent to format.
+
+        Returns:
+            Formatted string suitable for injection into agent conversation.
+        """
+        parts = [f"[SUBAGENT event={event.event_type.value}]"]
+        parts.append(f"From: {event.source_agent}")
+
+        if event.source_plan_title:
+            parts.append(f"Plan: {event.source_plan_title}")
+
+        # Add event-specific details
+        if event.event_type == TaskEventType.PLAN_CREATED:
+            steps = event.payload.get("steps", [])
+            if steps:
+                parts.append("Steps:")
+                for s in steps:
+                    parts.append(f"  - {s.get('step_id')}: {s.get('description')}")
+
+        elif event.event_type == TaskEventType.STEP_COMPLETED:
+            if event.source_step_id:
+                parts.append(f"Step: {event.source_step_id}")
+            output = event.payload.get("output")
+            if output:
+                import json
+                parts.append(f"Output: {json.dumps(output)}")
+            result = event.payload.get("result")
+            if result:
+                parts.append(f"Result: {result}")
+
+        elif event.event_type in (TaskEventType.PLAN_COMPLETED, TaskEventType.PLAN_FAILED):
+            summary = event.payload.get("summary")
+            if summary:
+                parts.append(f"Summary: {summary}")
+            progress = event.payload.get("progress")
+            if progress:
+                parts.append(f"Progress: {progress.get('completed', 0)}/{progress.get('total', 0)} steps")
+
+        return "\n".join(parts)
+
+    def _execute_subscribe_to_tasks(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the subscribeToTasks tool."""
+        event_types_raw = args.get("event_types", [])
+        agent_id = args.get("agent_id")
+        plan_id = args.get("plan_id")
+        step_id = args.get("step_id")
+
+        self._trace(f"subscribeToTasks: events={event_types_raw}, agent={agent_id}")
+
+        if not event_types_raw:
+            return {"error": "event_types is required"}
+
+        # Parse event types
+        event_types = []
+        for et in event_types_raw:
+            try:
+                event_types.append(TaskEventType(et))
+            except ValueError:
+                return {"error": f"Invalid event type: {et}"}
+
+        if not self._event_bus:
+            return {"error": "Event bus not initialized"}
+
+        # Capture the subscribing agent's session at subscription time
+        # This is critical because the callback may be invoked from a different thread
+        # (e.g., when subagent publishes an event), and thread-local storage would
+        # contain the subagent's session, not the parent's
+        import threading
+        subscriber_session = getattr(_thread_local, 'session', None)
+        subscriber_agent_name = self._get_agent_name()
+        thread_id = threading.current_thread().ident
+
+        self._trace(
+            f"subscribeToTasks: capturing session for {subscriber_agent_name}, "
+            f"session_exists={subscriber_session is not None}, thread_id={thread_id}"
+        )
+
+        # Create filter
+        filter = EventFilter(
+            agent_id=agent_id,
+            plan_id=plan_id,
+            step_id=step_id,
+            event_types=event_types
+        )
+
+        # Create callback that injects events into the subscriber's session
+        def on_event(event: TaskEvent) -> None:
+            self._trace(
+                f"Event callback: {event.event_type.value} from {event.source_agent} "
+                f"for subscriber {subscriber_agent_name}"
+            )
+
+            # Don't deliver events from self (avoid infinite loops)
+            if event.source_agent == subscriber_agent_name:
+                self._trace(f"Skipping self-event from {event.source_agent}")
+                return
+
+            # If we have a captured session, inject the event notification
+            if subscriber_session is not None:
+                # Format event as a message the model can process
+                event_message = self._format_event_notification(event)
+
+                # Import SourceType for injection
+                from shared.message_queue import SourceType
+
+                # Inject into the subscriber's session
+                try:
+                    subscriber_session.inject_prompt(
+                        text=event_message,
+                        source_id=event.source_agent,
+                        source_type=SourceType.CHILD
+                    )
+                    self._trace(
+                        f"Injected {event.event_type.value} notification into "
+                        f"{subscriber_agent_name}'s session"
+                    )
+                except Exception as e:
+                    self._trace(f"Failed to inject event: {e}")
+            else:
+                self._trace(
+                    f"No session captured for {subscriber_agent_name}, "
+                    f"event not injected (will be in history)"
+                )
+
+        # Subscribe
+        sub_id = self._event_bus.subscribe(
+            subscriber_agent=subscriber_agent_name,
+            filter=filter,
+            callback=on_event
+        )
+
+        # Track subscription for this agent
+        agent_name = self._get_agent_name()
+        if agent_name not in self._agent_subscriptions:
+            self._agent_subscriptions[agent_name] = []
+        self._agent_subscriptions[agent_name].append(sub_id)
+
+        return {
+            "subscription_id": sub_id,
+            "filter": filter.to_dict(),
+            "message": f"Subscribed to {len(event_types)} event type(s). Events will be delivered inline."
+        }
+
+    def _execute_add_dependent_step(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the addDependentStep tool."""
+        description = args.get("description", "")
+        depends_on_raw = args.get("depends_on", [])
+        after_step_id = args.get("after_step_id")
+        provides = args.get("provides")
+
+        self._trace(f"addDependentStep: description={description!r}, deps={len(depends_on_raw)}")
+
+        if not description:
+            return {"error": "description is required"}
+
+        if not depends_on_raw:
+            return {"error": "depends_on is required and must not be empty"}
+
+        # Get current plan
+        plan = self._get_current_plan()
+        if not plan:
+            return {"error": "No active plan. Create a plan first with createPlan."}
+
+        if not plan.started:
+            return {"error": "Plan not started. Call startPlan first to get user approval."}
+
+        # Parse dependencies
+        depends_on = []
+        for dep in depends_on_raw:
+            if not dep.get("agent_id") or not dep.get("step_id"):
+                return {"error": "Each dependency must have agent_id and step_id"}
+            depends_on.append(TaskRef.from_dict(dep))
+
+        # Add the step with dependencies
+        new_step = plan.add_step(
+            description=description,
+            after_step_id=after_step_id,
+            depends_on=depends_on,
+            provides=provides
+        )
+
+        # Register dependencies with the event bus
+        if self._event_bus:
+            for dep in depends_on:
+                self._event_bus.register_dependency(
+                    dependency_ref=dep,
+                    waiting_agent=self._get_agent_name(),
+                    waiting_plan_id=plan.plan_id,
+                    waiting_step_id=new_step.step_id
+                )
+
+        # Save to storage
+        if self._storage:
+            self._storage.save_plan(plan)
+
+        # Report the addition
+        if self._reporter:
+            self._reporter.report_step_update(plan, new_step, agent_id=self._get_agent_name())
+
+        # Publish step_blocked event
+        if self._event_bus:
+            event = TaskEvent.create(
+                event_type=TaskEventType.STEP_BLOCKED,
+                agent_id=self._get_agent_name(),
+                plan=plan,
+                step=new_step,
+                payload={
+                    "blocked_by": [ref.to_dict() for ref in new_step.blocked_by]
+                }
+            )
+            self._event_bus.publish(event)
+
+        return {
+            "step_id": new_step.step_id,
+            "sequence": new_step.sequence,
+            "description": new_step.description,
+            "status": new_step.status.value,
+            "blocked_by": [ref.to_dict() for ref in new_step.blocked_by],
+            "total_steps": len(plan.steps),
+            "progress": plan.get_progress(),
+            "message": f"Step added with {len(depends_on)} dependencies (BLOCKED)"
+        }
+
+    def _execute_complete_step_with_output(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the completeStepWithOutput tool."""
+        step_id = args.get("step_id", "")
+        output = args.get("output")
+        result = args.get("result")
+
+        self._trace(f"completeStepWithOutput: step_id={step_id}, output_keys={list(output.keys()) if output else []}")
+
+        if not step_id:
+            return {"error": "step_id is required"}
+
+        if output is None:
+            return {"error": "output is required"}
+
+        # Get current plan
+        plan = self._get_current_plan()
+        if not plan:
+            return {"error": "No active plan. Create a plan first with createPlan."}
+
+        if not plan.started:
+            return {"error": "Plan not started. Call startPlan first to get user approval."}
+
+        # Find step
+        step = plan.get_step_by_id(step_id)
+        if not step:
+            return {"error": f"Step not found: {step_id}"}
+
+        # Complete the step with output
+        step.complete(result=result, output=output)
+
+        # Save to storage
+        if self._storage:
+            self._storage.save_plan(plan)
+
+        # Report update
+        if self._reporter:
+            self._reporter.report_step_update(plan, step, agent_id=self._get_agent_name())
+
+        # Publish step_completed event with output
+        if self._event_bus:
+            event = TaskEvent.create(
+                event_type=TaskEventType.STEP_COMPLETED,
+                agent_id=self._get_agent_name(),
+                plan=plan,
+                step=step,
+                payload={
+                    "output": output,
+                    "result": result,
+                    "provides": step.provides
+                }
+            )
+            self._event_bus.publish(event)
+
+        return {
+            "step_id": step.step_id,
+            "sequence": step.sequence,
+            "description": step.description,
+            "status": step.status.value,
+            "output": output,
+            "result": result,
+            "progress": plan.get_progress(),
+            "message": "Step completed with output. Dependent steps will be notified."
+        }
+
+    def _execute_get_blocked_steps(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the getBlockedSteps tool."""
+        plan_id = args.get("plan_id")
+
+        self._trace(f"getBlockedSteps: plan_id={plan_id}")
+
+        # Get plan by explicit ID or current plan
+        if plan_id and self._storage:
+            plan = self._storage.get_plan(plan_id)
+        else:
+            plan = self._get_current_plan()
+
+        if not plan:
+            return {"error": "No plan found. Create a plan first with createPlan."}
+
+        blocked_steps = plan.get_blocked_steps()
+
+        if not blocked_steps:
+            return {
+                "blocked_steps": [],
+                "message": "No blocked steps"
+            }
+
+        return {
+            "blocked_steps": [
+                {
+                    "step_id": s.step_id,
+                    "sequence": s.sequence,
+                    "description": s.description,
+                    "blocked_by": [ref.to_dict() for ref in s.blocked_by],
+                    "depends_on": [ref.to_dict() for ref in s.depends_on],
+                    "received_outputs": list(s.received_outputs.keys())
+                }
+                for s in blocked_steps
+            ],
+            "count": len(blocked_steps)
+        }
+
+    def _execute_get_task_events(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the getTaskEvents tool."""
+        agent_id = args.get("agent_id")
+        event_types_raw = args.get("event_types", [])
+        limit = args.get("limit", 20)
+
+        self._trace(f"getTaskEvents: agent={agent_id}, types={event_types_raw}, limit={limit}")
+
+        if not self._event_bus:
+            return {"error": "Event bus not initialized"}
+
+        # Parse event types
+        event_types = None
+        if event_types_raw:
+            event_types = []
+            for et in event_types_raw:
+                try:
+                    event_types.append(TaskEventType(et))
+                except ValueError:
+                    pass  # Skip invalid
+
+        events = self._event_bus.get_recent_events(
+            agent_id=agent_id,
+            event_types=event_types,
+            limit=limit
+        )
+
+        return {
+            "events": [e.to_dict() for e in events],
+            "count": len(events)
+        }
+
+    def _execute_list_subscriptions(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the listSubscriptions tool."""
+        self._trace("listSubscriptions")
+
+        if not self._event_bus:
+            return {"error": "Event bus not initialized"}
+
+        subs = self._event_bus.get_subscriptions(agent_id=self._get_agent_name())
+
+        return {
+            "subscriptions": [s.to_dict() for s in subs],
+            "count": len(subs)
+        }
+
+    def _execute_unsubscribe(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the unsubscribe tool."""
+        sub_id = args.get("subscription_id", "")
+
+        self._trace(f"unsubscribe: sub_id={sub_id}")
+
+        if not sub_id:
+            return {"error": "subscription_id is required"}
+
+        if not self._event_bus:
+            return {"error": "Event bus not initialized"}
+
+        success = self._event_bus.unsubscribe(sub_id)
+
+        if success:
+            # Remove from agent's tracked subscriptions
+            agent_name = self._get_agent_name()
+            if agent_name in self._agent_subscriptions:
+                if sub_id in self._agent_subscriptions[agent_name]:
+                    self._agent_subscriptions[agent_name].remove(sub_id)
+
+        return {
+            "success": success,
+            "subscription_id": sub_id,
+            "message": "Subscription removed" if success else "Subscription not found"
+        }
+
+    def _on_dependency_resolved(
+        self,
+        waiting_agent: str,
+        waiting_plan_id: str,
+        waiting_step_id: str,
+        completion_event: TaskEvent
+    ) -> None:
+        """Callback when a dependency is resolved.
+
+        Called by the event bus when a step that another step depends on
+        completes. Updates the waiting step's blocked_by and received_outputs.
+
+        Args:
+            waiting_agent: Agent that was waiting.
+            waiting_plan_id: Plan containing the waiting step.
+            waiting_step_id: Step that was blocked.
+            completion_event: The step_completed event with output.
+        """
+        self._trace(
+            f"Dependency resolved: {waiting_agent}:{waiting_step_id} <- "
+            f"{completion_event.source_agent}:{completion_event.source_step_id}"
+        )
+
+        # Get the waiting plan
+        if not self._storage:
+            return
+
+        plan = self._storage.get_plan(waiting_plan_id)
+        if not plan:
+            return
+
+        step = plan.get_step_by_id(waiting_step_id)
+        if not step:
+            return
+
+        # Extract output from completion event
+        output = completion_event.payload.get("output")
+        provides_name = completion_event.payload.get("provides")
+
+        # Create ref for the completed step
+        completed_ref = TaskRef(
+            agent_id=completion_event.source_agent,
+            plan_id=completion_event.source_plan_id,
+            step_id=completion_event.source_step_id or ""
+        )
+
+        # Resolve the dependency
+        is_unblocked = step.resolve_dependency(completed_ref, output, provides_name)
+
+        # Save updated plan
+        self._storage.save_plan(plan)
+
+        # If unblocked, publish event
+        if is_unblocked and self._event_bus:
+            event = TaskEvent.create(
+                event_type=TaskEventType.STEP_UNBLOCKED,
+                agent_id=waiting_agent,
+                plan=plan,
+                step=step,
+                payload={
+                    "received_outputs": list(step.received_outputs.keys()),
+                    "unblocked_by": completed_ref.to_dict()
+                }
+            )
+            self._event_bus.publish(event)
+
+            # Report if reporter is available
+            if self._reporter:
+                self._reporter.report_step_update(plan, step, agent_id=waiting_agent)
+
+    # === Event publishing helpers ===
+
+    def _publish_event(
+        self,
+        event_type: TaskEventType,
+        plan: TodoPlan,
+        step: Optional[TodoStep] = None,
+        payload: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Publish an event to the event bus.
+
+        Args:
+            event_type: Type of event.
+            plan: The plan this event relates to.
+            step: Optional step this event relates to.
+            payload: Additional event data.
+        """
+        if not self._event_bus:
+            return
+
+        event = TaskEvent.create(
+            event_type=event_type,
+            agent_id=self._get_agent_name(),
+            plan=plan,
+            step=step,
+            payload=payload
+        )
+        self._event_bus.publish(event)
 
 
 def create_plugin() -> TodoPlugin:

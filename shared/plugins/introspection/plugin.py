@@ -9,10 +9,15 @@ The plugin supports deferred tool loading for token economy:
 - Models request schemas on-demand, reducing initial context overhead
 """
 
+import threading
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from ..model_provider.types import ToolSchema, TOOL_CATEGORIES
 from ..streaming import StreamingCapable
+
+# Thread-local storage for session reference per agent context
+# This prevents subagents from overwriting parent's session reference
+_thread_local = threading.local()
 
 
 class IntrospectionPlugin:
@@ -44,6 +49,16 @@ class IntrospectionPlugin:
     def name(self) -> str:
         return "introspection"
 
+    @property
+    def _session(self):
+        """Get the session for the current thread context.
+
+        Uses thread-local storage so each agent (main or subagent) gets
+        its own session reference, preventing subagents from overwriting
+        the parent's session.
+        """
+        return getattr(_thread_local, 'session', None)
+
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Initialize the introspection plugin.
 
@@ -66,6 +81,20 @@ class IntrospectionPlugin:
             registry: The PluginRegistry instance.
         """
         self._registry = registry
+
+    def set_session(self, session) -> None:
+        """Receive the session for tool activation.
+
+        This is called automatically by the plugin wiring system. When tools
+        are discovered via get_tool_schemas, they need to be activated in
+        the session so the provider can use them.
+
+        Stores in thread-local storage so each agent context gets its own session.
+
+        Args:
+            session: The JaatoSession instance.
+        """
+        _thread_local.session = session
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return tool schemas for introspection tools.
@@ -306,12 +335,19 @@ class IntrospectionPlugin:
         schemas = []
         not_found = []
 
+        # Collect tools that need activation (discoverable tools not yet in provider)
+        tools_to_activate = []
+
         for tool_name in names:
             if tool_name in schema_map:
                 target_schema = schema_map[tool_name]
 
                 # Track this access
                 self._accessed_tools.add(tool_name)
+
+                # Check if this is a discoverable tool that needs activation
+                if getattr(target_schema, 'discoverability', 'discoverable') == 'discoverable':
+                    tools_to_activate.append(tool_name)
 
                 # Find plugin source
                 plugin = self._registry.get_plugin_for_tool(tool_name)
@@ -355,6 +391,14 @@ class IntrospectionPlugin:
             if suggestions:
                 result["suggestions"] = suggestions
             result["hint"] = "Use list_tools() to see available tools."
+
+        # Activate discovered tools so the model can actually call them
+        # This adds the tool schemas to the provider's declared tools
+        if tools_to_activate and self._session:
+            activated = self._session.activate_discovered_tools(tools_to_activate)
+            if activated:
+                result["activated"] = activated
+                result["activation_note"] = "These tools are now available to call."
 
         return result
 

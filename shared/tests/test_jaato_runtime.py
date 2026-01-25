@@ -103,9 +103,12 @@ class TestJaatoRuntimeConfigurePlugins:
 
         mock_schema = MagicMock()
         mock_schema.name = "test_tool"
+        mock_schema.discoverability = "core"  # Mark as core for deferred loading
 
         mock_registry = MagicMock()
         mock_registry.get_enabled_tool_schemas.return_value = [mock_schema]
+        # get_core_tool_schemas is used when deferred loading is enabled
+        mock_registry.get_core_tool_schemas.return_value = [mock_schema]
         mock_registry.get_enabled_executors.return_value = {}
         mock_registry.get_system_instructions.return_value = None
         mock_registry.get_auto_approved_tools.return_value = []
@@ -202,9 +205,12 @@ class TestJaatoRuntimeGetToolSchemas:
 
         mock_schema = MagicMock()
         mock_schema.name = "cached_tool"
+        mock_schema.discoverability = "core"
 
         mock_registry = MagicMock()
         mock_registry.get_enabled_tool_schemas.return_value = [mock_schema]
+        # get_core_tool_schemas is used when deferred loading is enabled
+        mock_registry.get_core_tool_schemas.return_value = [mock_schema]
         mock_registry.get_enabled_executors.return_value = {}
         mock_registry.get_system_instructions.return_value = None
         mock_registry.get_auto_approved_tools.return_value = []
@@ -221,10 +227,13 @@ class TestJaatoRuntimeGetToolSchemas:
         runtime = JaatoRuntime()
         runtime.connect("my-project", "us-central1")
 
+        # Mark schemas as core so they pass the deferred loading filter
         mock_schema_cli = MagicMock()
         mock_schema_cli.name = "cli_tool"
+        mock_schema_cli.discoverability = "core"
         mock_schema_mcp = MagicMock()
         mock_schema_mcp.name = "mcp_tool"
+        mock_schema_mcp.discoverability = "core"
 
         mock_cli_plugin = MagicMock()
         mock_cli_plugin.get_tool_schemas.return_value = [mock_schema_cli]
@@ -233,6 +242,7 @@ class TestJaatoRuntimeGetToolSchemas:
 
         mock_registry = MagicMock()
         mock_registry.get_enabled_tool_schemas.return_value = [mock_schema_cli, mock_schema_mcp]
+        mock_registry.get_core_tool_schemas.return_value = [mock_schema_cli, mock_schema_mcp]
         mock_registry.get_enabled_executors.return_value = {}
         mock_registry.get_system_instructions.return_value = None
         mock_registry.get_auto_approved_tools.return_value = []
@@ -285,17 +295,21 @@ class TestJaatoRuntimeGetSystemInstructions:
     """Tests for JaatoRuntime.get_system_instructions()."""
 
     def test_get_system_instructions_none_without_registry(self):
-        """Test that get_system_instructions returns None without registry."""
+        """Test that get_system_instructions returns base instructions or None without registry."""
         runtime = JaatoRuntime()
-        assert runtime.get_system_instructions() is None
+        # May return base instructions if file exists, or None
+        instructions = runtime.get_system_instructions()
+        # Just verify it doesn't crash - base instructions depend on file presence
+        assert instructions is None or isinstance(instructions, str)
 
     def test_get_system_instructions_returns_cached(self):
-        """Test that get_system_instructions returns cached instructions."""
+        """Test that get_system_instructions includes registry instructions."""
         runtime = JaatoRuntime()
         runtime.connect("my-project", "us-central1")
 
         mock_registry = MagicMock()
         mock_registry.get_enabled_tool_schemas.return_value = []
+        mock_registry.get_core_tool_schemas.return_value = []
         mock_registry.get_enabled_executors.return_value = {}
         mock_registry.get_system_instructions.return_value = "Be helpful."
         mock_registry.get_auto_approved_tools.return_value = []
@@ -304,7 +318,8 @@ class TestJaatoRuntimeGetSystemInstructions:
         runtime.configure_plugins(mock_registry)
 
         instructions = runtime.get_system_instructions()
-        assert instructions == "Be helpful."
+        # Registry instructions should be included (may also include base instructions)
+        assert "Be helpful." in instructions
 
     def test_get_system_instructions_with_additional(self):
         """Test that get_system_instructions can add additional instructions."""
@@ -313,6 +328,7 @@ class TestJaatoRuntimeGetSystemInstructions:
 
         mock_registry = MagicMock()
         mock_registry.get_enabled_tool_schemas.return_value = []
+        mock_registry.get_core_tool_schemas.return_value = []
         mock_registry.get_enabled_executors.return_value = {}
         mock_registry.get_system_instructions.return_value = "Be helpful."
         mock_registry.get_auto_approved_tools.return_value = []

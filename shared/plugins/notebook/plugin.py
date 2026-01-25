@@ -285,7 +285,7 @@ class NotebookPlugin(StreamingCapable):
                     "required": ["code"]
                 },
                 category="code",
-                discoverability="core",
+                discoverability="discoverable",
             ),
             ToolSchema(
                 name="notebook_create",

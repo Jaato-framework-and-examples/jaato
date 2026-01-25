@@ -599,7 +599,35 @@ class SubagentPlugin:
             "- Do NOT re-read files - copy the full content directly from your context.\n"
             "- Subagents will automatically have a share_context tool to send findings back to you.\n\n"
             "Example spawn with context:\n"
-            "  spawn_subagent(task='analyze auth', context={files: {'auth.py': '<FULL FILE CONTENT HERE>'}, findings: ['Uses JWT']})"
+            "  spawn_subagent(task='analyze auth', context={files: {'auth.py': '<FULL FILE CONTENT HERE>'}, findings: ['Uses JWT']})\n\n"
+            "ACTIVE COLLABORATION WITH TODO TOOLS:\n"
+            "Use TODO planning tools for structured parent-child collaboration:\n\n"
+            "PARENT WORKFLOW (before spawning):\n"
+            "1. Create a plan with createPlan for your overall task\n"
+            "2. Call subscribeToTasks() to receive events when subagents complete steps\n"
+            "3. Use addDependentStep to create steps that wait on subagent deliverables\n"
+            "4. Spawn the subagent with clear instructions to use TODO tools\n\n"
+            "CHILD WORKFLOW (in subagent):\n"
+            "1. Create its own plan with createPlan for its subtask\n"
+            "2. Execute work and report progress with updateStep\n"
+            "3. Complete with completePlan - this triggers events to parent\n\n"
+            "SYNCHRONIZATION:\n"
+            "- Parent's addDependentStep creates BLOCKED steps that auto-unblock when child completes\n"
+            "- Use getBlockedSteps to see what's waiting on subagents\n"
+            "- Use getTaskEvents to review cross-agent activity\n\n"
+            "EXAMPLE COLLABORATION:\n"
+            "  # Parent:\n"
+            "  createPlan(title='Main task', steps=['Prepare', 'Delegate research', 'Synthesize'])\n"
+            "  subscribeToTasks()  # Receive child events\n"
+            "  addDependentStep(description='Wait for research results', wait_for='research findings')\n"
+            "  spawn_subagent(profile='investigator-web-research', task='Research X. Use createPlan to track progress.')\n"
+            "  # ... parent continues, blocked step unblocks when child's plan completes\n\n"
+            "  # Child (investigator):\n"
+            "  createPlan(title='Research X', steps=['Search', 'Fetch', 'Summarize'])\n"
+            "  # ... does work, updates steps ...\n"
+            "  completePlan(summary='Found 5 key findings...')  # Triggers event to parent\n\n"
+            "This enables observable, traceable multi-agent workflows where both agents "
+            "maintain plans and coordinate through the shared TODO event system."
         )
 
         if not self._config or not self._config.profiles:
@@ -948,6 +976,9 @@ class SubagentPlugin:
     def _execute_close_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Close an active subagent session.
 
+        If the session is still running, it will be cancelled first before
+        being removed from the registry.
+
         Args:
             args: Tool arguments containing:
                 - subagent_id: ID of the subagent session to close
@@ -963,17 +994,34 @@ class SubagentPlugin:
                 'message': 'No subagent_id provided'
             }
 
-        if subagent_id not in self._active_sessions:
-            return {
-                'success': False,
-                'message': f'No active session found with ID: {subagent_id}'
-            }
+        with self._sessions_lock:
+            if subagent_id not in self._active_sessions:
+                return {
+                    'success': False,
+                    'message': f'No active session found with ID: {subagent_id}'
+                }
 
-        self._close_session(subagent_id)
-        return {
-            'success': True,
-            'message': f'Session {subagent_id} closed successfully'
-        }
+            session_info = self._active_sessions[subagent_id]
+            session = session_info.get('session')
+
+            # If session is still running, cancel it first
+            was_running = False
+            if session and session.is_running:
+                was_running = True
+                if session.supports_stop:
+                    session.request_stop()
+
+            self._close_session_unlocked(subagent_id)
+
+            if was_running:
+                return {
+                    'success': True,
+                    'message': f'Session {subagent_id} cancelled and closed successfully'
+                }
+            return {
+                'success': True,
+                'message': f'Session {subagent_id} closed successfully'
+            }
 
     def _execute_cancel_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Cancel a running subagent operation.
@@ -1064,7 +1112,7 @@ class SubagentPlugin:
                 phase_started = session.phase_started_at.isoformat() if session and session.phase_started_at else None
 
                 sessions.append({
-                    'agent_id': agent_id,
+                    'subagent_id': agent_id,  # Match parameter name for close/cancel/send tools
                     'profile': info['profile'].name,
                     'status': 'running' if is_running else 'idle',
                     'activity_phase': activity_phase,
@@ -1161,7 +1209,16 @@ class SubagentPlugin:
         return '\n'.join(parts)
 
     def _close_session(self, agent_id: str) -> None:
-        """Close and cleanup a subagent session.
+        """Close and cleanup a subagent session (thread-safe).
+
+        Args:
+            agent_id: ID of the session to close.
+        """
+        with self._sessions_lock:
+            self._close_session_unlocked(agent_id)
+
+    def _close_session_unlocked(self, agent_id: str) -> None:
+        """Close and cleanup a subagent session (caller must hold lock).
 
         Args:
             agent_id: ID of the session to close.
@@ -1334,10 +1391,10 @@ class SubagentPlugin:
             parent_cwd
         )
 
-        # Return immediately with agent_id
+        # Return immediately with subagent_id (matches parameter name for close/cancel/send tools)
         return {
             'success': True,
-            'agent_id': agent_id,
+            'subagent_id': agent_id,
             'status': 'spawned',
             'message': f'Subagent {agent_id} spawned and running in background. END YOUR TURN NOW. Do NOT continue generating text. Do NOT write fake completion events. Real events will be sent to you automatically.'
         }

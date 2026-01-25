@@ -324,8 +324,8 @@ class TestRegistryShutdownCleanup:
 
         assert plugin._initialized is False
 
-    def test_current_plan_cleared_on_shutdown(self):
-        """Test that current plan is cleared on shutdown."""
+    def test_current_plan_preserved_on_shutdown(self):
+        """Test that current plan is preserved on shutdown for cross-agent collaboration."""
         registry = PluginRegistry()
         registry.discover()
 
@@ -337,9 +337,13 @@ class TestRegistryShutdownCleanup:
             "title": "Test Plan",
             "steps": ["Step 1", "Step 2"]
         })
-        assert plugin._current_plan_id is not None
+        # Plugin now uses dict mapping agent_name -> plan_id for multi-agent support
+        # With no session set, _get_agent_name() defaults to "main"
+        assert plugin._current_plan_ids.get("main") is not None
 
         registry.unexpose_tool("todo")
 
-        # After shutdown, current plan should be cleared
-        assert plugin._current_plan_id is None
+        # After shutdown, current plan should be PRESERVED
+        # (design changed for cross-agent collaboration - plans persist
+        # when one agent shuts down while others continue)
+        assert plugin._current_plan_ids.get("main") is not None

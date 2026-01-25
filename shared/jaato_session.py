@@ -292,6 +292,15 @@ class JaatoSession:
         """Check if session is configured and ready."""
         return self._provider is not None
 
+    @property
+    def agent_id(self) -> str:
+        """Get the agent ID for this session.
+
+        Returns:
+            The unique agent ID (e.g., "main", "subagent_1", etc.)
+        """
+        return self._agent_id
+
     def set_agent_context(
         self,
         agent_type: str = "main",
@@ -901,6 +910,8 @@ class JaatoSession:
         # Auto-wire plugins that need session access
         # Any plugin with set_session() will receive this session reference
         if self._runtime.registry:
+            import threading
+            self._trace(f"configure: wiring plugins with session, thread_id={threading.current_thread().ident}")
             for plugin_name in self._runtime.registry._exposed:
                 plugin = self._runtime.registry.get_plugin(plugin_name)
                 if plugin and hasattr(plugin, 'set_session'):
@@ -990,6 +1001,52 @@ class JaatoSession:
         # Recreate provider session with updated tools (preserve history)
         history = self.get_history()
         self._create_provider_session(history)
+
+    def activate_discovered_tools(self, tool_names: List[str]) -> List[str]:
+        """Activate discovered tools so the model can call them.
+
+        When deferred tool loading is enabled, discoverable tools are not
+        initially sent to the provider. When the model discovers tools via
+        get_tool_schemas, this method activates them by adding their schemas
+        to the provider's declared tools.
+
+        Args:
+            tool_names: Names of tools to activate.
+
+        Returns:
+            List of tool names that were actually activated (not already active).
+        """
+        if not self._provider or not self._runtime.registry:
+            return []
+
+        # Get current tool names for dedup
+        current_tool_names = {t.name for t in (self._tools or [])}
+        activated = []
+
+        # Get schemas for requested tools from registry
+        all_schemas = self._runtime.registry.get_exposed_tool_schemas()
+        schema_map = {s.name: s for s in all_schemas}
+
+        for tool_name in tool_names:
+            if tool_name in current_tool_names:
+                continue  # Already active
+            if tool_name not in schema_map:
+                continue  # Tool doesn't exist
+
+            schema = schema_map[tool_name]
+            if self._tools is None:
+                self._tools = []
+            self._tools.append(schema)
+            current_tool_names.add(tool_name)
+            activated.append(tool_name)
+
+        # If we activated any tools, recreate the provider session
+        if activated:
+            self._trace(f"Activating discovered tools: {activated}")
+            history = self.get_history()
+            self._create_provider_session(history)
+
+        return activated
 
     def _register_model_command(self) -> None:
         """Register the built-in model command for listing and switching models."""
@@ -2544,8 +2601,20 @@ class JaatoSession:
 
         Used for sequential execution where we want tool-by-tool UI updates.
         """
+        import threading
         name = fc.name
         args = fc.args
+
+        self._trace(f"_execute_single_tool: name={name}, thread_id={threading.current_thread().ident}")
+
+        # Ensure session is set in thread-local for plugins that need it
+        # This handles cases where tool execution might be in a different thread
+        # context than where configure() was called
+        if self._runtime.registry:
+            for plugin_name in self._runtime.registry.list_exposed():
+                plugin = self._runtime.registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'set_session'):
+                    plugin.set_session(self)
 
         # Forward tool call to parent for visibility
         self._forward_to_parent("TOOL_CALL", f"{name}({json.dumps(args)})")
@@ -2652,11 +2721,22 @@ class JaatoSession:
         - Uses thread-local callback (not instance-level)
         - Does not emit start/end hooks (handled by caller)
         - Includes telemetry for this thread
+        - Propagates session to worker thread's thread-local storage
         """
         name = fc.name
         args = fc.args
 
         fc_start = datetime.now()
+
+        # Propagate session to this worker thread's thread-local storage
+        # This is critical for plugins (like TODO) that use thread-local to
+        # identify the current agent context. Without this, parallel tools
+        # would see agent_name=None and fail to find the correct plan.
+        if self._runtime.registry:
+            for plugin_name in self._runtime.registry.list_exposed():
+                plugin = self._runtime.registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'set_session'):
+                    plugin.set_session(self)
 
         # Determine plugin type for telemetry
         plugin_type = "unknown"

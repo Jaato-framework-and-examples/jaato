@@ -63,13 +63,27 @@ class LivePlanReporter(TodoReporter):
         """Convert TodoPlan to display-friendly dict."""
         steps = []
         for step in plan.steps:
-            steps.append({
+            step_data = {
                 "sequence": step.sequence,
                 "description": step.description,
                 "status": step.status.value,
                 "result": step.result,
                 "error": step.error,
-            })
+            }
+            # Include cross-agent dependency info for UI
+            if step.blocked_by:
+                step_data["blocked_by"] = [
+                    {"agent_id": ref.agent_id, "step_id": ref.step_id}
+                    for ref in step.blocked_by
+                ]
+            if step.depends_on:
+                step_data["depends_on"] = [
+                    {"agent_id": ref.agent_id, "step_id": ref.step_id}
+                    for ref in step.depends_on
+                ]
+            if step.received_outputs:
+                step_data["received_outputs"] = step.received_outputs
+            steps.append(step_data)
 
         return {
             "plan_id": plan.plan_id,
