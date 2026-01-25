@@ -327,3 +327,280 @@ class TestProgressEvent:
         assert "event_id" in data
         assert "timestamp" in data
         assert "progress" in data
+
+
+# === Cross-Agent Collaboration Tests ===
+
+from ..models import TaskRef, TaskEventType
+
+
+class TestStepStatusBlocked:
+    """Tests for the new BLOCKED step status."""
+
+    def test_blocked_status_value(self):
+        assert StepStatus.BLOCKED.value == "blocked"
+
+    def test_create_step_with_dependencies(self):
+        """Test creating a step with dependencies sets it to BLOCKED."""
+        deps = [
+            TaskRef(agent_id="researcher", step_id="analysis"),
+            TaskRef(agent_id="reviewer", step_id="review")
+        ]
+        step = TodoStep.create(1, "Integrate findings", depends_on=deps)
+
+        assert step.status == StepStatus.BLOCKED
+        assert len(step.depends_on) == 2
+        assert len(step.blocked_by) == 2
+
+    def test_create_step_without_dependencies(self):
+        """Test creating a step without dependencies is PENDING."""
+        step = TodoStep.create(1, "Simple step")
+
+        assert step.status == StepStatus.PENDING
+        assert len(step.depends_on) == 0
+        assert len(step.blocked_by) == 0
+
+
+class TestTodoStepDependencies:
+    """Tests for TodoStep dependency management."""
+
+    def test_is_blocked(self):
+        """Test is_blocked helper."""
+        deps = [TaskRef(agent_id="a", step_id="s")]
+        step = TodoStep.create(1, "Test", depends_on=deps)
+
+        assert step.is_blocked() is True
+
+        step.blocked_by = []
+        assert step.is_blocked() is False
+
+    def test_add_dependency(self):
+        """Test adding a dependency after creation."""
+        step = TodoStep.create(1, "Test")
+        assert step.status == StepStatus.PENDING
+
+        step.add_dependency(TaskRef(agent_id="a", step_id="s"))
+
+        assert step.status == StepStatus.BLOCKED
+        assert len(step.depends_on) == 1
+        assert len(step.blocked_by) == 1
+
+    def test_add_dependency_no_duplicates(self):
+        """Test that duplicate dependencies are not added."""
+        step = TodoStep.create(1, "Test")
+        ref = TaskRef(agent_id="a", step_id="s")
+
+        step.add_dependency(ref)
+        step.add_dependency(ref)  # Same ref
+
+        assert len(step.depends_on) == 1
+
+    def test_resolve_dependency_unblocks(self):
+        """Test resolving all dependencies unblocks the step."""
+        dep = TaskRef(agent_id="researcher", step_id="analysis")
+        step = TodoStep.create(1, "Integrate", depends_on=[dep])
+
+        assert step.status == StepStatus.BLOCKED
+
+        is_unblocked = step.resolve_dependency(
+            dep,
+            output={"findings": ["a", "b"]},
+            provides_name="research_output"
+        )
+
+        assert is_unblocked is True
+        assert step.status == StepStatus.PENDING
+        assert len(step.blocked_by) == 0
+        assert "researcher:analysis" in step.received_outputs
+        assert "research_output" in step.received_outputs
+
+    def test_resolve_dependency_partial(self):
+        """Test resolving one of multiple dependencies."""
+        dep1 = TaskRef(agent_id="a", step_id="s1")
+        dep2 = TaskRef(agent_id="b", step_id="s2")
+        step = TodoStep.create(1, "Test", depends_on=[dep1, dep2])
+
+        is_unblocked = step.resolve_dependency(dep1, {"result": 1})
+
+        assert is_unblocked is False
+        assert step.status == StepStatus.BLOCKED
+        assert len(step.blocked_by) == 1
+        assert "a:s1" in step.received_outputs
+
+    def test_get_blocking_refs(self):
+        """Test getting list of blocking dependencies."""
+        deps = [
+            TaskRef(agent_id="a", step_id="s1"),
+            TaskRef(agent_id="b", step_id="s2")
+        ]
+        step = TodoStep.create(1, "Test", depends_on=deps)
+
+        blocking = step.get_blocking_refs()
+
+        assert len(blocking) == 2
+        # Should be copies, not the same objects
+        assert blocking is not step.blocked_by
+
+    def test_complete_with_output(self):
+        """Test completing a step with structured output."""
+        step = TodoStep.create(1, "Analysis", provides="analysis_result")
+        step.start()
+        step.complete(result="Done", output={"findings": ["x", "y"]})
+
+        assert step.status == StepStatus.COMPLETED
+        assert step.result == "Done"
+        assert step.output == {"findings": ["x", "y"]}
+        assert step.provides == "analysis_result"
+
+    def test_step_to_dict_with_collaboration_fields(self):
+        """Test serialization includes collaboration fields."""
+        deps = [TaskRef(agent_id="a", step_id="s1")]
+        step = TodoStep.create(1, "Test", depends_on=deps, provides="output")
+        step.received_outputs = {"a:s1": {"data": 123}}
+
+        data = step.to_dict()
+
+        assert "depends_on" in data
+        assert len(data["depends_on"]) == 1
+        assert data["depends_on"][0]["agent_id"] == "a"
+        assert data["provides"] == "output"
+        assert data["received_outputs"] == {"a:s1": {"data": 123}}
+
+    def test_step_from_dict_with_collaboration_fields(self):
+        """Test deserialization handles collaboration fields."""
+        data = {
+            "step_id": "step_123",
+            "sequence": 1,
+            "description": "Test",
+            "status": "blocked",
+            "depends_on": [{"agent_id": "a", "step_id": "s1"}],
+            "blocked_by": [{"agent_id": "a", "step_id": "s1"}],
+            "provides": "my_output",
+            "output": {"result": 42},
+            "received_outputs": {"a:s1": {"data": "received"}}
+        }
+
+        step = TodoStep.from_dict(data)
+
+        assert step.status == StepStatus.BLOCKED
+        assert len(step.depends_on) == 1
+        assert step.depends_on[0].agent_id == "a"
+        assert step.provides == "my_output"
+        assert step.output == {"result": 42}
+        assert step.received_outputs == {"a:s1": {"data": "received"}}
+
+
+class TestTodoPlanDependencies:
+    """Tests for TodoPlan dependency-related methods."""
+
+    def test_get_blocked_steps(self):
+        """Test getting all blocked steps."""
+        plan = TodoPlan.create("Test", ["A", "B", "C"])
+
+        # Block step B
+        plan.steps[1].add_dependency(TaskRef(agent_id="x", step_id="y"))
+
+        blocked = plan.get_blocked_steps()
+
+        assert len(blocked) == 1
+        assert blocked[0].description == "B"
+
+    def test_get_blocked_steps_none(self):
+        """Test no blocked steps returns empty list."""
+        plan = TodoPlan.create("Test", ["A", "B"])
+
+        blocked = plan.get_blocked_steps()
+
+        assert blocked == []
+
+    def test_add_step_with_dependencies(self):
+        """Test adding a step with dependencies."""
+        plan = TodoPlan.create("Test", ["Step 1"])
+        plan.started = True
+
+        deps = [TaskRef(agent_id="researcher", step_id="done")]
+        new_step = plan.add_step(
+            description="Dependent step",
+            depends_on=deps,
+            provides="my_output"
+        )
+
+        assert new_step.status == StepStatus.BLOCKED
+        assert len(new_step.depends_on) == 1
+        assert new_step.provides == "my_output"
+
+    def test_resolve_dependencies_from(self):
+        """Test resolving dependencies from a completed step."""
+        plan = TodoPlan.create("Test", ["Step 1"])
+        plan.started = True
+
+        # Add dependent step
+        dep = TaskRef(agent_id="researcher", step_id="analysis")
+        step2 = plan.add_step("Integrate", depends_on=[dep])
+
+        assert step2.status == StepStatus.BLOCKED
+
+        # Simulate completion of dependency
+        unblocked = plan.resolve_dependencies_from(
+            completed_agent="researcher",
+            completed_plan_id="plan_123",
+            completed_step_id="analysis",
+            output={"findings": ["a", "b"]},
+            provides_name="research_output"
+        )
+
+        assert len(unblocked) == 1
+        assert unblocked[0] is step2
+        assert step2.status == StepStatus.PENDING
+        assert "researcher:analysis" in step2.received_outputs
+
+    def test_get_progress_includes_blocked(self):
+        """Test that progress stats include blocked count."""
+        plan = TodoPlan.create("Test", ["A", "B", "C"])
+        plan.steps[1].status = StepStatus.BLOCKED
+
+        progress = plan.get_progress()
+
+        assert progress["blocked"] == 1
+        assert progress["pending"] == 2
+
+    def test_get_step_by_provides(self):
+        """Test finding a step by its provides name."""
+        plan = TodoPlan.create("Test", ["Step 1"])
+        plan.started = True
+        plan.add_step("Analysis", provides="analysis_output")
+
+        found = plan.get_step_by_provides("analysis_output")
+
+        assert found is not None
+        assert found.provides == "analysis_output"
+
+    def test_get_step_by_provides_not_found(self):
+        """Test that missing provides name returns None."""
+        plan = TodoPlan.create("Test", ["Step 1"])
+
+        found = plan.get_step_by_provides("nonexistent")
+
+        assert found is None
+
+
+class TestTaskEventTypeEnum:
+    """Tests for TaskEventType enum."""
+
+    def test_plan_events(self):
+        assert TaskEventType.PLAN_CREATED.value == "plan_created"
+        assert TaskEventType.PLAN_STARTED.value == "plan_started"
+        assert TaskEventType.PLAN_COMPLETED.value == "plan_completed"
+        assert TaskEventType.PLAN_FAILED.value == "plan_failed"
+        assert TaskEventType.PLAN_CANCELLED.value == "plan_cancelled"
+
+    def test_step_events(self):
+        assert TaskEventType.STEP_ADDED.value == "step_added"
+        assert TaskEventType.STEP_STARTED.value == "step_started"
+        assert TaskEventType.STEP_COMPLETED.value == "step_completed"
+        assert TaskEventType.STEP_FAILED.value == "step_failed"
+        assert TaskEventType.STEP_SKIPPED.value == "step_skipped"
+
+    def test_collaboration_events(self):
+        assert TaskEventType.STEP_BLOCKED.value == "step_blocked"
+        assert TaskEventType.STEP_UNBLOCKED.value == "step_unblocked"

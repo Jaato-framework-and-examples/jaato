@@ -1413,6 +1413,8 @@ class PTDisplay:
             """Handle cycle_agents keybinding - cycle through agents."""
             if self._agent_registry:
                 self._agent_registry.cycle_selection()
+                # Sync output display to show new agent's buffer content
+                self._sync_output_display()
                 # Show the agent details popup briefly
                 if self._agent_tab_bar:
                     self._agent_tab_bar.show_popup()

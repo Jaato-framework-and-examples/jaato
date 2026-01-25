@@ -7,10 +7,15 @@ import json
 import os
 import platform
 import shutil
+import threading
 import time
 
 if TYPE_CHECKING:
     from shared.jaato_session import JaatoSession
+
+# Thread-local storage for session reference per agent context
+# This prevents subagents from overwriting parent's session reference
+_thread_local = threading.local()
 
 
 class EnvironmentPlugin:
@@ -27,8 +32,18 @@ class EnvironmentPlugin:
         """Unique identifier for this plugin."""
         return "environment"
 
+    @property
+    def _session(self) -> Optional['JaatoSession']:
+        """Get the session for the current thread context.
+
+        Uses thread-local storage so each agent (main or subagent) gets
+        its own session reference, preventing subagents from overwriting
+        the parent's session.
+        """
+        return getattr(_thread_local, 'session', None)
+
     def __init__(self):
-        self._session: Optional['JaatoSession'] = None
+        pass  # No instance state needed - session is in thread-local
 
     def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
         """Called by registry with configuration."""
@@ -36,17 +51,20 @@ class EnvironmentPlugin:
 
     def shutdown(self) -> None:
         """Cleanup when plugin is disabled."""
-        self._session = None
+        # Clear thread-local session for current thread
+        if hasattr(_thread_local, 'session'):
+            _thread_local.session = None
 
     def set_session(self, session: 'JaatoSession') -> None:
         """Receive session reference for context usage queries.
 
         Called by JaatoSession when this plugin is registered.
+        Stores in thread-local storage so each agent context gets its own session.
 
         Args:
             session: The JaatoSession instance.
         """
-        self._session = session
+        _thread_local.session = session
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Declare the tools this plugin provides."""

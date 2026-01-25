@@ -30,6 +30,7 @@ class PlanPanel:
         "completed": ("●", "green"),
         "failed": ("✗", "red"),
         "skipped": ("⊘", "yellow"),
+        "blocked": ("⏳", "magenta"),  # Waiting on cross-agent dependencies
         # Plan statuses (overall plan, not steps)
         "active": ("▸", "cyan"),
         "cancelled": ("⊘", "yellow"),
@@ -68,7 +69,7 @@ class PlanPanel:
 
     # Known status values that have corresponding semantic styles
     _KNOWN_STATUSES = frozenset({
-        "pending", "in_progress", "completed", "failed", "skipped",
+        "pending", "in_progress", "completed", "failed", "skipped", "blocked",
         "active", "cancelled",
     })
 
@@ -122,6 +123,22 @@ class PlanPanel:
             if style:
                 return style
         return ""
+
+    def _get_dependency_style(self) -> str:
+        """Get style for dependency references from theme or fallback."""
+        if self._theme:
+            style = self._theme.get_rich_style("plan_dependency")
+            if style:
+                return style
+        return "dim magenta"
+
+    def _get_received_output_style(self) -> str:
+        """Get style for received output indicators from theme or fallback."""
+        if self._theme:
+            style = self._theme.get_rich_style("plan_received_output")
+            if style:
+                return style
+        return "dim cyan"
 
     def update_plan(self, plan_data: Dict[str, Any]) -> None:
         """Update the plan data to render.
@@ -237,6 +254,7 @@ class PlanPanel:
             "green": "class:plan.completed",
             "red": "class:plan.failed",
             "yellow": "class:plan.skipped",
+            "magenta": "class:plan.blocked",
         }
 
         # Sort by sequence and build formatted tuples
@@ -311,6 +329,9 @@ class PlanPanel:
                 step_status = step.get("status", "pending")
                 result = step.get("result", "")
                 error = step.get("error", "")
+                blocked_by = step.get("blocked_by", [])
+                depends_on = step.get("depends_on", [])
+                received_outputs = step.get("received_outputs", {})
 
                 symbol, _ = self.STATUS_SYMBOLS.get(step_status, ("○", "dim"))
                 color = self._get_status_style(step_status)
@@ -334,6 +355,28 @@ class PlanPanel:
                     error_line.append("    ✗ ", style=self._style("plan_popup_error_prefix"))
                     error_line.append(error, style=self._get_error_style())
                     elements.append(error_line)
+
+                # Cross-agent dependency info (always show for blocked or previously-blocked steps)
+                if step_status == "blocked" and blocked_by:
+                    # Show what this step is waiting on
+                    dep_line = Text()
+                    dep_line.append("    ├─ ", style=self._get_dependency_style())
+                    dep_line.append("waiting: ", style=self._get_dependency_style())
+                    refs = [f"{d['agent_id']}:{d['step_id'][:8]}" for d in blocked_by]
+                    dep_line.append(", ".join(refs), style=self._get_dependency_style())
+                    elements.append(dep_line)
+                elif depends_on and received_outputs:
+                    # Show resolved dependencies with received outputs
+                    dep_line = Text()
+                    dep_line.append("    └─ ", style=self._get_received_output_style())
+                    dep_line.append("received: ", style=self._get_received_output_style())
+                    # Show which dependencies provided outputs
+                    output_keys = list(received_outputs.keys())[:3]  # Limit to 3
+                    if len(output_keys) > 0:
+                        dep_line.append(", ".join(output_keys), style=self._get_received_output_style())
+                        if len(received_outputs) > 3:
+                            dep_line.append(f" (+{len(received_outputs) - 3} more)", style=self._get_received_output_style())
+                    elements.append(dep_line)
 
             # Show "more below" indicator
             remaining = total_steps - end_idx

@@ -298,6 +298,7 @@ DEFAULT_SEMANTIC_STYLES = {
     "plan_completed": StyleSpec(fg="success", bg="surface"),
     "plan_failed": StyleSpec(fg="error", bg="surface"),
     "plan_skipped": StyleSpec(fg="warning", bg="surface"),
+    "plan_blocked": StyleSpec(fg="#af87ff", bg="surface"),  # Magenta - waiting on dependencies
     # Plan panel - overall plan statuses (for completeness)
     "plan_active": StyleSpec(fg="primary", bg="surface"),
     "plan_cancelled": StyleSpec(fg="warning", bg="surface", dim=True),
@@ -318,6 +319,9 @@ DEFAULT_SEMANTIC_STYLES = {
     "plan_popup_separator": StyleSpec(fg="muted", dim=True),
     "plan_popup_progress": StyleSpec(fg="text", bold=True),
     "plan_popup_progress_detail": StyleSpec(fg="muted", dim=True),
+    # Plan popup - cross-agent dependency display
+    "plan_dependency": StyleSpec(fg="#af87ff", dim=True),  # Magenta dim - waiting on
+    "plan_received_output": StyleSpec(fg="#5fafaf", dim=True),  # Cyan dim - received from
 
     # Output - headers
     "user_header": StyleSpec(fg="success", bold=True),
@@ -530,6 +534,10 @@ def _create_fallback_theme(theme_name: str) -> "ThemeConfig":
         semantic["plan_popup_error_prefix"] = StyleSpec(fg="#555555")
         semantic["plan_popup_separator"] = StyleSpec(fg="#888888")
         semantic["plan_popup_progress_detail"] = StyleSpec(fg="#555555")
+        # Plan blocked/dependency styles - use darker purple for light backgrounds
+        semantic["plan_blocked"] = StyleSpec(fg="#7744aa", bg="surface")
+        semantic["plan_dependency"] = StyleSpec(fg="#7744aa")
+        semantic["plan_received_output"] = StyleSpec(fg="#227788")
         # Thinking styles - use darker colors without dim for light background
         semantic["thinking_header"] = StyleSpec(fg="#555555")
         semantic["thinking_header_separator"] = StyleSpec(fg="#888888")
@@ -561,6 +569,10 @@ def _create_fallback_theme(theme_name: str) -> "ThemeConfig":
         semantic["plan_popup_error_prefix"] = StyleSpec(fg="#aaaaaa")
         semantic["plan_popup_separator"] = StyleSpec(fg="#aaaaaa")
         semantic["plan_popup_progress_detail"] = StyleSpec(fg="#cccccc")
+        # Plan blocked/dependency styles - use bright colors for high contrast
+        semantic["plan_blocked"] = StyleSpec(fg="#cc88ff", bg="surface")
+        semantic["plan_dependency"] = StyleSpec(fg="#cc88ff")
+        semantic["plan_received_output"] = StyleSpec(fg="#66dddd")
         # Thinking styles - use brighter colors without dim for high contrast
         semantic["thinking_header"] = StyleSpec(fg="#cccccc")
         semantic["thinking_header_separator"] = StyleSpec(fg="#aaaaaa")

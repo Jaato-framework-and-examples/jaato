@@ -287,8 +287,9 @@ class TestMultiReporter:
         plan = TodoPlan.create("Test", ["A"])
         multi.report_plan_created(plan)
 
-        mock_reporter1.report_plan_created.assert_called_once_with(plan)
-        mock_reporter2.report_plan_created.assert_called_once_with(plan)
+        # MultiReporter passes agent_id=None to child reporters
+        mock_reporter1.report_plan_created.assert_called_once_with(plan, None)
+        mock_reporter2.report_plan_created.assert_called_once_with(plan, None)
 
     def test_add_reporter(self):
         multi = MultiReporter()

@@ -396,7 +396,7 @@ class PlanUpdatedEvent(Event):
     agent_id: str = ""
     plan_name: str = ""
     steps: List[Dict[str, Any]] = field(default_factory=list)
-    # ^ List of {content, status, active_form?}
+    # ^ List of {content, status, active_form?, blocked_by?, depends_on?, received_outputs?}
 
 
 @dataclass

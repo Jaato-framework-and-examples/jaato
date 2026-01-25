@@ -622,11 +622,76 @@ class JaatoRuntime:
         provider.connect(model)
         return provider
 
+    def _get_core_plugins(self) -> List[str]:
+        """Find all plugins that provide tools with discoverability='core'.
+
+        These plugins are essential for the framework to function and should
+        always be included regardless of profile configuration.
+
+        Returns:
+            List of plugin names that have at least one core tool.
+        """
+        if not self._registry:
+            return []
+
+        core_plugins = []
+        for plugin_name, plugin in self._registry._plugins.items():
+            if not hasattr(plugin, 'get_tool_schemas'):
+                continue
+            try:
+                schemas = plugin.get_tool_schemas()
+                for schema in schemas:
+                    if getattr(schema, 'discoverability', None) == 'core':
+                        core_plugins.append(plugin_name)
+                        break  # Found one core tool, plugin qualifies
+            except Exception:
+                pass  # Skip plugins that fail to provide schemas
+
+        return core_plugins
+
+    def _get_essential_plugins(self, plugin_names: List[str]) -> List[str]:
+        """Get plugin list with core plugins added automatically.
+
+        Plugins that provide tools with discoverability='core' are essential
+        for the framework to function (e.g., introspection for tool discovery).
+        These plugins are automatically included even if not explicitly listed
+        in profile definitions.
+
+        Also ensures core plugins are properly exposed (initialized) in the
+        registry so they function correctly.
+
+        Args:
+            plugin_names: Original list of plugin names from profile.
+
+        Returns:
+            Plugin list with core plugins added (if not already present).
+        """
+        # Find all plugins with core tools
+        core_plugins = self._get_core_plugins()
+
+        result = list(plugin_names)
+        for name in core_plugins:
+            if name not in result:
+                result.append(name)
+            # Ensure core plugin is exposed (initialized with registry access)
+            if self._registry and name not in self._registry._exposed:
+                try:
+                    self._registry.expose_tool(name)
+                except ValueError:
+                    pass  # Plugin not discovered, skip
+
+        return result
+
     def get_tool_schemas(
         self,
         plugin_names: Optional[List[str]] = None
     ) -> List[ToolSchema]:
         """Get tool schemas, optionally filtered by plugin names.
+
+        When deferred tool loading is enabled, only 'core' tools are returned
+        in the initial context. Other tools must be discovered via introspection
+        (list_tools, get_tool_schemas). This applies to both main agents and
+        subagents for consistent behavior.
 
         Args:
             plugin_names: Optional list of plugin names to include.
@@ -642,16 +707,34 @@ class JaatoRuntime:
             # Return all cached schemas
             return list(self._all_tool_schemas) if self._all_tool_schemas else []
 
+        # Add essential plugins (introspection) when deferred tools is enabled
+        effective_plugins = self._get_essential_plugins(plugin_names)
+
         # Filter to specific plugins
         schemas = []
-        for name in plugin_names:
+        deferred_enabled = _is_deferred_tools_enabled()
+        for name in effective_plugins:
             plugin = self._registry.get_plugin(name)
             if plugin and hasattr(plugin, 'get_tool_schemas'):
-                schemas.extend(plugin.get_tool_schemas())
+                plugin_schemas = plugin.get_tool_schemas()
+                if deferred_enabled:
+                    # Filter to core tools only - others discovered via introspection
+                    plugin_schemas = [
+                        s for s in plugin_schemas
+                        if getattr(s, 'discoverability', 'discoverable') == 'core'
+                    ]
+                schemas.extend(plugin_schemas)
 
         # Add permission plugin schemas if permission plugin is configured
         if self._permission_plugin:
-            schemas.extend(self._permission_plugin.get_tool_schemas())
+            permission_schemas = self._permission_plugin.get_tool_schemas()
+            if deferred_enabled:
+                # Permission tools should be core (always available)
+                permission_schemas = [
+                    s for s in permission_schemas
+                    if getattr(s, 'discoverability', 'discoverable') == 'core'
+                ]
+            schemas.extend(permission_schemas)
 
         return schemas
 
@@ -675,9 +758,12 @@ class JaatoRuntime:
             # Return all cached executors
             return dict(self._all_executors) if self._all_executors else {}
 
+        # Add essential plugins (introspection) when deferred tools is enabled
+        effective_plugins = self._get_essential_plugins(plugin_names)
+
         # Filter to specific plugins
         executors = {}
-        for name in plugin_names:
+        for name in effective_plugins:
             plugin = self._registry.get_plugin(name)
             if plugin and hasattr(plugin, 'get_executors'):
                 executors.update(plugin.get_executors())
@@ -718,10 +804,13 @@ class JaatoRuntime:
             else:
                 plugin_instructions = self._system_instructions
         else:
+            # Add essential plugins (introspection) when deferred tools is enabled
+            effective_plugins = self._get_essential_plugins(plugin_names)
+
             # Build from specific plugins, then run enrichment
             parts = []
             if self._registry:
-                for name in plugin_names:
+                for name in effective_plugins:
                     plugin = self._registry.get_plugin(name)
                     if plugin and hasattr(plugin, 'get_system_instructions'):
                         instr = plugin.get_system_instructions()

@@ -3437,17 +3437,27 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 )
                 percent = (completed_steps / total_steps * 100) if total_steps > 0 else 0
 
+                # Build step dicts, including cross-agent dependency info
+                plan_steps = []
+                for i, step in enumerate(event.steps):
+                    step_data = {
+                        "description": step.get("content", ""),
+                        "status": step.get("status", "pending"),
+                        "active_form": step.get("active_form"),
+                        "sequence": i + 1,  # 1-based for display
+                    }
+                    # Include cross-agent dependency fields if present
+                    if step.get("blocked_by"):
+                        step_data["blocked_by"] = step["blocked_by"]
+                    if step.get("depends_on"):
+                        step_data["depends_on"] = step["depends_on"]
+                    if step.get("received_outputs"):
+                        step_data["received_outputs"] = step["received_outputs"]
+                    plan_steps.append(step_data)
+
                 plan_data = {
                     "title": event.plan_name or "Plan",
-                    "steps": [
-                        {
-                            "description": step.get("content", ""),
-                            "status": step.get("status", "pending"),
-                            "active_form": step.get("active_form"),
-                            "sequence": i + 1,  # 1-based for display
-                        }
-                        for i, step in enumerate(event.steps)
-                    ],
+                    "steps": plan_steps,
                     "progress": {
                         "total": total_steps,
                         "completed": completed_steps,

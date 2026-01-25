@@ -1307,11 +1307,19 @@ class JaatoServer:
             agent_id = _get_agent_id(agent_name)
             steps = []
             for step in plan_data.get('steps', []):
-                steps.append({
+                step_data = {
                     'content': step.get('description', ''),
                     'status': step.get('status', 'pending'),
                     'active_form': step.get('active_form'),
-                })
+                }
+                # Include cross-agent dependency info for blocked steps
+                if step.get('blocked_by'):
+                    step_data['blocked_by'] = step['blocked_by']
+                if step.get('depends_on'):
+                    step_data['depends_on'] = step['depends_on']
+                if step.get('received_outputs'):
+                    step_data['received_outputs'] = step['received_outputs']
+                steps.append(step_data)
             server.emit(PlanUpdatedEvent(
                 agent_id=agent_id,
                 plan_name=plan_data.get('title', 'Plan'),

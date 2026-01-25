@@ -501,6 +501,28 @@ class OutputBuffer:
         except Exception:
             return action
 
+    def _safe_insert_line(
+        self, index: int, item: "Union[OutputLine, ToolBlock]"
+    ) -> int:
+        """Insert into _lines, removing from front if at max capacity.
+
+        When the deque is at its maxlen, insert() raises IndexError.
+        This method handles that by removing from the front first.
+
+        Args:
+            index: Position to insert at.
+            item: The line or block to insert.
+
+        Returns:
+            The actual index where the item was inserted (may be less than
+            requested if items were removed from front to make room).
+        """
+        if self._lines.maxlen is not None and len(self._lines) >= self._lines.maxlen:
+            self._lines.popleft()
+            index = max(0, index - 1)
+        self._lines.insert(index, item)
+        return index
+
     def _measure_display_lines(self, source: str, text: str, is_turn_start: bool = False) -> int:
         """Measure how many display lines a piece of text will take.
 
@@ -1427,7 +1449,8 @@ class OutputBuffer:
         insert_pos = self._tool_placeholder_index
 
         # Insert just the tool_block - it renders its own separator (───)
-        self._lines.insert(insert_pos, tool_block)
+        # Use _safe_insert_line to handle bounded deque (raises IndexError when full)
+        insert_pos = self._safe_insert_line(insert_pos, tool_block)
         next_pos = insert_pos + 1
 
         # Flush any pending enrichment notifications
@@ -1441,8 +1464,7 @@ class OutputBuffer:
                         source=enrich_source, text=line, style="dim",
                         display_lines=display_lines, is_turn_start=False
                     )
-                    self._lines.insert(next_pos, enrich_line)
-                    next_pos += 1
+                    next_pos = self._safe_insert_line(next_pos, enrich_line) + 1
             self._pending_enrichments.clear()
 
         # Add trailing blank line after tool block (and enrichments)
@@ -1451,7 +1473,7 @@ class OutputBuffer:
             source="model", text="", style="",
             display_lines=1, is_turn_start=False
         )
-        self._lines.insert(next_pos, trailing_line)
+        self._safe_insert_line(next_pos, trailing_line)
 
         # Clear placeholder and active tools
         self._tool_placeholder_index = None

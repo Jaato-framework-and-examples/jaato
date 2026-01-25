@@ -44,8 +44,9 @@ class TestTodoPluginInitialization:
         plugin.shutdown()
 
         assert plugin._initialized is False
-        assert plugin._storage is None
-        assert plugin._reporter is None
+        # Note: _storage and _reporter are intentionally preserved across shutdown
+        # for cross-agent collaboration - plans should persist when one agent
+        # shuts down while others continue using the shared plugin
 
 
 class TestTodoPluginToolSchemas:
@@ -55,12 +56,23 @@ class TestTodoPluginToolSchemas:
         plugin = TodoPlugin()
         schemas = plugin.get_tool_schemas()
 
-        assert len(schemas) == 4
+        # Core tools (always present)
         names = {s.name for s in schemas}
         assert "createPlan" in names
         assert "updateStep" in names
         assert "getPlanStatus" in names
         assert "completePlan" in names
+        # Additional tools for cross-agent collaboration
+        assert "startPlan" in names
+        assert "addStep" in names
+        assert "subscribeToTasks" in names
+        assert "addDependentStep" in names
+        assert "completeStepWithOutput" in names
+        assert "getBlockedSteps" in names
+        assert "getTaskEvents" in names
+        assert "listSubscriptions" in names
+        assert "unsubscribe" in names
+        assert len(schemas) == 13
 
     def test_createPlan_schema(self):
         plugin = TodoPlugin()
@@ -164,7 +176,9 @@ class TestCreatePlanExecutor:
             "steps": ["A"]
         })
 
-        assert plugin._current_plan_id == result["plan_id"]
+        # Plugin now uses dict mapping agent_name -> plan_id for multi-agent support
+        # With no session set, _get_agent_name() defaults to "main"
+        assert plugin._current_plan_ids.get("main") == result["plan_id"]
 
     def test_create_plan_reports_creation(self):
         plugin = TodoPlugin()
@@ -190,11 +204,12 @@ class TestUpdateStepExecutor:
         plugin.initialize()
         executors = plugin.get_executors()
 
-        # Create plan first
+        # Create and start plan first (updateStep requires plan to be started)
         create_result = executors["createPlan"]({
             "title": "Test",
             "steps": ["Step 1", "Step 2"]
         })
+        executors["startPlan"]({})  # Start the plan
         step_id = create_result["steps"][0]["step_id"]
 
         # Update step
@@ -215,6 +230,7 @@ class TestUpdateStepExecutor:
             "title": "Test",
             "steps": ["Step 1"]
         })
+        executors["startPlan"]({})  # Start the plan
         step_id = create_result["steps"][0]["step_id"]
 
         result = executors["updateStep"]({
@@ -235,6 +251,7 @@ class TestUpdateStepExecutor:
             "title": "Test",
             "steps": ["Step 1"]
         })
+        executors["startPlan"]({})  # Start the plan
         step_id = create_result["steps"][0]["step_id"]
 
         result = executors["updateStep"]({
@@ -255,6 +272,7 @@ class TestUpdateStepExecutor:
             "title": "Test",
             "steps": ["Step 1"]
         })
+        executors["startPlan"]({})  # Start the plan
         step_id = create_result["steps"][0]["step_id"]
 
         result = executors["updateStep"]({
@@ -287,6 +305,7 @@ class TestUpdateStepExecutor:
             "title": "Test",
             "steps": ["Step 1"]
         })
+        executors["startPlan"]({})  # Start the plan
 
         result = executors["updateStep"]({
             "step_id": "nonexistent",
@@ -326,6 +345,7 @@ class TestUpdateStepExecutor:
             "title": "Test",
             "steps": ["A"]
         })
+        executors["startPlan"]({})  # Start the plan
         step_id = create_result["steps"][0]["step_id"]
 
         mock_reporter.reset_mock()
@@ -395,6 +415,7 @@ class TestCompletePlanExecutor:
             "title": "Test",
             "steps": ["A"]
         })
+        executors["startPlan"]({})  # Must start before completing
 
         result = executors["completePlan"]({
             "status": "completed",
@@ -414,6 +435,7 @@ class TestCompletePlanExecutor:
             "title": "Test",
             "steps": ["A"]
         })
+        executors["startPlan"]({})  # Must start before failing
 
         result = executors["completePlan"]({
             "status": "failed",
@@ -448,11 +470,14 @@ class TestCompletePlanExecutor:
             "steps": ["A"]
         })
 
-        assert plugin._current_plan_id is not None
+        # Plugin now uses dict mapping agent_name -> plan_id for multi-agent support
+        # With no session set, _get_agent_name() defaults to "main"
+        assert plugin._current_plan_ids.get("main") is not None
 
+        executors["startPlan"]({})  # Must start before completing
         executors["completePlan"]({"status": "completed"})
 
-        assert plugin._current_plan_id is None
+        assert plugin._current_plan_ids.get("main") is None
 
     def test_complete_plan_no_plan(self):
         plugin = TodoPlugin()
@@ -493,6 +518,7 @@ class TestCompletePlanExecutor:
             "title": "Test",
             "steps": ["A"]
         })
+        executors["startPlan"]({})  # Must start before completing
 
         mock_reporter.reset_mock()
         executors["completePlan"]({"status": "completed"})
@@ -602,6 +628,9 @@ class TestTodoPluginWorkflow:
         assert create_result["progress"]["total"] == 4
         assert create_result["progress"]["pending"] == 4
 
+        # Start the plan (required before updateStep)
+        executors["startPlan"]({})
+
         # Start first step
         step1_id = create_result["steps"][0]["step_id"]
         executors["updateStep"]({
@@ -647,6 +676,9 @@ class TestTodoPluginWorkflow:
             "title": "Risky Task",
             "steps": ["Step 1", "Step 2"]
         })
+
+        # Start the plan (required before updateStep)
+        executors["startPlan"]({})
 
         # Complete first step
         executors["updateStep"]({
