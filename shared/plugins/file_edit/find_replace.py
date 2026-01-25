@@ -20,6 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from shared.ui_utils import ellipsize_path
+
+# Default maximum width for file paths in find/replace previews
+DEFAULT_MAX_PATH_WIDTH = 50
+
 
 @dataclass
 class FileMatch:
@@ -446,7 +451,8 @@ def generate_find_replace_preview(
         truncated = True
 
     for fm in displayed_files:
-        lines.append(f"File: {fm.path} ({fm.match_count} matches)\n")
+        display_path = ellipsize_path(fm.path, DEFAULT_MAX_PATH_WIDTH)
+        lines.append(f"File: {display_path} ({fm.match_count} matches)\n")
 
         displayed_matches = fm.matches[:max_matches_per_file]
         if len(fm.matches) > max_matches_per_file:

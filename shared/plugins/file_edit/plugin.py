@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+from shared.ui_utils import ellipsize_path, ellipsize_path_pair
 from ..base import UserCommand, PermissionDisplayInfo
 from ..model_provider.types import ToolSchema
 from ..sandbox_utils import check_path_with_jaato_containment, detect_jaato_symlink
@@ -26,6 +27,7 @@ from .diff_utils import (
     generate_move_file_diff,
     summarize_diff,
     DEFAULT_MAX_LINES,
+    DEFAULT_MAX_PATH_WIDTH,
 )
 from .multi_file import (
     MultiFileExecutor,
@@ -711,8 +713,9 @@ will show you a preview and require approval before execution. Backups are autom
             old_content = file_path.read_text()
         except OSError as e:
             logger.warning(f"Failed to read file for update permission display: {path}", exc_info=True)
+            display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
             return PermissionDisplayInfo(
-                summary=f"Update file: {path} (read error)",
+                summary=f"Update file: {display_path} (read error)",
                 details=f"Error reading file: {e}\nTraceback: {traceback.format_exc()}",
                 format_hint="text"
             )
@@ -746,7 +749,8 @@ will show you a preview and require approval before execution. Backups are autom
         )
 
         lines = content.splitlines()
-        summary = f"Create new file: {path} ({len(lines)} lines)"
+        display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
+        summary = f"Create new file: {display_path} ({len(lines)} lines)"
 
         return PermissionDisplayInfo(
             summary=summary,
@@ -769,8 +773,9 @@ will show you a preview and require approval before execution. Backups are autom
             content = file_path.read_text()
         except OSError as e:
             logger.warning(f"Failed to read file for delete permission display: {path}", exc_info=True)
+            display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
             return PermissionDisplayInfo(
-                summary=f"Delete file: {path} (read error)",
+                summary=f"Delete file: {display_path} (read error)",
                 details=f"Error reading file: {e}\nTraceback: {traceback.format_exc()}",
                 format_hint="text"
             )
@@ -780,7 +785,8 @@ will show you a preview and require approval before execution. Backups are autom
         )
 
         lines = content.splitlines()
-        summary = f"Delete file: {path} ({len(lines)} lines, backup will be created)"
+        display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
+        summary = f"Delete file: {display_path} ({len(lines)} lines, backup will be created)"
 
         return PermissionDisplayInfo(
             summary=summary,
@@ -810,8 +816,9 @@ will show you a preview and require approval before execution. Backups are autom
         try:
             content = source.read_text()
         except OSError as e:
+            display_source = ellipsize_path(source_path, DEFAULT_MAX_PATH_WIDTH)
             return PermissionDisplayInfo(
-                summary=f"Move file: {source_path} (read error)",
+                summary=f"Move file: {display_source} (read error)",
                 details=f"Error reading source file: {e}",
                 format_hint="text"
             )
@@ -821,10 +828,12 @@ will show you a preview and require approval before execution. Backups are autom
         )
 
         lines = content.splitlines()
+        # Use path pair ellipsization for source -> destination display
+        path_pair = ellipsize_path_pair(source_path, destination_path, DEFAULT_MAX_PATH_WIDTH)
         if overwrite and destination.exists():
-            summary = f"Move file: {source_path} -> {destination_path} ({len(lines)} lines, overwrite enabled)"
+            summary = f"Move file: {path_pair} ({len(lines)} lines, overwrite enabled)"
         else:
-            summary = f"Move file: {source_path} -> {destination_path} ({len(lines)} lines)"
+            summary = f"Move file: {path_pair} ({len(lines)} lines)"
 
         return PermissionDisplayInfo(
             summary=summary,
