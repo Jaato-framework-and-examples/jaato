@@ -976,6 +976,9 @@ class SubagentPlugin:
     def _execute_close_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Close an active subagent session.
 
+        If the session is still running, it will be cancelled first before
+        being removed from the registry.
+
         Args:
             args: Tool arguments containing:
                 - subagent_id: ID of the subagent session to close
@@ -998,7 +1001,23 @@ class SubagentPlugin:
                     'message': f'No active session found with ID: {subagent_id}'
                 }
 
+            session_info = self._active_sessions[subagent_id]
+            session = session_info.get('session')
+
+            # If session is still running, cancel it first
+            was_running = False
+            if session and session.is_running:
+                was_running = True
+                if session.supports_stop:
+                    session.request_stop()
+
             self._close_session_unlocked(subagent_id)
+
+            if was_running:
+                return {
+                    'success': True,
+                    'message': f'Session {subagent_id} cancelled and closed successfully'
+                }
             return {
                 'success': True,
                 'message': f'Session {subagent_id} closed successfully'
