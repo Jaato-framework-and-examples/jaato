@@ -622,6 +622,39 @@ class JaatoRuntime:
         provider.connect(model)
         return provider
 
+    def _get_essential_plugins(self, plugin_names: List[str]) -> List[str]:
+        """Get plugin list with essential plugins added when deferred tools is enabled.
+
+        When deferred tool loading is enabled, the introspection plugin is essential
+        for agents to discover available tools. This method ensures introspection
+        is always included even if not explicitly specified in the plugin list.
+
+        Also ensures essential plugins are properly exposed (initialized) in the
+        registry so they function correctly.
+
+        Args:
+            plugin_names: Original list of plugin names.
+
+        Returns:
+            Plugin list with essential plugins added (if not already present).
+        """
+        if not _is_deferred_tools_enabled():
+            return plugin_names
+
+        # Essential plugins when deferred tools is enabled
+        essential = ["introspection"]
+        result = list(plugin_names)
+        for name in essential:
+            if name not in result:
+                result.append(name)
+            # Ensure essential plugin is exposed (initialized with registry access)
+            if self._registry and name not in self._registry._exposed:
+                try:
+                    self._registry.expose_tool(name)
+                except ValueError:
+                    pass  # Plugin not discovered, skip
+        return result
+
     def get_tool_schemas(
         self,
         plugin_names: Optional[List[str]] = None
@@ -642,9 +675,12 @@ class JaatoRuntime:
             # Return all cached schemas
             return list(self._all_tool_schemas) if self._all_tool_schemas else []
 
+        # Add essential plugins (introspection) when deferred tools is enabled
+        effective_plugins = self._get_essential_plugins(plugin_names)
+
         # Filter to specific plugins
         schemas = []
-        for name in plugin_names:
+        for name in effective_plugins:
             plugin = self._registry.get_plugin(name)
             if plugin and hasattr(plugin, 'get_tool_schemas'):
                 schemas.extend(plugin.get_tool_schemas())
@@ -675,9 +711,12 @@ class JaatoRuntime:
             # Return all cached executors
             return dict(self._all_executors) if self._all_executors else {}
 
+        # Add essential plugins (introspection) when deferred tools is enabled
+        effective_plugins = self._get_essential_plugins(plugin_names)
+
         # Filter to specific plugins
         executors = {}
-        for name in plugin_names:
+        for name in effective_plugins:
             plugin = self._registry.get_plugin(name)
             if plugin and hasattr(plugin, 'get_executors'):
                 executors.update(plugin.get_executors())
@@ -718,10 +757,13 @@ class JaatoRuntime:
             else:
                 plugin_instructions = self._system_instructions
         else:
+            # Add essential plugins (introspection) when deferred tools is enabled
+            effective_plugins = self._get_essential_plugins(plugin_names)
+
             # Build from specific plugins, then run enrichment
             parts = []
             if self._registry:
-                for name in plugin_names:
+                for name in effective_plugins:
                     plugin = self._registry.get_plugin(name)
                     if plugin and hasattr(plugin, 'get_system_instructions'):
                         instr = plugin.get_system_instructions()
