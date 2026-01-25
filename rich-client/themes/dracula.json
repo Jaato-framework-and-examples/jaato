@@ -70,6 +70,9 @@
     "plan_popup_separator": {"fg": "muted", "dim": true},
     "plan_popup_progress": {"fg": "text", "bold": true},
     "plan_popup_progress_detail": {"fg": "muted", "dim": true},
+    "plan_blocked": {"fg": "#bd93f9", "bg": "surface"},
+    "plan_dependency": {"fg": "#bd93f9", "dim": true},
+    "plan_received_output": {"fg": "#8be9fd", "dim": true},
 
     "user_header": {"fg": "secondary", "bold": true},
     "user_header_separator": {"fg": "secondary", "dim": true},
