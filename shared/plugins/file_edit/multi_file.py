@@ -28,6 +28,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from shared.ui_utils import ellipsize_path, ellipsize_path_pair
+
+# Default maximum width for file paths in multi-file previews
+DEFAULT_MAX_PATH_WIDTH = 50
+
 
 class OperationType(Enum):
     """Types of file operations supported."""
@@ -781,7 +786,8 @@ def generate_multi_file_diff_preview(
                 diff.append(f"... ({len(diff)} more lines)\n")
                 truncated = True
 
-            lines.append(f"[{i+1}] EDIT: {path}\n")
+            display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
+            lines.append(f"[{i+1}] EDIT: {display_path}\n")
             lines.extend(diff)
             lines.append("\n")
 
@@ -790,7 +796,8 @@ def generate_multi_file_diff_preview(
             content = op.get("content", "")
             content_lines = content.splitlines()
 
-            lines.append(f"[{i+1}] CREATE: {path} ({len(content_lines)} lines)\n")
+            display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
+            lines.append(f"[{i+1}] CREATE: {display_path} ({len(content_lines)} lines)\n")
             preview_lines = content_lines[:max_lines_per_file]
             for line in preview_lines:
                 lines.append(f"+{line}\n")
@@ -801,11 +808,13 @@ def generate_multi_file_diff_preview(
 
         elif action == "delete":
             path = op.get("path", "unknown")
-            lines.append(f"[{i+1}] DELETE: {path}\n\n")
+            display_path = ellipsize_path(path, DEFAULT_MAX_PATH_WIDTH)
+            lines.append(f"[{i+1}] DELETE: {display_path}\n\n")
 
         elif action == "rename":
             source = op.get("from") or op.get("source_path", "unknown")
             dest = op.get("to") or op.get("destination_path", "unknown")
-            lines.append(f"[{i+1}] RENAME: {source} -> {dest}\n\n")
+            display_pair = ellipsize_path_pair(source, dest, DEFAULT_MAX_PATH_WIDTH)
+            lines.append(f"[{i+1}] RENAME: {display_pair}\n\n")
 
     return "".join(lines), truncated
