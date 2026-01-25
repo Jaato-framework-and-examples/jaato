@@ -1,7 +1,7 @@
 {
   "name": "skill-code-021-generate-fusion-api-java-spring",
   "description": "[GENERATE Flow] Create Fusion REST API following 4-layer model (Experience, Composable, Domain, System). USE WHEN: (1) request explicitly mentions 'Fusion API' with a layer name, (2) need pagination/HATEOAS/compensation patterns. EXTENDS skill-020. TRIGGERS: Fusion + API layer name. ASK for clarification if layer mentioned without 'Fusion'.",
-  "plugins": ["artifact_tracker", "background", "cli", "environment", "file_edit", "filesystem_query", "lsp", "mcp", "memory", "references", "template", "todo"],
+  "plugins": ["artifact_tracker", "background", "cli", "filesystem_query", "lsp", "mcp", "memory", "references", "template"],
   "plugin_configs": {
     "references": {
       "preselected": ["enablement-knowledge-base", "eri-code-001-hexagonal-light-java-spring", "eri-code-014-api-public-exposure-java-spring", "skill-020-microservice-java-spring", "skill-021-api-rest-java-spring"],
