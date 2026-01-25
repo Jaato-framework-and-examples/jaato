@@ -91,6 +91,10 @@ class TodoPlugin:
         Args:
             session: The JaatoSession instance.
         """
+        import threading
+        agent_id = getattr(session, 'agent_id', None) if session else None
+        thread_id = threading.current_thread().ident
+        self._trace(f"set_session: agent_id={agent_id}, thread_id={thread_id}")
         _thread_local.session = session
 
     @property
@@ -1250,6 +1254,50 @@ class TodoPlugin:
 
     # === Cross-agent collaboration executors ===
 
+    def _format_event_notification(self, event: TaskEvent) -> str:
+        """Format an event as a notification message for injection.
+
+        Args:
+            event: The TaskEvent to format.
+
+        Returns:
+            Formatted string suitable for injection into agent conversation.
+        """
+        parts = [f"[SUBAGENT event={event.event_type.value}]"]
+        parts.append(f"From: {event.source_agent}")
+
+        if event.source_plan_title:
+            parts.append(f"Plan: {event.source_plan_title}")
+
+        # Add event-specific details
+        if event.event_type == TaskEventType.PLAN_CREATED:
+            steps = event.payload.get("steps", [])
+            if steps:
+                parts.append("Steps:")
+                for s in steps:
+                    parts.append(f"  - {s.get('step_id')}: {s.get('description')}")
+
+        elif event.event_type == TaskEventType.STEP_COMPLETED:
+            if event.source_step_id:
+                parts.append(f"Step: {event.source_step_id}")
+            output = event.payload.get("output")
+            if output:
+                import json
+                parts.append(f"Output: {json.dumps(output)}")
+            result = event.payload.get("result")
+            if result:
+                parts.append(f"Result: {result}")
+
+        elif event.event_type in (TaskEventType.PLAN_COMPLETED, TaskEventType.PLAN_FAILED):
+            summary = event.payload.get("summary")
+            if summary:
+                parts.append(f"Summary: {summary}")
+            progress = event.payload.get("progress")
+            if progress:
+                parts.append(f"Progress: {progress.get('completed', 0)}/{progress.get('total', 0)} steps")
+
+        return "\n".join(parts)
+
     def _execute_subscribe_to_tasks(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the subscribeToTasks tool."""
         event_types_raw = args.get("event_types", [])
@@ -1273,6 +1321,20 @@ class TodoPlugin:
         if not self._event_bus:
             return {"error": "Event bus not initialized"}
 
+        # Capture the subscribing agent's session at subscription time
+        # This is critical because the callback may be invoked from a different thread
+        # (e.g., when subagent publishes an event), and thread-local storage would
+        # contain the subagent's session, not the parent's
+        import threading
+        subscriber_session = getattr(_thread_local, 'session', None)
+        subscriber_agent_name = self._agent_name or "main"
+        thread_id = threading.current_thread().ident
+
+        self._trace(
+            f"subscribeToTasks: capturing session for {subscriber_agent_name}, "
+            f"session_exists={subscriber_session is not None}, thread_id={thread_id}"
+        )
+
         # Create filter
         filter = EventFilter(
             agent_id=agent_id,
@@ -1281,17 +1343,48 @@ class TodoPlugin:
             event_types=event_types
         )
 
-        # Create callback that stores events for the agent
+        # Create callback that injects events into the subscriber's session
         def on_event(event: TaskEvent) -> None:
-            # Store event in agent's queue for later retrieval
-            # The event is already in the bus history, but we trace it
             self._trace(
-                f"Event received: {event.event_type.value} from {event.source_agent}"
+                f"Event callback: {event.event_type.value} from {event.source_agent} "
+                f"for subscriber {subscriber_agent_name}"
             )
+
+            # Don't deliver events from self (avoid infinite loops)
+            if event.source_agent == subscriber_agent_name:
+                self._trace(f"Skipping self-event from {event.source_agent}")
+                return
+
+            # If we have a captured session, inject the event notification
+            if subscriber_session is not None:
+                # Format event as a message the model can process
+                event_message = self._format_event_notification(event)
+
+                # Import SourceType for injection
+                from shared.message_queue import SourceType
+
+                # Inject into the subscriber's session
+                try:
+                    subscriber_session.inject_prompt(
+                        text=event_message,
+                        source_id=event.source_agent,
+                        source_type=SourceType.CHILD
+                    )
+                    self._trace(
+                        f"Injected {event.event_type.value} notification into "
+                        f"{subscriber_agent_name}'s session"
+                    )
+                except Exception as e:
+                    self._trace(f"Failed to inject event: {e}")
+            else:
+                self._trace(
+                    f"No session captured for {subscriber_agent_name}, "
+                    f"event not injected (will be in history)"
+                )
 
         # Subscribe
         sub_id = self._event_bus.subscribe(
-            subscriber_agent=self._agent_name or "main",
+            subscriber_agent=subscriber_agent_name,
             filter=filter,
             callback=on_event
         )
@@ -1304,7 +1397,7 @@ class TodoPlugin:
         return {
             "subscription_id": sub_id,
             "filter": filter.to_dict(),
-            "message": f"Subscribed to {len(event_types)} event type(s)"
+            "message": f"Subscribed to {len(event_types)} event type(s). Events will be delivered inline."
         }
 
     def _execute_add_dependent_step(self, args: Dict[str, Any]) -> Dict[str, Any]:

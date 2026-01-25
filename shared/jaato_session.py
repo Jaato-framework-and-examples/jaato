@@ -910,6 +910,8 @@ class JaatoSession:
         # Auto-wire plugins that need session access
         # Any plugin with set_session() will receive this session reference
         if self._runtime.registry:
+            import threading
+            self._trace(f"configure: wiring plugins with session, thread_id={threading.current_thread().ident}")
             for plugin_name in self._runtime.registry._exposed:
                 plugin = self._runtime.registry.get_plugin(plugin_name)
                 if plugin and hasattr(plugin, 'set_session'):
@@ -2599,8 +2601,20 @@ class JaatoSession:
 
         Used for sequential execution where we want tool-by-tool UI updates.
         """
+        import threading
         name = fc.name
         args = fc.args
+
+        self._trace(f"_execute_single_tool: name={name}, thread_id={threading.current_thread().ident}")
+
+        # Ensure session is set in thread-local for plugins that need it
+        # This handles cases where tool execution might be in a different thread
+        # context than where configure() was called
+        if self._runtime.registry:
+            for plugin_name in self._runtime.registry.list_exposed():
+                plugin = self._runtime.registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'set_session'):
+                    plugin.set_session(self)
 
         # Forward tool call to parent for visibility
         self._forward_to_parent("TOOL_CALL", f"{name}({json.dumps(args)})")
@@ -2707,11 +2721,22 @@ class JaatoSession:
         - Uses thread-local callback (not instance-level)
         - Does not emit start/end hooks (handled by caller)
         - Includes telemetry for this thread
+        - Propagates session to worker thread's thread-local storage
         """
         name = fc.name
         args = fc.args
 
         fc_start = datetime.now()
+
+        # Propagate session to this worker thread's thread-local storage
+        # This is critical for plugins (like TODO) that use thread-local to
+        # identify the current agent context. Without this, parallel tools
+        # would see agent_name=None and fail to find the correct plan.
+        if self._runtime.registry:
+            for plugin_name in self._runtime.registry.list_exposed():
+                plugin = self._runtime.registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'set_session'):
+                    plugin.set_session(self)
 
         # Determine plugin type for telemetry
         plugin_type = "unknown"
