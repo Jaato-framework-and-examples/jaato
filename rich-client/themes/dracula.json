@@ -155,6 +155,12 @@
     "pending_prompt": {"fg": "primary"},
     "pending_prompt_overflow": {"fg": "muted", "italic": true},
 
+    "permission_comment_label": {"fg": "secondary", "bold": true},
+    "permission_comment_border": {"fg": "muted"},
+    "permission_comment_input": {"fg": "text"},
+    "permission_comment_hint": {"fg": "muted", "italic": true},
+    "permission_comment_focused": {"fg": "primary", "bold": true},
+
     "input_text": {"fg": "text"},
     "input_prompt": {"fg": "primary", "bold": true}
   }
