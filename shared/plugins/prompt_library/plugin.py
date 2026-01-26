@@ -831,12 +831,36 @@ description: {description}
 
 Available prompts: {prompt_list}
 
-When to use:
-- Use listPrompts() to discover available prompts
-- Use usePrompt(name, params) to retrieve and execute a prompt
-- Use savePrompt() when you notice the user performing repetitive tasks
+## Using prompts
+- Use listPrompts() to discover available prompts with their parameters
+- Use usePrompt(name, params) to retrieve and expand a prompt, then follow its instructions
+- The user can invoke prompts directly with `prompt <name> [args...]`
 
-The user can also invoke prompts directly with `prompt <name> [args...]`."""
+## Proactively suggest creating prompts
+When you notice the user performing similar tasks repeatedly, suggest saving it as a reusable prompt:
+
+Patterns to watch for:
+- User asks for the same type of review/analysis multiple times
+- User repeatedly gives similar formatting or style instructions
+- User describes a workflow they want to reuse
+- User mentions "like before" or "the same way" when giving instructions
+
+When you notice a pattern (2-3 similar requests), proactively offer:
+"I've noticed you've asked me to [describe pattern] a few times. Would you like me to save this as a reusable prompt? You could then use `prompt <suggested-name>` to invoke it."
+
+If the user agrees, use savePrompt() with:
+- A descriptive name (lowercase, hyphens)
+- Clear instructions that capture their preferences
+- Parameter placeholders for variable parts (e.g., {{{{file}}}}, {{{{focus}}}})
+
+Example:
+```
+savePrompt(
+  name="security-review",
+  description="Review code for security vulnerabilities",
+  content="Review {{{{file}}}} for security issues:\\n\\n1. Check for injection vulnerabilities\\n2. Look for authentication/authorization issues\\n3. Identify data exposure risks\\n\\nProvide specific line numbers and remediation suggestions."
+)
+```"""
 
 
 def create_plugin() -> PromptLibraryPlugin:
