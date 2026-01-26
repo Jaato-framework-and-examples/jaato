@@ -548,6 +548,7 @@ class PermissionResponseRequest(Event):
     type: EventType = field(default=EventType.PERMISSION_RESPONSE)
     request_id: str = ""
     response: str = ""  # "y", "n", "a", "never", etc.
+    comment: str = ""  # Optional user comment with additional instructions
 
 
 @dataclass

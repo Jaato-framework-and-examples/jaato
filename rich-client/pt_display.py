@@ -548,6 +548,7 @@ class PTDisplay:
         # Permission keyboard navigation state
         self._permission_response_options: Optional[list] = None  # Current response options
         self._permission_focus_index: int = 0  # Currently focused option index
+        self._permission_comment_mode: bool = True  # Allow free text comments in permission prompts
 
         # Stop callback for interrupting model generation
         self._stop_callback: Optional[Callable[[], bool]] = None
@@ -613,10 +614,12 @@ class PTDisplay:
     def _on_input_changed(self) -> None:
         """Called when input buffer text changes - invalidates layout for resize.
 
-        In permission mode, this also validates input and reverts invalid characters.
+        In permission mode, this also validates input and reverts invalid characters
+        (unless comment mode is enabled, which allows free text input).
         """
         # In permission mode, validate input and revert if invalid
-        if self._waiting_for_channel_input and self._valid_input_prefixes:
+        # Skip validation in comment mode - user can type freely
+        if self._waiting_for_channel_input and self._valid_input_prefixes and not self._permission_comment_mode:
             current_text = self._input_buffer.text
             if not self._is_valid_permission_input(current_text):
                 # Revert to last valid input
@@ -2574,7 +2577,14 @@ class PTDisplay:
         self.refresh()
 
     def _select_focused_permission_option(self) -> None:
-        """Select the currently focused permission option and submit it."""
+        """Select the currently focused permission option and submit it.
+
+        In comment mode, the input buffer text is included as a user comment
+        along with the selected option. The submission is JSON-encoded:
+        {"response": "y", "comment": "user text"} or just "y" if no comment.
+        """
+        import json
+
         if not self._permission_response_options or not self._input_callback:
             return
 
@@ -2586,5 +2596,16 @@ class PTDisplay:
         else:
             short = getattr(option, 'short', getattr(option, 'key', ''))
 
+        # Get comment from input buffer (in comment mode)
+        comment = ""
+        if self._permission_comment_mode and self._input_buffer:
+            comment = self._input_buffer.text.strip()
+            # Clear the buffer after capturing the comment
+            self._input_buffer.reset()
+
         # Submit the selection via input callback
-        self._input_callback(short)
+        # Encode as JSON if there's a comment, otherwise just the short form
+        if comment:
+            self._input_callback(json.dumps({"response": short, "comment": comment}))
+        else:
+            self._input_callback(short)

@@ -621,16 +621,19 @@ class IPCClient:
         self,
         request_id: str,
         response: str,
+        comment: str = "",
     ) -> None:
         """Respond to a permission request.
 
         Args:
             request_id: The permission request ID.
             response: The response (y, n, a, never, etc.).
+            comment: Optional user comment with additional instructions.
         """
         await self._send_event(PermissionResponseRequest(
             request_id=request_id,
             response=response,
+            comment=comment,
         ))
 
     async def respond_to_clarification(

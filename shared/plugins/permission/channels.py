@@ -222,6 +222,7 @@ class ChannelResponse:
     remember: bool = False  # Whether to remember this decision for the session
     remember_pattern: Optional[str] = None  # Pattern to remember (e.g., "git *")
     expires_at: Optional[str] = None  # ISO8601 expiration time
+    comment: str = ""  # Optional user comment with additional instructions
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ChannelResponse':
@@ -239,6 +240,7 @@ class ChannelResponse:
             remember=data.get("remember", False),
             remember_pattern=data.get("remember_pattern"),
             expires_at=data.get("expires_at"),
+            comment=data.get("comment", ""),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -250,6 +252,7 @@ class ChannelResponse:
             "remember": self.remember,
             "remember_pattern": self.remember_pattern,
             "expires_at": self.expires_at,
+            "comment": self.comment,
         }
 
 
@@ -927,6 +930,10 @@ class QueueChannel(ConsoleChannel):
 
         Note: Permission content is displayed via unified event flow (AgentOutputEvent).
         This method only handles input waiting.
+
+        Response format supports:
+        - Plain string: "y", "n", "always", etc.
+        - JSON with comment: '{"response": "y", "comment": "additional text"}'
         """
         # Signal that we're waiting for input
         self._waiting_for_input = True
@@ -959,16 +966,30 @@ class QueueChannel(ConsoleChannel):
                     reason=f"No response within {request.timeout_seconds}s",
                 )
 
+            # Parse response - check for JSON format with comment
+            comment = ""
+            actual_response = response_text
+            if response_text.startswith("{"):
+                try:
+                    parsed = json.loads(response_text)
+                    actual_response = parsed.get("response", response_text)
+                    comment = parsed.get("comment", "")
+                except json.JSONDecodeError:
+                    # Not valid JSON, treat as plain response
+                    pass
+
             # Parse response using request's response_options (uses parent's method)
-            matched_option = request.get_option_for_input(response_text)
+            matched_option = request.get_option_for_input(actual_response)
             if matched_option:
-                return self._create_response_for_option(request, matched_option)
+                response = self._create_response_for_option(request, matched_option)
+                response.comment = comment
+                return response
             else:
                 # Invalid input - treat as deny
                 return ChannelResponse(
                     request_id=request.request_id,
                     decision=ChannelDecision.DENY,
-                    reason=f"Invalid response: {response_text}",
+                    reason=f"Invalid response: {actual_response}",
                 )
 
         finally:

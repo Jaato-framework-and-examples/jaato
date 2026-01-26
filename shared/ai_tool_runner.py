@@ -418,6 +418,9 @@ class ToolExecutor:
                     'reason': perm_info.get('reason', ''),
                     'method': perm_info.get('method', 'unknown'),
                 }
+                # Include user comment if provided
+                if perm_info.get('comment'):
+                    permission_meta['user_comment'] = perm_info['comment']
                 # Record permission check to ledger
                 if self._ledger is not None:
                     self._ledger._record('permission-check', {

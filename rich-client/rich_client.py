@@ -3883,10 +3883,22 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
                 # Handle permission response
                 if pending_permission_request:
-                    ipc_trace(f"Sending permission response: {text} for {pending_permission_request['request_id']}")
+                    # Parse response - may be JSON with comment or plain string
+                    response = text
+                    comment = ""
+                    if text.startswith("{"):
+                        try:
+                            import json
+                            parsed = json.loads(text)
+                            response = parsed.get("response", text)
+                            comment = parsed.get("comment", "")
+                        except json.JSONDecodeError:
+                            pass  # Not valid JSON, use text as-is
+                    ipc_trace(f"Sending permission response: {response} (comment={comment!r}) for {pending_permission_request['request_id']}")
                     await client.respond_to_permission(
                         pending_permission_request["request_id"],
-                        text
+                        response,
+                        comment,
                     )
                     continue
 

@@ -3337,8 +3337,8 @@ class OutputBuffer:
             else:
                 parts.append(f"{DIM}{option_text}{RESET}")
 
-        # Add hint at the end
-        hint = f"{DIM}  ⇥ cycle  ↵ select{RESET}"
+        # Add hint at the end (including comment hint)
+        hint = f"{DIM}  ⇥ cycle  ↵ select  (type to add comment){RESET}"
 
         return " ".join(parts) + hint
 
