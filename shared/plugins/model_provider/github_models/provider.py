@@ -317,11 +317,12 @@ class GitHubModelsProvider:
     ) -> bool:
         """Verify that authentication is configured.
 
-        For GitHub Models, this checks for GITHUB_TOKEN.
-        Interactive login is not supported.
+        For GitHub Models, this checks for:
+        1. Device Code OAuth tokens (stored via github-auth login)
+        2. GITHUB_TOKEN environment variable
 
         Args:
-            allow_interactive: Ignored (no interactive login available).
+            allow_interactive: If True, starts device code flow for login.
             on_message: Optional callback for status messages.
 
         Returns:
@@ -331,10 +332,16 @@ class GitHubModelsProvider:
         Raises:
             TokenNotFoundError: If allow_interactive=False and no token found.
         """
+        from .env import resolve_token_source
+
         token = resolve_token()
         if token:
+            source = resolve_token_source()
             if on_message:
-                on_message("Found GitHub token")
+                if source == "oauth":
+                    on_message("Found GitHub token (device code OAuth)")
+                else:
+                    on_message("Found GitHub token (environment variable)")
             return True
 
         # No token found
@@ -343,9 +350,30 @@ class GitHubModelsProvider:
                 checked_locations=get_checked_credential_locations()
             )
 
+        # Try interactive device code flow
         if on_message:
-            on_message("No GitHub token found. Please set GITHUB_TOKEN environment variable.")
-        return False
+            on_message("No GitHub token found. Starting device code authentication...")
+
+        try:
+            from .oauth import login_interactive
+
+            def emit_message(msg: str) -> None:
+                if on_message:
+                    on_message(msg)
+
+            tokens, _ = login_interactive(on_message=emit_message, auto_poll=True)
+            if tokens:
+                if on_message:
+                    on_message("Successfully authenticated with GitHub")
+                return True
+            else:
+                if on_message:
+                    on_message("Authentication failed or was cancelled")
+                return False
+        except Exception as e:
+            if on_message:
+                on_message(f"Interactive authentication failed: {e}")
+            return False
 
     def shutdown(self) -> None:
         """Clean up resources."""

@@ -454,23 +454,40 @@ def refresh_tokens(refresh_token: str) -> OAuthTokens:
     )
 
 
-# Token storage location (compatible with Claude Code CLI)
-def _get_token_storage_path() -> Path:
-    """Get path to token storage file."""
-    # Use XDG config dir on Linux, AppData on Windows, ~/Library on macOS
-    if os.name == "nt":
-        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    elif os.name == "posix" and os.uname().sysname == "Darwin":
-        base = Path.home() / "Library" / "Application Support"
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+# Token storage location
+def _get_token_storage_path(for_write: bool = False) -> Path:
+    """Get path to token storage file.
 
-    return base / "jaato" / "anthropic_oauth.json"
+    Follows jaato convention:
+    1. Project .jaato/ first (project-specific auth)
+    2. Home ~/.jaato/ second (user-level default)
+
+    Args:
+        for_write: If True, returns the path to write to (prefers project dir
+                   if it exists, otherwise home). If False, returns the first
+                   existing file or the default write location.
+
+    Returns:
+        Path to token storage file.
+    """
+    project_path = Path.cwd() / ".jaato" / "anthropic_oauth.json"
+    home_path = Path.home() / ".jaato" / "anthropic_oauth.json"
+
+    if for_write:
+        if project_path.parent.exists():
+            return project_path
+        return home_path
+    else:
+        if project_path.exists():
+            return project_path
+        if home_path.exists():
+            return home_path
+        return home_path
 
 
 def save_tokens(tokens: OAuthTokens) -> None:
     """Save tokens to persistent storage."""
-    path = _get_token_storage_path()
+    path = _get_token_storage_path(for_write=True)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, "w") as f:
@@ -547,21 +564,31 @@ def login(
 # ==================== Pending Auth State ====================
 # For two-step login flow where user must manually copy the auth code
 
-def _get_pending_auth_path() -> Path:
-    """Get path to pending auth state file."""
-    if os.name == "nt":
-        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    elif os.name == "posix" and os.uname().sysname == "Darwin":
-        base = Path.home() / "Library" / "Application Support"
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+def _get_pending_auth_path(for_write: bool = False) -> Path:
+    """Get path to pending auth state file.
 
-    return base / "jaato" / "anthropic_pending_auth.json"
+    Follows same convention as token storage:
+    1. Project .jaato/ first
+    2. Home ~/.jaato/ second
+    """
+    project_path = Path.cwd() / ".jaato" / "anthropic_pending_auth.json"
+    home_path = Path.home() / ".jaato" / "anthropic_pending_auth.json"
+
+    if for_write:
+        if project_path.parent.exists():
+            return project_path
+        return home_path
+    else:
+        if project_path.exists():
+            return project_path
+        if home_path.exists():
+            return home_path
+        return home_path
 
 
 def save_pending_auth(code_verifier: str, state: str) -> None:
     """Save pending auth state for two-step login flow."""
-    path = _get_pending_auth_path()
+    path = _get_pending_auth_path(for_write=True)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, "w") as f:

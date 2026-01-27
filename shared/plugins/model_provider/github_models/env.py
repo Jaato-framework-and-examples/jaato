@@ -7,16 +7,17 @@ following a naming convention that mirrors the Google GenAI provider:
 
 Resolution priority:
 1. Explicit config passed in code
-2. JAATO_GITHUB_* environment variables
-3. Standard GitHub environment variables (GITHUB_TOKEN)
-4. Defaults
+2. Device Code OAuth tokens (stored via github-auth login)
+3. JAATO_GITHUB_* environment variables
+4. Standard GitHub environment variables (GITHUB_TOKEN)
+5. Defaults
 """
 
 import os
 from typing import Literal, Optional, List
 
 # Auth method type
-AuthMethod = Literal["pat", "app_token", "auto"]
+AuthMethod = Literal["pat", "app_token", "oauth", "auto"]
 
 # ============================================================
 # Environment Variable Names
@@ -62,14 +63,49 @@ def resolve_auth_method() -> AuthMethod:
 
 
 def resolve_token() -> Optional[str]:
-    """Resolve GitHub token from environment.
+    """Resolve GitHub token from environment or stored OAuth.
 
-    Looks for GITHUB_TOKEN which is the standard GitHub environment variable.
+    Priority:
+    1. Device Code OAuth tokens (stored via github-auth login)
+    2. GITHUB_TOKEN environment variable
 
     Returns:
         Token if found, None otherwise.
     """
+    # First, try stored OAuth token from device code flow
+    try:
+        from .oauth import get_stored_access_token
+        stored_token = get_stored_access_token()
+        if stored_token:
+            return stored_token
+    except ImportError:
+        pass  # oauth module not available
+
+    # Fall back to environment variable
     return os.environ.get(ENV_GITHUB_TOKEN)
+
+
+def resolve_token_source() -> Optional[str]:
+    """Determine the source of the resolved token.
+
+    Returns:
+        "oauth" if using stored OAuth token,
+        "env" if using GITHUB_TOKEN env var,
+        None if no token found.
+    """
+    # Check stored OAuth token first
+    try:
+        from .oauth import get_stored_access_token
+        if get_stored_access_token():
+            return "oauth"
+    except ImportError:
+        pass
+
+    # Check environment variable
+    if os.environ.get(ENV_GITHUB_TOKEN):
+        return "env"
+
+    return None
 
 
 def resolve_organization() -> Optional[str]:
@@ -107,7 +143,7 @@ def resolve_endpoint() -> str:
     return os.environ.get(ENV_GITHUB_ENDPOINT, DEFAULT_ENDPOINT)
 
 
-def get_checked_credential_locations(auth_method: AuthMethod) -> List[str]:
+def get_checked_credential_locations(auth_method: AuthMethod = "auto") -> List[str]:
     """Get list of locations checked for credentials.
 
     Used for error messages to help users understand what was checked.
@@ -120,6 +156,19 @@ def get_checked_credential_locations(auth_method: AuthMethod) -> List[str]:
     """
     locations = []
 
+    # Check stored OAuth token
+    try:
+        from .oauth import get_stored_access_token
+        oauth_token = get_stored_access_token()
+        if oauth_token:
+            masked = f"{oauth_token[:10]}...{oauth_token[-4:]}"
+            locations.append(f"Device Code OAuth: set ({masked})")
+        else:
+            locations.append("Device Code OAuth: not configured (run 'github-auth login')")
+    except ImportError:
+        locations.append("Device Code OAuth: not available")
+
+    # Check environment variable
     token = os.environ.get(ENV_GITHUB_TOKEN)
     if token:
         # Mask the token for security

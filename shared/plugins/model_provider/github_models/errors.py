@@ -21,7 +21,7 @@ class TokenNotFoundError(GitHubModelsError):
 
     def __init__(
         self,
-        auth_method: str,
+        auth_method: str = "auto",
         checked_locations: Optional[List[str]] = None,
         suggestion: Optional[str] = None,
     ):
@@ -34,7 +34,7 @@ class TokenNotFoundError(GitHubModelsError):
 
     def _format_message(self) -> str:
         lines = [
-            f"No GitHub token found for authentication method: {self.auth_method}",
+            "No GitHub token found.",
             "",
         ]
 
@@ -54,11 +54,15 @@ class TokenNotFoundError(GitHubModelsError):
 
     def _default_suggestions(self) -> List[str]:
         return [
-            "To fix:",
-            "  1. Create a Personal Access Token (PAT) at https://github.com/settings/tokens",
+            "To authenticate, choose one of these options:",
+            "",
+            "Option 1: Device Code Flow (recommended for GitHub Copilot)",
+            "  Run 'github-auth login' to authenticate via browser",
+            "",
+            "Option 2: Personal Access Token (PAT)",
+            "  1. Create a PAT at https://github.com/settings/tokens",
             "  2. For fine-grained PAT: select 'models: read' permission",
-            "  3. For classic PAT: no specific scope needed, but fine-grained is recommended",
-            "  4. Set GITHUB_TOKEN=your-token",
+            "  3. Set GITHUB_TOKEN=your-token",
             "",
             "For GitHub Enterprise with SSO:",
             "  - Fine-grained PATs are auto-authorized during creation",

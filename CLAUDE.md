@@ -249,6 +249,12 @@ Plugins are automatically wired during initialization - no manual wiring needed:
 | `GITHUB_TOKEN` | GitHub PAT with `models: read` permission |
 | `JAATO_GITHUB_ORGANIZATION` | Organization for billing attribution |
 
+**Authentication Options (in priority order):**
+1. **Device Code OAuth** (recommended): `github-auth login` - browser-based authorization
+2. **Personal Access Token** (`ghp_...` or `github_pat_...`): Set `GITHUB_TOKEN` env var
+
+The device code flow uses GitHub Copilot's OAuth client ID and doesn't require creating a PAT manually.
+
 ### Anthropic Claude
 | Variable | Purpose |
 |----------|---------|
@@ -345,8 +351,9 @@ Available Models:
 
 ### Authentication Commands
 ```
-anthropic-auth login/logout/status     # Anthropic OAuth
-antigravity-auth login/logout/status   # Google OAuth
+anthropic-auth login/logout/status     # Anthropic OAuth (PKCE flow)
+antigravity-auth login/logout/status   # Google OAuth (PKCE flow)
+github-auth login/poll/logout/status   # GitHub OAuth (device code flow)
 ```
 
 ### Session Commands
