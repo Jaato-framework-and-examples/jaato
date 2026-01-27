@@ -160,6 +160,7 @@
     "permission_comment_input": {"fg": "text"},
     "permission_comment_hint": {"fg": "muted", "italic": true},
     "permission_comment_focused": {"fg": "primary", "bold": true},
+    "permission_comment_hidden": {"fg": "background", "bg": "background"},
 
     "input_text": {"fg": "text"},
     "input_prompt": {"fg": "primary", "bold": true}

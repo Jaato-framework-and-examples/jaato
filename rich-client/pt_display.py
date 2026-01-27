@@ -552,8 +552,8 @@ class PTDisplay:
 
         # Permission comment input buffer (separate from main input)
         self._permission_comment_buffer = Buffer(
-            multiline=True,
-            on_text_changed=lambda _: self._invalidate(),
+            multiline=False,  # Single line for simple input
+            on_text_changed=lambda _: self._on_permission_comment_changed(),
         )
 
         # Stop callback for interrupting model generation
@@ -620,20 +620,45 @@ class PTDisplay:
     def _on_input_changed(self) -> None:
         """Called when input buffer text changes - invalidates layout for resize.
 
-        In permission mode, this also validates input and reverts invalid characters
-        (unless comment mode is enabled, which allows free text input).
+        This handles the main input buffer. When in permission mode, the main input
+        is hidden and _permission_comment_buffer is used instead (which has its own
+        _on_permission_comment_changed handler).
+
+        For non-permission channel input (exit, clarification), this validates input.
         """
-        # In permission mode, validate input and revert if invalid
-        # Skip validation in comment mode - user can type freely
-        if self._waiting_for_channel_input and self._valid_input_prefixes and not self._permission_comment_mode:
-            current_text = self._input_buffer.text
-            if not self._is_valid_permission_input(current_text):
-                # Revert to last valid input
-                self._input_buffer.text = self._last_valid_permission_input
-                self._input_buffer.cursor_position = len(self._last_valid_permission_input)
-            else:
-                # Update last valid input
-                self._last_valid_permission_input = current_text
+        # In channel input mode without permission prompt, validate input
+        if self._waiting_for_channel_input and self._valid_input_prefixes:
+            if not self._permission_comment_mode:
+                # No comment mode: validate input and revert if invalid
+                current_text = self._input_buffer.text
+                if not self._is_valid_permission_input(current_text):
+                    # Revert to last valid input
+                    self._input_buffer.text = self._last_valid_permission_input
+                    self._input_buffer.cursor_position = len(self._last_valid_permission_input)
+                else:
+                    # Update last valid input
+                    self._last_valid_permission_input = current_text
+
+        if self._app and self._app.is_running:
+            self._app.invalidate()
+
+    def _on_permission_comment_changed(self) -> None:
+        """Called when permission comment buffer text changes.
+
+        Updates the output buffer's comment text and triggers a re-render
+        so the embedded comment box shows the current text.
+        """
+        if not self._permission_comment_buffer:
+            return
+
+        comment_text = self._permission_comment_buffer.text
+
+        # Update the output buffer's comment text (use correct buffer for agents)
+        buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
+        buffer.set_permission_comment_text(comment_text)
+
+        # Sync display to show updated comment box
+        self._sync_output_display()
 
         if self._app and self._app.is_running:
             self._app.invalidate()
@@ -1123,14 +1148,17 @@ class PTDisplay:
                 # In pager mode - advance page
                 self._advance_pager_page()
                 return
-            # Check for permission mode with embedded comment input
+            # Check for permission prompt with embedded comment input
             if (getattr(self, '_waiting_for_channel_input', False) and
                 self._permission_response_options and
                 getattr(self, '_permission_comment_mode', True)):
-                # In permission mode with comment box - always submit focused option + comment
-                self._select_focused_permission_option()
-                return
-            # Legacy: Check for permission mode without comment box
+                # Only use embedded comment mode for actual permission prompts
+                buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
+                if buffer.is_permission_prompt_pending():
+                    # Permission prompt with comment box - submit focused option + comment
+                    self._select_focused_permission_option()
+                    return
+            # Channel input (exit/clarification) or no text: select focused option
             text = self._input_buffer.text.strip()
             if (not text and
                 getattr(self, '_waiting_for_channel_input', False) and
@@ -1211,8 +1239,16 @@ class PTDisplay:
                 buffer.toggle_selected_tool_expanded()
                 self._app.invalidate()
                 return
-            # Check for permission mode - select focused option
+            # Check for channel input mode
             if getattr(self, '_waiting_for_channel_input', False) and self._permission_response_options:
+                # Check if this is an actual permission prompt with embedded comment
+                buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
+                if getattr(self, '_permission_comment_mode', True) and buffer.is_permission_prompt_pending():
+                    # Permission prompt: if focus is on comment buffer, insert space there
+                    if event.current_buffer == self._permission_comment_buffer:
+                        event.current_buffer.insert_text(" ")
+                        return
+                # Otherwise (exit/clarification or not in comment buffer), select focused option
                 self._select_focused_permission_option()
                 return
             # Normal mode - insert space character
@@ -1642,64 +1678,31 @@ class PTDisplay:
             filter=Condition(lambda: len(self._pending_prompts) > 0),
         )
 
-        # Permission comment input box (shown when permission prompt is active)
-        # This is a real editable input area embedded within the permission prompt
-        def get_comment_box_height():
-            if not getattr(self, '_waiting_for_channel_input', False):
-                return 0
-            if not getattr(self, '_permission_comment_mode', True):
-                return 0
-            # 1 line for label, 1-3 for input, 1 for hint
-            text = self._permission_comment_buffer.text if self._permission_comment_buffer else ""
-            content_lines = max(1, min(3, text.count('\n') + 1))
-            return content_lines + 2
+        # Helper to check if we should hide main input for permission comment mode
+        def _should_hide_input_for_permission():
+            """Check if main input should be hidden for permission prompt with comment box."""
+            if not self._waiting_for_channel_input:
+                return False
+            if not self._permission_comment_mode:
+                return False
+            if not self._permission_response_options:
+                return False
+            # Check if output buffer has an actual permission prompt pending
+            buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
+            return buffer.is_permission_prompt_pending()
 
-        def get_comment_label():
-            return [("class:permission-comment-label", "  Comment (optional): ")]
-
-        def get_comment_hint():
-            # Show focused option in the hint
-            if self._permission_response_options and self._permission_focus_index < len(self._permission_response_options):
-                opt = self._permission_response_options[self._permission_focus_index]
-                if isinstance(opt, dict):
-                    focused = opt.get('full', opt.get('short', ''))
-                else:
-                    focused = getattr(opt, 'full', getattr(opt, 'short', ''))
-                return [
-                    ("class:permission-comment-hint", f"  ⇥ cycle options  ↵ submit "),
-                    ("class:permission-comment-focused", f"[{focused}]"),
-                ]
-            return [("class:permission-comment-hint", "  ⇥ cycle options  ↵ submit")]
-
+        # Hidden keystroke capture buffer for permission comments
+        # The visual comment box is rendered inside the output buffer (embedded in permission prompt)
+        # This invisible input area captures keystrokes and syncs to the visual display
+        # Using height=0 makes it truly invisible, but we need to ensure focus works
         permission_comment_box = ConditionalContainer(
-            HSplit([
-                # Label row
-                Window(
-                    FormattedTextControl(get_comment_label),
-                    height=1,
-                    style="class:permission-comment",
-                ),
-                # Editable comment input with box drawing
-                VSplit([
-                    Window(width=2, char=" "),  # Left margin
-                    Window(width=1, char="│", style="class:permission-comment-border"),
-                    Window(
-                        BufferControl(buffer=self._permission_comment_buffer),
-                        height=lambda: max(1, min(3, (self._permission_comment_buffer.text.count('\n') + 1) if self._permission_comment_buffer else 1)),
-                        wrap_lines=True,
-                        style="class:permission-comment-input",
-                    ),
-                    Window(width=1, char="│", style="class:permission-comment-border"),
-                    Window(width=2, char=" "),  # Right margin
-                ]),
-                # Hint row
-                Window(
-                    FormattedTextControl(get_comment_hint),
-                    height=1,
-                    style="class:permission-comment",
-                ),
-            ]),
-            filter=Condition(lambda: getattr(self, '_waiting_for_channel_input', False) and getattr(self, '_permission_comment_mode', True)),
+            Window(
+                BufferControl(buffer=self._permission_comment_buffer),
+                height=0,
+                wrap_lines=False,
+                style="class:permission-comment-hidden",
+            ),
+            filter=Condition(_should_hide_input_for_permission),
         )
 
         # Plan popup (floating overlay, shown with Ctrl+P)
@@ -1747,10 +1750,10 @@ class PTDisplay:
             filter=Condition(lambda: self._agent_tab_bar is not None and self._agent_tab_bar.is_popup_visible),
         )
 
-        # Wrap input_row in conditional to hide when permission comment mode is active
+        # Main input row - hidden during permission prompts (comment box captures input instead)
         main_input_row = ConditionalContainer(
             input_row,
-            filter=Condition(lambda: not (getattr(self, '_waiting_for_channel_input', False) and getattr(self, '_permission_comment_mode', True))),
+            filter=Condition(lambda: not _should_hide_input_for_permission()),
         )
 
         # Root layout with session bar at top, then tab bar, status bar, output, bars, input
@@ -1762,8 +1765,8 @@ class PTDisplay:
                 status_bar,              # Status bar
                 output_window,           # Output panel (fills remaining space)
                 pending_prompts_bar,     # Queued prompts (dynamic, above input)
-                permission_comment_box,  # Permission comment input (conditional)
-                main_input_row,          # Main input area (hidden in permission mode)
+                main_input_row,          # Main input area (hidden during permission prompts)
+                permission_comment_box,  # Invisible keystroke capture for permission comments
             ]),
             floats=[
                 Float(
@@ -2643,21 +2646,29 @@ class PTDisplay:
             # Store options for keyboard navigation
             self._permission_response_options = response_options
             self._permission_focus_index = 0  # Default focus on first option (yes)
-            # Clear and focus the permission comment buffer
-            if self._permission_comment_mode and self._permission_comment_buffer:
+            # Check if this is a permission prompt (vs exit/clarification)
+            buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
+            if self._permission_comment_mode and buffer.is_permission_prompt_pending():
+                # Permission prompt: clear and focus the comment buffer
                 self._permission_comment_buffer.reset()
-                # Switch focus to the comment buffer
-                if self._app and self._app.layout:
+                if self._app and self._app.is_running:
                     self._app.layout.focus(self._permission_comment_buffer)
+            else:
+                # Not a permission prompt (exit/clarification): use main input
+                if self._input_buffer:
+                    self._input_buffer.reset()
         else:
             self._valid_input_prefixes = set()
             self._last_valid_permission_input = ""
             self._permission_response_options = None
             self._permission_focus_index = 0
-            # Clear the permission comment buffer and restore focus to main input
+            # Clear permission comment buffer and visual display
             if self._permission_comment_buffer:
                 self._permission_comment_buffer.reset()
-            if self._app and self._app.layout:
+            buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
+            buffer.set_permission_comment_text("")
+            # Switch focus back to main input buffer
+            if self._permission_comment_mode and self._app and self._app.is_running:
                 self._app.layout.focus(self._input_buffer)
         # Update output buffer with focus state for inline highlighting (use correct buffer)
         buffer = self._agent_registry.get_selected_buffer() if self._agent_registry else self._output_buffer
@@ -2665,6 +2676,9 @@ class PTDisplay:
             self._permission_response_options,
             self._permission_focus_index
         )
+        # Set permission comment mode on output buffer so panel uses open-bottom box style
+        # This allows the comment box to visually continue the panel borders
+        buffer.set_permission_comment_mode(waiting and self._permission_comment_mode)
         self.refresh()
 
     def _select_focused_permission_option(self) -> None:
@@ -2687,7 +2701,7 @@ class PTDisplay:
         else:
             short = getattr(option, 'short', getattr(option, 'key', ''))
 
-        # Get comment from the dedicated permission comment buffer
+        # Get comment from the permission comment buffer (separate from main input)
         comment = ""
         if self._permission_comment_mode and self._permission_comment_buffer:
             comment = self._permission_comment_buffer.text.strip()

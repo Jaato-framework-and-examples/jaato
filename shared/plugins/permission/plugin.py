@@ -404,7 +404,17 @@ You MUST always provide an intent explaining WHY you need to execute the tool.
 The intent should describe what you are trying to accomplish, not just repeat the command.
 
 It returns whether the action is allowed and the reason for the decision.
-If permission is denied, do not attempt to proceed with that action."""
+If permission is denied, do not attempt to proceed with that action.
+
+USER COMMENTS WITH PERMISSION RESPONSES:
+When a user approves a permission request, they may include an optional comment with additional instructions or context. This comment appears in the tool result's `_permission.user_comment` field.
+
+IMPORTANT: User comments are direct instructions from the user that you MUST acknowledge and follow.
+- If a comment contains a request (e.g., "but also update the tests"), you should act on it.
+- If a comment contains a reminder (e.g., "don't forget to handle errors"), keep it in mind for subsequent actions.
+- If a comment contains a correction (e.g., "use Python 3.12 syntax"), apply it to your work.
+
+Always acknowledge user comments in your response and explain how you will address them."""
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that should be auto-approved.
