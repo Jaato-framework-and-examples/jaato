@@ -89,40 +89,250 @@ This document outlines the design for a web-based client for jaato that connects
 
 ---
 
+## Workspace-First Architecture
+
+Unlike the rich-client which runs locally and uses the current directory as its workspace, the web client connects to a remote server and must first select a workspace before starting a session.
+
+### The Problem
+
+- The rich-client runs in a terminal with `cwd` as the implicit workspace
+- `.env` files containing provider credentials are workspace-specific
+- The web client has no concept of "current directory"
+- Without a workspace, there's no `.env`, no provider, no session
+
+### Solution: Workspace Selection Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Web Client connects to Server                              │
+│              ↓                                              │
+│  Server sends WorkspaceListEvent                            │
+│  (workspaces under --workspace-root)                        │
+│              ↓                                              │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  WORKSPACE SELECTION SCREEN                          │   │
+│  │                                                      │   │
+│  │  Available Workspaces:                               │   │
+│  │    ○ project-a        (anthropic, configured)        │   │
+│  │    ○ project-b        (google, configured)           │   │
+│  │    ○ project-c        (not configured)               │   │
+│  │                                                      │   │
+│  │  [ + Create New Workspace ]                          │   │
+│  └─────────────────────────────────────────────────────┘   │
+│              ↓                                              │
+│  User selects workspace → workspace.select                  │
+│              ↓                                              │
+│  Server loads .env, returns ConfigStatusEvent               │
+│              ↓                                              │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  CONFIGURATION (if .env missing/incomplete)          │   │
+│  │                                                      │   │
+│  │  Provider: [Anthropic ▼]                             │   │
+│  │  Model:    [claude-sonnet-4-20250514 ▼]             │   │
+│  │                                                      │   │
+│  │  Authentication:                                     │   │
+│  │    ○ API Key: [________________________]             │   │
+│  │    ● OAuth:   [ Login with Anthropic ]               │   │
+│  │                                                      │   │
+│  │  [ Save Configuration ]                              │   │
+│  └─────────────────────────────────────────────────────┘   │
+│              ↓                                              │
+│  Session initialized → Chat UI                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Server Changes Required
+
+#### New Server Parameter
+
+```bash
+.venv/bin/python -m server \
+  --web-socket 0.0.0.0:8080 \
+  --workspace-root ~/projects \
+  --daemon
+```
+
+The `--workspace-root` parameter defines where workspaces live. All workspace paths in the protocol are relative to this root.
+
+#### New Events/Requests
+
+| Request | Response Event | Description |
+|---------|----------------|-------------|
+| `workspace.list` | `WorkspaceListEvent` | List workspaces under root with config status |
+| `workspace.create` | `WorkspaceCreatedEvent` | Create new workspace directory |
+| `workspace.select` | `ConfigStatusEvent` | Select workspace, load .env, return status |
+| `config.update` | `ConfigUpdatedEvent` | Write provider/model to workspace .env |
+
+#### Event Definitions
+
+```typescript
+// Server → Client
+interface WorkspaceListEvent {
+  type: 'workspace.list';
+  root: string;
+  workspaces: Array<{
+    name: string;           // Relative path (e.g., "project-a")
+    configured: boolean;    // Has valid .env
+    provider?: string;      // Provider if configured
+    model?: string;         // Model if configured
+  }>;
+}
+
+interface ConfigStatusEvent {
+  type: 'config.status';
+  workspace: string;
+  configured: boolean;
+  provider?: string;
+  model?: string;
+  available_providers: string[];
+  missing_fields: string[];  // What's needed to complete config
+}
+
+interface WorkspaceCreatedEvent {
+  type: 'workspace.created';
+  name: string;
+  path: string;
+}
+
+interface ConfigUpdatedEvent {
+  type: 'config.updated';
+  workspace: string;
+  provider: string;
+  model: string;
+}
+
+// Client → Server
+interface WorkspaceListRequest {
+  type: 'workspace.list';
+}
+
+interface WorkspaceCreateRequest {
+  type: 'workspace.create';
+  name: string;
+}
+
+interface WorkspaceSelectRequest {
+  type: 'workspace.select';
+  name: string;
+}
+
+interface ConfigUpdateRequest {
+  type: 'config.update';
+  provider: string;
+  model?: string;
+  api_key?: string;  // Optional, for non-OAuth providers
+}
+```
+
+### OAuth Integration
+
+OAuth flows use existing server commands. The web client:
+1. Sends `CommandRequest` with `name: "anthropic-auth"`, `args: ["login"]`
+2. Receives URL/device code via `SystemMessageEvent` or dedicated event
+3. User completes OAuth in browser
+4. Polls status via `CommandRequest` with `args: ["status"]`
+5. On success, proceeds to chat
+
+### Workspace Registry
+
+The server maintains workspace state in `~/.jaato/workspaces.json`:
+
+```json
+{
+  "root": "/home/user/projects",
+  "workspaces": [
+    {
+      "name": "project-a",
+      "path": "/home/user/projects/project-a",
+      "last_accessed": "2024-01-15T10:30:00Z"
+    }
+  ]
+}
+```
+
+Workspaces are auto-discovered on startup by scanning `--workspace-root` for:
+- Directories containing `.jaato/`
+- Directories containing `.env`
+
+---
+
 ## Architecture
 
 ### Component Hierarchy
 
 ```
 App
-├── ConnectionProvider          # WebSocket connection context
-│   ├── Header                  # Logo, connection status, model selector
-│   ├── MainLayout
-│   │   ├── Sidebar (collapsible)
-│   │   │   ├── AgentList       # Multi-agent switcher
-│   │   │   ├── SessionList     # Session management
-│   │   │   └── ToolTree        # Active/completed tools
-│   │   ├── ContentArea
-│   │   │   ├── PlanPanel       # Sticky plan display (top)
-│   │   │   ├── OutputPane      # Scrollable message stream
-│   │   │   │   ├── MessageBlock
-│   │   │   │   ├── ToolCallBlock
-│   │   │   │   └── SystemMessage
-│   │   │   └── InputArea       # User prompt input
-│   │   │       ├── PromptInput
-│   │   │       ├── AttachmentBar
-│   │   │       └── SendButton
-│   │   └── StatusBar           # Token usage, GC status
-│   └── ModalLayer
-│       ├── PermissionModal     # Tool approval prompts
-│       ├── ClarificationModal  # Multi-question dialogs
-│       └── SettingsModal       # Configuration
-└── ToastProvider               # Notifications
+├── ConnectionProvider              # WebSocket connection context
+│   │
+│   ├── [Before Workspace Selected]
+│   │   └── WorkspaceScreen         # Initial screen
+│   │       ├── WorkspaceList       # Available workspaces
+│   │       ├── CreateWorkspace     # New workspace form
+│   │       └── ConfigureWorkspace  # Provider/model setup
+│   │           ├── ProviderSelect
+│   │           ├── ModelSelect
+│   │           └── AuthSection     # OAuth or API key
+│   │
+│   └── [After Workspace Selected]
+│       ├── Header                  # Logo, workspace name, model selector
+│       ├── MainLayout
+│       │   ├── Sidebar (collapsible)
+│       │   │   ├── AgentList       # Multi-agent switcher
+│       │   │   ├── SessionList     # Session management
+│       │   │   └── ToolTree        # Active/completed tools
+│       │   ├── ContentArea
+│       │   │   ├── PlanPanel       # Sticky plan display (top)
+│       │   │   ├── OutputPane      # Scrollable message stream
+│       │   │   │   ├── MessageBlock
+│       │   │   │   ├── ToolCallBlock
+│       │   │   │   └── SystemMessage
+│       │   │   └── InputArea       # User prompt input
+│       │   │       ├── PromptInput
+│       │   │       ├── AttachmentBar
+│       │   │       └── SendButton
+│       │   └── StatusBar           # Token usage, GC status
+│       └── ModalLayer
+│           ├── PermissionModal     # Tool approval prompts
+│           ├── ClarificationModal  # Multi-question dialogs
+│           └── SettingsModal       # Configuration
+│
+└── ToastProvider                   # Notifications
 ```
 
 ### State Architecture (Zustand Slices)
 
 ```typescript
+// stores/workspace.ts
+interface WorkspaceStore {
+  // State
+  workspaces: Workspace[];
+  selectedWorkspace: string | null;
+  configStatus: ConfigStatus | null;
+
+  // Actions
+  setWorkspaces: (workspaces: Workspace[]) => void;
+  selectWorkspace: (name: string) => void;
+  setConfigStatus: (status: ConfigStatus) => void;
+  createWorkspace: (name: string) => void;
+  updateConfig: (provider: string, model?: string) => void;
+}
+
+interface Workspace {
+  name: string;
+  configured: boolean;
+  provider?: string;
+  model?: string;
+}
+
+interface ConfigStatus {
+  workspace: string;
+  configured: boolean;
+  provider?: string;
+  model?: string;
+  availableProviders: string[];
+  missingFields: string[];
+}
+
 // stores/connection.ts
 interface ConnectionStore {
   status: 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
@@ -231,6 +441,10 @@ React re-renders affected components
 | Event Type | Store Action | UI Component |
 |------------|--------------|--------------|
 | `connected` | connectionStore.setConnected() | Header (status indicator) |
+| `workspace.list` | workspaceStore.setWorkspaces() | WorkspaceList |
+| `workspace.created` | workspaceStore.addWorkspace() | WorkspaceList |
+| `config.status` | workspaceStore.setConfigStatus() | ConfigureWorkspace |
+| `config.updated` | workspaceStore.updateConfig() | ConfigureWorkspace |
 | `agent.created` | agentStore.createAgent() | AgentList |
 | `agent.output` | agentStore.appendOutput() | OutputPane |
 | `agent.status_changed` | agentStore.updateStatus() | AgentList, Spinner |
@@ -253,6 +467,10 @@ React re-renders affected components
 
 | User Action | Event Type | Payload |
 |-------------|------------|---------|
+| List workspaces | `workspace.list` | `{}` |
+| Create workspace | `workspace.create` | `{ name }` |
+| Select workspace | `workspace.select` | `{ name }` |
+| Update config | `config.update` | `{ provider, model?, api_key? }` |
 | Submit prompt | `message.send` | `{ text, attachments }` |
 | Permission response | `permission.response` | `{ request_id, response }` |
 | Clarification answer | `clarification.response` | `{ request_id, answer }` |
@@ -541,6 +759,28 @@ Use `react-window` or `@tanstack/virtual` for output pane:
 
 ## Implementation Phases
 
+### Phase 0: Workspace Management (Prerequisite)
+
+**Goal:** Enable workspace selection and configuration before chat
+
+**Server Changes:**
+- [ ] Add `--workspace-root` parameter to server
+- [ ] Implement workspace discovery (scan for .jaato/ or .env)
+- [ ] Add `workspace.list` request/event
+- [ ] Add `workspace.create` request/event
+- [ ] Add `workspace.select` request/event
+- [ ] Add `config.update` request/event
+- [ ] Persist workspace registry to `~/.jaato/workspaces.json`
+
+**Web Client Features:**
+- [ ] Workspace selection screen (list, select, create)
+- [ ] Configuration screen (provider, model selection)
+- [ ] OAuth flow integration (invoke existing auth commands)
+- [ ] Workspace store (Zustand)
+- [ ] Route: no workspace → workspace screen → chat
+
+**Timeline:** 1-2 weeks
+
 ### Phase 1: MVP (Core Functionality)
 
 **Goal:** Basic chat with streaming, permissions, and tool visibility
@@ -618,6 +858,11 @@ web-client/
 │   ├── main.tsx                    # Entry point
 │   ├── App.tsx                     # Root component
 │   ├── components/
+│   │   ├── workspace/
+│   │   │   ├── WorkspaceScreen.tsx
+│   │   │   ├── WorkspaceList.tsx
+│   │   │   ├── CreateWorkspace.tsx
+│   │   │   └── ConfigureWorkspace.tsx
 │   │   ├── layout/
 │   │   │   ├── Header.tsx
 │   │   │   ├── Sidebar.tsx
@@ -652,6 +897,7 @@ web-client/
 │   │       ├── Badge.tsx
 │   │       └── Toast.tsx
 │   ├── stores/
+│   │   ├── workspace.ts
 │   │   ├── connection.ts
 │   │   ├── agents.ts
 │   │   ├── tools.ts
@@ -761,11 +1007,11 @@ All messages are JSON with required fields:
 
 ## Open Questions
 
-1. **Authentication**: Should the web client support authentication? Currently, WebSocket server has no auth.
-2. **Multiple Tabs**: Should we prevent/warn about multiple tabs connecting to same server?
-3. **Mobile Priority**: How important is mobile support for initial release?
-4. **Offline Mode**: Is PWA/offline capability needed?
-5. **File Uploads**: Maximum file size? Supported formats?
+1. **Multiple Tabs**: Should we prevent/warn about multiple tabs connecting to same server?
+2. **Mobile Priority**: How important is mobile support for initial release?
+3. **Offline Mode**: Is PWA/offline capability needed?
+4. **File Uploads**: Maximum file size? Supported formats?
+5. **Workspace Permissions**: Should users be restricted to certain workspaces?
 
 ---
 
