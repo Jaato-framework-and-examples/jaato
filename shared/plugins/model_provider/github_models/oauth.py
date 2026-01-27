@@ -504,6 +504,23 @@ def clear_tokens() -> None:
         path.unlink()
 
 
+def _oauth_trace(msg: str) -> None:
+    """Write trace message for debugging OAuth operations."""
+    import datetime
+    import tempfile
+    trace_path = os.environ.get(
+        "JAATO_PROVIDER_TRACE",
+        os.path.join(tempfile.gettempdir(), "provider_trace.log")
+    )
+    try:
+        with open(trace_path, "a") as f:
+            ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            f.write(f"[{ts}] [oauth] {msg}\n")
+            f.flush()
+    except Exception:
+        pass
+
+
 def get_stored_access_token() -> Optional[str]:
     """Get Copilot API token from storage, refreshing if needed.
 
@@ -516,24 +533,36 @@ def get_stored_access_token() -> Optional[str]:
     Returns:
         Copilot API token if available, None otherwise.
     """
+    _oauth_trace("get_stored_access_token: start")
+
     # Try to get existing Copilot token
+    _oauth_trace("get_stored_access_token: loading copilot token...")
     copilot_token = load_copilot_token()
+    _oauth_trace(f"get_stored_access_token: copilot_token={bool(copilot_token)}")
 
     if copilot_token and not copilot_token.is_expired():
+        _oauth_trace("get_stored_access_token: returning existing valid token")
         return copilot_token.token
 
     # Need to refresh - get OAuth token
+    _oauth_trace("get_stored_access_token: token expired/missing, loading OAuth...")
     oauth_tokens = load_tokens()
+    _oauth_trace(f"get_stored_access_token: oauth_tokens={bool(oauth_tokens)}")
     if not oauth_tokens:
+        _oauth_trace("get_stored_access_token: no OAuth tokens, returning None")
         return None
 
     # Exchange OAuth token for Copilot token
+    _oauth_trace("get_stored_access_token: exchanging for Copilot token...")
     try:
         copilot_token = exchange_oauth_for_copilot_token(oauth_tokens.access_token)
+        _oauth_trace("get_stored_access_token: exchange successful, saving...")
         save_copilot_token(copilot_token)
+        _oauth_trace("get_stored_access_token: returning new token")
         return copilot_token.token
-    except RuntimeError:
+    except RuntimeError as e:
         # Token exchange failed - OAuth token may be invalid
+        _oauth_trace(f"get_stored_access_token: exchange failed: {e}")
         return None
 
 
