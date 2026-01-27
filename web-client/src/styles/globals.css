@@ -1,0 +1,134 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Base palette - Dark theme (default) */
+  --color-primary: #6366f1;
+  --color-secondary: #8b5cf6;
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-error: #ef4444;
+
+  /* Semantic colors */
+  --color-bg: #0f172a;
+  --color-surface: #1e293b;
+  --color-text: #f1f5f9;
+  --color-text-muted: #94a3b8;
+  --color-border: #334155;
+
+  /* Plan status */
+  --color-plan-pending: var(--color-text-muted);
+  --color-plan-progress: var(--color-warning);
+  --color-plan-complete: var(--color-success);
+  --color-plan-failed: var(--color-error);
+
+  /* Diff colors */
+  --color-diff-add: #22c55e;
+  --color-diff-add-bg: rgba(34, 197, 94, 0.1);
+  --color-diff-remove: #ef4444;
+  --color-diff-remove-bg: rgba(239, 68, 68, 0.1);
+  --color-diff-context: var(--color-text-muted);
+
+  /* Scrollbar */
+  --scrollbar-thumb: #475569;
+  --scrollbar-track: transparent;
+}
+
+[data-theme="light"] {
+  --color-bg: #ffffff;
+  --color-surface: #f8fafc;
+  --color-text: #0f172a;
+  --color-text-muted: #64748b;
+  --color-border: #e2e8f0;
+
+  --color-diff-add-bg: rgba(34, 197, 94, 0.15);
+  --color-diff-remove-bg: rgba(239, 68, 68, 0.15);
+
+  --scrollbar-thumb: #cbd5e1;
+}
+
+/* Base styles */
+html {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+
+/* Code block styling */
+pre {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  overflow-x: auto;
+}
+
+code {
+  font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', monospace;
+  font-size: 0.875rem;
+}
+
+/* Diff styling */
+.diff-line-add {
+  background-color: var(--color-diff-add-bg);
+  color: var(--color-diff-add);
+}
+
+.diff-line-remove {
+  background-color: var(--color-diff-remove-bg);
+  color: var(--color-diff-remove);
+}
+
+/* Spinner animation */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Focus styles */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Selection */
+::selection {
+  background-color: var(--color-primary);
+  color: white;
+}

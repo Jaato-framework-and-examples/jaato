@@ -53,6 +53,7 @@ tests_enablement_2.0/
 # Generated output
 generated-tests/
 src/
+!web-client/src/
 **/target/
 
 # Logs
