@@ -7,6 +7,9 @@ shared/sa_keyfile.json
 **/sa_keyfile.json
 *-keyfile.json
 
+# Node.js
+node_modules/
+
 # Python
 .venv/
 __pycache__/
