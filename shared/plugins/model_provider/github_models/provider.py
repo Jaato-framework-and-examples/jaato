@@ -951,7 +951,7 @@ class GitHubModelsProvider:
                             content = str(result) if result is not None else ""
                         messages.append({
                             "role": "tool",
-                            "tool_call_id": part.function_response.id or f"call_{part.function_response.name}",
+                            "tool_call_id": part.function_response.call_id or f"call_{part.function_response.name}",
                             "content": content,
                         })
 
