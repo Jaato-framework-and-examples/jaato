@@ -271,17 +271,33 @@ class GitHubModelsProvider:
             config = ProviderConfig()
 
         # Resolve configuration
-        self._token = config.api_key or resolve_token()
+        raw_token = config.api_key or resolve_token()
         self._organization = config.extra.get('organization') or resolve_organization()
         self._enterprise = config.extra.get('enterprise') or resolve_enterprise()
         self._endpoint = config.extra.get('endpoint') or resolve_endpoint()
 
         # Validate token
-        if not self._token:
+        if not raw_token:
             raise TokenNotFoundError(
                 auth_method=resolve_auth_method(),
                 checked_locations=get_checked_credential_locations(resolve_auth_method()),
             )
+
+        # If using OAuth, exchange for Copilot token
+        from .env import resolve_token_source
+        token_source = resolve_token_source()
+        if token_source == "oauth" and not config.api_key:
+            # Using device code OAuth - need to exchange for Copilot token
+            from .oauth import get_stored_access_token
+            copilot_token = get_stored_access_token()
+            if copilot_token:
+                self._token = copilot_token
+            else:
+                # Exchange failed - fall back to OAuth token (may not work)
+                self._token = raw_token
+        else:
+            # Using PAT from env var or explicit api_key
+            self._token = raw_token
 
         # Create the client
         self._client = self._create_client()
