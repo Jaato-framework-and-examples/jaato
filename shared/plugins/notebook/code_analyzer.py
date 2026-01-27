@@ -29,6 +29,10 @@ except ImportError:
     # Fallback for direct module execution (testing)
     from shared.plugins.sandbox_utils import check_path_with_jaato_containment
 
+# Python 3.12+ removed ast.Str, ast.Num, ast.Bytes (use ast.Constant instead)
+# Define a type that's safe to use in isinstance() checks
+_AST_STR_TYPE: tuple = (ast.Str,) if hasattr(ast, 'Str') else ()
+
 
 class RiskLevel(Enum):
     """Risk level for detected patterns."""
@@ -370,8 +374,8 @@ class CodeAnalyzer:
             elif isinstance(child, ast.Constant) and isinstance(child.value, str):
                 self._check_string_literal(child, child.value, result)
 
-            # For Python < 3.8 compatibility
-            elif isinstance(child, ast.Str):
+            # For Python < 3.8 compatibility (ast.Str removed in 3.12)
+            elif _AST_STR_TYPE and isinstance(child, _AST_STR_TYPE):
                 self._check_string_literal(child, child.s, result)
 
     def _check_import(
@@ -631,7 +635,8 @@ class CodeAnalyzer:
         """Try to extract a string value from an AST node."""
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return node.value
-        if isinstance(node, ast.Str):
+        # Python < 3.8 compatibility (ast.Str removed in 3.12)
+        if _AST_STR_TYPE and isinstance(node, _AST_STR_TYPE):
             return node.s
         if isinstance(node, ast.JoinedStr):
             # f-string - can't fully evaluate but try to get static parts
@@ -639,7 +644,8 @@ class CodeAnalyzer:
             for value in node.values:
                 if isinstance(value, ast.Constant):
                     parts.append(str(value.value))
-                elif isinstance(value, ast.Str):
+                # Python < 3.8 compatibility (ast.Str removed in 3.12)
+                elif _AST_STR_TYPE and isinstance(value, _AST_STR_TYPE):
                     parts.append(value.s)
             return "".join(parts) if parts else None
         return None
