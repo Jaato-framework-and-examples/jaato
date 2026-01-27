@@ -817,6 +817,7 @@ class JaatoServer:
                 ))
 
             def on_agent_output(self, agent_id, source, text, mode):
+                server._trace(f"ON_AGENT_OUTPUT agent={agent_id} source={source} len={len(text)} mode={mode}")
                 # For model output with streaming formatter pipeline
                 if source == "model" and server._formatter_pipeline:
                     # Process chunk through streaming pipeline

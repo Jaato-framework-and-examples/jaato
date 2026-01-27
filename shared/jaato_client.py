@@ -10,6 +10,7 @@ via get_runtime() to create additional sessions.
 """
 
 import os
+import tempfile
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from datetime import datetime
 
@@ -106,6 +107,25 @@ class JaatoClient:
         # UI hooks for agent lifecycle events
         self._ui_hooks: Optional['AgentUIHooks'] = None
         self._agent_id: str = "main"
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message to log file for debugging."""
+        trace_path = os.environ.get("JAATO_TRACE_LOG")
+        if not trace_path:
+            trace_path = os.environ.get(
+                "JAATO_PROVIDER_TRACE",
+                os.path.join(tempfile.gettempdir(), "provider_trace.log")
+            )
+        # Empty string means disabled
+        if trace_path == "":
+            return
+        try:
+            with open(trace_path, "a") as f:
+                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                f.write(f"[{ts}] [jaato_client] {msg}\n")
+                f.flush()
+        except Exception:
+            pass  # Don't let tracing errors break the client
 
     @property
     def is_connected(self) -> bool:
@@ -494,6 +514,8 @@ class JaatoClient:
 
         # Wrap output callback to route through UI hooks
         def wrapped_output_callback(source: str, text: str, mode: str) -> None:
+            # Debug trace for callback chain diagnosis
+            self._trace(f"WRAPPED_OUTPUT_CALLBACK source={source} len={len(text)} mode={mode} has_hooks={self._ui_hooks is not None}")
             # Call UI hooks if present
             if self._ui_hooks:
                 self._ui_hooks.on_agent_output(
