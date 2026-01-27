@@ -260,22 +260,46 @@ def poll_for_token(
 
 
 # Token storage location
-def _get_token_storage_path() -> Path:
-    """Get path to token storage file."""
-    # Use XDG config dir on Linux, AppData on Windows, ~/Library on macOS
-    if os.name == "nt":
-        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    elif os.name == "posix" and os.uname().sysname == "Darwin":
-        base = Path.home() / "Library" / "Application Support"
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+def _get_token_storage_path(for_write: bool = False) -> Path:
+    """Get path to token storage file.
 
-    return base / "jaato" / "github_oauth.json"
+    Follows jaato convention:
+    1. Project .jaato/ first (project-specific auth)
+    2. Home ~/.jaato/ second (user-level default)
+
+    Args:
+        for_write: If True, returns the path to write to (prefers project dir
+                   if it exists, otherwise home). If False, returns the first
+                   existing file or the default write location.
+
+    Returns:
+        Path to token storage file.
+    """
+    # Project-level path
+    project_path = Path.cwd() / ".jaato" / "github_oauth.json"
+
+    # User-level path (home directory)
+    home_path = Path.home() / ".jaato" / "github_oauth.json"
+
+    if for_write:
+        # For writing: prefer project .jaato/ if directory exists
+        if project_path.parent.exists():
+            return project_path
+        # Otherwise use home directory
+        return home_path
+    else:
+        # For reading: check project first, then home
+        if project_path.exists():
+            return project_path
+        if home_path.exists():
+            return home_path
+        # Default to home for new files
+        return home_path
 
 
 def save_tokens(tokens: OAuthTokens) -> None:
     """Save tokens to persistent storage."""
-    path = _get_token_storage_path()
+    path = _get_token_storage_path(for_write=True)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, "w") as f:
@@ -321,21 +345,31 @@ def get_stored_access_token() -> Optional[str]:
 
 
 # Pending device code state for two-step flow
-def _get_pending_auth_path() -> Path:
-    """Get path to pending auth state file."""
-    if os.name == "nt":
-        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    elif os.name == "posix" and os.uname().sysname == "Darwin":
-        base = Path.home() / "Library" / "Application Support"
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+def _get_pending_auth_path(for_write: bool = False) -> Path:
+    """Get path to pending auth state file.
 
-    return base / "jaato" / "github_pending_auth.json"
+    Follows same convention as token storage:
+    1. Project .jaato/ first
+    2. Home ~/.jaato/ second
+    """
+    project_path = Path.cwd() / ".jaato" / "github_pending_auth.json"
+    home_path = Path.home() / ".jaato" / "github_pending_auth.json"
+
+    if for_write:
+        if project_path.parent.exists():
+            return project_path
+        return home_path
+    else:
+        if project_path.exists():
+            return project_path
+        if home_path.exists():
+            return home_path
+        return home_path
 
 
 def save_pending_auth(device_code_response: DeviceCodeResponse) -> None:
     """Save pending device code for polling."""
-    path = _get_pending_auth_path()
+    path = _get_pending_auth_path(for_write=True)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     data = {
