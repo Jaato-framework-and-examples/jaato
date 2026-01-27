@@ -56,20 +56,22 @@ This document outlines the design for a web-based client for jaato that connects
 - No runtime cost
 - Excellent responsive utilities
 
-### Code Highlighting: **Shiki**
+### Output Rendering: **Server-Side Pipeline**
 
-**Rationale:**
-- VSCode-quality syntax highlighting
-- WASM-based, runs in browser
-- Supports all languages we need
-- Theme-aware
+**Key Principle:** Syntax highlighting, diff rendering, and structured formatting are handled by the **server's output pipeline**, not the client. The client receives pre-styled content via `AgentOutputEvent` and renders it with appropriate CSS.
+
+**Benefits:**
+- Consistent experience across all clients (web, TUI, future clients)
+- No WASM loading or client-side processing overhead
+- Single source of truth for formatting logic
+- Client stays lightweight and focused on presentation
 
 ### Markdown Rendering: **react-markdown + remark-gfm**
 
 **Rationale:**
 - GFM support (tables, task lists)
 - Plugin ecosystem for custom rendering
-- Integrates with Shiki for code blocks
+- Renders server-provided styled content
 
 ### WebSocket: **Native WebSocket API + reconnecting-websocket**
 
@@ -280,7 +282,7 @@ interface OutputPaneProps {
 // Uses react-window for virtualization
 // Each message block is a variable-height item
 // Markdown rendered with react-markdown
-// Code blocks highlighted with Shiki
+// Code blocks receive pre-highlighted content from server pipeline
 ```
 
 **Message Block Types:**
@@ -518,13 +520,13 @@ Use `react-window` or `@tanstack/virtual` for output pane:
 // Debounce status bar updates (token counts)
 ```
 
-### Code Highlighting
+### Styled Output Rendering
 
 ```typescript
-// Lazy-load Shiki WASM
-// Cache highlighted blocks
-// Use web workers for large files
-// Fallback to plain text if highlighting slow
+// Server sends pre-styled content (syntax highlighting, diffs)
+// Client applies CSS classes from server-provided style hints
+// Preserve ANSI-to-CSS mapping for consistent theming
+// Handle streaming partial content gracefully
 ```
 
 ### Memory Management
@@ -547,6 +549,7 @@ Use `react-window` or `@tanstack/virtual` for output pane:
 - [ ] WebSocket connection with reconnection
 - [ ] Message input and streaming output
 - [ ] Basic markdown rendering
+- [ ] Render server-provided styled output (syntax highlighting, diffs)
 - [ ] Permission modal (all response types)
 - [ ] Tool call display (flat list)
 - [ ] Token usage display
@@ -563,8 +566,6 @@ Use `react-window` or `@tanstack/virtual` for output pane:
 - [ ] Plan panel (sticky + expanded)
 - [ ] Multi-agent support (agent switcher)
 - [ ] Clarification dialogs
-- [ ] Code syntax highlighting
-- [ ] Diff rendering in permissions
 - [ ] Light/dark theme toggle
 - [ ] Keyboard shortcuts
 - [ ] File attachments
@@ -667,7 +668,7 @@ web-client/
 │   ├── lib/
 │   │   ├── events.ts               # Event types & parsing
 │   │   ├── protocol.ts             # Client→Server event builders
-│   │   ├── highlighter.ts          # Shiki setup
+│   │   ├── styles.ts               # Server style hint → CSS mapping
 │   │   └── markdown.ts             # Markdown config
 │   ├── styles/
 │   │   ├── globals.css

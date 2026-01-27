@@ -68,7 +68,14 @@ See [docs/web-client-design.md](../docs/web-client-design.md) for detailed desig
 - **Zustand** - State management
 - **Tailwind CSS** - Styling
 - **Vite** - Build tool
-- **Shiki** - Syntax highlighting (planned)
+
+### Server-Side Rendering Pipeline
+
+Syntax highlighting, diff rendering, and other output formatting are handled by the **server's output pipeline**, not the client. This ensures a consistent experience across all clients (web, TUI, future clients).
+
+The client receives pre-styled content via `AgentOutputEvent` and renders it with appropriate CSS. This separation of concerns means:
+- **Pipeline** (server): Produces structured, styled data
+- **Client** (web): Chooses visual presentation (layout, colors, animations)
 
 ### Why This Stack?
 
@@ -76,9 +83,9 @@ See [docs/web-client-design.md](../docs/web-client-design.md) for detailed desig
 
 - **Streaming fits React's model** - `AgentOutputEvent` with `mode: "append"` maps naturally to state updates and re-renders
 - **Concurrent features** - `useTransition` and automatic batching help with high-frequency updates from streaming
-- **Ecosystem maturity** - Well-tested libraries for markdown (`react-markdown`), syntax highlighting (`shiki`), virtual scrolling (`react-window`)
+- **Ecosystem maturity** - Well-tested libraries for markdown (`react-markdown`), virtual scrolling (`react-window`)
 
-Vue 3 or Svelte would also work, but React has the deepest ecosystem for real-time updates, markdown, and code highlighting.
+Vue 3 or Svelte would also work, but React has the deepest ecosystem for real-time updates and complex UI state.
 
 #### Zustand over Redux/Context
 
@@ -119,7 +126,7 @@ Create React App is deprecated. Webpack is slower and more complex to configure.
 | React | Larger bundle than Svelte/Preact |
 | Zustand | Less structured than Redux (fine for our scale) |
 | Tailwind | Class-heavy HTML (acceptable for productivity) |
-| Shiki | WASM load time for syntax highlighting |
+| Server-side styling | Client depends on server for syntax/diff formatting |
 
 The stack prioritizes **developer velocity** and **real-time performance** over minimal bundle size, which matches our use case of a developer tool running locally.
 
@@ -163,12 +170,11 @@ web-client/
 - [x] Basic markdown rendering
 - [x] Permission modal
 - [x] Token usage display
-- [ ] Code syntax highlighting
+- [ ] Render server-provided styled output (syntax highlighting, diffs)
 
 ### Phase 2: Feature Parity
 - [ ] Multi-agent support (UI)
 - [ ] Clarification dialogs
-- [ ] Diff rendering in permissions
 - [ ] File attachments
 - [ ] Session management
 
