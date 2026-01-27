@@ -261,8 +261,12 @@ class GitHubAuthPlugin:
     def _cmd_status(self) -> str:
         """Handle the status command."""
         try:
-            from ..model_provider.github_models.oauth import load_tokens
+            from ..model_provider.github_models.oauth import (
+                load_tokens,
+                load_copilot_token,
+            )
             from ..model_provider.github_models.env import resolve_token
+            import time
 
             lines = ["GitHub Authentication Status", "=" * 35, ""]
 
@@ -279,6 +283,26 @@ class GitHubAuthPlugin:
 
             lines.append("")
 
+            # Check Copilot token
+            copilot_token = load_copilot_token()
+            if copilot_token:
+                masked_copilot = f"{copilot_token.token[:10]}...{copilot_token.token[-4:]}"
+                if copilot_token.is_expired():
+                    lines.append("Copilot API Token: Expired (will refresh on next use)")
+                else:
+                    remaining = int(copilot_token.expires_at - time.time())
+                    mins = remaining // 60
+                    lines.append(f"Copilot API Token: Valid ({mins} min remaining)")
+                lines.append(f"  Token: {masked_copilot}")
+            else:
+                if tokens:
+                    lines.append("Copilot API Token: Not acquired yet")
+                    lines.append("  Will be exchanged on first API call")
+                else:
+                    lines.append("Copilot API Token: N/A (no OAuth token)")
+
+            lines.append("")
+
             # Check environment variable
             env_token = resolve_token()
             if env_token:
@@ -291,7 +315,7 @@ class GitHubAuthPlugin:
 
             # Show priority
             if tokens:
-                lines.append("Active auth: Device Code OAuth (stored token)")
+                lines.append("Active auth: Device Code OAuth (Copilot API)")
             elif env_token:
                 lines.append("Active auth: GITHUB_TOKEN environment variable")
             else:
