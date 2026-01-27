@@ -8,8 +8,7 @@ mirrors the Azure SDK interface for easy integration.
 """
 
 import json
-import urllib.request
-import urllib.error
+import requests
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
@@ -95,6 +94,7 @@ class CopilotClient:
         """
         self._token = token
         self._timeout = 120  # 2 minute timeout for completions
+        self._session = requests.Session()
 
     def _make_request(
         self,
@@ -122,30 +122,29 @@ class CopilotClient:
             "Authorization": f"Bearer {self._token}",
         }
 
-        body = json.dumps(data).encode("utf-8") if data else None
-
-        req = urllib.request.Request(
-            url,
-            data=body,
-            headers=headers,
-            method=method,
-        )
-
         try:
-            response = urllib.request.urlopen(req, timeout=self._timeout)
+            response = self._session.request(
+                method=method,
+                url=url,
+                json=data,
+                headers=headers,
+                stream=stream,
+                timeout=self._timeout,
+            )
+            response.raise_for_status()
             if stream:
                 return response
-            return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8") if e.fp else str(e)
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            error_body = e.response.text if e.response else str(e)
             try:
                 error_data = json.loads(error_body)
                 error_msg = error_data.get("error", {}).get("message", error_body)
             except json.JSONDecodeError:
                 error_msg = error_body
-            raise RuntimeError(f"Copilot API error (HTTP {e.code}): {error_msg}") from e
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"Copilot API request failed: {e.reason}") from e
+            raise RuntimeError(f"Copilot API error (HTTP {e.response.status_code if e.response else 'unknown'}): {error_msg}") from e
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"Copilot API request failed: {e}") from e
 
     def list_models(self) -> List[str]:
         """List available models from Copilot API.
@@ -278,16 +277,9 @@ class CopilotClient:
 
         response = self._make_request(COPILOT_CHAT_ENDPOINT, payload, stream=True)
 
-        # Parse SSE stream
-        buffer = ""
-        for line in response:
-            line = line.decode("utf-8")
-            buffer += line
-
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                line = line.strip()
-
+        # Parse SSE stream using iter_lines for proper timeout handling
+        try:
+            for line in response.iter_lines(decode_unicode=True):
                 if not line:
                     continue
                 if line.startswith("data: "):
@@ -315,7 +307,9 @@ class CopilotClient:
                             )
                     except json.JSONDecodeError:
                         continue
+        finally:
+            response.close()
 
     def close(self) -> None:
-        """Close the client (no-op for HTTP client)."""
-        pass
+        """Close the client and its session."""
+        self._session.close()
