@@ -587,21 +587,39 @@ def load_code_assist_project(access_token: str) -> Optional[str]:
 # ==================== Token Storage ====================
 
 
-def _get_token_storage_path() -> Path:
-    """Get path to token storage file."""
-    if os.name == "nt":
-        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    elif os.name == "posix" and os.uname().sysname == "Darwin":
-        base = Path.home() / "Library" / "Application Support"
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+def _get_token_storage_path(for_write: bool = False) -> Path:
+    """Get path to token storage file.
 
-    return base / "jaato" / "antigravity_accounts.json"
+    Follows jaato convention:
+    1. Project .jaato/ first (project-specific auth)
+    2. Home ~/.jaato/ second (user-level default)
+
+    Args:
+        for_write: If True, returns the path to write to (prefers project dir
+                   if it exists, otherwise home). If False, returns the first
+                   existing file or the default write location.
+
+    Returns:
+        Path to token storage file.
+    """
+    project_path = Path.cwd() / ".jaato" / "antigravity_accounts.json"
+    home_path = Path.home() / ".jaato" / "antigravity_accounts.json"
+
+    if for_write:
+        if project_path.parent.exists():
+            return project_path
+        return home_path
+    else:
+        if project_path.exists():
+            return project_path
+        if home_path.exists():
+            return home_path
+        return home_path
 
 
 def save_accounts(manager: AccountManager) -> None:
     """Save account manager to persistent storage."""
-    path = _get_token_storage_path()
+    path = _get_token_storage_path(for_write=True)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, "w") as f:
