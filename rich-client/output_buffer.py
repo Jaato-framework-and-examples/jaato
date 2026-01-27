@@ -26,11 +26,11 @@ def _trace(msg: str) -> None:
     if not trace_path:
         return  # Tracing disabled
     try:
-        with open(trace_path, "a") as f:
+        with open(trace_path, "a", encoding="utf-8") as f:
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             f.write(f"[{ts}] [OutputBuffer] {msg}\n")
             f.flush()
-    except (IOError, OSError):
+    except (IOError, OSError, UnicodeEncodeError):
         pass
 
 
@@ -67,10 +67,10 @@ def _buffer_trace(msg: str) -> None:
 
     try:
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        with open(trace_path, "a") as f:
+        with open(trace_path, "a", encoding="utf-8") as f:
             f.write(f"[{ts}] {msg}\n")
             f.flush()
-    except (IOError, OSError):
+    except (IOError, OSError, UnicodeEncodeError):
         pass  # Silently ignore trace errors
 
 
@@ -196,10 +196,10 @@ def _buffer_trace(msg: str) -> None:
 
     try:
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        with open(trace_path, "a") as f:
+        with open(trace_path, "a", encoding="utf-8") as f:
             f.write(f"[{ts}] {msg}\n")
             f.flush()
-    except (IOError, OSError):
+    except (IOError, OSError, UnicodeEncodeError):
         pass  # Silently ignore trace errors
 
 
